@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Lumen Copilot performance root-cause audit: local runtime, frontend loading, authentication, search, chat, workers, data, and observability.">
+  <link rel="icon" href="data:,">
+  <title>Lumen Copilot — Why the System Feels Slow</title>
+  <style>
+    :root {
+      --ink:#101820; --muted:#52616d; --soft:#eef3f6; --line:#cfd9df;
+      --blue:#3d8dff; --cyan:#6dcbf4; --blue-soft:#dff3ff;
+      --green:#178a5b; --green-soft:#e4f5ed; --amber:#b8660b; --amber-soft:#fff0da;
+      --red:#bb3e36; --red-soft:#fce8e6; --gray-soft:#e8edf0; --canvas:#fff;
+      --shadow:0 24px 70px rgba(16,24,32,.18);
+    }
+    *{box-sizing:border-box}
+    html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#dfe6ea;color:var(--ink);font-family:"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+    button,a{font:inherit} a{color:inherit;text-underline-offset:3px}
+    #stage{position:fixed;width:1280px;height:720px;transform-origin:0 0;background:var(--canvas);box-shadow:var(--shadow);overflow:hidden}
+    .slide{position:absolute;inset:0;display:none;flex-direction:column;padding:43px 58px 38px;background:var(--canvas);overflow:hidden}
+    .slide.active{display:flex}
+    .slide::before{content:"";position:absolute;inset:0 0 auto;width:100%;height:7px;background:linear-gradient(90deg,var(--blue) 0 22%,var(--cyan) 22% 34%,#d8e2e8 34% 100%)}
+    .slide.dark{color:#fff;background:#101820}.slide.dark::before{background:linear-gradient(90deg,var(--cyan),var(--blue))}
+    .section-label{font-size:13px;font-weight:750;letter-spacing:.14em;text-transform:uppercase;color:var(--blue);margin:0 0 10px}.dark .section-label{color:var(--cyan)}
+    h1,h2,h3,p{margin-top:0} h1{font-size:62px;line-height:.99;letter-spacing:-.042em;margin-bottom:23px} h2{font-size:38px;line-height:1.08;letter-spacing:-.028em;margin-bottom:17px} h3{font-size:21px;line-height:1.15;letter-spacing:-.012em;margin-bottom:9px}
+    p,li,td,th{font-size:16.5px;line-height:1.36}.lead{font-size:24px;line-height:1.28;letter-spacing:-.012em;color:#33424c}.dark .lead{color:#d9e5eb}.small{font-size:14px;line-height:1.34}.tiny{font-size:12px;line-height:1.3}.muted{color:var(--muted)}.dark .muted{color:#aebdc6}.mono{font-family:Consolas,"SFMono-Regular",monospace}.red-text{color:var(--red)}.amber-text{color:var(--amber)}.green-text{color:var(--green)}.blue-text{color:#176c9f}
+    ul,ol{margin:7px 0 0;padding-left:22px} li{margin:0 0 7px} li::marker{color:var(--blue)}
+    .grow{flex:1;min-height:0}.row{display:flex;gap:24px;align-items:stretch}.col{flex:1 1 0;min-width:0}.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:17px}.grid-4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.split-58{display:grid;grid-template-columns:1.42fr 1fr;gap:27px}.split-42{display:grid;grid-template-columns:1fr 1.42fr;gap:27px}
+    .panel{background:var(--soft);border:1px solid #dbe4e9;border-radius:10px;padding:17px 19px}.panel.white{background:#fff}.panel.blue{background:var(--blue-soft);border-color:#b8e1fa}.panel.green{background:var(--green-soft);border-color:#b9e4cf}.panel.amber{background:var(--amber-soft);border-color:#f3d5a4}.panel.red{background:var(--red-soft);border-color:#efc4c0}.panel.dark-panel{background:#192731;border-color:#31434f;color:#fff}
+    .callout{border-left:5px solid var(--blue);padding:9px 0 9px 17px;margin-top:11px}.callout.red{border-left-color:var(--red)}.callout.amber{border-left-color:var(--amber)}.callout.green{border-left-color:var(--green)}
+    .kicker{display:inline-flex;align-items:center;gap:8px;width:fit-content;padding:7px 11px;border-radius:999px;background:var(--blue-soft);color:#185f91;font-size:13px;font-weight:750;letter-spacing:.02em}
+    .tag{display:inline-block;padding:5px 8px;border-radius:999px;font-size:11px;line-height:1;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.confirmed{background:var(--green-soft);color:var(--green)}.contributor{background:var(--amber-soft);color:var(--amber)}.risk{background:var(--red-soft);color:var(--red)}.unknown{background:var(--gray-soft);color:#52616d}
+    .metric{padding:11px 0 9px;border-top:1px solid var(--line)}.metric:first-child{border-top:0}.metric .value{font-size:40px;line-height:1;font-weight:800;letter-spacing:-.035em}.metric .label{margin-top:7px;font-size:13.5px;line-height:1.24;color:var(--muted)}
+    .stat-strip{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.stat-strip.four{grid-template-columns:repeat(4,1fr)}.stat-strip>div{padding:14px 13px;border-right:1px solid var(--line)}.stat-strip>div:last-child{border-right:0}.stat-strip b{display:block;font-size:28px;line-height:1;letter-spacing:-.03em}.stat-strip span{display:block;margin-top:7px;font-size:12px;color:var(--muted);line-height:1.24}
+    table{width:100%;border-collapse:collapse;table-layout:fixed} th{text-align:left;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:8px 9px;border-bottom:2px solid var(--ink)} td{vertical-align:top;padding:8px 9px;border-bottom:1px solid #dce4e9} tr:last-child td{border-bottom:0}.dense td{font-size:12.5px;line-height:1.25;padding:6px 7px}.dense th{font-size:10.5px;padding:6px 7px}
+    .flow{display:flex;align-items:center;justify-content:center;gap:8px;margin:16px 0}.node{min-width:120px;padding:14px 13px;border:1px solid var(--line);border-radius:9px;background:#fff;text-align:center;font-size:13.5px;font-weight:750}.node.blue{background:var(--blue-soft);border-color:#9ed7f4}.node.red{background:var(--red-soft);border-color:#eab3ae}.node.green{background:var(--green-soft);border-color:#aadcc4}.node.amber{background:var(--amber-soft);border-color:#e7c589}.arrow{color:var(--blue);font-size:24px;font-weight:800}
+    .timeline{position:relative;padding-left:34px}.timeline::before{content:"";position:absolute;left:12px;top:6px;bottom:8px;width:2px;background:#bcd7e6}.step{position:relative;margin-bottom:12px}.step::before{content:"";position:absolute;left:-28px;top:5px;width:13px;height:13px;border-radius:50%;background:var(--blue);border:3px solid #fff;box-shadow:0 0 0 1px #a9c8d8}.step.red::before{background:var(--red)}.step.amber::before{background:var(--amber)}.step strong{display:block;font-size:15.5px;margin-bottom:2px}.step span{display:block;font-size:13.5px;line-height:1.28;color:var(--muted)}
+    .code{margin:0;padding:14px 16px;border-radius:8px;background:#15222b;color:#e8f2f7;font:13px/1.45 Consolas,"SFMono-Regular",monospace;white-space:pre-wrap}.hot{color:#ffb2ac}.cool{color:#9edfff}.ok{color:#9fe5bf}
+    .bar-row{display:grid;grid-template-columns:190px 1fr 86px;gap:12px;align-items:center;margin:9px 0}.bar-label{font-size:14px;font-weight:700}.track{height:12px;background:#e3eaee;border-radius:999px;overflow:hidden}.fill{height:100%;width:var(--w);background:var(--bar,var(--blue));border-radius:inherit}.bar-value{text-align:right;font:700 13px Consolas,monospace}
+    .equation{padding:16px 18px;border:2px solid var(--blue);border-radius:10px;font:700 20px/1.34 Consolas,monospace;color:#145f95;background:#f3fbff;text-align:center}
+    .rank{display:flex;align-items:center;gap:13px;margin-bottom:12px}.rank-num{flex:0 0 39px;height:39px;display:grid;place-items:center;border-radius:50%;background:var(--ink);color:#fff;font-weight:850}.rank-copy b{display:block;font-size:16px}.rank-copy span{display:block;font-size:13px;color:var(--muted);line-height:1.28}
+    .source{position:absolute;left:58px;right:270px;bottom:17px;font-size:10.3px;line-height:1.2;color:#6d7c86;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dark .source{color:#9fb1bc}.slide-num{position:absolute;right:58px;bottom:15px;font-size:12px;font-weight:750;color:#7b8a93}
+    #progress{position:fixed;left:0;bottom:0;height:4px;background:var(--blue);width:0;z-index:20;transition:width 160ms ease}
+    #controls{position:fixed;right:18px;bottom:14px;z-index:25;display:flex;align-items:center;gap:7px;padding:7px;border-radius:999px;background:rgba(16,24,32,.84);backdrop-filter:blur(8px);color:#fff}#controls button{width:31px;height:31px;border:0;border-radius:50%;color:#fff;background:transparent;cursor:pointer;font-weight:800}#controls button:hover,#controls button:focus-visible{background:rgba(255,255,255,.16);outline:none}#counter{min-width:65px;text-align:center;font-size:12px;font-weight:700}
+    #help{position:fixed;inset:0;z-index:40;display:none;place-items:center;background:rgba(10,16,22,.68)}#help.open{display:grid}#help .help-card{width:470px;padding:26px 28px;border-radius:13px;background:#fff;box-shadow:var(--shadow)}#help kbd{display:inline-block;min-width:30px;padding:3px 7px;border:1px solid #bdc9d0;border-bottom-width:2px;border-radius:5px;background:#f4f7f9;text-align:center;font:12px Consolas,monospace}
+    @media print{html,body{overflow:visible;background:#fff}#stage{position:static;width:auto;height:auto;transform:none!important;box-shadow:none}.slide{position:relative;display:flex!important;width:1280px;height:720px;page-break-after:always;break-after:page}#controls,#progress,#help{display:none!important}@page{size:16in 9in;margin:0}}
+    @media (prefers-reduced-motion:reduce){#progress{transition:none}}
+  </style>
+</head>
+<body>
+  <main id="stage" aria-label="Lumen Copilot performance root-cause audit presentation">
+
+    <section class="slide dark active" aria-labelledby="s1-title">
+      <p class="section-label">Performance root-cause audit · 18 July 2026</p>
+      <div class="grow" style="display:flex;flex-direction:column;justify-content:center;max-width:1050px">
+        <div class="kicker" style="margin-bottom:22px;background:#203643;color:#9ee3ff">FastAPI · React/Vite · PostgreSQL · Redis · Celery · OpenSearch</div>
+        <h1 id="s1-title">Why the system<br>feels slow</h1>
+        <p class="lead" style="max-width:930px">The current experience combines an invalid shared local environment, an expensive polling dev server, deliberately buffered answer streaming, and external model/tool latency. They need different fixes.</p>
+      </div>
+      <div class="row" style="border-top:1px solid #344752;padding-top:17px">
+        <div class="col small"><b>Assessment baseline</b><br><span class="muted mono">434943f · docs/472-performance-root-cause-audit</span></div>
+        <div class="col small"><b>Tracked work</b><br><span class="muted">GitHub issue #472</span></div>
+        <div class="col small"><b>Evidence</b><br><span class="muted">Live timings, browser waterfall, Docker/process sampling, logs, build output, code-path trace</span></div>
+      </div>
+      <div class="source">Local evidence only: Windows + Docker Desktop + OneDrive workspace. No production traffic was available.</div><div class="slide-num">01</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s2-title">
+      <p class="section-label">Executive verdict</p><h2 id="s2-title">“Slow” is four stacked problems—not one FastAPI problem</h2>
+      <div class="grid-2 grow">
+        <div class="panel red"><span class="tag risk">Environment invalid</span><h3 style="margin-top:12px">Worktrees share a Compose identity and data volumes</h3><p>Current containers and persistent data came from different checkouts. The database revision is orphaned relative to the current migration chain, while liveness stays green.</p></div>
+        <div class="panel amber"><span class="tag contributor">Developer tax</span><h3 style="margin-top:12px">Vite polling saturates the bind-mounted filesystem</h3><p>One dev navigation took 7.64 s and 186 requests; the same built SPA loaded in 0.263 s with 4 requests.</p></div>
+        <div class="panel blue"><span class="tag confirmed">Perceived latency</span><h3 style="margin-top:12px">Answer “streaming” waits for a full model turn</h3><p>The runtime buffers tool-free answer chunks until the provider finishes, then emits them. Time-to-first-visible-answer is therefore close to full-turn latency.</p></div>
+        <div class="panel"><span class="tag contributor">Tail amplification</span><h3 style="margin-top:12px">Remote models, tools, retries, and resource churn multiply</h3><p>Observed assistant jobs took 35.9–41.7 s. Search adds embedding + OpenSearch + relational hydration + optional answer generation in series.</p></div>
+      </div>
+      <div class="source">Verdict synthesizes slides 5–28. “Environment invalid” means user-flow timing cannot be treated as an application benchmark.</div><div class="slide-num">02</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s3-title">
+      <p class="section-label">Evidence standard</p><h2 id="s3-title">Confirmed facts are separated from contributors and capacity risks</h2>
+      <div class="split-58 grow">
+        <div>
+          <div class="rank"><div class="rank-num" style="background:var(--green)">A</div><div class="rank-copy"><b>Confirmed root cause</b><span>Directly reproduced or visible in runtime state, logs, build output, and code.</span></div></div>
+          <div class="rank"><div class="rank-num" style="background:var(--amber)">B</div><div class="rank-copy"><b>Confirmed contributor</b><span>Definitely adds latency or contention, but its share of end-user delay is not isolated.</span></div></div>
+          <div class="rank"><div class="rank-num" style="background:var(--red)">C</div><div class="rank-copy"><b>Scale/tail risk</b><span>Bounded code inspection shows a saturation mechanism; production incidence is unmeasured.</span></div></div>
+          <div class="rank"><div class="rank-num" style="background:#70808a">?</div><div class="rank-copy"><b>Not measured</b><span>No production APM, distributed traces, endpoint histograms, load suite, or user RUM was found.</span></div></div>
+        </div>
+        <div class="panel">
+          <h3>Measurements used</h3>
+          <ul>
+            <li>Persistent HTTP client: 15–30 samples per endpoint.</li>
+            <li>Five Docker resource snapshots after reloads settled.</li>
+            <li>One clean browser navigation per dev/build comparison.</li>
+            <li>Five isolated Argon2 dummy verifies.</li>
+            <li>Existing task logs for real external-provider runs.</li>
+          </ul>
+          <div class="callout amber"><p class="small" style="margin:0"><b>Boundary:</b> local timings explain this workstation’s experience; they are not production SLIs.</p></div>
+        </div>
+      </div>
+      <div class="source">Audit method: read-only runtime inspection plus ordinary build/browser verification; no services, data volumes, or migrations were reset.</div><div class="slide-num">03</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s4-title">
+      <p class="section-label">Latency model</p><h2 id="s4-title">Each user journey crosses a different critical path</h2>
+      <div class="panel blue"><div class="equation">perceived delay = environment wait + browser boot + auth gate + request path + model/tool turns + finalization</div></div>
+      <div class="flow grow">
+        <div class="node amber">Vite / static<br><span class="tiny muted">186 vs 4 requests</span></div><div class="arrow">→</div>
+        <div class="node red">Session refresh<br><span class="tiny muted">blocks route guard</span></div><div class="arrow">→</div>
+        <div class="node blue">REST accept<br><span class="tiny muted">FastAPI + DB</span></div><div class="arrow">→</div>
+        <div class="node amber">Embed / search / tools<br><span class="tiny muted">remote + local I/O</span></div><div class="arrow">→</div>
+        <div class="node red">Model turn buffer<br><span class="tiny muted">answer not visible yet</span></div><div class="arrow">→</div>
+        <div class="node green">WS answer<br><span class="tiny muted">persist + audit</span></div>
+      </div>
+      <div class="grid-3">
+        <div class="panel"><h3>Page load</h3><p class="small">Dominated locally by polling Vite, module fan-out, and the mandatory refresh request.</p></div>
+        <div class="panel"><h3>Search</h3><p class="small">One blocking REST waterfall; results wait for an optional synthesized answer.</p></div>
+        <div class="panel"><h3>Chat / runs</h3><p class="small">Fast 202 is not fast answer latency; the long path continues out of request scope.</p></div>
+      </div>
+      <div class="source">Code paths: frontend bootstrap/query client; backend search service/retrieval; chat API/runtime/backplane.</div><div class="slide-num">04</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s5-title">
+      <p class="section-label">Root cause 1 · Compose identity</p><h2 id="s5-title">Different worktrees are colliding inside one “lumen-copilot” stack</h2>
+      <div class="split-58 grow">
+        <div>
+          <p class="lead">The compose file hard-codes <span class="mono">name: lumen-copilot</span>. That makes every checkout reuse the same container names, networks, and named volumes unless the operator overrides the project name.</p>
+          <div class="timeline">
+            <div class="step"><strong>Infrastructure created from another worktree</strong><span>Postgres, Redis, MinIO, and OpenSearch labels point to <span class="mono">.claude/worktrees/admiring-shirley-…</span>.</span></div>
+            <div class="step amber"><strong>Current backend was later replaced</strong><span>Its bind mount points to the present checkout, but it talks to the earlier checkout’s persistent data.</span></div>
+            <div class="step red"><strong>Branch changes hot-reload code only</strong><span>The entrypoint migration does not rerun, so code and schema silently diverge.</span></div>
+          </div>
+        </div>
+        <div class="panel red">
+          <span class="tag risk">Confirmed</span><h3 style="margin-top:12px">This is state contamination</h3>
+          <ul>
+            <li>Same project/container names across worktrees.</li>
+            <li>Same host port block.</li>
+            <li>Persistent DB volume survives code history changes.</li>
+            <li>Current user-flow latency is not a clean baseline.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="source">Evidence: docker inspect labels and mounts; docker-compose.yml project name and named volumes.</div><div class="slide-num">05</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s6-title">
+      <p class="section-label">Root cause 1 · False green</p><h2 id="s6-title">The database is on an orphan migration revision, yet health is “healthy”</h2>
+      <div class="grid-2 grow">
+        <div>
+          <pre class="code"><span class="cool">alembic current</span>
+FAILED: Can't locate revision
+identified by <span class="hot">'0038_embedding_2048'</span>
+
+<span class="cool">repository head</span>
+<span class="ok">0039_connector_oauth</span>
+  ↳ 0038_sandbox_sessions</pre>
+          <div class="callout red"><h3>Observed user impact</h3><p style="margin:0">Login returned HTTP 500 because code selected <span class="mono">users.email_attested_at</span>, but the live table lacks that column.</p></div>
+        </div>
+        <div>
+          <div class="panel amber"><h3>Why health misses it</h3><ul><li>Compose checks <span class="mono">GET /health</span>: process-only liveness.</li><li><span class="mono">/health/ready</span> checks Postgres, Redis, and MinIO reachability—not migration compatibility.</li><li>Readiness omits OpenSearch and SearXNG.</li><li>Uvicorn reload never reruns the container entrypoint migration.</li></ul></div>
+          <div class="panel green" style="margin-top:15px"><h3>Key distinction</h3><p style="margin:0">This flow is <b>broken</b>, not merely slow. A 500 after 50 ms is worse than a correct 500 ms response.</p></div>
+        </div>
+      </div>
+      <div class="source">Evidence: live Alembic inspection, backend exception log, health.py, docker-compose.yml.</div><div class="slide-num">06</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s7-title">
+      <p class="section-label">Root cause 2 · Host contention</p><h2 id="s7-title">Two complete stacks are running while host memory is 87.3% used</h2>
+      <div class="stat-strip four">
+        <div><b>2×</b><span>full Lumen stacks (main + benchmark)</span></div><div><b>4.0 GiB</b><span>host memory free of 31.42 GiB</span></div><div><b>2.68 GiB</b><span>two OpenSearch containers</span></div><div><b>2.0 GiB</b><span>two worker containers</span></div>
+      </div>
+      <div class="grid-2 grow" style="margin-top:22px">
+        <div class="panel"><h3>Main stack steady sample</h3><div class="bar-row"><span class="bar-label">Vite</span><span class="track"><i class="fill" style="--w:75%;--bar:var(--red)"></i></span><span class="bar-value">74.5% CPU</span></div><div class="bar-row"><span class="bar-label">Backend</span><span class="track"><i class="fill" style="--w:18%;--bar:var(--amber)"></i></span><span class="bar-value">18.5%</span></div><div class="bar-row"><span class="bar-label">Worker</span><span class="track"><i class="fill" style="--w:90%;--bar:var(--blue)"></i></span><span class="bar-value">1.81 GiB</span></div><div class="bar-row"><span class="bar-label">OpenSearch</span><span class="track"><i class="fill" style="--w:76%;--bar:var(--blue)"></i></span><span class="bar-value">1.51 GiB</span></div></div>
+        <div class="panel amber"><h3>What this changes</h3><ul><li>Filesystem pollers compete continuously.</li><li>Two JVMs and two Celery pools pressure page cache and Docker VM memory.</li><li>Branch reload storms compound CPU and I/O contention.</li><li>Tail timings become noisy—even for unrelated services.</li></ul><p class="small muted">Five snapshots; CPU is per-container and may exceed 100% on multicore hosts.</p></div>
+      </div>
+      <div class="source">Evidence: docker ps/stats, Windows OS memory counters. Duplicate stack was observed, not stopped.</div><div class="slide-num">07</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s8-title">
+      <p class="section-label">Root cause 2 · Polling watchers</p><h2 id="s8-title">Vite’s reliability workaround is the dominant idle CPU consumer</h2>
+      <div class="split-42 grow">
+        <div class="panel red"><span class="tag risk">Confirmed</span><h3 style="margin-top:12px">Polling + bind mount + OneDrive</h3><pre class="code">server: {
+  fs: { allow: [repoRoot] },
+  watch: { <span class="hot">usePolling: true</span> }
+}
+
+volumes:
+  - <span class="hot">./frontend:/app</span></pre><p class="small" style="margin-top:12px">The Vite process remained at ~70–83% CPU after the branch reload had settled.</p></div>
+        <div>
+          <p class="lead">Polling repeatedly traverses a Windows-to-Linux bind mount hosted inside a synchronized OneDrive folder. The watcher also reacts to test files and broad checkout changes.</p>
+          <div class="timeline">
+            <div class="step"><strong>Git switch changes hundreds of paths</strong><span>Source, tests, config, and migrations appear together.</span></div>
+            <div class="step amber"><strong>Vite emits page reloads and HMR updates</strong><span>Logs show test files causing full page reloads.</span></div>
+            <div class="step red"><strong>Backend WatchFiles reloads too</strong><span>Its bind-mounted test and migration changes restart the application process.</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="source">Evidence: vite.config.ts, compose bind mounts, settled docker stats, frontend/backend reload logs.</div><div class="slide-num">08</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s9-title">
+      <p class="section-label">Browser evidence</p><h2 id="s9-title">The built SPA is 29× faster to load than the current dev page</h2>
+      <div class="grid-2 grow">
+        <div class="panel red"><span class="tag risk">Polling Vite</span><div class="metric"><div class="value red-text">7.64 s</div><div class="label">navigation load event</div></div><div class="metric"><div class="value">186</div><div class="label">resource requests</div></div><div class="metric"><div class="value">5.63 MB</div><div class="label">browser transfer bytes</div></div><p class="small muted">Unbundled source modules, React refresh runtime, source maps/dependencies, and auth refresh.</p></div>
+        <div class="panel green"><span class="tag confirmed">Production build preview</span><div class="metric"><div class="value green-text">0.263 s</div><div class="label">navigation load event</div></div><div class="metric"><div class="value">4</div><div class="label">resource requests</div></div><div class="metric"><div class="value">266 KB</div><div class="label">browser transfer bytes</div></div><p class="small muted">Built HTML, one entry script, one stylesheet, favicon; API success was not required for load timing.</p></div>
+      </div>
+      <div class="callout green"><p style="margin:0"><b>Conclusion:</b> most initial local page-load pain is the development delivery path, not React rendering or FastAPI response time.</p></div>
+      <div class="source">Playwright Chromium, one clean navigation each; built via pnpm build and served with Vite preview.</div><div class="slide-num">09</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s10-title">
+      <p class="section-label">Frontend boot path</p><h2 id="s10-title">Every fresh page blocks behind session restoration</h2>
+      <div class="flow">
+        <div class="node blue">JS boot</div><div class="arrow">→</div><div class="node amber">status = unknown</div><div class="arrow">→</div><div class="node red">POST /auth/refresh</div><div class="arrow">→</div><div class="node">route guard resolves</div><div class="arrow">→</div><div class="node green">screen renders</div>
+      </div>
+      <div class="grid-3 grow">
+        <div class="panel"><h3>Mandatory network gate</h3><p>The access token is memory-only, so refresh is correct for security—but its latency is directly visible as “Restoring your session…”.</p></div>
+        <div class="panel amber"><h3>Errors feel slower</h3><p>TanStack Query retries once with a fixed first backoff of <b>1,000 ms</b>. A failing page query deliberately waits before surfacing.</p></div>
+        <div class="panel red"><h3>Current schema failure</h3><p>Refresh/login cannot establish a working session. The browser measured a 1.71 s refresh during the dev navigation before falling back to sign-in.</p></div>
+      </div>
+      <div class="callout amber"><p style="margin:0">The security model is sound; the performance requirement is to budget, trace, and keep this single gate reliably fast.</p></div>
+      <div class="source">frontend useBootstrapSession.ts, RouteGuard.tsx, queryClient.ts; browser resource timing.</div><div class="slide-num">10</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s11-title">
+      <p class="section-label">Backend baseline</p><h2 id="s11-title">FastAPI’s basic request loop is not globally slow</h2>
+      <div class="stat-strip four">
+        <div><b>2.6 ms</b><span>liveness p50, N=20</span></div><div><b>5.6 ms</b><span>liveness p95</span></div><div><b>40.7 ms</b><span>readiness p50, N=15</span></div><div><b>67.0 ms</b><span>readiness p95</span></div>
+      </div>
+      <div class="split-58 grow" style="margin-top:24px">
+        <div><p class="lead">The same backend process that participates in a multi-second UI journey answers a pure FastAPI route in ~3 ms and three concurrent dependency checks in ~41 ms.</p><div class="callout green"><h3>What this rules out</h3><p style="margin:0">“Python/FastAPI is inherently too slow” is not supported by the evidence. Delay is concentrated in specific I/O, CPU, orchestration, and development paths.</p></div></div>
+        <div class="panel"><h3>Do not over-read health</h3><ul><li>Liveness does no data access.</li><li>Readiness does not validate schema head.</li><li>Neither is a search/chat benchmark.</li><li>Local single-user p50 says nothing about saturation.</li></ul></div>
+      </div>
+      <div class="source">Persistent .NET HttpClient against localhost:47181; current running backend.</div><div class="slide-num">11</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s12-title">
+      <p class="section-label">Auth path</p><h2 id="s12-title">Argon2 runs synchronously inside the async login handler</h2>
+      <div class="split-58 grow">
+        <div>
+          <pre class="code">user = <span class="cool">await</span> repo.find_by_email(email)
+
+if not <span class="hot">verify_password(...)</span>:
+    ...
+
+# verify_password → PasswordHasher.verify
+# no to_thread / executor boundary</pre>
+          <div class="stat-strip" style="grid-template-columns:repeat(3,1fr);margin-top:18px"><div><b>168.5</b><span>minimum ms</span></div><div><b>174.7</b><span>median ms</span></div><div><b>191.8</b><span>maximum ms</span></div></div>
+        </div>
+        <div class="panel amber"><span class="tag contributor">Confirmed contributor</span><h3 style="margin-top:12px">One verify occupies the event loop</h3><p>Argon2’s cost is intentional security work. The problem is executing it on the single reload worker’s event-loop thread.</p><ul><li>Concurrent lightweight requests pause behind it.</li><li>Unknown-user dummy verify has the same cost by design.</li><li>A bounded thread/process execution seam preserves timing uniformity without blocking the loop.</li></ul></div>
+      </div>
+      <div class="source">Five isolated dummy_verify calls inside the backend container; auth_service.py and auth/hashing.py.</div><div class="slide-num">12</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s13-title">
+      <p class="section-label">Search critical path</p><h2 id="s13-title">Search serializes six latency domains into one REST response</h2>
+      <div class="timeline grow" style="margin-top:4px">
+        <div class="step"><strong>1 · Record recent query (Postgres)</strong><span>A write enters the request transaction before retrieval.</span></div>
+        <div class="step"><strong>2 · Resolve per-user grants (Postgres)</strong><span>Builds the permission filter fresh so revoked access disappears immediately.</span></div>
+        <div class="step amber"><strong>3 · Embed query (external provider)</strong><span>Remote call; cached only for repeated single-query, tenant-namespaced inputs.</span></div>
+        <div class="step"><strong>4 · Ensure index + hybrid search (OpenSearch)</strong><span>First process search also pays one index/pipeline check.</span></div>
+        <div class="step"><strong>5 · Hydrate and re-check passages (Postgres)</strong><span>Defense-in-depth query plus document metadata enrichment.</span></div>
+        <div class="step red"><strong>6 · Generate optional direct answer (external model)</strong><span>Route passes no opt-out, so results wait for up to a 300-token completion when the gateway is enabled.</span></div>
+        <div class="step"><strong>7 · Audit + commit (Postgres)</strong><span>The response is not released until the full transaction commits.</span></div>
+      </div>
+      <div class="source">backend search.py, search_service.py, retrieval/service.py, LLM gateway, OpenSearch store.</div><div class="slide-num">13</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s14-title">
+      <p class="section-label">Search amplification</p><h2 id="s14-title">Correctness checks also create avoidable query and tail latency</h2>
+      <div class="grid-3 grow">
+        <div class="panel amber"><h3>Per-document enrichment</h3><p>Results loop over passages and await <span class="mono">DocumentRepository.get</span> once per distinct document. The cache avoids per-chunk queries, but a 20-document page still adds ~20 serialized reads.</p></div>
+        <div class="panel red"><h3>Direct answer blocks results</h3><p>The synthesized answer is described as optional, but there is no request parameter to skip it. A slow provider delays already-available ranked passages.</p></div>
+        <div class="panel"><h3>Transaction spans the waterfall</h3><p>The request-scoped SQLAlchemy session remains active while embedding, OpenSearch, and model I/O occur before commit.</p></div>
+      </div>
+      <div class="equation" style="margin-top:20px">T(search) ≈ T(grants) + T(embed) + T(OpenSearch) + T(hydrate) + Ndocs·T(meta) + T(answer) + T(commit)</div>
+      <div class="callout green"><p style="margin:0"><b>Design direction:</b> return ranked results first; bulk-enrich metadata; synthesize the cited answer as a separately budgeted, cancellable phase.</p></div>
+      <div class="source">Static critical-path trace. Exact component shares require per-stage spans.</div><div class="slide-num">14</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s15-title">
+      <p class="section-label">Chat critical path</p><h2 id="s15-title">A fast 202 only means the long answer path moved elsewhere</h2>
+      <div class="flow">
+        <div class="node blue">POST message</div><div class="arrow">→</div><div class="node">persist user turn</div><div class="arrow">→</div><div class="node green">202 + stream ID</div><div class="arrow">→</div><div class="node red">unbounded asyncio task</div><div class="arrow">→</div><div class="node amber">model/tools loop</div><div class="arrow">→</div><div class="node">persist + done</div>
+      </div>
+      <div class="grid-2 grow">
+        <div class="panel"><h3>Request latency is decoupled</h3><p>The route commits the user message, creates a background task, registers it in a process-wide set, and returns. That is a good transport pattern.</p></div>
+        <div class="panel red"><h3>Answer latency is not bounded by the 202</h3><p>The background task still pays route resolution, permissions, context assembly, repeated model turns, tools, citations, suggestions, audit, usage, and commit.</p></div>
+        <div class="panel amber"><h3>Failure ownership moves too</h3><p>Client timing must measure <b>accepted → start → first visible answer → terminal</b>, not only the POST response.</p></div>
+        <div class="panel blue"><h3>Progress events help—but do not shrink latency</h3><p>Preparing/thinking/finalizing status is honest UX. It does not change first-answer-byte or total completion time.</p></div>
+      </div>
+      <div class="source">backend api/v1/chat.py, services/chat_runtime.py, main.py.</div><div class="slide-num">15</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s16-title">
+      <p class="section-label">Perceived chat latency</p><h2 id="s16-title">The answer stream is intentionally buffered until the whole turn finishes</h2>
+      <div class="split-58 grow">
+        <div>
+          <pre class="code">async for event in gateway.<span class="cool">stream_tools</span>(...):
+    if event.text:
+        <span class="hot">text_chunks.append(event.text)</span>
+
+return tool_calls, finish_reason, text_chunks
+
+# caller, only after the turn returns:
+await <span class="hot">_publish_text(state, turn_text)</span></pre>
+          <div class="callout red"><p style="margin:0"><b>Result:</b> a tool-free “streamed” answer does not become visible token-by-token. Chunks are flushed rapidly after the provider’s turn completes.</p></div>
+        </div>
+        <div class="panel amber">
+          <h3>Why it was designed this way</h3><p>The runtime cannot know early text is answer content until it knows the model will not issue a tool. Buffering prevents “I’ll search…” narration from being persisted as the final answer and keeps retries safe.</p>
+          <h3 style="margin-top:18px">Performance consequence</h3><p>Time-to-first-visible-answer approaches <b>full model-turn time</b>. On a slow/free route, the UI looks stalled even though upstream tokens are arriving.</p>
+          <p class="small muted">This is a deliberate correctness/UX trade-off and needs an ADR-level redesign—not a one-line flush.</p>
+        </div>
+      </div>
+      <div class="source">chat_runtime._stream_one_turn and _publish_text; gateway.stream_tools.</div><div class="slide-num">16</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s17-title">
+      <p class="section-label">Agentic multiplication</p><h2 id="s17-title">One answer may contain many serial model turns</h2>
+      <div class="equation">answer = prepare + Σ(model turn → tool batch) + synthesis/continuation + persist + suggestions</div>
+      <div class="grid-4 grow" style="margin-top:22px">
+        <div class="panel"><div class="metric"><div class="value">20</div><div class="label">default maximum tool turns</div></div></div>
+        <div class="panel"><div class="metric"><div class="value">60 s</div><div class="label">provider timeout per request</div></div></div>
+        <div class="panel"><div class="metric"><div class="value">2</div><div class="label">same-route retries after the first attempt</div></div></div>
+        <div class="panel"><div class="metric"><div class="value">8 s</div><div class="label">follow-up suggestion timeout</div></div></div>
+      </div>
+      <div class="grid-2">
+        <div class="panel amber"><h3>Concurrency exists inside one tool batch</h3><p class="small">Read-only tools fan out up to 4 at once, so one batch tends toward max(tool latency), not sum(tool latency).</p></div>
+        <div class="panel red"><h3>Turns remain serial</h3><p class="small">The next model call depends on tool results. Retry/fallback policies can expand tail time dramatically even though every individual bound is finite.</p></div>
+      </div>
+      <div class="source">core/config.py and chat_runtime retry/tool-turn/suggestion policies. Worst-case bounds are risks, not observed typicals.</div><div class="slide-num">17</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s18-title">
+      <p class="section-label">Observed model path</p><h2 id="s18-title">Real worker runs took 35.9 and 41.7 seconds</h2>
+      <div class="stat-strip four"><div><b>35.85 s</b><span>assistant run A</span></div><div><b>41.66 s</b><span>assistant run B</span></div><div><b>4+</b><span>chat completions across the pair</span></div><div><b>7+</b><span>embedding calls across the pair</span></div></div>
+      <div class="split-58 grow" style="margin-top:22px">
+        <div><p class="lead">Logs show the model/tool loop—not local OpenSearch—dominating elapsed time. External calls arrive in waves: completion, embeddings, hybrid searches, another completion, then finalization.</p><div class="timeline"><div class="step"><strong>First provider completions</strong><span>~12 seconds after tasks were received.</span></div><div class="step amber"><strong>Retrieval phase</strong><span>Multiple embedding calls followed by fast OpenSearch responses.</span></div><div class="step red"><strong>Later completion and finalization</strong><span>Tasks finish tens of seconds after the HTTP 200s, reflecting additional generation/persistence work.</span></div></div></div>
+        <div class="panel red"><span class="tag risk">Confirmed path, limited sample</span><h3 style="margin-top:12px">The default route is a free external model</h3><p>Free/provider-routed models can queue, throttle, or vary in generation speed. Model selection is therefore a first-class latency policy, not just an accuracy/cost choice.</p><p class="small muted">These were headless assistant tasks that reuse the core runtime; interactive percentiles were unavailable.</p></div>
+      </div>
+      <div class="source">Existing Celery worker logs, 18 July 2026. Counts are conservative because log interleaving obscures exact per-run attribution.</div><div class="slide-num">18</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s19-title">
+      <p class="section-label">Database capacity</p><h2 id="s19-title">Chat can hold a database session across the full external-latency window</h2>
+      <div class="split-58 grow">
+        <div>
+          <pre class="code">async with sessionmaker() as session:
+    await bind_tenant(session, ...)
+    result = await <span class="hot">_answer(...)</span>
+      # model calls
+      # tool batches
+      # retrieval / web
+      # suggestions
+    await session.commit()</pre>
+          <div class="stat-strip" style="grid-template-columns:repeat(3,1fr);margin-top:18px"><div><b>5</b><span>base pool</span></div><div><b>10</b><span>overflow</span></div><div><b>30 s</b><span>pool wait timeout</span></div></div>
+        </div>
+        <div class="panel red"><span class="tag risk">Scale/tail risk</span><h3 style="margin-top:12px">Concurrent slow answers can consume the pool</h3><p>An AsyncSession is not always holding a checked-out connection, but transaction-scoped DB activity around long awaits makes checkout lifetime and pool pressure difficult to reason about.</p><ul><li>One runtime session per answer.</li><li>Up to 4 extra sessions during read-only tool fan-out.</li><li>15 total connections before callers wait.</li><li>No observed production pool checkout metric.</li></ul></div>
+      </div>
+      <div class="source">db/session.py live pool introspection; chat_runtime.run/_answer and tool fan-out comments.</div><div class="slide-num">19</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s20-title">
+      <p class="section-label">Realtime overhead</p><h2 id="s20-title">Every WebSocket envelope creates and closes a Redis client</h2>
+      <div class="split-42 grow">
+        <div class="panel red"><pre class="code">async def publish(...):
+  client = <span class="hot">redis.from_url(...)</span>
+  try:
+    async with client.pipeline() as pipe:
+      RPUSH · LTRIM · EXPIRE · PUBLISH
+      await pipe.execute()
+  finally:
+    await <span class="hot">client.aclose()</span></pre><p class="small" style="margin-top:12px">Owner bind/read and subscriptions also create transient clients.</p></div>
+        <div>
+          <p class="lead">A single answer emits start, step events, narration, many deltas, citations, suggestions, and terminal state. Client lifecycle cost scales with envelope count.</p>
+          <div class="equation">Redis client churn ∝ streams × envelopes per stream</div>
+          <div class="callout amber"><h3>Low-load symptom vs scale blocker</h3><p style="margin:0">This may not dominate one local answer, but it converts richer streaming into connection churn and adds tail variance exactly where the UX expects immediacy.</p></div>
+          <div class="callout green"><p style="margin:0">Use one application-lifetime pooled Redis client; keep per-stream pub/sub objects scoped.</p></div>
+        </div>
+      </div>
+      <div class="source">backend/app/realtime/backplane.py.</div><div class="slide-num">20</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s21-title">
+      <p class="section-label">Admission control</p><h2 id="s21-title">Answer production has lifecycle tracking—but no capacity gate</h2>
+      <div class="grid-3 grow">
+        <div class="panel green"><h3>What exists</h3><ul><li>Process-wide task set.</li><li>Done callback removes tasks.</li><li>Shutdown cancels and drains with a grace timeout.</li><li>Tool fan-out semaphore.</li></ul></div>
+        <div class="panel red"><h3>What is missing</h3><ul><li>Global active-answer limit.</li><li>Per-tenant admission quota.</li><li>Queue depth and wait budget.</li><li>Overload response / retry-after.</li></ul></div>
+        <div class="panel amber"><h3>Failure mode</h3><p>Every accepted request can create another long-lived coroutine, runtime DB session, provider stream, Redis publisher, and tool batch. Saturation becomes latency collapse rather than controlled rejection.</p></div>
+      </div>
+      <div class="equation" style="margin-top:18px">stable service: arrival rate &lt; sustainable completion rate — with a bounded queue</div>
+      <div class="callout red"><p style="margin:0"><b>Priority:</b> measure active answers and queue time first; then enforce capacity by deployment and tenant.</p></div>
+      <div class="source">main.py and api/v1/chat.py; no answer semaphore/limiter found.</div><div class="slide-num">21</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s22-title">
+      <p class="section-label">Worker sizing</p><h2 id="s22-title">Local Celery auto-sized itself to 22 prefork processes</h2>
+      <div class="split-58 grow">
+        <div><div class="stat-strip" style="grid-template-columns:repeat(3,1fr)"><div><b>22</b><span>prefork concurrency</span></div><div><b>23</b><span>Celery processes incl. parent</span></div><div><b>1.81 GiB</b><span>idle worker memory</span></div></div><p class="lead" style="margin-top:24px">Compose does not pass <span class="mono">--concurrency</span>, so Celery mirrors the host CPU count. That is aggressive for a laptop and for memory-heavy Python/LiteLLM imports.</p><div class="callout amber"><p style="margin:0">The benchmark stack adds another worker pool. Idle CPU is low, but memory pressure and process startup cost remain.</p></div></div>
+        <div class="panel red"><span class="tag risk">Confirmed local root cause</span><h3 style="margin-top:12px">One size does not fit all</h3><ul><li>Ingestion is I/O + remote embedding heavy.</li><li>Assistant runs are long-lived and provider-bound.</li><li>Sandbox and connector tasks have different resource profiles.</li><li>Local dev needs a small explicit concurrency; production needs queue-specific sizing from measurements.</li></ul></div>
+      </div>
+      <div class="source">Celery startup log, docker top/stats, docker-compose.yml command.</div><div class="slide-num">22</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s23-title">
+      <p class="section-label">Cold start</p><h2 id="s23-title">The dependency graph makes “docker compose up” a long serial gate</h2>
+      <div class="flow">
+        <div class="node amber">OpenSearch healthy<br><span class="tiny muted">~27 s to yellow</span></div><div class="arrow">→</div><div class="node">backend migration<br><span class="tiny muted">~10.8 s observed</span></div><div class="arrow">→</div><div class="node red">Uvicorn import/reload<br><span class="tiny muted">~29.8 s observed</span></div><div class="arrow">→</div><div class="node">backend “healthy”</div><div class="arrow">→</div><div class="node blue">worker / beat / frontend</div>
+      </div>
+      <div class="grid-3 grow">
+        <div class="panel"><h3>Heavy base stack</h3><p>Postgres, Redis, MinIO, OpenSearch, SearXNG, backend, worker, beat, and frontend all start for the default path.</p></div>
+        <div class="panel amber"><h3>Imports through a bind mount</h3><p>Uvicorn’s spawned child took tens of seconds to reach application startup after the reloader began in the sampled restart.</p></div>
+        <div class="panel red"><h3>Health dependency is weak</h3><p>Downstream services wait on liveness, not schema-valid readiness, so the graph can complete in a broken state.</p></div>
+      </div>
+      <div class="source">Compose dependency graph and timestamped logs. Timings are one observed restart, not a controlled cold-start benchmark.</div><div class="slide-num">23</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s24-title">
+      <p class="section-label">Large-object path</p><h2 id="s24-title">Uploads and inline previews buffer whole files in application memory</h2>
+      <div class="grid-2 grow">
+        <div class="panel red"><h3>Upload</h3><pre class="code">data = <span class="hot">await file.read()</span>
+await object_store.put(..., Body=data)</pre><p>Up to 50 MiB is materialized before validation/storage. Concurrent uploads multiply API memory and garbage-collection pressure.</p></div>
+        <div class="panel amber"><h3>Inline content</h3><pre class="code">body = <span class="hot">await stream.read()</span>
+return StreamingResponse(
+  <span class="hot">iter((content.data,))</span>, ...)</pre><p>The response is named “streaming,” but storage bytes were already fully buffered. Local config intentionally disables direct object-store redirect.</p></div>
+        <div class="panel"><h3>Why users notice</h3><p>Large previews/uploads compete with the same process that handles auth, search orchestration, and chat admission.</p></div>
+        <div class="panel green"><h3>Design direction</h3><p>Stream/spool uploads with incremental size enforcement; use direct/presigned transfer or bounded chunked proxying for downloads.</p></div>
+      </div>
+      <div class="source">api/v1/documents.py, storage/object_store.py, core/config.py, compose DOCUMENT_CONTENT_REDIRECT local override.</div><div class="slide-num">24</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s25-title">
+      <p class="section-label">Production frontend</p><h2 id="s25-title">Production delivery is fast locally—but the entry chunk is still oversized</h2>
+      <div class="stat-strip four"><div><b>799.28 KB</b><span>minified entry JavaScript</span></div><div><b>247.74 KB</b><span>entry gzip</span></div><div><b>103.08 KB</b><span>CSS (17.17 KB gzip)</span></div><div><b>898</b><span>modules transformed</span></div></div>
+      <div class="grid-2 grow" style="margin-top:22px">
+        <div class="panel amber"><h3>Build warning</h3><p>Rollup flags chunks over 500 KB and a cross-chunk circular re-export involving <span class="mono">DefaultModelSetting</span>. It warns that execution order may break.</p><p class="small muted">Build completed in 16.92 s after typecheck.</p></div>
+        <div class="panel"><h3>Interpretation</h3><ul><li>Not the main cause of today’s 7.6 s dev load.</li><li>Still meaningful on slower devices/networks.</li><li>Broad entry dependencies reduce parse/compile headroom.</li><li>Route-level chunks already exist; vendor and shell splitting need profiling.</li></ul></div>
+      </div>
+      <div class="callout green"><p style="margin:0">Set a bundle budget and verify execution—not just silence the warning with a higher threshold.</p></div>
+      <div class="source">pnpm build on audit baseline; Vite/Rollup output.</div><div class="slide-num">25</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s26-title">
+      <p class="section-label">Observability</p><h2 id="s26-title">The code cannot currently say where a slow answer spent its time</h2>
+      <div class="grid-3 grow">
+        <div class="panel red"><span class="tag risk">Missing</span><h3 style="margin-top:12px">Request metrics</h3><p>Endpoint rate, errors, p50/p95/p99, in-flight requests, and response-size histograms.</p></div>
+        <div class="panel red"><span class="tag risk">Missing</span><h3 style="margin-top:12px">Distributed spans</h3><p>DB checkout/query, embedding, OpenSearch, model TTFT/total, tool, Redis publish, worker queue, storage.</p></div>
+        <div class="panel red"><span class="tag risk">Missing</span><h3 style="margin-top:12px">Capacity gauges</h3><p>DB pool wait/checkout, active answers, admission queue, Redis connections, Celery queue age, event-loop lag.</p></div>
+        <div class="panel amber"><h3>What exists</h3><p>Structured logs, request IDs, audit records, typed errors, provider usage logs, and task duration lines.</p></div>
+        <div class="panel amber"><h3>What is absent</h3><p>No Prometheus/OpenTelemetry integration, server-timing header, frontend RUM, load/soak harness, or checked-in performance baseline was found.</p></div>
+        <div class="panel green"><h3>Minimum trace vocabulary</h3><p><span class="mono">accepted → started → provider_first_byte → first_visible_delta → done</span>, plus each tool and persistence phase.</p></div>
+      </div>
+      <div class="source">Repository-wide search for metrics/APM/load tooling; existing logging and audit code.</div><div class="slide-num">26</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s27-title">
+      <p class="section-label">Ranked diagnosis</p><h2 id="s27-title">Fix validity and visibility before tuning application code</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:6%">Rank</th><th style="width:29%">Cause</th><th style="width:13%">Confidence</th><th style="width:26%">Evidence</th><th style="width:26%">Primary effect</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td><b>Compose/worktree state collision</b></td><td><span class="tag confirmed">Confirmed</span></td><td>Container labels, mounts, orphan Alembic revision</td><td>Broken auth; invalid benchmark state</td></tr>
+          <tr><td>2</td><td><b>Polling Vite over OneDrive bind mount</b></td><td><span class="tag confirmed">Confirmed</span></td><td>74.5% CPU; 7.64 s / 186-request page</td><td>Slow navigation and reloads</td></tr>
+          <tr><td>3</td><td><b>Buffered chat answer turn</b></td><td><span class="tag confirmed">Confirmed</span></td><td>Runtime code buffers deltas until turn completion</td><td>High time-to-first-visible-answer</td></tr>
+          <tr><td>4</td><td><b>External model/tool loop</b></td><td><span class="tag confirmed">Confirmed</span></td><td>35.9–41.7 s assistant jobs; multi-call logs</td><td>Dominant answer completion time</td></tr>
+          <tr><td>5</td><td><b>Oversized local worker + duplicate stack</b></td><td><span class="tag confirmed">Confirmed</span></td><td>22 preforks, 1.81 GiB; host 87.3% used</td><td>Contention and cold-start tax</td></tr>
+          <tr><td>6</td><td><b>Search serial waterfall</b></td><td><span class="tag contributor">Contributor</span></td><td>Static critical path incl. external answer</td><td>Ranked results wait unnecessarily</td></tr>
+          <tr><td>7</td><td><b>Loop/pool/lifecycle risks</b></td><td><span class="tag risk">Scale risk</span></td><td>Sync Argon2, DB session scope, Redis churn, no admission</td><td>Tail collapse under concurrency</td></tr>
+        </tbody>
+      </table>
+      <div class="source">Confidence ranks reflect this local audit. Production ordering must be revalidated with telemetry.</div><div class="slide-num">27</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s28-title">
+      <p class="section-label">Avoid false starts</p><h2 id="s28-title">What not to optimize first</h2>
+      <div class="grid-2 grow">
+        <div class="panel green"><h3>Do not rewrite FastAPI</h3><p>Liveness p50 is 2.6 ms. Framework replacement would not repair migration drift, Vite polling, external model latency, or buffered answer semantics.</p></div>
+        <div class="panel green"><h3>Do not tune OpenSearch first</h3><p>Idle OpenSearch CPU was ~1.5%; observed hybrid searches in task logs returned quickly after embedding. Measure query spans before index-level tuning.</p></div>
+        <div class="panel amber"><h3>Do not call dev-server timing “production”</h3><p>The build preview is dramatically faster. Keep development experience and production delivery as separate SLOs.</p></div>
+        <div class="panel amber"><h3>Do not hide the bundle warning</h3><p>Raising Rollup’s threshold changes no bytes and leaves a circular chunk-order warning unresolved.</p></div>
+        <div class="panel red"><h3>Do not add retries blindly</h3><p>Retries can turn transient faults into long queue occupation. Every retry needs a total deadline and admission budget.</p></div>
+        <div class="panel red"><h3>Do not benchmark the current database</h3><p>Its revision is incompatible with the current repository. First establish a clean, reproducible state.</p></div>
+      </div>
+      <div class="source">Prioritization based on measured bottlenecks and invalid-state evidence.</div><div class="slide-num">28</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s29-title">
+      <p class="section-label">Immediate recovery · day 0–2</p><h2 id="s29-title">Restore a valid local baseline before judging performance</h2>
+      <div class="timeline grow">
+        <div class="step red"><strong>1 · Isolate every worktree</strong><span>Derive Compose project name, ports, and volume prefix from the worktree/issue; prevent accidental reuse.</span></div>
+        <div class="step red"><strong>2 · Reconcile the local database deliberately</strong><span>Back up anything valuable; for disposable dev state, recreate from the current migration chain. Never force-stamp an unknown schema.</span></div>
+        <div class="step amber"><strong>3 · Make health reflect usability</strong><span>Use readiness for compose dependencies; add schema-head and OpenSearch checks; expose degraded reasons without secrets.</span></div>
+        <div class="step amber"><strong>4 · Stop duplicate base stacks during ordinary development</strong><span>Keep benchmark/load environments opt-in and independently named.</span></div>
+        <div class="step"><strong>5 · Cap local workers</strong><span>Use a small explicit Celery concurrency or solo pool; separate production sizing from laptop defaults.</span></div>
+        <div class="step"><strong>6 · Re-run the baseline</strong><span>Record clean startup, page load, login, search-with/without-answer, chat accepted/first-delta/done.</span></div>
+      </div>
+      <div class="callout red"><p style="margin:0">This audit intentionally did not destroy volumes, apply migrations, or stop the other active stack.</p></div>
+      <div class="source">Recovery actions are recommendations; execution requires preserving any user-owned local data.</div><div class="slide-num">29</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s30-title">
+      <p class="section-label">Performance hardening · days 2–14</p><h2 id="s30-title">Attack the visible critical path in dependency order</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:18%">Workstream</th><th style="width:35%">Change</th><th style="width:24%">Proof</th><th style="width:23%">Guardrail</th></tr></thead>
+        <tbody>
+          <tr><td><b>Frontend dev</b></td><td>Narrow polling scope; ignore tests/dist/docs; evaluate host-run Vite or non-synced workspace.</td><td>Idle Vite CPU &lt;10%; warm navigation &lt;1 s</td><td>HMR remains reliable on Windows/macOS</td></tr>
+          <tr><td><b>Auth</b></td><td>Move Argon2 to a bounded executor; keep dummy verify parity.</td><td>Event-loop lag stays bounded during login burst</td><td>No timing/account-existence regression</td></tr>
+          <tr><td><b>Search</b></td><td>Bulk metadata; separate ranked results from direct answer; add per-stage spans.</td><td>Results p95 independent of model p95</td><td>Permission and citation invariants unchanged</td></tr>
+          <tr><td><b>Chat UX</b></td><td>ADR for early visible answer semantics; measure provider byte vs visible delta.</td><td>First-visible-delta budget met</td><td>No narration-as-answer or retry duplication</td></tr>
+          <tr><td><b>Capacity</b></td><td>Answer admission limits; pooled Redis; shorter DB scopes.</td><td>Stable p95 at target concurrency</td><td>Fair per-tenant quotas and clean shutdown</td></tr>
+          <tr><td><b>Large files</b></td><td>Incremental upload and direct/chunked download.</td><td>Memory remains flat across file size</td><td>Size/type/tenant checks stay fail-closed</td></tr>
+        </tbody>
+      </table>
+      <div class="source">Recommended implementation order follows validity → measurement → quick wins → architecture changes.</div><div class="slide-num">30</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s31-title">
+      <p class="section-label">Performance contract</p><h2 id="s31-title">Define budgets per journey—not one “response time” number</h2>
+      <div class="grid-3 grow">
+        <div class="panel blue"><h3>Local development</h3><ul><li>Warm page load p95</li><li>HMR update p95</li><li>Idle CPU/memory ceiling</li><li>Stack ready time</li></ul></div>
+        <div class="panel green"><h3>REST</h3><ul><li>Auth p95 + event-loop lag</li><li>List/detail p95</li><li>Search results p95</li><li>Error-path latency</li></ul></div>
+        <div class="panel amber"><h3>AI journeys</h3><ul><li>Accepted → start</li><li>Start → provider first byte</li><li>Provider byte → visible delta</li><li>Visible delta → done</li></ul></div>
+        <div class="panel"><h3>Capacity</h3><ul><li>Active answers</li><li>Admission queue age</li><li>DB pool wait</li><li>Worker queue age</li></ul></div>
+        <div class="panel"><h3>Reliability</h3><ul><li>Error/timeout/retry rate</li><li>Abandoned WS streams</li><li>Schema-head mismatch</li><li>Dependency readiness</li></ul></div>
+        <div class="panel red"><h3>Suggested first targets</h3><ul><li>Built shell load &lt;1 s local</li><li>Search results p95 &lt;1 s excluding answer</li><li>First visible chat content p95 &lt;3 s on paid route</li><li>No pool wait at target load</li></ul></div>
+      </div>
+      <div class="source">Targets are proposed starting hypotheses; validate with product expectations and representative providers/corpora.</div><div class="slide-num">31</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s32-title">
+      <p class="section-label">Experiment plan</p><h2 id="s32-title">Six controlled experiments will replace speculation with attribution</h2>
+      <div class="grid-2 grow">
+        <div class="panel"><h3>1 · Dev delivery A/B</h3><p class="small">Current Docker polling vs narrowed polling vs host-run Vite; same checkout, warm cache, 20 navigations.</p></div>
+        <div class="panel"><h3>2 · Auth concurrency</h3><p class="small">1/5/20 logins with event-loop lag and unrelated health latency; sync vs bounded executor.</p></div>
+        <div class="panel"><h3>3 · Search decomposition</h3><p class="small">Span grants/embed/OpenSearch/hydrate/enrich/direct-answer/audit; toggle answer; vary distinct documents.</p></div>
+        <div class="panel"><h3>4 · Chat visibility</h3><p class="small">Provider first byte vs first WS narration vs first answer delta vs done; simple answer and tool-heavy prompts.</p></div>
+        <div class="panel"><h3>5 · Saturation</h3><p class="small">Ramp concurrent answers; record admission wait, DB checkout, Redis connections, p95/p99, and error rate.</p></div>
+        <div class="panel"><h3>6 · Worker sizing</h3><p class="small">2/4/8 concurrency by queue; throughput, memory, queue age, provider throttling, and DB contention.</p></div>
+      </div>
+      <div class="callout green"><p style="margin:0">Check the benchmark harness into the repository with data shape, provider route, machine profile, and pass/fail budgets.</p></div>
+      <div class="source">Every experiment needs a clean Compose identity and known migration head.</div><div class="slide-num">32</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s33-title">
+      <p class="section-label">Target state</p><h2 id="s33-title">A fast system controls work before it optimizes work</h2>
+      <div class="flow">
+        <div class="node green">Static SPA / tuned dev</div><div class="arrow">→</div><div class="node blue">schema-valid readiness</div><div class="arrow">→</div><div class="node amber">admission + deadline</div><div class="arrow">→</div><div class="node">short DB scopes</div><div class="arrow">→</div><div class="node blue">instrumented model/tools</div><div class="arrow">→</div><div class="node green">pooled realtime</div>
+      </div>
+      <div class="grid-3 grow">
+        <div class="panel"><h3>Valid</h3><p>Every worktree owns its data; health proves schema and dependencies are usable.</p></div>
+        <div class="panel"><h3>Observable</h3><p>Every delay has a span, every capacity limit a gauge, every journey a budget.</p></div>
+        <div class="panel"><h3>Bounded</h3><p>Admissions, queues, retries, tools, workers, files, and provider calls have total deadlines.</p></div>
+        <div class="panel"><h3>Progressive</h3><p>Ranked results and visible answer progress arrive as soon as correctness permits.</p></div>
+        <div class="panel"><h3>Resource-aware</h3><p>DB and Redis connections are pooled and held only for the work that needs them.</p></div>
+        <div class="panel"><h3>Provider-aware</h3><p>Latency/cost/reliability tiers are explicit model-routing policy with measurable fallback behavior.</p></div>
+      </div>
+      <div class="source">Target state preserves permission, citation, approval, and audit invariants.</div><div class="slide-num">33</div>
+    </section>
+
+    <section class="slide dark" aria-labelledby="s34-title">
+      <p class="section-label">Decision</p>
+      <div class="grow" style="display:flex;flex-direction:column;justify-content:center;max-width:1030px">
+        <h1 id="s34-title" style="font-size:56px">First make the baseline true.<br>Then make the answer visible.</h1>
+        <p class="lead">Approve three workstreams in order: <b>isolated/reproducible local state</b>, <b>end-to-end latency instrumentation</b>, then <b>critical-path redesign for dev delivery, search, and chat visibility</b>.</p>
+        <div class="grid-3" style="margin-top:20px">
+          <div class="panel dark-panel"><h3>Now</h3><p class="small">Worktree isolation, schema-valid readiness, local worker cap, clean baseline.</p></div>
+          <div class="panel dark-panel"><h3>Next</h3><p class="small">Spans, SLIs, benchmark harness, provider-route budgets.</p></div>
+          <div class="panel dark-panel"><h3>Then</h3><p class="small">Early results/answer visibility, admission, pooled clients, short transactions.</p></div>
+        </div>
+      </div>
+      <div class="source">Recommended decision from issue #472 performance root-cause audit.</div><div class="slide-num">34</div>
+    </section>
+
+    <section class="slide" aria-labelledby="s35-title">
+      <p class="section-label">Appendix · Evidence index</p><h2 id="s35-title">Reproducible evidence and code locations</h2>
+      <table class="dense grow">
+        <thead><tr><th style="width:24%">Finding</th><th style="width:41%">Primary source</th><th style="width:35%">Runtime/build evidence</th></tr></thead>
+        <tbody>
+          <tr><td>Compose collision</td><td><span class="mono">docker-compose.yml</span></td><td>docker inspect labels/mounts/project names</td></tr>
+          <tr><td>Schema mismatch</td><td><span class="mono">backend/alembic/versions</span>, models/repositories</td><td>alembic current/heads; login exception log</td></tr>
+          <tr><td>Health gap</td><td><span class="mono">backend/app/api/health.py</span></td><td>/health and /health/ready timing/status</td></tr>
+          <tr><td>Polling dev server</td><td><span class="mono">frontend/vite.config.ts</span>, compose mounts</td><td>docker stats/top; Vite reload logs</td></tr>
+          <tr><td>Dev vs build</td><td><span class="mono">frontend/package.json</span></td><td>Playwright Resource Timing; pnpm build output</td></tr>
+          <tr><td>Auth gate / retry</td><td><span class="mono">useBootstrapSession.ts</span>, <span class="mono">queryClient.ts</span></td><td>browser refresh duration</td></tr>
+          <tr><td>Argon2 blocking</td><td><span class="mono">auth_service.py</span>, <span class="mono">auth/hashing.py</span></td><td>five-container-call microbenchmark</td></tr>
+          <tr><td>Search waterfall</td><td><span class="mono">search_service.py</span>, <span class="mono">retrieval/service.py</span></td><td>static awaits/critical-path trace</td></tr>
+          <tr><td>Chat buffering</td><td><span class="mono">services/chat_runtime.py</span>, <span class="mono">llm/gateway.py</span></td><td>existing worker provider/task logs</td></tr>
+          <tr><td>DB/Redis/admission</td><td><span class="mono">db/session.py</span>, <span class="mono">realtime/backplane.py</span>, <span class="mono">api/v1/chat.py</span></td><td>live pool config; process/task inspection</td></tr>
+          <tr><td>Worker sizing</td><td><span class="mono">docker-compose.yml</span>, <span class="mono">tasks/celery_app.py</span></td><td>Celery concurrency log; docker top/stats</td></tr>
+          <tr><td>Whole-file I/O</td><td><span class="mono">api/v1/documents.py</span>, <span class="mono">storage/object_store.py</span></td><td>static read/materialization trace</td></tr>
+        </tbody>
+      </table>
+      <div class="source">Audit artifact is self-contained; exact command output remains in the associated Codex task, not embedded with credentials.</div><div class="slide-num">35</div>
+    </section>
+  </main>
+
+  <div id="progress" aria-hidden="true"></div>
+  <nav id="controls" aria-label="Presentation controls">
+    <button id="prev" type="button" aria-label="Previous slide">←</button><span id="counter">1 / 35</span><button id="next" type="button" aria-label="Next slide">→</button><button id="helpBtn" type="button" aria-label="Keyboard help">?</button>
+  </nav>
+  <div id="help" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <div class="help-card"><h3 id="help-title">Presentation controls</h3><p><kbd>←</kbd> <kbd>→</kbd> or <kbd>PgUp</kbd> <kbd>PgDn</kbd> navigate. <kbd>Home</kbd>/<kbd>End</kbd> jump. <kbd>?</kbd> toggles this help. <kbd>Esc</kbd> closes it.</p><p class="small muted" style="margin-bottom:0">The URL hash tracks the active slide for direct links and refresh.</p></div>
+  </div>
+  <script>
+    (() => {
+      const stage = document.getElementById('stage');
+      const slides = [...document.querySelectorAll('.slide')];
+      const counter = document.getElementById('counter');
+      const progress = document.getElementById('progress');
+      const help = document.getElementById('help');
+      let index = Math.max(0, Math.min(slides.length - 1, Number(location.hash.slice(1) || 1) - 1));
+
+      function scale() {
+        const s = Math.min(innerWidth / 1280, innerHeight / 720);
+        stage.style.transform = `scale(${s})`;
+        stage.style.left = `${(innerWidth - 1280 * s) / 2}px`;
+        stage.style.top = `${(innerHeight - 720 * s) / 2}px`;
+      }
+      function show(next, updateHash = true) {
+        index = Math.max(0, Math.min(slides.length - 1, next));
+        slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+        counter.textContent = `${index + 1} / ${slides.length}`;
+        progress.style.width = `${((index + 1) / slides.length) * 100}%`;
+        if (updateHash) history.replaceState(null, '', `#${index + 1}`);
+        document.title = `${index + 1}/${slides.length} · Lumen Copilot — Why the System Feels Slow`;
+      }
+      function toggleHelp(force) { help.classList.toggle('open', force ?? !help.classList.contains('open')); }
+      document.getElementById('prev').addEventListener('click', () => show(index - 1));
+      document.getElementById('next').addEventListener('click', () => show(index + 1));
+      document.getElementById('helpBtn').addEventListener('click', () => toggleHelp());
+      help.addEventListener('click', e => { if (e.target === help) toggleHelp(false); });
+      addEventListener('keydown', e => {
+        if (e.key === 'Escape') return toggleHelp(false);
+        if (e.key === '?') return toggleHelp();
+        if (help.classList.contains('open')) return;
+        if (['ArrowRight','PageDown',' '].includes(e.key)) { e.preventDefault(); show(index + 1); }
+        else if (['ArrowLeft','PageUp'].includes(e.key)) { e.preventDefault(); show(index - 1); }
+        else if (e.key === 'Home') { e.preventDefault(); show(0); }
+        else if (e.key === 'End') { e.preventDefault(); show(slides.length - 1); }
+      });
+      addEventListener('hashchange', () => show(Number(location.hash.slice(1) || 1) - 1, false));
+      addEventListener('resize', scale);
+      window.__lumenDeck = { slides, show, get index() { return index; } };
+      scale(); show(index, false);
+    })();
+  </script>
+</body>
+</html>
