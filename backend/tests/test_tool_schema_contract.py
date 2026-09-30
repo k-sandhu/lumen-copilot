@@ -428,8 +428,15 @@ async def test_runner_strips_optional_nulls_before_legacy_handler(
                 "query": {"type": "string"},
                 "required_nullable": {"type": ["string", "null"]},
                 "optional": {"type": "string"},
+                "nested": {"$ref": "#/$defs/nested"},
             },
-            "required": ["query", "required_nullable"],
+            "required": ["query", "required_nullable", "nested"],
+            "$defs": {
+                "nested": {
+                    "type": "object",
+                    "properties": {"optional": {"type": "string"}},
+                }
+            },
         },
         handler=handler,
     )
@@ -438,10 +445,15 @@ async def test_runner_strips_optional_nulls_before_legacy_handler(
         call=ToolCall(
             id="null-optionals",
             name=definition.name,
-            arguments={"query": "x", "required_nullable": None, "optional": None},
+            arguments={
+                "query": "x",
+                "required_nullable": None,
+                "optional": None,
+                "nested": {"optional": None},
+            },
         ),
         context=ToolContext(principal=world.principal, retrieval=_FakeRetrieval()),  # type: ignore[arg-type]
     )
 
     assert result.ok is True
-    assert calls == [{"query": "x", "required_nullable": None}]
+    assert calls == [{"query": "x", "required_nullable": None, "nested": {}}]

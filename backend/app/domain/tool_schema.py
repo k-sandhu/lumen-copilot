@@ -75,6 +75,30 @@ def _remote_reference(node: Any) -> bool:
 
 def legacy_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     """Treat provider nulls for optional parameters as the legacy omission default."""
+    return _legacy_arguments(arguments, schema, schema)
+
+
+def _local_schema(node: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    """Resolve local JSON pointers without retrieving external schema resources."""
+    visited: set[str] = set()
+    while isinstance(ref := node.get("$ref"), str) and ref.startswith("#/"):
+        if ref in visited:
+            break
+        visited.add(ref)
+        target: Any = root
+        for part in ref[2:].split("/"):
+            key = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(key) if isinstance(target, dict) else None
+        if not isinstance(target, dict):
+            break
+        node = {**target, **{key: value for key, value in node.items() if key != "$ref"}}
+    return node
+
+
+def _legacy_arguments(
+    arguments: dict[str, Any], schema: dict[str, Any], root: dict[str, Any]
+) -> dict[str, Any]:
+    schema = _local_schema(schema, root)
     result = deepcopy(arguments)
     properties = schema.get("properties", {})
     if not isinstance(properties, dict):
@@ -85,12 +109,12 @@ def legacy_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[
         if value is None and name in properties and name not in required:
             result.pop(name)
         elif isinstance(child, dict) and isinstance(value, dict):
-            result[name] = legacy_arguments(value, child)
+            result[name] = _legacy_arguments(value, child, root)
         elif isinstance(child, dict) and isinstance(value, list):
             items = child.get("items")
             if isinstance(items, dict):
                 result[name] = [
-                    legacy_arguments(item, items) if isinstance(item, dict) else item
+                    _legacy_arguments(item, items, root) if isinstance(item, dict) else item
                     for item in value
                 ]
     return result
