@@ -560,10 +560,6 @@ _SELF_PATTERNS = (
         rf"(?i:my name is)\s+{_FULL_NAME}(?=[,.!?]|$)"
     ),
     re.compile(
-        rf"(?:^|[.!?]\s*)(?:(?i:hello|hi|hey)[,!]?\s+)?"
-        rf"(?i:this is)\s+{_FULL_NAME}(?=[,.!?]|\s+[a-z]|$)"
-    ),
-    re.compile(
         rf"(?:^|[.!?]\s*)(?i:hello|hi|hey)[,!]?\s+" rf"(?i:I am|I'm)\s+{_FULL_NAME}(?=[,.!?]|$)"
     ),
 )

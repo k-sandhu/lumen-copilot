@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -106,6 +107,54 @@ async def test_upload_sessions_are_owner_and_tenant_scoped(
     assert (
         await DocumentUploadRepository(session, tenant_b).get_for_owner(upload_id, owner_id) is None
     )
+
+
+@pytest.mark.parametrize("writer", ["add", "replace"])
+@pytest.mark.parametrize("start,end", [(None, 1_000), (0, None)])
+async def test_chunk_repository_rejects_half_null_timestamp_pairs(
+    session: AsyncSession,
+    two_tenants: tuple[uuid.UUID, uuid.UUID],
+    writer: str,
+    start: int | None,
+    end: int | None,
+) -> None:
+    tenant_id, _ = two_tenants
+    owner_id, collection_id = await _owner_collection(session, tenant_id, email="pairs@a.test")
+    document = await DocumentRepository(session, tenant_id).create(
+        owner_id=owner_id,
+        collection_id=collection_id,
+        filename="text.txt",
+        mime_type="text/plain",
+        size_bytes=8,
+        storage_key=f"{tenant_id}/text.txt",
+        acl_enforced=False,
+    )
+    repo = ChunkRepository(session, tenant_id)
+    with pytest.raises(IntegrityError, match="ck_chunks_time_span"):
+        async with session.begin_nested():
+            if writer == "add":
+                await repo.add(
+                    document_id=document.id,
+                    ord=0,
+                    text="x",
+                    char_start=0,
+                    char_end=1,
+                    time_start_ms=start,
+                    time_end_ms=end,
+                )
+            else:
+                await repo.replace_for_document(
+                    document.id,
+                    [
+                        ChunkInput(
+                            text="x",
+                            char_start=0,
+                            char_end=1,
+                            time_start_ms=start,
+                            time_end_ms=end,
+                        )
+                    ],
+                )
 
 
 async def test_transcript_replace_and_media_chunk_timestamps_round_trip(

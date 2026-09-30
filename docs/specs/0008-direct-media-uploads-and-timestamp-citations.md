@@ -46,6 +46,10 @@ or an unambiguous direct-address/response exchange); otherwise the UI says
 6. Abort is idempotent before completion. Expired sessions are failed closed and
    a janitor aborts abandoned provider uploads. A completed session cannot be
    aborted (`409`). Cross-tenant or non-owned sessions are hidden as `404`.
+   A janitor recovery rejected by stored size or metadata checks commits FAILED
+   together with a system rejection audit event and deletes the corrupt object.
+   Tenant scope is rebound after transaction boundaries before further scoped
+   reads or rejection auditing.
 7. The replacement upload/playback/transcript surface is versioned under `/api/v2`.
    The former multipart `POST /documents` upload is disabled with an authenticated
    `410` in the coordinated frontend/backend migration, so there is no supported
@@ -102,6 +106,11 @@ diarizer. Conflicts or ambiguity remove the display name. Names are presentation
 metadata only: they never grant permission, link voices across files, or create a
 voiceprint.
 
+Segments are ordered by start time and ordinal. Overlapping speech may have
+decreasing end times; each individual span must still fit the document duration.
+Bare “this is” declarations are ambiguous (they may describe projects, places,
+or organizations) and alone cannot establish a personal name.
+
 ## 5. Timestamped citations
 
 Media transcript chunks carry nullable `time_start_ms`, `time_end_ms`, and source
@@ -114,6 +123,8 @@ For media, timestamp fields are a pair and satisfy
 reversed, out-of-range, cross-document, or unauthorized timing is blocked under
 INV-3. Ordinary document citations keep both fields null. Permission revocation
 redacts media timestamps with the same shell-preserving behavior as text snippets.
+Database CHECK constraints reject half-null timestamp pairs for both chunks and
+citations, including writes outside the normal repository path.
 
 ## 6. Viewer and access URLs
 
@@ -131,6 +142,10 @@ preserving current time and play/pause state; a later independently expired
 capability may be renewed in the same way. Codec failures never create a refresh
 loop. Loading, processing, empty, permission-revoked, transient-error, and retry
 states are explicit and keyboard accessible.
+Changing document, citation time, or transcript retry discards the prior window's
+pending pagination results and errors and allows pagination of the new window.
+Document metadata always includes `duration_ms`, with null for ordinary documents
+and media whose duration has not yet been established.
 
 ## 7. Security, audit, and negative acceptance
 
@@ -176,3 +191,8 @@ and citation activation seeks the audio/video player. A live MinIO test covers
 multipart CORS, exposed ETags, and byte ranges; a synthetic media fixture covers
 FFmpeg extraction and timeline alignment. A live OpenRouter test is opt-in because
 it incurs cost and requires a configured key.
+
+Migration 0044's downgrade retains `documents.size_bytes` as BIGINT so byte counts
+of accepted media above 2 GiB survive rollback without loss. Populated rollback
+tests cover the INTEGER boundary and larger media, and completion/rejection tests
+exercise transaction boundaries under a NOSUPERUSER NOBYPASSRLS database role.

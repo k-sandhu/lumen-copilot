@@ -29,9 +29,11 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
@@ -54,7 +56,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import DocumentStatus, Role, SourceStatus
+from app.domain.entities import DocumentKind, DocumentStatus, Role, SourceStatus
 from app.ingestion.chunking import chunk_text
 from app.main import create_app
 from app.services.document_service import reassemble_chunk_texts
@@ -286,6 +288,70 @@ def _upload_files(filename: str = "report.txt", data: bytes = b"hello", ctype: s
 
 
 # --- Happy path: upload ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind,status,duration",
+    [
+        (DocumentKind.DOCUMENT, DocumentStatus.READY, None),
+        (DocumentKind.AUDIO, DocumentStatus.PENDING, None),
+        (DocumentKind.AUDIO, DocumentStatus.READY, 4_000),
+    ],
+)
+async def test_document_duration_response_matches_required_nullable_contract(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    kind: DocumentKind,
+    status: DocumentStatus,
+    duration: int | None,
+) -> None:
+    from app.api.v1.documents import DocumentResponse
+
+    token = await _login(client, seeded.alice_email)
+    collection_id = await _seed_collection(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+    )
+    async with sessionmaker() as session:
+        owner = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.alice_email)
+        assert owner is not None
+        repo = DocumentRepository(session, seeded.tenant_a)
+        document = await repo.create(
+            owner_id=owner.id,
+            collection_id=collection_id,
+            filename="fixture",
+            mime_type="text/plain" if kind is DocumentKind.DOCUMENT else "audio/mpeg",
+            size_bytes=8,
+            storage_key=f"{seeded.tenant_a}/fixture",
+            acl_enforced=False,
+            kind=kind,
+        )
+        if duration is not None:
+            await repo.update_media_metadata(
+                document.id,
+                kind=kind,
+                duration_ms=duration,
+                transcript_language="en",
+                transcription_model="fake",
+            )
+        await repo.set_status(document.id, status=status)
+        await session.commit()
+    schema = yaml.safe_load(
+        (Path(__file__).parents[2] / "contracts/openapi.yaml").read_text(encoding="utf-8")
+    )["components"]["schemas"]["Document"]
+    for path in [
+        f"/api/v1/documents/{document.id}",
+        f"/api/v1/documents?collection_id={collection_id}",
+    ]:
+        response = await client.get(path, headers=_auth(token))
+        assert response.status_code == 200, response.text
+        body = response.json()
+        item = body["items"][0] if "items" in body else body
+        assert set(schema["required"]) <= item.keys()
+        assert item["duration_ms"] == duration
+    assert DocumentResponse.model_fields["duration_ms"].is_required()
 
 
 async def test_upload_returns_201_pending_owned_by_caller(

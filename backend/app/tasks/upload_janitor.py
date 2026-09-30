@@ -122,10 +122,21 @@ async def sweep_expired_uploads_async(
                         ).recover_completing(current.id)
                     except NotFoundError:
                         pass
-                    except UploadCompletionRejected:
+                    except UploadCompletionRejected as exc:
                         # The service has already made FAILED + object cleanup part
                         # of this transaction. Swallow so the terminal state commits
                         # and one corrupt object cannot stop the bounded sweep.
+                        await _recovery_service(
+                            session=session,
+                            candidate=current,
+                            store=store,
+                            settings=settings,
+                        ).audit_rejection(
+                            operation="complete",
+                            resource_type="document_upload",
+                            resource_id=current.id,
+                            error=exc,
+                        )
                         continue
                     else:
                         recovered += 1

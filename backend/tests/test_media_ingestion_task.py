@@ -435,6 +435,73 @@ async def test_media_failure_terminalization_audits_exactly_once(sqlite_engine: 
     assert transcribed[0].metadata == {"reason": "media_ingestion_failed"}
 
 
+async def test_media_worker_persists_nested_overlapping_speaker_turns(sqlite_engine: None) -> None:
+    settings = _settings()
+    tenant_id, document_id = await _seed_media()
+    segments = build_transcript_segments(
+        (
+            StitchedWord(
+                text="Speaking.",
+                start_ms=1_000,
+                end_ms=3_000,
+                speaker_id="speaker-1",
+                confidence=None,
+            ),
+            StitchedWord(
+                text="Interrupting.",
+                start_ms=2_000,
+                end_ms=2_500,
+                speaker_id="speaker-2",
+                confidence=None,
+            ),
+        )
+    )
+    drafts = build_transcript_chunks(
+        segments,
+        infer_speaker_names(segments),
+        duration_ms=4_000,
+        chunk_size=settings.ingestion_chunk_size,
+        overlap=settings.ingestion_chunk_overlap,
+    )
+    run_id = uuid.uuid4()
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        assert (
+            await DocumentRepository(session, tenant_id).claim_ingestion(
+                document_id,
+                ingestion_run_id=run_id,
+                stale_before=datetime.now(UTC) - timedelta(minutes=30),
+            )
+            is not None
+        )
+    count = await ingest_module._persist_media_result(
+        tenant_id,
+        document_id,
+        ingestion_run_id=run_id,
+        kind=DocumentKind.AUDIO,
+        duration_ms=4_000,
+        language="en",
+        segments=segments,
+        chunk_drafts=drafts,
+        embeddings=[Embedding(vector=[0.25] * 8, model="fake") for _ in drafts],
+        settings=settings,
+    )
+    assert count == len(drafts) > 0
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        assert (
+            await DocumentRepository(session, tenant_id).finish_ingestion(
+                document_id,
+                ingestion_run_id=run_id,
+                status=DocumentStatus.READY,
+            )
+            is not None
+        )
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        transcript = await TranscriptRepository(session, tenant_id).list_segments(document_id)
+        assert [(s.start_ms, s.end_ms) for s in transcript] == [(1_000, 3_000), (2_000, 2_500)]
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        assert document is not None and document.status is DocumentStatus.READY
+
+
 async def test_simultaneous_media_deliveries_only_one_claimant_calls_stt(
     sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

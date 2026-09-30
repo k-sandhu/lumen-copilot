@@ -64,7 +64,7 @@ class DocumentResponse(BaseModel):
     collection_id: UUID
     owner_id: UUID
     kind: DocumentKind
-    duration_ms: int | None = None
+    duration_ms: int | None
     status: DocumentStatus
     error: str | None = None
     chunk_count: int
@@ -152,7 +152,7 @@ def _build_service(
 # --- Routes -----------------------------------------------------------------
 
 
-@router.get("", response_model=DocumentListResponse, response_model_exclude_none=True)
+@router.get("", response_model=DocumentListResponse)
 async def list_documents(
     request: Request,
     session: DbSession,
@@ -199,7 +199,7 @@ async def upload_document_legacy(_principal: CurrentUser) -> None:
     )
 
 
-@router.get("/{document_id}", response_model=DocumentResponse, response_model_exclude_none=True)
+@router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     document_id: UUID,
     request: Request,

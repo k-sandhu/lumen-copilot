@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/api';
@@ -69,6 +69,59 @@ beforeEach(() => {
 });
 
 describe('MediaTranscriptPlayer', () => {
+  it.each(['success', 'error'] as const)(
+    'ignores stale pagination %s after a new citation window',
+    async (outcome) => {
+      let resolveOld!: (value: api.TranscriptPage) => void;
+      let rejectOld!: (error: Error) => void;
+      const oldRequest = new Promise<api.TranscriptPage>((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      });
+      const newWindow = {
+        ...page,
+        items: page.items.slice(0, 1).map((segment) => ({
+          ...segment,
+          id: 'new-turn',
+          text: 'New citation turn',
+          start_ms: 50_000,
+          end_ms: 55_000,
+        })),
+        next_cursor: 'cursor-after-new-window',
+      };
+      const fetch = vi
+        .spyOn(api, 'fetchDocumentTranscript')
+        .mockResolvedValueOnce({ ...page, next_cursor: 'cursor-early' })
+        .mockReturnValueOnce(oldRequest)
+        .mockResolvedValueOnce(newWindow)
+        .mockResolvedValueOnce({ ...newWindow, items: [], next_cursor: null });
+      const props = {
+        documentId: 'doc-1',
+        filename: 'meeting.mp3',
+        kind: 'audio' as const,
+        initialAccess: access,
+      };
+      const { rerender } = render(<MediaTranscriptPlayer {...props} initialTimeMs={0} />);
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole('button', { name: 'Load more transcript' }));
+      expect(fetch.mock.calls[1]?.[1]?.cursor).toBe('cursor-early');
+      rerender(<MediaTranscriptPlayer {...props} initialTimeMs={50_000} />);
+      await screen.findByText('New citation turn');
+      await act(async () => {
+        if (outcome === 'success') {
+          resolveOld({ ...page, next_cursor: 'cursor-stale' });
+        } else {
+          rejectOld(new Error('old pagination failed'));
+        }
+        await oldRequest.catch(() => undefined);
+      });
+      expect(screen.queryByText('Hello, my name is John.')).not.toBeInTheDocument();
+      expect(screen.queryByText('Could not load more transcript.')).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Load more transcript' }));
+      expect(fetch.mock.calls[3]?.[1]?.cursor).toBe('cursor-after-new-window');
+    },
+  );
+
   it('uses native metadata-only audio and labels inferred versus neutral speakers', async () => {
     render(
       <MediaTranscriptPlayer

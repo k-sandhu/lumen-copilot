@@ -251,7 +251,8 @@ def upgrade() -> None:
             f"ck_{table}_time_span",
             table,
             "(time_start_ms IS NULL AND time_end_ms IS NULL) OR "
-            "(time_start_ms >= 0 AND time_end_ms > time_start_ms)",
+            "(time_start_ms IS NOT NULL AND time_end_ms IS NOT NULL "
+            "AND time_start_ms >= 0 AND time_end_ms > time_start_ms)",
         )
 
     # A segment id is valid provenance only for its own document. Citations are
@@ -319,6 +320,5 @@ def downgrade() -> None:
     op.drop_column("documents", "transcript_language")
     op.drop_column("documents", "duration_ms")
     op.drop_column("documents", "kind")
-    op.alter_column(
-        "documents", "size_bytes", existing_type=sa.BigInteger(), type_=sa.Integer(), nullable=False
-    )
+    # Keep BIGINT: accepted media may exceed INTEGER's 2 GiB boundary. Older
+    # application versions can read these byte counts without a lossy rollback.

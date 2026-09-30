@@ -438,7 +438,8 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
         CheckConstraint("char_end >= char_start", name="ck_chunks_char_span"),
         CheckConstraint(
             "(time_start_ms IS NULL AND time_end_ms IS NULL) OR "
-            "(time_start_ms >= 0 AND time_end_ms > time_start_ms)",
+            "(time_start_ms IS NOT NULL AND time_end_ms IS NOT NULL "
+            "AND time_start_ms >= 0 AND time_end_ms > time_start_ms)",
             name="ck_chunks_time_span",
         ),
     )
@@ -740,7 +741,8 @@ class Citation(TenantScopedMixin, TimestampMixin, Base):
         CheckConstraint("char_end >= char_start", name="ck_citations_char_span"),
         CheckConstraint(
             "(time_start_ms IS NULL AND time_end_ms IS NULL) OR "
-            "(time_start_ms >= 0 AND time_end_ms > time_start_ms)",
+            "(time_start_ms IS NOT NULL AND time_end_ms IS NOT NULL "
+            "AND time_start_ms >= 0 AND time_end_ms > time_start_ms)",
             name="ck_citations_time_span",
         ),
     )

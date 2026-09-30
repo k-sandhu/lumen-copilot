@@ -2872,14 +2872,13 @@ class TranscriptRepository(_TenantScopedRepository):
         if speaker_ids != {segment.speaker_id for segment in segments}:
             raise ValueError("transcript speakers must exactly match segment speakers")
         prior_start = -1
-        prior_end = -1
         expected_char_start = 0
         for segment in segments:
             if segment.speaker_id not in speaker_ids:
                 raise ValueError("transcript segment references an unknown speaker")
             if not (0 <= segment.start_ms < segment.end_ms <= document.duration_ms):
                 raise ValueError("transcript segment has an invalid time span")
-            if segment.start_ms < prior_start or segment.end_ms < prior_end:
+            if segment.start_ms < prior_start:
                 raise ValueError("transcript segment timing must be ordered")
             if (
                 segment.char_start != expected_char_start
@@ -2890,7 +2889,6 @@ class TranscriptRepository(_TenantScopedRepository):
             if segment.confidence is not None and not 0 <= segment.confidence <= 1:
                 raise ValueError("transcript segment confidence must be between zero and one")
             prior_start = segment.start_ms
-            prior_end = segment.end_ms
             expected_char_start = segment.char_end + 1
         for speaker in speakers:
             evidence_ids = set(speaker.evidence_segment_ids)

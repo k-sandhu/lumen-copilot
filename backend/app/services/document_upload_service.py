@@ -29,6 +29,7 @@ from app.db.repositories import (
     GroupRepository,
     TranscriptRepository,
 )
+from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import (
     AuditOutcome,
@@ -186,6 +187,8 @@ class DocumentUploadService:
         existence oracle. Provider ids, keys, URLs, filenames, and content are
         never metadata here.
         """
+        # Rejections may follow a router rollback; the RLS GUC is transaction-local.
+        await bind_tenant(self._session, self._tenant_id)
         await self._audit.emit(
             action=(
                 AuditAction.PERMISSION_DENIED
@@ -432,6 +435,7 @@ class DocumentUploadService:
         # completion. A crash after S3 completion then resumes from durable
         # COMPLETING and HEAD, never from INITIATED/list_parts (ADR-0023).
         await self._session.commit()
+        await bind_tenant(self._session, self._tenant_id)
         upload = await self._uploads.get_for_owner(upload_id, self._owner_id, lock=True)
         assert upload is not None
         # Another completer can win while the durable boundary commit releases

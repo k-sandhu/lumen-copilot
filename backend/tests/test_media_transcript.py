@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+
 from app.domain.llm import Transcription, TranscriptionWord
 from app.ingestion.media import (
     ChunkTranscription,
@@ -129,6 +131,28 @@ def test_filler_before_explicit_self_introduction_remains_high_confidence() -> N
     identity = infer_speaker_names(segments)[0]
     assert identity.display_name == "John"
     assert identity.method is SpeakerNameMethod.SELF_INTRODUCTION
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["This is Project Atlas.", "This is New York.", "This is Acme Corporation.", "This is John."],
+)
+def test_ambiguous_this_is_declarations_keep_neutral_speaker(text: str) -> None:
+    segments = build_transcript_segments(
+        (
+            StitchedWord(
+                text=text,
+                start_ms=0,
+                end_ms=1_000,
+                speaker_id="speaker-1",
+                confidence=None,
+            ),
+        )
+    )
+    identity = infer_speaker_names(segments)[0]
+    assert identity.display_name is None
+    assert identity.confidence is None
+    assert identity.evidence_segment_ids == ()
 
 
 def test_single_common_overlap_word_does_not_merge_two_speaker_identities() -> None:

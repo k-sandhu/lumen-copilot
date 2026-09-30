@@ -22,7 +22,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.audit import AuditAction
+from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import DocumentUploadState, Role
 from app.storage import StoredObjectMetadata
 from app.tasks.upload_janitor import sweep_expired_uploads_async
@@ -272,5 +272,100 @@ async def test_janitor_isolates_storage_failure_to_one_candidate(
             )
             assert rows[upload_ids[0]] == DocumentUploadState.INITIATED.value
             assert rows[upload_ids[1]] == DocumentUploadState.EXPIRED.value
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("reason", ["stored_size_mismatch", "stored_metadata_mismatch"])
+async def test_janitor_rejection_commits_system_audit_with_failed_state(
+    monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = _Store()
+    now = datetime.now(UTC)
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[AsyncSession]:
+        async with factory() as session:
+            async with session.begin():
+                yield session
+
+    @asynccontextmanager
+    async def tenant_scope(_tenant_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        async with scope() as session:
+            yield session
+
+    monkeypatch.setattr("app.tasks.upload_janitor.session_scope", scope)
+    monkeypatch.setattr("app.tasks.upload_janitor.tenant_session_scope", tenant_scope)
+    monkeypatch.setattr(
+        "app.tasks.enqueue_ingestion", lambda *a, **kw: pytest.fail("rejected upload")
+    )
+    try:
+        async with scope() as session:
+            tenant = await TenantRepository(session).create(name="Acme")
+            owner = await UserRepository(session, tenant.id).create(
+                email="owner@acme.test", password_hash="h", roles=[Role.MEMBER]
+            )
+            collection = await CollectionRepository(session, tenant.id).create(
+                owner_id=owner.id, name="Media"
+            )
+            upload_id, document_id = uuid.uuid4(), uuid.uuid4()
+            key = f"{tenant.id}/quarantine/{document_id}/meeting.mp3"
+            uploads = DocumentUploadRepository(session, tenant.id)
+            await uploads.create(
+                upload_id=upload_id,
+                document_id=document_id,
+                owner_id=owner.id,
+                collection_id=collection.id,
+                filename="meeting.mp3",
+                mime_type="audio/mpeg",
+                size_bytes=8,
+                storage_key=key,
+                provider_upload_id="private-provider-id",
+                part_size_bytes=5 * 1024 * 1024,
+                part_count=1,
+                expires_at=now - timedelta(minutes=1),
+            )
+            await uploads.set_state(upload_id, owner.id, DocumentUploadState.COMPLETING)
+        store.objects[key] = StoredObjectMetadata(
+            key=key,
+            size_bytes=9 if reason == "stored_size_mismatch" else 8,
+            content_type="audio/mpeg",
+            metadata={
+                "lumen-upload-id": str(upload_id),
+                "lumen-document-id": (
+                    str(uuid.uuid4()) if reason == "stored_metadata_mismatch" else str(document_id)
+                ),
+            },
+        )
+        await sweep_expired_uploads_async(now=now, object_store=store)  # type: ignore[arg-type]
+        # A new transaction proves state and evidence actually committed together.
+        async with scope() as session:
+            upload = await DocumentUploadRepository(session, tenant.id).get_for_owner(
+                upload_id, owner.id
+            )
+            assert upload is not None and upload.state is DocumentUploadState.FAILED
+            assert upload.error == reason
+            assert store.deleted == [key] and key not in store.objects
+            assert (await session.execute(select(models.Document))).scalars().all() == []
+            events = (await session.execute(select(models.AuditEvent))).scalars().all()
+            assert len(events) == 1
+            event = events[0]
+            assert event.action == AuditAction.DOCUMENT_UPLOADED.value
+            assert event.actor_id == AuditActor.system().actor_id
+            assert event.source_origin == "system" and event.source_ip is None
+            assert event.outcome == "error"
+            assert event.resource_id == str(upload_id)
+            assert event.event_metadata == {
+                "operation": "complete",
+                "reason_code": reason,
+                "status": 413 if reason == "stored_size_mismatch" else 422,
+            }
+        await sweep_expired_uploads_async(now=now, object_store=store)  # type: ignore[arg-type]
+        async with scope() as session:
+            assert len((await session.execute(select(models.AuditEvent))).scalars().all()) == 1
     finally:
         await engine.dispose()

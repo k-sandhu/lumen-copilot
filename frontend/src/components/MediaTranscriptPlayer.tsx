@@ -56,17 +56,22 @@ export function MediaTranscriptPlayer({
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
+  const transcriptAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const abort = new AbortController();
+    transcriptAbortRef.current = abort;
     setTranscript({ kind: 'loading' });
+    setLoadingMore(false);
     setPageError(null);
     void fetchDocumentTranscript(
       documentId,
       { limit: 100, ...(initialTimeMs !== undefined ? { around_ms: initialTimeMs } : {}) },
       abort.signal,
     )
-      .then((page) => setTranscript({ kind: 'ready', page }))
+      .then((page) => {
+        if (!abort.signal.aborted) setTranscript({ kind: 'ready', page });
+      })
       .catch((error: unknown) => {
         if (abort.signal.aborted) return;
         if (error instanceof ApiError && error.status === 404) {
@@ -166,15 +171,19 @@ export function MediaTranscriptPlayer({
 
   const loadMore = useCallback(async () => {
     if (transcript.kind !== 'ready' || !transcript.page.next_cursor || loadingMore) return;
+    const signal = transcriptAbortRef.current?.signal;
+    if (!signal || signal.aborted) return;
     setLoadingMore(true);
     setPageError(null);
     try {
-      const next = await fetchDocumentTranscript(documentId, {
-        cursor: transcript.page.next_cursor,
-        limit: 100,
-      });
+      const next = await fetchDocumentTranscript(
+        documentId,
+        { cursor: transcript.page.next_cursor, limit: 100 },
+        signal,
+      );
+      if (signal.aborted) return;
       setTranscript((current) => {
-        if (current.kind !== 'ready') return current;
+        if (signal.aborted || current.kind !== 'ready') return current;
         return {
           kind: 'ready',
           page: {
@@ -186,11 +195,12 @@ export function MediaTranscriptPlayer({
         };
       });
     } catch (error) {
+      if (signal.aborted) return;
       setPageError(
         error instanceof ApiError ? error.displayMessage : 'Could not load more transcript.',
       );
     } finally {
-      setLoadingMore(false);
+      if (!signal.aborted) setLoadingMore(false);
     }
   }, [documentId, loadingMore, transcript]);
 
