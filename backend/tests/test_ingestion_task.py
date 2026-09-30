@@ -388,7 +388,7 @@ async def test_corrupt_pdf_marks_failed_not_crash(sqlite_engine: None) -> None:
     assert "PDF" in (result.error or "")
 
 
-async def test_empty_document_is_ready_with_zero_chunks(sqlite_engine: None) -> None:
+async def test_empty_document_is_failed_with_zero_chunks(sqlite_engine: None) -> None:
     settings = _settings()
     store = _FakeObjectStore()
     gateway = _FakeGateway()
@@ -407,7 +407,8 @@ async def test_empty_document_is_ready_with_zero_chunks(sqlite_engine: None) -> 
         object_store=store,
         gateway=gateway,  # type: ignore[arg-type]
     )
-    assert result.status is DocumentStatus.READY
+    assert result.status is DocumentStatus.FAILED
+    assert "native text" in (result.error or "")
     assert result.chunk_count == 0
     # And no chunks were left behind / created.
     async with db_session.session_scope() as session:

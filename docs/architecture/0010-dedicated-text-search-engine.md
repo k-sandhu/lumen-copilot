@@ -78,6 +78,7 @@ Serialized seam → parallel build, main green at each step:
   - **OpenSearch becomes a hard dependency of all retrieval** (chat grounding + `/search` + agent tools). Single-store means **no Postgres fallback** — if OpenSearch is down, retrieval fails closed. This is the deliberate trade for the sponsor's "single retrieval store" decision; availability/health monitoring matters more now.
   - A **~1–2 GB JVM service in the default stack** raises the local-run floor ([ADR-0005](0005-local-run-and-developer-workflow.md)); mitigated with a bounded heap and single-node config.
   - **Index consistency**: Postgres remains the source of truth for documents/permissions; the index is derived and must be reconciled (dual-write + reindex).
+  - **Ingestion activation**: persist chunks while processing, synchronize with refresh visibility, then publish ready; rejected index writes never activate ready. Empty native extraction is non-searchable. See [spec 0015](../specs/0015-search-readiness.md).
   - The **permission guarantee must be re-proven at the engine** with negative tests — the main correctness risk.
 - **Delivery:** a multi-slice epic per [ADR-0008](0008-conflict-free-parallel-delivery.md) (§7 sequence above), each slice its own issue/PR with `Closes #`.
 

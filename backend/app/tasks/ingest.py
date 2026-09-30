@@ -19,7 +19,8 @@ Pipeline (all slow/burst work — never the request path, backend/AGENTS.md):
 5. **Persist** the chunks (text + embedding vector + offsets + tenant + document
    + ordinal) via the #44 ``ChunkRepository``, tenant-scoped, **idempotently**
    (a re-run *replaces* the document's chunks — AC-5).
-6. **Advance status** ``pending → processing → ready`` and set ``chunk_count``;
+6. **Persist while processing**, then activate ``ready`` only after refreshed
+   index synchronization, with ``chunk_count`` set;
    any parse/embed/persist failure marks the document ``failed`` with the reason
    (AC-6) and **does not crash silently**.
 7. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
@@ -166,17 +167,17 @@ async def ingest_document_async(
     )
 
     if not chunks:
-        # An empty/blank document parses to nothing — a valid, terminal outcome:
-        # ready with zero chunks (idempotently clears any prior chunks).
+        # Empty native extraction is terminal and never searchable.
+        reason = "No native text was extracted. Use a text-bearing file or an OCR-enabled workflow."
         async with tenant_session_scope(tenant_id) as session:
             await ChunkRepository(session, tenant_id).replace_for_document(document_id, [])
             await DocumentRepository(session, tenant_id).set_status(
-                document_id, DocumentStatus.READY, error=None
+                document_id, DocumentStatus.FAILED, error=reason
             )
         # Clear any prior chunks from the search index too (a re-ingest of a
         # now-empty document must not leave stale index entries — ADR-0010 §5).
         await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
-        return IngestionResult(document_id, DocumentStatus.READY, 0)
+        return IngestionResult(document_id, DocumentStatus.FAILED, 0, reason)
 
     try:
         embeddings = await _embed_in_batches(
@@ -191,7 +192,7 @@ async def ingest_document_async(
     if len(embeddings) != len(chunks):  # pragma: no cover — gateway contract guard
         raise IngestionError(f"embedding count {len(embeddings)} != chunk count {len(chunks)}")
 
-    # --- Phase 3: persist chunks + mark ready (one transaction, idempotent). -
+    # --- Phase 3: persist chunks while processing (idempotent transaction). --
     chunk_inputs = [
         ChunkInput(
             text=chunk.text,
@@ -205,17 +206,21 @@ async def ingest_document_async(
         persisted = await ChunkRepository(session, tenant_id).replace_for_document(
             document_id, chunk_inputs
         )
-        await DocumentRepository(session, tenant_id).set_status(
-            document_id, DocumentStatus.READY, error=None
-        )
 
     # --- Phase 4: sync the search index (dual-write, ADR-0010 §5). -----------
     # Retrieval serves from the engine (single-store), so a document that
     # reports `ready` must be retrievable there. The sync is in-band and a
     # failure fails this (idempotent) run — the Celery wrapper retries the
-    # whole pipeline as a unit; Postgres state is already durable and a re-run
+    # whole pipeline as a unit; Postgres chunks are already durable and a re-run
     # replaces chunks + re-syncs, converging.
     await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
+    # --- Phase 5: activate only after refresh visibility is acknowledged. ---
+    async with tenant_session_scope(tenant_id) as session:
+        activated = await DocumentRepository(session, tenant_id).set_status(
+            document_id, DocumentStatus.READY, error=None
+        )
+        if activated is None:
+            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "document not found")
     return IngestionResult(document_id, DocumentStatus.READY, len(persisted))
 
 
@@ -234,7 +239,7 @@ async def _sync_index(
     """
     try:
         await sync_document_index_async(
-            tenant_id, document_id, settings=settings, store=store
+            tenant_id, document_id, settings=settings, store=store, refresh=True
         )
     except DependencyError as exc:
         raise IngestionError(f"could not index chunks: {exc.code}") from exc
