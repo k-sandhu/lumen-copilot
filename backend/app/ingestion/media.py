@@ -376,6 +376,60 @@ def _normal_word(text: str) -> str:
     return re.sub(r"[^\w']+", "", text.casefold())
 
 
+_GlobalWord = tuple[str, int, int, str, float | None]
+
+
+def _align_overlap_words(
+    previous: Sequence[_GlobalWord],
+    current: Sequence[_GlobalWord],
+    *,
+    overlap_start: int,
+    overlap_end: int,
+) -> list[tuple[int, int]]:
+    """One-to-one sequence alignment, preferring the closest timestamp estimates.
+
+    Only words intersecting the shared audio participate. Maximizing matches
+    before minimizing timing distance preserves repeated words as separate
+    utterances rather than deduplicating by text or midpoint alone.
+    """
+    prior = [
+        i for i, word in enumerate(previous) if word[1] < overlap_end and word[2] > overlap_start
+    ]
+    following = [
+        i for i, word in enumerate(current) if word[1] < overlap_end and word[2] > overlap_start
+    ]
+    scores = [[(0, 0)] * (len(following) + 1) for _ in range(len(prior) + 1)]
+    steps = [[0] * (len(following) + 1) for _ in range(len(prior) + 1)]
+    for row, prior_index in enumerate(prior, 1):
+        p_text, p_start, p_end, *_ = previous[prior_index]
+        normalized = _normal_word(p_text)
+        for column, current_index in enumerate(following, 1):
+            text, start, end, *_ = current[current_index]
+            choices = [(scores[row - 1][column], 0), (scores[row][column - 1], 1)]
+            if (
+                normalized
+                and normalized == _normal_word(text)
+                and abs(start - p_start) <= 750
+                and abs(end - p_end) <= 750
+            ):
+                count, distance = scores[row - 1][column - 1]
+                choices.append(((count + 1, distance - abs(start - p_start) - abs(end - p_end)), 2))
+            scores[row][column], steps[row][column] = max(choices)
+    matches: list[tuple[int, int]] = []
+    row, column = len(prior), len(following)
+    while row and column:
+        step = steps[row][column]
+        if step == 2:
+            matches.append((prior[row - 1], following[column - 1]))
+            row -= 1
+            column -= 1
+        elif step == 1:
+            column -= 1
+        else:
+            row -= 1
+    return list(reversed(matches))
+
+
 def stitch_chunk_transcriptions(
     chunks: Sequence[ChunkTranscription], *, duration_ms: int
 ) -> tuple[StitchedWord, ...]:
@@ -398,7 +452,9 @@ def stitch_chunk_transcriptions(
 
     next_speaker = 1
     label_maps: list[dict[str, str]] = []
-    raw_global: list[list[tuple[str, int, int, str, float | None]]] = []
+    raw_global: list[list[_GlobalWord]] = []
+    # Matched observations share one utterance root across adjacent requests.
+    roots: dict[tuple[int, int], tuple[int, int]] = {}
     for item in ordered:
         duration = item.span.end_ms - item.span.start_ms
         global_words: list[tuple[str, int, int, str, float | None]] = []
@@ -425,29 +481,16 @@ def stitch_chunk_transcriptions(
             previous = raw_global[-2]
             prior_map = label_maps[-1]
             counts: dict[str, Counter[str]] = defaultdict(Counter)
-            used_previous: set[int] = set()
-            for text, start, end, label, _confidence in global_words:
-                normalized = _normal_word(text)
-                if not normalized:
-                    continue
-                word_matches = [
-                    (abs(start - p_start) + abs(end - p_end), index, p_label)
-                    for index, (
-                        p_text,
-                        p_start,
-                        p_end,
-                        p_label,
-                        _p_confidence,
-                    ) in enumerate(previous)
-                    if index not in used_previous
-                    and normalized == _normal_word(p_text)
-                    and abs(start - p_start) <= 750
-                    and abs(end - p_end) <= 750
-                ]
-                if word_matches:
-                    _distance, prior_index, prior_label = min(word_matches)
-                    used_previous.add(prior_index)
-                    counts[label][prior_map[prior_label]] += 1
+            chunk_index = len(raw_global) - 1
+            for prior_index, current_index in _align_overlap_words(
+                previous,
+                global_words,
+                overlap_start=item.span.start_ms,
+                overlap_end=ordered[chunk_index - 1].span.end_ms,
+            ):
+                prior_key = (chunk_index - 1, prior_index)
+                roots[(chunk_index, current_index)] = roots.get(prior_key, prior_key)
+                counts[global_words[current_index][3]][prior_map[previous[prior_index][3]]] += 1
             claimed: set[str] = set()
             ranked: list[tuple[int, str, str]] = []
             for label, candidates in counts.items():
@@ -473,22 +516,29 @@ def stitch_chunk_transcriptions(
         (ordered[index].span.end_ms + ordered[index + 1].span.start_ms) // 2
         for index in range(len(ordered) - 1)
     ]
-    stitched: list[StitchedWord] = []
+    observations: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
     for index, words in enumerate(raw_global):
+        for word_index in range(len(words)):
+            key = (index, word_index)
+            observations[roots.get(key, key)].append(key)
+
+    def is_owned(key: tuple[int, int]) -> bool:
+        index, word_index = key
+        _text, start, end, _label, _confidence = raw_global[index][word_index]
         ownership_start = 0 if index == 0 else boundaries[index - 1]
         ownership_end = duration_ms + 1 if index == len(raw_global) - 1 else boundaries[index]
-        for text, start, end, label, confidence in words:
-            midpoint = (start + end) // 2
-            if ownership_start <= midpoint < ownership_end:
-                stitched.append(
-                    StitchedWord(
-                        text=text,
-                        start_ms=start,
-                        end_ms=end,
-                        speaker_id=label_maps[index][label],
-                        confidence=confidence,
-                    )
-                )
+        return ownership_start <= (start + end) // 2 < ownership_end
+
+    stitched: list[StitchedWord] = []
+    for instances in observations.values():
+        owned = [key for key in instances if is_owned(key)]
+        if not owned and len(instances) == 1:
+            continue
+        # Pick one canonical observation even when jitter puts both estimates
+        # outside their ownership windows; never drop a matched utterance.
+        index, word_index = min(owned or instances)
+        text, start, end, label, confidence = raw_global[index][word_index]
+        stitched.append(StitchedWord(text, start, end, label_maps[index][label], confidence))
     stitched.sort(key=lambda word: (word.start_ms, word.end_ms))
     if not stitched:
         raise MediaProcessingError("overlap stitching produced no words")

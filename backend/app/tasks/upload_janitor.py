@@ -9,7 +9,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.errors import DependencyError, NotFoundError
+from app.core.errors import DependencyError, NotFoundError, ValidationError
 from app.db.repositories import (
     AuditEventRepository,
     DocumentUploadReconcileRepository,
@@ -110,6 +110,7 @@ async def sweep_expired_uploads_async(
                     or _as_utc(current.expires_at) > _as_utc(moment)
                 ):
                     continue
+                expiry_reason = "upload_session_expired"
                 if current.state is DocumentUploadState.COMPLETING:
                     try:
                         # HEAD + document/audit creation + post-commit enqueue are
@@ -122,6 +123,18 @@ async def sweep_expired_uploads_async(
                         ).recover_completing(current.id)
                     except NotFoundError:
                         pass
+                    except ValidationError as exc:
+                        if exc.code not in {
+                            "incomplete_provider_parts",
+                            "invalid_provider_part_layout",
+                            "invalid_provider_part_etag",
+                        }:
+                            raise
+                        # A signed part can change after the durable boundary.
+                        # At expiry these permanent validation failures must
+                        # clean up and terminalize this candidate, not stop the
+                        # global sweep. Provider outages still roll back/retry.
+                        expiry_reason = exc.code
                     except UploadCompletionRejected as exc:
                         # The service has already made FAILED + object cleanup part
                         # of this transaction. Swallow so the terminal state commits
@@ -151,7 +164,7 @@ async def sweep_expired_uploads_async(
                     current.id,
                     current.owner_id,
                     DocumentUploadState.EXPIRED,
-                    error="upload_session_expired",
+                    error=expiry_reason,
                 )
                 await AuditSink(AuditEventRepository(session, candidate.tenant_id)).emit(
                     action=AuditAction.DOCUMENT_UPLOAD_EXPIRED,
@@ -161,7 +174,14 @@ async def sweep_expired_uploads_async(
                     outcome=AuditOutcome.ERROR,
                     request_id="upload-janitor",
                     source_ip="system",
-                    metadata={"document_id": str(current.document_id)},
+                    metadata={
+                        "document_id": str(current.document_id),
+                        **(
+                            {"reason_code": expiry_reason}
+                            if expiry_reason != "upload_session_expired"
+                            else {}
+                        ),
+                    },
                 )
                 count += 1
         except DependencyError as exc:

@@ -115,6 +115,46 @@ def test_self_introduction_is_inferred_but_conflict_returns_neutral_label() -> N
     assert infer_speaker_names(conflict)[0].display_name is None
 
 
+@pytest.mark.parametrize("reverse_jitter", [False, True])
+@pytest.mark.parametrize("repeated", [False, True])
+def test_overlap_word_alignment_preserves_jittered_and_repeated_utterances(
+    reverse_jitter: bool, repeated: bool
+) -> None:
+    # Default ten-minute spans: the ownership seam is 599500ms. The same
+    # utterance's estimates may fall on opposite sides of that seam.
+    earlier, later = (599_300, 599_400)
+    if reverse_jitter:
+        earlier, later = later, earlier
+    prior = [
+        _word("decision", 599_000, 599_100, "a"),
+        _word("is", 599_100, 599_200, "a"),
+        _word("approved", earlier, earlier + 200, "a"),
+    ]
+    following = [
+        _word("decision", 0, 100, "b"),
+        _word("is", 100, 200, "b"),
+        _word("approved", later - 599_000, later - 598_800, "b"),
+    ]
+    if repeated:
+        prior.append(_word("approved", 599_700, 599_900, "a"))
+        following.append(_word("approved", 720, 920, "b"))
+    # Words seen in only one request still obey ownership.
+    following.append(_word("today", 1_100, 1_300, "b"))
+    stitched = stitch_chunk_transcriptions(
+        (
+            ChunkTranscription(MediaSpan(0, 0, 600_000), _result(*prior)),
+            ChunkTranscription(MediaSpan(1, 599_000, 1_199_000), _result(*following)),
+        ),
+        duration_ms=1_199_000,
+    )
+    expected = ["decision", "is", "approved", *(["approved"] if repeated else []), "today"]
+    assert [word.text for word in stitched] == expected
+    assert {word.speaker_id for word in stitched} == {"speaker-1"}
+    assert all(0 <= word.start_ms < word.end_ms <= 1_199_000 for word in stitched)
+    segments = build_transcript_segments(stitched)
+    assert " ".join(segment.text for segment in segments) == " ".join(expected)
+
+
 def test_filler_before_explicit_self_introduction_remains_high_confidence() -> None:
     segments = build_transcript_segments(
         tuple(

@@ -437,7 +437,10 @@ class DocumentUploadService:
         await self._session.commit()
         await bind_tenant(self._session, self._tenant_id)
         upload = await self._uploads.get_for_owner(upload_id, self._owner_id, lock=True)
-        assert upload is not None
+        if upload is None:
+            # Collection deletion can remove the session while commit releases
+            # its lock. Let the router emit its normal audited 404 response.
+            return None
         # Another completer can win while the durable boundary commit releases
         # the row lock. Re-enter the state machine after reacquisition: COMPLETED
         # returns the existing row, COMPLETING performs one HEAD/complete recovery.

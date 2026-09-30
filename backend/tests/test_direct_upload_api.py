@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -40,7 +41,9 @@ from app.domain.entities import (
     Role,
 )
 from app.main import create_app
+from app.services.document_upload_service import DocumentUploadService
 from app.storage import MultipartUpload, StoredObjectMetadata, UploadedPart
+from app.tasks.upload_janitor import sweep_expired_uploads_async
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -1009,6 +1012,256 @@ async def test_completion_recovers_after_provider_success_process_crash(
     repeated = await client.get(f"/api/v2/document-uploads/{upload_id}", headers=auth(token))
     assert repeated.status_code == 200
     assert enqueued == [(seeded.tenant_a, document_id, True)]
+
+
+async def test_collection_delete_after_completion_commit_returns_audited_404(
+    client: AsyncClient,
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeMultipartStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: Seeded = sessionmaker.seeded  # type: ignore[attr-defined]
+    token = await login(client, "alice@a.test")
+    started = await initiate(client, token, seeded.collection_a, size=8)
+    assert started.status_code == 201
+    upload_id = started.json()["id"]
+    provider_id = next(iter(store.uploads))
+    store.upload_parts(provider_id, [8])
+    monkeypatch.setattr("app.tasks.enqueue_ingestion", lambda *a, **kw: pytest.fail("deleted"))
+    committed = asyncio.Event()
+    deleted = asyncio.Event()
+    original_commit = AsyncSession.commit
+    original_complete = DocumentUploadService.complete
+
+    async def mark_completion(service: DocumentUploadService, *args, **kwargs):
+        service._session.info["r3_gap"] = True
+        return await original_complete(service, *args, **kwargs)
+
+    monkeypatch.setattr(DocumentUploadService, "complete", mark_completion)
+
+    async def commit_gap(session: AsyncSession) -> None:
+        await original_commit(session)
+        if session.info.pop("r3_gap", False):
+            committed.set()
+            await deleted.wait()
+
+    monkeypatch.setattr(AsyncSession, "commit", commit_gap)
+
+    async def complete() -> Response:
+        # Assert the actual wire error instead of propagating the server exception.
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+        ) as completing:
+            return await completing.post(
+                f"/api/v2/document-uploads/{upload_id}/complete",
+                headers=auth(token),
+                json={"parts": [{"part_number": 1, "etag": '"etag-1"'}]},
+            )
+
+    async def delete() -> Response:
+        await committed.wait()
+        try:
+            # Fresh read proves that deletion runs after durable COMPLETING.
+            async with sessionmaker() as session:
+                state = await session.scalar(
+                    select(models.DocumentUpload.state).where(
+                        models.DocumentUpload.id == uuid.UUID(upload_id)
+                    )
+                )
+                assert state == DocumentUploadState.COMPLETING.value
+            return await client.delete(
+                f"/api/v1/collections/{seeded.collection_a}", headers=auth(token)
+            )
+        finally:
+            deleted.set()
+
+    completed, removed = await asyncio.gather(
+        asyncio.create_task(complete(), name="r3-complete-delete"), delete()
+    )
+    assert removed.status_code == 204, removed.text
+    assert store.aborted == [provider_id] and store.complete_calls == []
+    assert store.deleted == [str(store.uploads[provider_id]["key"])]
+    assert completed.status_code == 404, completed.text
+    assert completed.json()["code"] == "not_found"
+    async with sessionmaker() as session:
+        assert (
+            await session.scalar(
+                select(models.DocumentUpload.id).where(
+                    models.DocumentUpload.id == uuid.UUID(upload_id)
+                )
+            )
+            is None
+        )
+        assert (await session.execute(select(models.Document))).scalars().all() == []
+    events = await upload_rejection_audits(sessionmaker, seeded.tenant_a)
+    assert len(events) == 1
+    assert events[0].resource_id == upload_id
+    assert events[0].event_metadata == {
+        "operation": "complete",
+        "reason_code": "not_found_or_not_owned",
+        "status": 404,
+    }
+    assert_content_safe_rejection(events[0])
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["invalid_provider_part_layout", "incomplete_provider_parts", "invalid_provider_part_etag"],
+)
+async def test_janitor_isolates_late_part_mutation_and_commits_terminal_audit(
+    reason: str,
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeMultipartStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: Seeded = sessionmaker.seeded  # type: ignore[attr-defined]
+    token = await login(client, "alice@a.test")
+    other_token = await login(client, "carol@b.test")
+    started = await initiate(client, token, seeded.collection_a, size=8)
+    other = await initiate(client, other_token, seeded.collection_b, size=8)
+    assert started.status_code == other.status_code == 201
+    upload_id, other_id = uuid.UUID(started.json()["id"]), uuid.UUID(other.json()["id"])
+    provider_id, other_provider = list(store.uploads)
+    store.upload_parts(provider_id, [8])
+    committed, overwritten = asyncio.Event(), asyncio.Event()
+    original_commit = AsyncSession.commit
+    original_complete = DocumentUploadService.complete
+
+    async def mark_completion(service: DocumentUploadService, *args, **kwargs):
+        service._session.info["r3_gap"] = True
+        return await original_complete(service, *args, **kwargs)
+
+    monkeypatch.setattr(DocumentUploadService, "complete", mark_completion)
+
+    async def commit_gap(session: AsyncSession) -> None:
+        await original_commit(session)
+        if session.info.pop("r3_gap", False):
+            committed.set()
+            await overwritten.wait()
+
+    monkeypatch.setattr(AsyncSession, "commit", commit_gap)
+    monkeypatch.setattr("app.tasks.enqueue_ingestion", lambda *a, **kw: pytest.fail("invalid"))
+
+    async def complete() -> Response:
+        return await client.post(
+            f"/api/v2/document-uploads/{upload_id}/complete",
+            headers=auth(token),
+            json={"parts": [{"part_number": 1, "etag": '"etag-1"'}]},
+        )
+
+    async def overwrite() -> None:
+        await committed.wait()
+        try:
+            async with sessionmaker() as session:
+                assert (
+                    await session.scalar(
+                        select(models.DocumentUpload.state).where(
+                            models.DocumentUpload.id == upload_id
+                        )
+                    )
+                    == DocumentUploadState.COMPLETING.value
+                )
+            if reason == "incomplete_provider_parts":
+                store.uploads[provider_id]["parts"] = []
+            else:
+                store.uploads[provider_id]["parts"] = [
+                    UploadedPart(
+                        part_number=1,
+                        etag='"etag-1"'
+                        if reason == "invalid_provider_part_layout"
+                        else "bad\nETag",
+                        size_bytes=7 if reason == "invalid_provider_part_layout" else 8,
+                    )
+                ]
+        finally:
+            overwritten.set()
+
+    response, _ = await asyncio.gather(
+        asyncio.create_task(complete(), name="r3-late-overwrite"), overwrite()
+    )
+    assert response.status_code == 422 and response.json()["code"] == reason
+    now = datetime.now(UTC)
+    async with sessionmaker() as session:
+        for index, item in enumerate((upload_id, other_id)):
+            row = await session.get(models.DocumentUpload, item)
+            assert row is not None
+            row.expires_at = now - timedelta(minutes=2 - index)
+        await session.commit()
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    @asynccontextmanager
+    async def tenant_scope(_tenant: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        async with scope() as session:
+            yield session
+
+    monkeypatch.setattr("app.tasks.upload_janitor.session_scope", scope)
+    monkeypatch.setattr("app.tasks.upload_janitor.tenant_session_scope", tenant_scope)
+    settings = get_settings().model_copy(update={"upload_janitor_batch_size": 10})
+    result = await sweep_expired_uploads_async(now=now, settings=settings, object_store=store)  # type: ignore[arg-type]
+    assert (result.scanned, result.expired, result.recovered) == (2, 2, 0)
+    assert store.aborted == [provider_id, other_provider]
+    assert store.deleted == [str(store.uploads[p]["key"]) for p in (provider_id, other_provider)]
+    assert store.complete_calls == []
+    async with scope() as session:
+        rows = (await session.execute(select(models.DocumentUpload))).scalars().all()
+        assert {row.state for row in rows} == {DocumentUploadState.EXPIRED.value}
+        assert {row.id: row.error for row in rows} == {
+            upload_id: reason,
+            other_id: "upload_session_expired",
+        }
+        assert (await session.execute(select(models.Document))).scalars().all() == []
+        events = (
+            (
+                await session.execute(
+                    select(models.AuditEvent).where(
+                        models.AuditEvent.action == AuditAction.DOCUMENT_UPLOAD_EXPIRED.value
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 2
+        corrupt = next(event for event in events if event.resource_id == str(upload_id))
+        assert corrupt.tenant_id == seeded.tenant_a and corrupt.source_origin == "system"
+        assert corrupt.outcome == "error"
+        assert corrupt.event_metadata == {
+            "document_id": started.json()["document_id"],
+            "reason_code": reason,
+        }
+        assert (
+            next(event for event in events if event.resource_id == str(other_id)).tenant_id
+            == seeded.tenant_b
+        )
+    again = await sweep_expired_uploads_async(now=now, settings=settings, object_store=store)  # type: ignore[arg-type]
+    assert (again.scanned, again.expired, again.recovered) == (0, 0, 0)
+    assert store.aborted == [provider_id, other_provider]
+    async with scope() as session:
+        assert (
+            len(
+                (
+                    await session.execute(
+                        select(models.AuditEvent).where(
+                            models.AuditEvent.action == AuditAction.DOCUMENT_UPLOAD_EXPIRED.value
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            == 2
+        )
 
 
 async def test_get_recovers_crash_after_durable_boundary_before_provider_completion(

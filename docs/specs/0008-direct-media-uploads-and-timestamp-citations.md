@@ -79,6 +79,10 @@ The derived audio is transient. Long media is split into overlapping chunks no
 longer than ten minutes so provider timeout/retry never rebills already persisted
 chunks. Paid transcription results are persisted before embedding/indexing and
 are reused after retry.
+Overlap stitching aligns word sequences one-to-one with timestamp tolerance
+before choosing one canonical observation per matched utterance. Timing jitter
+across the ownership seam cannot remove or duplicate matched words; genuine
+repeated words remain separate. Unmatched words use midpoint ownership.
 
 The configured default transcription route is OpenRouter model
 `x-ai/grok-stt-1.0`, requested with word timestamps and speaker diarization via
@@ -146,6 +150,9 @@ Changing document, citation time, or transcript retry discards the prior window'
 pending pagination results and errors and allows pagination of the new window.
 Document metadata always includes `duration_ms`, with null for ordinary documents
 and media whose duration has not yet been established.
+An explicit citation or transcript seek during access renewal supersedes the
+renewal's saved time, including while replacement metadata is pending. Renewal
+retains the prior play/pause state and never autoplays a paused player.
 
 ## 7. Security, audit, and negative acceptance
 
@@ -169,6 +176,13 @@ and media whose duration has not yet been established.
   community MinIO Compose runs a pinned `mc rm --incomplete --older-than` reaper
   because that lifecycle action is not implemented by its S3 API. The ordinary
   database janitor remains responsible for known upload-session state.
+- Expired COMPLETING sessions with permanently invalid/missing provider parts or
+  invalid ETags are aborted/deleted and become EXPIRED with a content-safe reason
+  code in the same transaction as the system expiry audit. Cleanup continues for
+  other tenants; transient provider failures roll back and remain retryable.
+- If collection deletion removes an upload during completion's durable commit
+  gap, completion returns the ordinary audited `404` without completing storage
+  or enqueueing ingestion.
 
 ## 8. Scope fence
 

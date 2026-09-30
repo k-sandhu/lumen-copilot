@@ -58,6 +58,14 @@ export function MediaTranscriptPlayer({
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
   const transcriptAbortRef = useRef<AbortController | null>(null);
 
+  const seek = useCallback((milliseconds: number) => {
+    pendingSeekRef.current = milliseconds;
+    // An explicit seek supersedes the snapshot taken before URL renewal,
+    // including the interval while the replacement metadata is pending.
+    if (restoreRef.current) restoreRef.current.timeSeconds = milliseconds / 1000;
+    seekWhenReady(mediaRef.current, milliseconds, pendingSeekRef);
+  }, []);
+
   useEffect(() => {
     const abort = new AbortController();
     transcriptAbortRef.current = abort;
@@ -91,9 +99,8 @@ export function MediaTranscriptPlayer({
 
   useEffect(() => {
     if (initialTimeMs === undefined) return;
-    pendingSeekRef.current = initialTimeMs;
-    seekWhenReady(mediaRef.current, initialTimeMs, pendingSeekRef);
-  }, [initialTimeMs]);
+    seek(initialTimeMs);
+  }, [initialTimeMs, seek]);
 
   const speakers = useMemo(() => {
     if (transcript.kind !== 'ready') return new Map<string, TranscriptSpeaker>();
@@ -107,6 +114,7 @@ export function MediaTranscriptPlayer({
     const restore = restoreRef.current;
     if (restore) {
       restoreRef.current = null;
+      pendingSeekRef.current = null;
       media.currentTime = clampSeek(media, restore.timeSeconds);
       if (restore.shouldPlay) void media.play().catch(() => undefined);
       return;
@@ -116,11 +124,6 @@ export function MediaTranscriptPlayer({
       media.currentTime = clampSeek(media, target / 1000);
       pendingSeekRef.current = null;
     }
-  }, []);
-
-  const seek = useCallback((milliseconds: number) => {
-    pendingSeekRef.current = milliseconds;
-    seekWhenReady(mediaRef.current, milliseconds, pendingSeekRef);
   }, []);
 
   const refreshExpiredAccess = useCallback(

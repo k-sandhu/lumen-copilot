@@ -10,6 +10,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,9 +27,10 @@ import app.tasks  # noqa: F401  isort: skip — initialize task registry before 
 
 from app.api.v2.uploads import _commit_rejection
 from app.core.config import get_settings
-from app.core.errors import ValidationError
+from app.core.errors import NotFoundError, ValidationError
 from app.db import models
 from app.db.repositories import (
+    AuditEventRepository,
     ChatSessionRepository,
     ChunkRepository,
     CollectionRepository,
@@ -39,10 +41,13 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.db.tenant_context import bind_tenant
-from app.domain.entities import DocumentUploadState, MessageRole, Role
+from app.domain.audit import AuditAction
+from app.domain.entities import DocumentUpload, DocumentUploadState, MessageRole, Role
+from app.services.audit import AuditSink
+from app.services.collections_service import CollectionsService
 from app.services.document_upload_service import CompletePartInput
 from app.storage import UploadedPart
-from app.tasks.upload_janitor import _recovery_service
+from app.tasks.upload_janitor import _recovery_service, sweep_expired_uploads_async
 from tests.test_direct_upload_api import FakeMultipartStore
 
 _URL = "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr606"
@@ -432,4 +437,216 @@ async def test_rejection_audit_rebinds_tenant_after_rollback(
         "operation": "sign_parts",
         "reason_code": error.code,
         "status": 422,
+    }
+
+
+async def _live_upload(
+    session: AsyncSession, store: FakeMultipartStore, *, expires_at: datetime
+) -> DocumentUpload:
+    tenant, owner, collection = await _seed()
+    await bind_tenant(session, tenant)
+    upload_id, document_id = uuid.uuid4(), uuid.uuid4()
+    provider_id = f"provider-{upload_id}"
+    key = f"{tenant}/quarantine/{document_id}/test.mp3"
+    upload = await DocumentUploadRepository(session, tenant).create(
+        upload_id=upload_id,
+        document_id=document_id,
+        owner_id=owner,
+        collection_id=collection,
+        filename="test.mp3",
+        mime_type="audio/mpeg",
+        size_bytes=8,
+        storage_key=key,
+        provider_upload_id=provider_id,
+        part_size_bytes=5 * 1024**2,
+        part_count=1,
+        expires_at=expires_at,
+    )
+    await session.commit()
+    store.uploads[provider_id] = {
+        "key": key,
+        "content_type": "audio/mpeg",
+        "metadata": {"lumen-upload-id": str(upload_id), "lumen-document-id": str(document_id)},
+        "parts": [UploadedPart(part_number=1, etag='"etag-1"', size_bytes=8)],
+    }
+    return upload
+
+
+async def test_janitor_invalid_parts_terminalize_under_rls_and_continue_other_tenant(
+    restricted_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, store = restricted_session, FakeMultipartStore()
+    now = datetime.now(UTC)
+    corrupt = await _live_upload(session, store, expires_at=now - timedelta(minutes=2))
+    await bind_tenant(session, corrupt.tenant_id)
+    await DocumentUploadRepository(session, corrupt.tenant_id).set_state(
+        corrupt.id, corrupt.owner_id, DocumentUploadState.COMPLETING
+    )
+    await session.commit()
+    other = await _live_upload(session, store, expires_at=now - timedelta(minutes=1))
+    store.upload_parts(corrupt.provider_upload_id, [7])
+    monkeypatch.setattr("app.tasks.enqueue_ingestion", lambda *a, **kw: pytest.fail("corrupt"))
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[AsyncSession]:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+    @asynccontextmanager
+    async def tenant_scope(tenant: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        await bind_tenant(session, tenant)
+        async with scope() as scoped:
+            yield scoped
+
+    @asynccontextmanager
+    async def discovery_scope() -> AsyncIterator[AsyncSession]:
+        # Global discovery is the deliberate privileged system read. Every
+        # terminal mutation/audit below uses the asserted non-bypass role.
+        engine = create_async_engine(_URL)
+        try:
+            async with AsyncSession(engine) as discovery:
+                yield discovery
+                await discovery.commit()
+        finally:
+            await engine.dispose()
+
+    monkeypatch.setattr("app.tasks.upload_janitor.session_scope", discovery_scope)
+    monkeypatch.setattr("app.tasks.upload_janitor.tenant_session_scope", tenant_scope)
+    result = await sweep_expired_uploads_async(now=now, object_store=store)  # type: ignore[arg-type]
+    assert (result.scanned, result.expired, result.recovered) == (2, 2, 0)
+    assert store.aborted == [corrupt.provider_upload_id, other.provider_upload_id]
+    assert store.deleted == [corrupt.storage_key, other.storage_key]
+    assert store.complete_calls == []
+    for upload in (corrupt, other):
+        await bind_tenant(session, upload.tenant_id)
+        saved = await DocumentUploadRepository(session, upload.tenant_id).get_for_owner(
+            upload.id, upload.owner_id
+        )
+        assert saved is not None and saved.state is DocumentUploadState.EXPIRED
+        assert saved.error == (
+            "invalid_provider_part_layout" if upload is corrupt else "upload_session_expired"
+        )
+        event = (
+            await session.execute(
+                select(models.AuditEvent).where(models.AuditEvent.resource_id == str(upload.id))
+            )
+        ).scalar_one()
+        assert event.action == AuditAction.DOCUMENT_UPLOAD_EXPIRED.value
+        assert event.source_origin == "system" and event.outcome == "error"
+        assert event.event_metadata == {
+            "document_id": str(upload.document_id),
+            **({"reason_code": "invalid_provider_part_layout"} if upload is corrupt else {}),
+        }
+        await session.commit()
+    await bind_tenant(session, corrupt.tenant_id)
+    # Direct DML read without repository predicates still enforces tenant isolation.
+    assert (
+        await session.scalar(
+            select(models.DocumentUpload).where(models.DocumentUpload.id == other.id)
+        )
+        is None
+    )
+    await session.commit()
+    again = await sweep_expired_uploads_async(now=now, object_store=store)  # type: ignore[arg-type]
+    assert again.scanned == 0 and len(store.aborted) == 2
+
+
+async def test_collection_delete_at_durable_completion_boundary_under_rls(
+    restricted_session: AsyncSession,
+    live_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = restricted_session, FakeMultipartStore()
+    upload = await _live_upload(session, store, expires_at=datetime.now(UTC) + timedelta(hours=1))
+    await bind_tenant(session, upload.tenant_id)
+    service = _recovery_service(
+        session=session, candidate=upload, store=store, settings=get_settings()
+    )  # type: ignore[arg-type]
+    committed, deleted = asyncio.Event(), asyncio.Event()
+    original_commit = session.commit
+
+    async def commit_gap() -> None:
+        await original_commit()
+        committed.set()
+        await deleted.wait()
+
+    monkeypatch.setattr(session, "commit", commit_gap)
+    monkeypatch.setattr("app.tasks.enqueue_ingestion", lambda *a, **kw: pytest.fail("deleted"))
+
+    async def delete() -> None:
+        await committed.wait()
+        engine = create_async_engine(_URL)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f"SET ROLE {live_database}"))
+                await connection.commit()
+                assert (
+                    await connection.execute(
+                        text(
+                            "SELECT rolsuper, rolbypassrls FROM pg_roles "
+                            "WHERE rolname = current_user"
+                        )
+                    )
+                ).one() == (False, False)
+                await connection.commit()
+                async with AsyncSession(connection, expire_on_commit=False) as deleter:
+                    await bind_tenant(deleter, upload.tenant_id)
+                    current = await DocumentUploadRepository(
+                        deleter, upload.tenant_id
+                    ).get_for_owner(upload.id, upload.owner_id)
+                    assert current is not None and current.state is DocumentUploadState.COMPLETING
+                    collections = CollectionsService(
+                        deleter,
+                        tenant_id=upload.tenant_id,
+                        owner_id=upload.owner_id,
+                        object_store=store,  # type: ignore[arg-type]
+                        audit=AuditSink(AuditEventRepository(deleter, upload.tenant_id)),
+                        request_id="r3-delete",
+                        source_ip="127.0.0.1",
+                    )
+                    assert await collections.delete(upload.collection_id)
+                    await deleter.commit()
+        finally:
+            await engine.dispose()
+            deleted.set()
+
+    result, _ = await asyncio.gather(
+        service.complete(upload.id, [CompletePartInput(1, '"etag-1"')]), delete()
+    )
+    assert result is None
+    assert store.aborted == [upload.provider_upload_id] and store.complete_calls == []
+    assert store.deleted == [upload.storage_key]
+    # The router's actual rejection transaction must still work after the gap.
+    await _commit_rejection(
+        session,
+        service,
+        operation="complete",
+        resource_type="document_upload",
+        resource_id=upload.id,
+        error=NotFoundError("Upload not found."),
+        permission_denied=True,
+    )
+    await bind_tenant(session, upload.tenant_id)
+    assert (
+        await DocumentUploadRepository(session, upload.tenant_id).get_for_owner(
+            upload.id, upload.owner_id
+        )
+        is None
+    )
+    event = (
+        await session.execute(
+            select(models.AuditEvent).where(
+                models.AuditEvent.resource_id == str(upload.id),
+                models.AuditEvent.action == AuditAction.PERMISSION_DENIED.value,
+            )
+        )
+    ).scalar_one()
+    assert event.event_metadata == {
+        "operation": "complete",
+        "reason_code": "not_found_or_not_owned",
+        "status": 404,
     }

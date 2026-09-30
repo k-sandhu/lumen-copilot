@@ -69,6 +69,61 @@ beforeEach(() => {
 });
 
 describe('MediaTranscriptPlayer', () => {
+  it.each([
+    { source: 'citation', paused: true },
+    { source: 'citation', paused: false },
+    { source: 'transcript', paused: true },
+    { source: 'transcript', paused: false },
+  ] as const)(
+    'keeps the latest $source seek across a pending refresh (paused=$paused)',
+    async ({ source, paused }) => {
+      let resolveRefresh!: (value: api.DocumentAccessUrl) => void;
+      const refresh = new Promise<api.DocumentAccessUrl>((resolve) => {
+        resolveRefresh = resolve;
+      });
+      const createAccess = vi.spyOn(api, 'createDocumentAccessUrl').mockReturnValue(refresh);
+      const props = {
+        documentId: 'doc-1',
+        filename: 'meeting.mp3',
+        kind: 'audio' as const,
+        initialAccess: { ...access, expires_at: '2000-01-01T00:00:00Z' },
+      };
+      const { rerender } = render(<MediaTranscriptPlayer {...props} initialTimeMs={5_000} />);
+      await screen.findByText('Welcome.');
+      const player = screen.getByLabelText('Audio player for meeting.mp3') as HTMLAudioElement;
+      Object.defineProperty(player, 'readyState', {
+        configurable: true,
+        value: HTMLMediaElement.HAVE_METADATA,
+      });
+      Object.defineProperty(player, 'duration', { configurable: true, value: 60 });
+      Object.defineProperty(player, 'paused', { configurable: true, value: paused });
+      const play = vi.spyOn(player, 'play').mockResolvedValue();
+      fireEvent.loadedMetadata(player);
+      expect(player.currentTime).toBe(5);
+      fireEvent.error(player);
+      expect(createAccess).toHaveBeenCalledTimes(1);
+
+      const expectedTime = source === 'citation' ? 50 : 18;
+      if (source === 'citation') {
+        rerender(<MediaTranscriptPlayer {...props} initialTimeMs={50_000} />);
+      } else {
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Seek to 0:18' }));
+      }
+      expect(player.currentTime).toBe(expectedTime);
+      const refreshed = { ...access, url: 'https://storage.example/media?refreshed' };
+      await act(async () => {
+        resolveRefresh(refreshed);
+        await refresh;
+      });
+      expect(player).toHaveAttribute('src', refreshed.url);
+      // Browsers reset the source timeline until the new metadata arrives.
+      player.currentTime = 0;
+      fireEvent.loadedMetadata(player);
+      expect(player.currentTime).toBe(expectedTime);
+      expect(play).toHaveBeenCalledTimes(paused ? 0 : 1);
+    },
+  );
+
   it.each(['success', 'error'] as const)(
     'ignores stale pagination %s after a new citation window',
     async (outcome) => {
