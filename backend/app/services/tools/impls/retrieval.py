@@ -230,24 +230,31 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "Hybrid semantic + keyword search over the documents the user can "
             "access (their own and any shared with them). Use this to find "
             "evidence for the question. Returns ranked passages with their source "
-            "document and a snippet. Search again with a refined query if results "
-            "are thin."
+            "document and a snippet of up to 600 characters per passage. If no "
+            "passages match, broaden the query, use search_documents to locate a "
+            "document by filename, or list_documents to see available documents."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The natural-language search query.",
                 },
                 "k": {
                     "type": "integer",
-                    "description": "How many passages to return (1-20).",
+                    "description": (
+                        "How many passages to return (1-20; defaults to 6, lowered "
+                        "when context is tight)."
+                    ),
                     "minimum": 1,
                     "maximum": _MAX_K,
+                    "default": 6,
                 },
             },
             "required": ["query"],
+            "additionalProperties": False,
         },
         handler=_search_text,
         risk_tier=RiskTier.T0,
@@ -256,20 +263,29 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="search_documents",
         description=(
-            "Find documents the user can access (their own or shared with them) "
-            "by filename or metadata. Use this to locate a specific document "
-            "before reading it with get_document."
+            "Find accessible documents by filename substring. This search matches "
+            "filenames only, not document body text or other metadata. Use the "
+            "returned id with get_document to read a capped text prefix. If there "
+            "are no matches, try a shorter filename term or list_documents."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "name_or_query": {
                     "type": "string",
-                    "description": "Filename or keyword to match documents by.",
+                    "minLength": 1,
+                    "description": "Non-empty filename text to match (substring search).",
                 },
-                "k": {"type": "integer", "minimum": 1, "maximum": _MAX_K},
+                "k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_K,
+                    "description": "Maximum documents to return (1-20; defaults to 10).",
+                    "default": 10,
+                },
             },
             "required": ["name_or_query"],
+            "additionalProperties": False,
         },
         handler=_search_documents,
         risk_tier=RiskTier.T0,
@@ -283,19 +299,23 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "questions like 'what documents do I have access to' or to show the "
             "user what is available. Returns document names with their ids (each "
             "usable with get_document). The list is capped; to find one specific "
-            "document by name, use search_documents instead."
+            "document by filename, use search_documents instead. An empty result "
+            "means no accessible documents are available; narrow a full list with "
+            "search_documents or use search_text to look for evidence."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "k": {
                     "type": "integer",
-                    "description": "Maximum number of documents to list (1-50).",
+                    "description": "Maximum number of documents to list (1-50; defaults to 50).",
                     "minimum": 1,
                     "maximum": _LIST_MAX,
+                    "default": _LIST_MAX,
                 },
             },
             # No required args — enumeration needs no query.
+            "additionalProperties": False,
         },
         handler=_list_documents,
         risk_tier=RiskTier.T0,
@@ -304,9 +324,12 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="get_document",
         description=(
-            "Fetch the full text of a document the user can access by id (from "
-            "search_documents). Returns nothing if the document is not one the "
-            "user can access."
+            "Read the accessible document id returned by search_documents or "
+            "list_documents. Returns a text prefix of up to 2400 characters (or "
+            "four times the current snippet allowance when context is tight), not "
+            "necessarily the whole document. If relevant evidence is beyond that "
+            "prefix, use search_text to find matching passages. A missing or "
+            "inaccessible id returns 'Document not found'."
         ),
         json_schema={
             "type": "object",
@@ -317,6 +340,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
                 }
             },
             "required": ["document_id"],
+            "additionalProperties": False,
         },
         handler=_get_document,
         risk_tier=RiskTier.T0,

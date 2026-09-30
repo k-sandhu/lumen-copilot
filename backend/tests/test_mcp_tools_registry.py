@@ -80,9 +80,7 @@ class _FakeRetrieval:
 
 
 class _World:
-    def __init__(
-        self, *, session: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID
-    ) -> None:
+    def __init__(self, *, session: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID) -> None:
         self.session = session
         self.tenant_id = tenant_id
         self.user_id = user_id
@@ -145,9 +143,7 @@ async def _all_invocations(w: _World) -> list[Any]:
 
     from app.db import models
 
-    stmt = select(models.ToolInvocation).where(
-        models.ToolInvocation.tenant_id == w.tenant_id
-    )
+    stmt = select(models.ToolInvocation).where(models.ToolInvocation.tenant_id == w.tenant_id)
     return list((await w.session.execute(stmt)).scalars().all())
 
 
@@ -270,9 +266,7 @@ async def test_allowlisted_readonly_mcp_tool_runs_and_is_audited(world: _World) 
     tools = tools_for_servers([server], invoker)
     echo_name = namespaced_tool_name(slug_for_server(server), "echo")
 
-    r, audit_repo = _make_runner(
-        world, allowed=frozenset({echo_name}), extra_tools=tools
-    )
+    r, audit_repo = _make_runner(world, allowed=frozenset({echo_name}), extra_tools=tools)
     result = await r.run(
         call=ToolCall(id="c1", name=echo_name, arguments={"text": "hi"}),
         context=_context(world),
@@ -396,9 +390,7 @@ async def test_missing_required_arg_is_rejected(world: _World) -> None:
 async def test_downed_server_is_ok_false_not_a_crash(world: _World) -> None:
     server = _server(tenant_id=world.tenant_id, owner_id=world.user_id)
     # The adapter contains a down server as a typed ``ok=False`` McpToolResult.
-    down = McpToolResult.failure(
-        error_code=MCP_ERROR_UNAVAILABLE, content="server unreachable"
-    )
+    down = McpToolResult.failure(error_code=MCP_ERROR_UNAVAILABLE, content="server unreachable")
     invoker = _RecordingInvoker(result=down)
     tools = tools_for_servers([server], invoker)
     echo_name = namespaced_tool_name(slug_for_server(server), "echo")
@@ -543,11 +535,11 @@ async def test_extra_tools_do_not_shadow_the_static_registry(world: _World) -> N
 # --- arg-validation unit coverage -------------------------------------------
 
 
-def test_validate_args_allows_unknown_schema_shapes() -> None:
-    # An empty schema imposes no constraint; a schema the check does not understand
-    # is permitted through (the server validates authoritatively).
+def test_validate_args_closes_object_schemas_and_allows_empty_schema() -> None:
+    # An empty schema imposes no constraint; object schemas reject undeclared fields.
     assert mcp_bridge._validate_args({"anything": 1}, {}) is None
-    assert mcp_bridge._validate_args({"x": 1}, {"type": "object"}) is None
+    assert mcp_bridge._validate_args({}, {"type": "object"}) is None
+    assert mcp_bridge._validate_args({"x": 1}, {"type": "object"}) is not None
     # bool is NOT an integer (a common JSON-Schema trap).
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     assert mcp_bridge._validate_args({"n": True}, schema) is not None
