@@ -286,7 +286,12 @@ def _gated_tool(calls: list[str]) -> ToolDefinition:
     return ToolDefinition(
         name="run_python",
         description="a gated tool",
-        json_schema={"type": "object", "properties": {}},
+        json_schema={
+            "type": "object",
+            "properties": {"code": {"type": "string", "description": "Python code to run."}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
         handler=_handler,
         risk_tier=RiskTier.T2,
         requires_approval=True,
