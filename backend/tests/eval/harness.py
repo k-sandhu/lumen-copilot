@@ -201,9 +201,10 @@ class _GroundedGateway:
             yield StreamEvent(text=self._refusal)
             yield StreamEvent(finish_reason="stop")
             return
-        # Answer strictly from the retrieved passage text (the first block).
+        # Quote every returned passage, citing each quoted block rather than
+        # relying on the old runtime's automatic citation of all retrieval.
         yield StreamEvent(text="Based on your documents: ")
-        yield StreamEvent(text=_first_passage_snippet(joined))
+        yield StreamEvent(text=joined)
         yield StreamEvent(finish_reason="stop")
 
 
