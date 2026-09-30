@@ -1,5 +1,8 @@
 """Route-level handle validation with current permission reads and audit readback."""
 
+# Imported fixtures intentionally share names with injected test parameters.
+# ruff: noqa: F811
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -11,7 +14,11 @@ from httpx import AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytest_plugins = ("tests.test_chat_api",)
+from tests.test_chat_api import app as app
+from tests.test_chat_api import backplane as backplane
+from tests.test_chat_api import client as client
+from tests.test_chat_api import seeded as seeded
+from tests.test_chat_api import sessionmaker as sessionmaker
 
 
 def _visible_answer(envs: list[dict[str, object]]) -> str:
@@ -45,18 +52,20 @@ def _install_real_permission_read(
         collection_ids: object = None,
         document_ids: object = None,
     ) -> list[object]:
-        del self
-        async with sessionmaker() as session:
-            service = RetrievalService(session, gateway=object())  # type: ignore[arg-type]
-            return cast(
-                list[object],
-                await service.read_passages(
-                    principal=principal,  # type: ignore[arg-type]
-                    chunk_ids=chunk_ids,
-                    collection_ids=collection_ids,  # type: ignore[arg-type]
-                    document_ids=document_ids,  # type: ignore[arg-type]
-                ),
-            )
+        # Share the actual coordinator transaction. Closing another SQLite
+        # StaticPool session here would roll back pending traces, masking the
+        # route's responsibility for committing reads and refusals.
+        session = cast(AsyncSession, self._session)  # type: ignore[attr-defined]
+        service = RetrievalService(session, gateway=object())  # type: ignore[arg-type]
+        return cast(
+            list[object],
+            await service.read_passages(
+                principal=principal,  # type: ignore[arg-type]
+                chunk_ids=chunk_ids,
+                collection_ids=collection_ids,  # type: ignore[arg-type]
+                document_ids=document_ids,  # type: ignore[arg-type]
+            ),
+        )
 
     async def stream_tools(
         self: object, messages: object, **kwargs: object
