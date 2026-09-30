@@ -48,6 +48,7 @@ class AuditSink:
         request_id: str,
         source_ip: str,
         metadata: dict[str, object] | None = None,
+        durable: bool = False,
     ) -> AuditEvent:
         """Validate and persist one audit event, returning the stored record.
 
@@ -60,7 +61,10 @@ class AuditSink:
         ``event_id`` (uuid) and ``ts`` (UTC ``now()``); the tenant is fixed by
         the repository's scope. The caller owns the transaction boundary (the
         row is flushed, not committed) so the audit write commits atomically
-        with the action it records.
+        with the action it records. With ``durable=True``, the repository instead
+        opens and commits an independent tenant-bound transaction. T2 external
+        effects use this for pre-dispatch intent and correlated result (#518),
+        because cancellation/rollback of an answer cannot undo the external action.
 
         Args:
             action: A taxonomy action (enum or string in the taxonomy).
@@ -90,7 +94,10 @@ class AuditSink:
             request_id=request_id,
             source_ip=source_ip,
         )
-        return await self._repository.record(
+        # External T2 effects cannot participate in the answer transaction (#518).
+        # Their intent/result use independent commits through this same sink.
+        record = self._repository.record_committed if durable else self._repository.record
+        return await record(
             action=validated_action.value,
             resource_type=resource_type,
             outcome=outcome,
