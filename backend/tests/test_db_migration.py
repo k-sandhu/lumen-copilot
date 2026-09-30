@@ -120,14 +120,17 @@ def test_every_revision_id_fits_alembic_version_column() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0013 with a SINGLE head (ADR-0008 §4).
+    """The migration chain has a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0043_code_run_resolved_packages"]
+    assert list(script.get_heads()) == ["0044_ingestion_locations"]
+    locations = script.get_revision("0044_ingestion_locations")
+    assert locations is not None
+    assert locations.down_revision == "0043_code_run_resolved_packages"
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
