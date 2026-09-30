@@ -80,12 +80,49 @@ def _parse_pdf(data: bytes) -> str:
 
 
 def _parse_docx(data: bytes) -> str:
-    """Extract paragraph text from a DOCX (``python-docx``, imported lazily)."""
+    """Extract paragraphs and labelled table rows in body order (spec 0010)."""
     import docx
+    from docx.document import Document as DocxDocument
+    from docx.table import Table, _Cell
+    from docx.text.paragraph import Paragraph
+
+    def render_blocks(container: DocxDocument | _Cell) -> list[str]:
+        lines: list[str] = []
+        for block in container.iter_inner_content():
+            if isinstance(block, Paragraph):
+                lines.append(block.text)
+            elif isinstance(block, Table):
+                lines.extend(render_table(block))
+        return lines
+
+    def render_table(table: Table) -> list[str]:
+        lines = ["[Table]"]
+        headers: list[str] = []
+        width = len(table.columns)
+        for number, row in enumerate(table.rows, start=1):
+            values = (
+                [""] * row.grid_cols_before
+                + ["\n".join(render_blocks(cell)) for cell in row.cells]
+                + [""] * row.grid_cols_after
+            )
+            values.extend([""] * max(0, width - len(values)))
+            if number == 1:
+                headers = [value.replace("\n", " / ") for value in values]
+            cells = []
+            for column, value in enumerate(values, start=1):
+                label = (
+                    f" [{headers[column - 1]}]"
+                    if number > 1 and column <= len(headers) and headers[column - 1]
+                    else ""
+                )
+                cells.append(f"C{column}{label}={value}")
+            lines.append(f"Row {number}: " + " | ".join(cells))
+        lines.append("[/Table]")
+        return lines
 
     try:
         document = docx.Document(io.BytesIO(data))
-        paragraphs = [p.text for p in document.paragraphs]
+        paragraphs = render_blocks(document)
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse DOCX: {type(exc).__name__}") from exc
     return "\n".join(paragraphs)
