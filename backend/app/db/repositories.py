@@ -14,9 +14,11 @@ foreign-tenant id returns ``None`` / no rows (the negative test asserts exactly
 this). Existence non-disclosure (404, not 403) is enforced one layer up, in the
 service/api boundary, off these ``None`` returns.
 
-Repositories persist via the session but **do not commit**; the caller owns the
+Repositories normally persist via the session but **do not commit**; the caller owns the
 transaction boundary (request handler / ``session_scope``), so a use-case that
-touches several repositories commits atomically.
+touches several repositories commits atomically. ``AuditEventRepository.record_committed``
+is the explicit exception: external-action evidence commits in a separate tenant-bound
+transaction without touching the caller's pending data (#518).
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.logging import get_logger
 from app.db import models
@@ -4383,6 +4385,44 @@ class AuditEventRepository(_TenantScopedRepository):
         self._session.add(row)
         await self._session.flush()
         return _to_audit_event(row)
+
+    async def record_committed(
+        self,
+        *,
+        action: str,
+        resource_type: str,
+        outcome: AuditOutcome,
+        actor_id: UUID | None = None,
+        resource_id: str | None = None,
+        request_id: str | None = None,
+        source_ip: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> AuditEvent:
+        """Append in an independent tenant-bound transaction before external effects.
+
+        The caller's answer transaction is neither flushed nor committed. Awaiting
+        this method proves the record committed; any failure prevents dispatch.
+        A connection-bound session cannot offer an independent transaction, so fail
+        closed rather than reuse the caller's connection.
+        """
+        from app.db.tenant_context import bind_tenant
+
+        if not isinstance(self._session.bind, AsyncEngine):
+            raise RuntimeError("durable audit requires an engine-bound session")
+        factory = async_sessionmaker(self._session.bind, expire_on_commit=False)
+        async with factory() as session, session.begin():
+            await bind_tenant(session, self._tenant_id)
+            event = await AuditEventRepository(session, self._tenant_id).record(
+                action=action,
+                resource_type=resource_type,
+                outcome=outcome,
+                actor_id=actor_id,
+                resource_id=resource_id,
+                request_id=request_id,
+                source_ip=source_ip,
+                metadata=metadata,
+            )
+        return event
 
     async def list_recent(self, *, limit: int = 100) -> list[AuditEvent]:
         stmt = (

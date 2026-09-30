@@ -21,6 +21,7 @@ non-committing session (the service rolls it back), so a preview leaves the DB c
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
 
@@ -63,6 +64,22 @@ from app.services.audit import AuditSink
 class _SearchThenAnswerGateway:
     """Searches once, then answers from the retrieved passage (the grounded path)."""
 
+    def __init__(self, *, cite_passages: bool = False) -> None:
+        self._cite_passages = cite_passages
+
+    def _citation_suffix(self, messages: list[object]) -> str:
+        if not self._cite_passages:
+            return ""
+        for message in reversed(messages):
+            role = getattr(message, "role", None)
+            if getattr(role, "value", None) != "tool":
+                continue
+            content = str(getattr(message, "content", ""))
+            match = re.search(r"\[(S[1-9][0-9]*)\]", content)
+            if match is not None:
+                return f" [{match.group(1)}]"
+        return ""
+
     async def stream_tools(
         self,
         messages: object,
@@ -77,7 +94,9 @@ class _SearchThenAnswerGateway:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
         if tool_choice == "none" or has_tool_result:
-            yield StreamEvent(text="The 2024 standard deduction is $14,600.")
+            yield StreamEvent(
+                text=f"The 2024 standard deduction is $14,600.{self._citation_suffix(msgs)}"
+            )
             yield StreamEvent(finish_reason="stop")
         else:
             yield StreamEvent(
@@ -149,10 +168,11 @@ class _RunPythonGateway:
 
 
 class _Retrieval:
-    """Returns a fixed passage to any principal (permission modelled elsewhere)."""
+    """Returns the fixed passage only to test principals explicitly granted access."""
 
-    def __init__(self, passage: RetrievedPassage) -> None:
+    def __init__(self, passage: RetrievedPassage, *, allowed_users: set[uuid.UUID]) -> None:
         self._passage = passage
+        self._allowed_users = allowed_users
 
     async def search_text(
         self,
@@ -165,6 +185,26 @@ class _Retrieval:
         # every fake must accept it (the #418 lesson, applied to retrieval).
         document_ids: object = None,
     ) -> list[RetrievedPassage]:
+        if getattr(principal, "user_id", None) not in self._allowed_users:
+            return []
+        return [self._passage]
+
+    async def read_passages(
+        self,
+        *,
+        principal: object,
+        chunk_ids: list[uuid.UUID],
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        """Re-read only the caller-permitted passage returned by search_text."""
+        del collection_ids
+        if getattr(principal, "user_id", None) not in self._allowed_users:
+            return []
+        if self._passage.chunk_id not in chunk_ids:
+            return []
+        if document_ids is not None and self._passage.document_id not in document_ids:
+            return []
         return [self._passage]
 
     async def search_documents(
@@ -330,7 +370,11 @@ async def test_write_file_is_simulated_no_artifact_or_transcript(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-1: a write tool is *simulated*, and NO artifact / chat session / message persists."""
-    _patch_runtime(monkeypatch, gateway=_WriteFileGateway(), retrieval=_Retrieval(_passage(ctx)))
+    _patch_runtime(
+        monkeypatch,
+        gateway=_WriteFileGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
+    )
 
     async with ctx.sessionmaker() as session:
         service = await _service(ctx, session, principal=ctx.alice)
@@ -358,7 +402,11 @@ async def test_write_file_is_simulated_no_artifact_or_transcript(
 
 async def test_run_python_is_denied_no_code_run(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC-1/AC-N: the T2 code tool is DENIED in a preview (no sandbox seam) — no code run."""
-    _patch_runtime(monkeypatch, gateway=_RunPythonGateway(), retrieval=_Retrieval(_passage(ctx)))
+    _patch_runtime(
+        monkeypatch,
+        gateway=_RunPythonGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
+    )
 
     async with ctx.sessionmaker() as session:
         service = await _service(ctx, session, principal=ctx.alice)
@@ -383,7 +431,9 @@ async def test_debug_trace_has_prompt_retrieval_tools_outputs_timing(
 ) -> None:
     """AC-3: the trace carries the effective prompt, retrieval, tool calls, outputs, timing."""
     _patch_runtime(
-        monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(cite_passages=True),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
     )
 
     async with ctx.sessionmaker() as session:
@@ -416,7 +466,9 @@ async def test_debug_trace_has_prompt_retrieval_tools_outputs_timing(
 async def test_cross_tenant_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-1: an assistant in tenant A is invisible to a caller in tenant B (404)."""
     _patch_runtime(
-        monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
     )
     stranger = Principal(user_id=uuid.uuid4(), tenant_id=ctx.tenant_b, roles=(Role.MEMBER,))
     async with ctx.sessionmaker() as session:
@@ -428,7 +480,9 @@ async def test_cross_tenant_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.Monk
 async def test_non_owner_assistant_is_404(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-2: a non-owner (same tenant, not admin) cannot test another user's draft (404)."""
     _patch_runtime(
-        monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
     )
     async with ctx.sessionmaker() as session:
         service = await _service(ctx, session, principal=ctx.bob)  # bob does not own it
@@ -441,7 +495,9 @@ async def test_admin_may_test_any_assistant_in_tenant(
 ) -> None:
     """A tenant admin may preview any assistant (the owner-or-admin rule, matching CRUD)."""
     _patch_runtime(
-        monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
     )
     admin = Principal(user_id=uuid.uuid4(), tenant_id=ctx.tenant_a, roles=(Role.ADMIN,))
     async with ctx.sessionmaker() as session:
@@ -457,7 +513,9 @@ async def test_admin_may_test_any_assistant_in_tenant(
 async def test_test_run_is_audited(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-6: a test run emits assistant.tested, actor = the caller."""
     _patch_runtime(
-        monkeypatch, gateway=_SearchThenAnswerGateway(), retrieval=_Retrieval(_passage(ctx))
+        monkeypatch,
+        gateway=_SearchThenAnswerGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
     )
     async with ctx.sessionmaker() as session:
         service = await _service(ctx, session, principal=ctx.alice)
@@ -478,6 +536,17 @@ async def test_test_run_is_audited(ctx: _Ctx, monkeypatch: pytest.MonkeyPatch) -
 class _TwoSearchGateway:
     """Requests TWO searches in one turn, then answers — the fan-out bait."""
 
+    @staticmethod
+    def _citation_suffix(messages: list[object]) -> str:
+        for message in reversed(messages):
+            role = getattr(message, "role", None)
+            if getattr(role, "value", None) != "tool":
+                continue
+            match = re.search(r"\[(S[1-9][0-9]*)\]", str(getattr(message, "content", "")))
+            if match is not None:
+                return f" [{match.group(1)}]"
+        return ""
+
     async def stream_tools(
         self,
         messages: object,
@@ -492,7 +561,9 @@ class _TwoSearchGateway:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
         if tool_choice == "none" or has_tool_result:
-            yield StreamEvent(text="The 2024 standard deduction is $14,600.")
+            yield StreamEvent(
+                text=f"The 2024 standard deduction is $14,600.{self._citation_suffix(msgs)}"
+            )
             yield StreamEvent(finish_reason="stop")
         else:
             yield StreamEvent(
@@ -515,7 +586,7 @@ async def test_preview_with_two_reads_stays_on_the_one_rollback_session(
     call scopes), both searches succeed, and nothing durable persists."""
     captured: dict[str, object] = {}
     opens = {"n": 0}
-    retrieval = _Retrieval(_passage(ctx))
+    retrieval = _Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id})
     real_cls = assistant_test_service.ChatRuntime
 
     def _factory(**kwargs: object) -> object:

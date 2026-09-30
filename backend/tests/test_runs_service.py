@@ -17,6 +17,7 @@ and the runtime's own sessionmaker both bind to the one offline SQLite engine.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
 
@@ -64,6 +65,22 @@ import app.db.models  # noqa: F401  isort: skip
 class _ScriptedGateway:
     """A gateway that searches once, then answers from the retrieved passage."""
 
+    def __init__(self, *, cite_passages: bool = False) -> None:
+        self._cite_passages = cite_passages
+
+    def _citation_suffix(self, messages: list[object]) -> str:
+        if not self._cite_passages:
+            return ""
+        for message in reversed(messages):
+            role = getattr(message, "role", None)
+            if getattr(role, "value", None) != "tool":
+                continue
+            content = str(getattr(message, "content", ""))
+            match = re.search(r"\[(S[1-9][0-9]*)\]", content)
+            if match is not None:
+                return f" [{match.group(1)}]"
+        return ""
+
     async def stream_tools(
         self,
         messages: object,
@@ -78,7 +95,9 @@ class _ScriptedGateway:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
         if tool_choice == "none" or has_tool_result:
-            yield StreamEvent(text="The 2024 standard deduction is $14,600.")
+            yield StreamEvent(
+                text=f"The 2024 standard deduction is $14,600.{self._citation_suffix(msgs)}"
+            )
             yield StreamEvent(finish_reason="stop")
         else:
             yield StreamEvent(
@@ -162,6 +181,23 @@ class _PermissionedRetrieval:
 
     async def get_document(self, *, principal: object, document_id: object) -> DocumentText | None:
         return None
+
+    async def read_passages(
+        self,
+        *,
+        principal: object,
+        chunk_ids: list[uuid.UUID],
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        """Re-read only passages granted to the current run owner."""
+        del collection_ids
+        user_id = getattr(principal, "user_id", None)
+        if user_id not in self._allowed or self._passage.chunk_id not in chunk_ids:
+            return []
+        if document_ids is not None and self._passage.document_id not in document_ids:
+            return []
+        return [self._passage]
 
 
 # --- Fixture: SQLite engine + seeded tenant/assistant/document --------------
@@ -326,7 +362,7 @@ async def test_run_executes_headless_with_no_ws_client(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-1: a run runs end-to-end with no socket and persists a cited transcript + terminal."""
-    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
+    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway(cite_passages=True))
     run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
 
     status = await runs_service.execute_run(run_id, ctx.tenant_a)
@@ -356,7 +392,7 @@ async def test_run_detail_hydrates_grounded_citations(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The read service returns the run's grounded citations (INV-3, shared chain)."""
-    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
+    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway(cite_passages=True))
     run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
     await runs_service.execute_run(run_id, ctx.tenant_a)
 
@@ -386,7 +422,7 @@ async def test_headless_run_cannot_retrieve_what_runner_lacks(
     authority backdoor around the permission model).
     """
     retrieval = _PermissionedRetrieval(_passage(ctx), {ctx.alice_id})  # only alice may see it
-    _patch_runtime(monkeypatch, gateway=_ScriptedGateway(), retrieval=retrieval)
+    _patch_runtime(monkeypatch, gateway=_ScriptedGateway(cite_passages=True), retrieval=retrieval)
 
     # Bob owns this run — he lacks the grant.
     bob_run = await _create_queued_run(ctx, owner_id=ctx.bob_id)
@@ -523,7 +559,7 @@ async def test_already_terminal_run_is_not_rerun(
     ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A second delivery of a run that already ran is a no-op (idempotent claim)."""
-    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
+    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway(cite_passages=True))
     run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
     first = await runs_service.execute_run(run_id, ctx.tenant_a)
     assert first is RunStatus.SUCCEEDED
@@ -926,7 +962,7 @@ async def test_a_revoked_document_is_redacted_from_both_run_surfaces(
     "permission is re-checked on every READ" — which was true of the chat transcript and
     false here.
     """
-    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway())
+    _wire_alice_grant(ctx, monkeypatch, gateway=_ScriptedGateway(cite_passages=True))
     run_id = await _create_queued_run(ctx, owner_id=ctx.alice_id)
     await runs_service.execute_run(run_id, ctx.tenant_a)
 
