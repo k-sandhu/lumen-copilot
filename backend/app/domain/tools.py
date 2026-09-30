@@ -107,6 +107,8 @@ APPROVAL_REASON_APPROVAL_UNAVAILABLE = "approval_required_unavailable"
 APPROVAL_REASON_POLICY_UNREADABLE = "tool_policy_unreadable"
 #: No real approval gate is wired in this deployment (the inert deny-all default).
 APPROVAL_REASON_GATE_INERT = "approval_gate_inert"
+#: An allow lacks an applicable policy record bound to this call (INV-7, #518).
+APPROVAL_REASON_RECORD_INVALID = "approval_record_invalid"
 
 #: How a T2+ invocation was authorised (#518). One value today: spec 0004 §2.5 was
 #: amended to admit a tenant-scoped, admin-recorded pre-approval as INV-7's "recorded
@@ -225,6 +227,7 @@ class ToolHandlerResult:
 __all__ = [
     "APPROVAL_REASON_APPROVAL_UNAVAILABLE",
     "APPROVAL_REASON_GATE_INERT",
+    "APPROVAL_REASON_RECORD_INVALID",
     "APPROVAL_SCOPE_TENANT_PREAPPROVAL",
     "APPROVAL_REASON_POLICY_ABSENT",
     "APPROVAL_REASON_POLICY_DISABLED",

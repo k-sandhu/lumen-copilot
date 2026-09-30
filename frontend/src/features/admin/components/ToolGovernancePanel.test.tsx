@@ -85,21 +85,66 @@ describe('ToolGovernancePanel', () => {
 
   it('tells the admin what clearing approval actually commits them to (#518)', async () => {
     getToolPolicy.mockResolvedValue({
-      items: [{ ...POLICY.items[1], requires_approval: false }],
+      items: [{ ...POLICY.items[1], requires_approval: false, is_default: false }],
     } as ToolPolicy);
     renderWithQuery(<ToolGovernancePanel />);
 
     await screen.findByText('run_python');
     // This used to assert "nothing to warn about". Spec 0004 §2.5 was amended (#518)
     // so that clearing this counts as INV-7's recorded approval — which makes it a
-    // grant recorded against THIS admin that authorises the tool rather than any
+    // grant recorded against the authorising admin that authorises the tool rather than any
     // particular call. The person deciding should read that at the control, not find
     // it in an audit event later.
     const note = screen.getByRole('note');
-    expect(note).toHaveTextContent(/recorded against you/i);
+    expect(note).toHaveTextContent(/authorising admin/i);
+    expect(note).not.toHaveTextContent(/recorded against you/i);
     expect(note).toHaveTextContent(/not reviewed one by one/i);
     // …and it is NOT the refuses-everything warning, which is the opposite state.
     expect(note).not.toHaveTextContent(/refuses every call/i);
+  });
+
+  it('shows a disabled policy without claiming an effective workspace grant', async () => {
+    getToolPolicy.mockResolvedValue({
+      items: [{ ...POLICY.items[1], enabled: false, requires_approval: false, is_default: false }],
+    } as ToolPolicy);
+    renderWithQuery(<ToolGovernancePanel />);
+    await screen.findByText('run_python');
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent(/disabled/i);
+    expect(note).not.toHaveTextContent(/pre-approved for the whole tenant|recorded against/i);
+  });
+
+  it.each([true, false])(
+    'does not present a T1 policy (default=%s) as recorded approval',
+    async (isDefault) => {
+      getToolPolicy.mockResolvedValue({
+        items: [
+          {
+            ...POLICY.items[1],
+            tool_name: 'write_file',
+            risk_tier: 'T1',
+            requires_approval: false,
+            is_default: isDefault,
+          },
+        ],
+      } as ToolPolicy);
+      renderWithQuery(<ToolGovernancePanel />);
+      await screen.findByText('write_file');
+      const note = screen.getByRole('note');
+      expect(note).toHaveTextContent(/T1.*no extra approval/i);
+      expect(note).not.toHaveTextContent(/pre-approved|recorded against/i);
+    },
+  );
+
+  it('does not invent a pre-approval from a T2 default with approval off', async () => {
+    getToolPolicy.mockResolvedValue({
+      items: [{ ...POLICY.items[1], requires_approval: false, is_default: true }],
+    } as ToolPolicy);
+    renderWithQuery(<ToolGovernancePanel />);
+    await screen.findByText('run_python');
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent(/no recorded tenant pre-approval/i);
+    expect(note).not.toHaveTextContent(/pre-approved for the whole tenant|recorded against/i);
   });
 
   it('offers no approval control for a read-only (T0) tool', async () => {

@@ -28,8 +28,10 @@ governance contract, in this fixed order:
    message — never a crashed stream.
 6. **Uniform result** (issue #207 §4): whatever happened, produce one
    :class:`~app.domain.tools.ToolResult`.
-7. **Audit + trace** (issue #207 §4/§5 / AC-4 / INV-6): emit ``tool.invoked``
-   (intent) and ``tool.result`` (outcome) through the one audit sink, and write a
+7. **Audit + trace** (issue #207 §4/§5 / AC-4 / INV-6): commit approval-bearing
+   ``tool.invoked`` intent before execution and correlate its separately committed
+   ``tool.result`` outcome (#518). Other calls retain the ordered finalise audit
+   path. Both flow through the one audit sink, and write a
    ``tool_invocations`` row — for **every** invocation, including a governance
    denial or a failure, so the trace has no silent gap.
 
@@ -56,6 +58,8 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, AutonomyLevel
 from app.domain.llm import ToolCall
 from app.domain.tools import (
+    APPROVAL_REASON_RECORD_INVALID,
+    APPROVAL_SCOPE_TENANT_PREAPPROVAL,
     ERROR_APPROVAL_DENIED,
     ERROR_AUTONOMY_DENIED,
     ERROR_NOT_FOUND,
@@ -399,18 +403,26 @@ class ToolRunner:
                 )
             )
             granted = approval.approval
-            if approval.approved and granted is None:
-                # A real gate always records one. An approval with nothing behind it
-                # cannot satisfy the amended INV-7, so say so loudly rather than
-                # auditing a consequential action as "approved" by nobody. Not a
-                # refusal: the inert test gates and the historical bool-returning
-                # fakes legitimately have no record, and breaking them would be a
-                # worse trade than a log line.
-                log.warning(
-                    "tool.approval_without_record",
-                    tool=call.name,
-                    risk_tier=definition.risk_tier.value,
+            if (
+                approval.approved
+                and definition.risk_tier.is_write_tier
+                and not (
+                    definition.risk_tier is RiskTier.T2
+                    and granted is not None
+                    and granted.scope == APPROVAL_SCOPE_TENANT_PREAPPROVAL
+                    and isinstance(granted.policy_id, UUID)
+                    and granted.arguments_hash == args_hash
                 )
+            ):
+                # The amendment admits only recorded T2 tenant pre-approvals.
+                # Null admin attribution is deliberate after deprovisioning; a
+                # missing policy or a hash for another call is never a grant.
+                approval = ApprovalDecision.deny(
+                    APPROVAL_REASON_RECORD_INVALID,
+                    "The approval record does not authorise this tool call. "
+                    "The action was not performed.",
+                )
+                granted = None
             if not approval.approved:
                 # (iii) the structured log (issue #502): a blocked run is
                 # diagnosable from the logs alone, naming the gate that refused.
@@ -450,6 +462,32 @@ class ToolRunner:
                     denied_reason=approval.reason,
                 )
 
+        invoked_event_id: UUID | None = None
+        if granted is not None:
+            # Commit the approval-bearing intent BEFORE any external side effect.
+            # Cancellation or answer rollback cannot erase what authorised it.
+            # An unavailable audit sink raises here and the handler never starts.
+            intent = await self._audit.emit(
+                action=AuditAction.TOOL_INVOKED,
+                actor=self._actor,
+                resource_type="tool",
+                resource_id=call.name,
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "args_hash": args_hash,
+                    "ordinal": ordinal,
+                    "session_id": str(self._session_id) if self._session_id else None,
+                    "message_id": str(message_id) if message_id else None,
+                    **_approval_metadata(granted),
+                },
+                durable=True,
+            )
+            invoked_event_id = intent.id
+
         # (5) Bounded execute (AC-5). A raised/timed-out handler becomes an
         # ok=False result — the stream never crashes. A concurrent call enters
         # its isolated scope ONLY here — after every governance gate passed —
@@ -470,6 +508,7 @@ class ToolRunner:
             # The EXECUTED path — the one an auditor cares about most. A refusal
             # authorised nothing, so only this call carries a record.
             approval=granted,
+            invoked_event_id=invoked_event_id,
         )
 
     def _autonomy_decision(self, risk_tier: RiskTier) -> _AutonomyDecision:
@@ -555,12 +594,14 @@ class ToolRunner:
         outcome: AuditOutcome,
         denied_reason: str | None = None,
         approval: ApprovalRecord | None = None,
+        invoked_event_id: UUID | None = None,
     ) -> ToolResult:
         """Audit (invoked + result) and record the ``tool_invocations`` row (AC-4).
 
         Runs for **every** outcome — success, denial, or failure — so INV-6 holds:
-        an invocation with no emitted audit event or no trace row is impossible
-        because this is the one exit through which every result returns.
+        every returned result is audited and traced. An approved call cancelled
+        during execution retains its independently committed pre-dispatch intent,
+        even though it never reaches this finalise path (#518).
 
         The ADR-0016 §5 **serialized persistence coordinator** (#412): the
         writes flush on the runner's one DB session (which admits no concurrent
@@ -568,7 +609,9 @@ class ToolRunner:
         events carry no ordering column of their own, so their physical write
         sequence is the record. The condition gates each finalise until every
         lower ordinal has persisted; completions may land in any order, the
-        writes never do. Both audit events also carry the ordinal in metadata,
+        writes never do. Approval-gated tools execute serially; their intent is
+        already committed before execution, and only their correlated result is
+        emitted here. Both audit events also carry the ordinal in metadata,
         so dispatch order stays reconstructible even off-sequence readers.
         The ``finally`` advances the drain even when a write raises — the
         exception still propagates (the answer dies with a terminal), but a
@@ -592,16 +635,7 @@ class ToolRunner:
         # `args_hash` above is already the call's argument hash, and the gate echoes
         # that same value back on the record — so "which call" and "which approval"
         # cannot disagree.
-        approval_metadata: dict[str, object] = {}
-        if approval is not None:
-            approval_metadata = {
-                "approval_scope": approval.scope,
-                # Explicit nulls, not omissions: "no admin recorded" is a FACT about a
-                # grant whose author was deprovisioned, and an absent key would read as
-                # "this field did not exist yet".
-                "approved_by": str(approval.approved_by) if approval.approved_by else None,
-                "approval_policy_id": str(approval.policy_id) if approval.policy_id else None,
-            }
+        approval_metadata = _approval_metadata(approval) if approval is not None else {}
         metadata = {
             "tool": call.name,
             "call_id": call.id,
@@ -609,22 +643,24 @@ class ToolRunner:
             "ok": result.ok,
             "ordinal": ordinal,
             **approval_metadata,
+            **({"invoked_event_id": str(invoked_event_id)} if invoked_event_id else {}),
             **({"error": result.error} if result.error else {}),
             **({"denied_reason": reason} if reason else {}),
         }
         async with self._persist_gate:
             await self._persist_gate.wait_for(lambda: self._next_persist_ordinal == ordinal)
             try:
-                await self._audit.emit(
-                    action=AuditAction.TOOL_INVOKED,
-                    actor=self._actor,
-                    resource_type="tool",
-                    resource_id=call.name,
-                    outcome=outcome,
-                    request_id=self._request_id,
-                    source_ip=self._source_ip,
-                    metadata=metadata,
-                )
+                if invoked_event_id is None:
+                    await self._audit.emit(
+                        action=AuditAction.TOOL_INVOKED,
+                        actor=self._actor,
+                        resource_type="tool",
+                        resource_id=call.name,
+                        outcome=outcome,
+                        request_id=self._request_id,
+                        source_ip=self._source_ip,
+                        metadata=metadata,
+                    )
                 await self._audit.emit(
                     action=AuditAction.TOOL_RESULT,
                     actor=self._actor,
@@ -634,6 +670,7 @@ class ToolRunner:
                     request_id=self._request_id,
                     source_ip=self._source_ip,
                     metadata={**metadata, "duration_ms": result.duration_ms},
+                    durable=invoked_event_id is not None,
                 )
                 await self._invocations.record(
                     tool_name=call.name,
@@ -654,6 +691,15 @@ class ToolRunner:
                 self._next_persist_ordinal += 1
                 self._persist_gate.notify_all()
         return result
+
+
+def _approval_metadata(approval: ApprovalRecord) -> dict[str, object]:
+    """Explicit null attribution remains evidence after admin deprovisioning."""
+    return {
+        "approval_scope": approval.scope,
+        "approved_by": str(approval.approved_by) if approval.approved_by else None,
+        "approval_policy_id": str(approval.policy_id) if approval.policy_id else None,
+    }
 
 
 def _complete(call: ToolCall, body: ToolHandlerResult, duration_ms: int) -> ToolResult:

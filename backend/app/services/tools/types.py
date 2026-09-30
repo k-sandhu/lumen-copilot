@@ -310,9 +310,8 @@ class ApprovalDecision:
     ``domain.tools.APPROVAL_REASON_*``) and a model-safe, operator-actionable
     ``detail`` sentence naming the control that changes the answer.
 
-    It is **truthy iff approved**, so a gate that still returns a plain ``bool``
-    (a test fake, the inert deny-all default) keeps working unchanged — the runner
-    normalises either shape.
+    It is **truthy iff approved**; the runner normalises legacy ``bool`` answers
+    too. A bare ``True`` cannot authorise T2+ execution without a valid record.
 
     ``detail`` is surfaced **verbatim to the model**, which makes it a
     prompt-injection-reachable surface: a retrieved document that says "quote any
@@ -344,10 +343,9 @@ class ApprovalDecision:
     def allow(cls, approval: ApprovalRecord | None = None) -> ApprovalDecision:
         """The approved outcome (no reason needed — nothing refused).
 
-        ``approval`` is optional ONLY so the inert test gates and the historical
-        deny-all default keep constructing without it. Every real gate supplies one;
-        a production allow without a record is a bug, and the runner logs it as such
-        rather than silently auditing an approval nobody signed.
+        ``approval`` remains optional for backwards-compatible construction. The
+        runner refuses T2+ decisions without an applicable, call-bound record;
+        every approving gate must supply one for a consequential invocation.
         """
         return cls(approved=True, approval=approval)
 
@@ -370,7 +368,7 @@ class ApprovalGate(Protocol):
 
     A gate may answer with a plain ``bool`` or with the richer
     :class:`ApprovalDecision` (issue #502) that also names *why* it refused; the
-    runner accepts either and only ever treats an explicit approval as allow.
+    runner accepts either; T2+ additionally requires an applicable recorded approval.
     """
 
     async def request(self, request: ApprovalRequest) -> bool | ApprovalDecision:
