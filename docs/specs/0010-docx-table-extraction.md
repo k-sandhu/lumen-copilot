@@ -18,14 +18,18 @@ The first row supplies column labels as an explicit heuristic, not inferred
 semantic types. Later rows repeat these source-derived labels beside values,
 including units present in the label. This keeps a retrieved row intelligible
 when its header is outside the chunk. Empty cells retain their columns. Merged
-origins repeat at the occupied grid positions; this is a text projection of a
-merge, not multiple independent measurements. Nested tables inside cells are
+origins repeat at the occupied grid positions. Each repeated position appends
+`[merged from R2C1]` (with its table-local origin row and column), distinguishing
+the merge from independent equal-valued cells. The original position has no
+repeat marker. Repeated merged values are context, not multiple measurements.
+Nested tables inside cells are
 walked recursively along with adjacent cell paragraphs. No generated facts or
 units are added. Headers embedded in later rows remain ordinary source text.
 
 Acceptance: table-only text is retained, paragraph/table/paragraph order is
 preserved, headers and units remain associated, merged and blank cells retain
-positions, and nested tables retain content. Corrupt bytes still raise the
+positions and identify the shared origin; equal-valued unmerged cells carry no
+merge marker. Nested tables retain content. Corrupt bytes still raise the
 typed `DocumentParseError`; imports remain inside the DOCX helper.
 
 New rendering applies only on ingestion. Existing chunks and citation offsets

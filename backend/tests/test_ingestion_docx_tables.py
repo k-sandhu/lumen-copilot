@@ -118,6 +118,57 @@ def test_docx_vertically_merged_cells_repeat_value_at_occupied_positions() -> No
     assert "C2 [Owner]=Bo" in row_three
 
 
+def test_docx_horizontal_merge_marks_repeated_numeric_cell_origin() -> None:
+    document, table = _make_table_document(2, 3)
+    table.cell(0, 0).text = "Quantity"
+    table.cell(0, 1).text = "Unit price"
+    table.cell(0, 2).text = "Total"
+    merged = table.cell(1, 0).merge(table.cell(1, 1))
+    merged.text = "120"
+    table.cell(1, 2).text = "240"
+
+    text = _parse(document)
+
+    row = next(line for line in text.splitlines() if line.startswith("Row 2:"))
+    assert "C1 [Quantity]=120" in row
+    assert "C2 [Unit price]=120 [merged from R2C1]" in row
+    assert "C1 [Quantity]=120 [merged from" not in row
+    assert "C3 [Total]=240 [merged from" not in row
+
+
+def test_docx_vertical_merge_marks_repeated_numeric_cell_origin() -> None:
+    document, table = _make_table_document(3, 2)
+    table.cell(0, 0).text = "Amount"
+    table.cell(0, 1).text = "Period"
+    merged = table.cell(1, 0).merge(table.cell(2, 0))
+    merged.text = "75"
+    table.cell(1, 1).text = "Q1"
+    table.cell(2, 1).text = "Q2"
+
+    text = _parse(document)
+
+    row_two = next(line for line in text.splitlines() if line.startswith("Row 2:"))
+    row_three = next(line for line in text.splitlines() if line.startswith("Row 3:"))
+    assert "C1 [Amount]=75" in row_two
+    assert "C1 [Amount]=75 [merged from R2C1]" in row_three
+    assert "C2 [Period]=Q2 [merged from" not in row_three
+
+
+def test_docx_equal_unmerged_numeric_cells_are_not_marked_as_merged() -> None:
+    document, table = _make_table_document(2, 2)
+    table.cell(0, 0).text = "Count A"
+    table.cell(0, 1).text = "Count B"
+    table.cell(1, 0).text = "5"
+    table.cell(1, 1).text = "5"
+
+    text = _parse(document)
+
+    row = next(line for line in text.splitlines() if line.startswith("Row 2:"))
+    assert "C1 [Count A]=5" in row
+    assert "C2 [Count B]=5" in row
+    assert "[merged from" not in row
+
+
 def test_docx_recursively_extracts_nested_table_text() -> None:
     document, table = _make_table_document(1, 1)
     cell = table.cell(0, 0)

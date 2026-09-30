@@ -99,10 +99,18 @@ def _parse_docx(data: bytes) -> str:
         lines = ["[Table]"]
         headers: list[str] = []
         width = len(table.columns)
+        origins: dict[object, tuple[int, int]] = {}
         for number, row in enumerate(table.rows, start=1):
+            grid_cells = list(row.cells)
+            repeats: dict[int, tuple[int, int]] = {}
+            for column, cell in enumerate(grid_cells, start=row.grid_cols_before + 1):
+                position = (number, column)
+                origin = origins.setdefault(cell._tc, position)
+                if origin != position:
+                    repeats[column] = origin
             values = (
                 [""] * row.grid_cols_before
-                + ["\n".join(render_blocks(cell)) for cell in row.cells]
+                + ["\n".join(render_blocks(cell)) for cell in grid_cells]
                 + [""] * row.grid_cols_after
             )
             values.extend([""] * max(0, width - len(values)))
@@ -115,7 +123,13 @@ def _parse_docx(data: bytes) -> str:
                     if number > 1 and column <= len(headers) and headers[column - 1]
                     else ""
                 )
-                cells.append(f"C{column}{label}={value}")
+                repeated_origin = repeats.get(column)
+                merge_marker = (
+                    f" [merged from R{repeated_origin[0]}C{repeated_origin[1]}]"
+                    if repeated_origin is not None
+                    else ""
+                )
+                cells.append(f"C{column}{label}={value}{merge_marker}")
             lines.append(f"Row {number}: " + " | ".join(cells))
         lines.append("[/Table]")
         return lines
