@@ -2085,7 +2085,7 @@ class DocumentRepository(_TenantScopedRepository):
     async def set_extraction(
         self, document_id: UUID, *, text: str, locations: Sequence[SourceLocation]
     ) -> Document | None:
-        """Replace retained extraction metadata, scoped like the owning document."""
+        """Set exact retained source/map, preserving this attempt's other metadata."""
         stmt = select(models.Document).where(
             models.Document.tenant_id == self._tenant_id,
             models.Document.id == document_id,
@@ -2095,8 +2095,25 @@ class DocumentRepository(_TenantScopedRepository):
             return None
         row.source_text = text
         row.ingestion_metadata = {
-            "source_locations": [location.to_dict() for location in locations]
+            **(row.ingestion_metadata or {}),
+            "source_locations": [location.to_dict() for location in locations],
         }
+        await self._session.flush()
+        await self._session.refresh(row)
+        return to_document(row)
+
+    async def update_ingestion_metadata(
+        self, document_id: UUID, values: dict[str, object]
+    ) -> Document | None:
+        """Merge one attempt's metadata without losing its retained source map."""
+        stmt = select(models.Document).where(
+            models.Document.tenant_id == self._tenant_id,
+            models.Document.id == document_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        row.ingestion_metadata = {**(row.ingestion_metadata or {}), **values}
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)

@@ -54,6 +54,7 @@ from app.db.session import tenant_session_scope
 from app.domain.entities import DocumentStatus
 from app.domain.llm import Embedding
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
+from app.ingestion.diagnostics import build_extraction_diagnostics
 from app.llm import LLMGateway
 from app.search import OpenSearchStore
 from app.storage import ObjectStore
@@ -144,6 +145,7 @@ async def ingest_document_async(
         storage_key = document.storage_key
         mime_type = document.mime_type
         await documents.set_status(document_id, DocumentStatus.PROCESSING, error=None)
+        await documents.update_ingestion_metadata(document_id, {"extraction_diagnostics": None})
 
     # --- Phase 2: fetch + parse + chunk + embed (outside the DB txn). --------
     # A parse failure is PERMANENT (corrupt/unsupported bytes) → fail the doc now
@@ -157,8 +159,16 @@ async def ingest_document_async(
     try:
         parsed = parse_document_with_locations(data, mime_type=mime_type)
         text = parsed.text
+        diagnostics = build_extraction_diagnostics(data, mime_type=mime_type, parsed=parsed)
     except DocumentParseError as exc:
         return await _fail(tenant_id, document_id, str(exc))
+
+    # Inspection survives a later model/index fault; retain text/maps only with
+    # replacement chunks, so historical exact slices cannot be retargeted here.
+    async with tenant_session_scope(tenant_id) as session:
+        await DocumentRepository(session, tenant_id).update_ingestion_metadata(
+            document_id, {"extraction_diagnostics": diagnostics.to_dict()}
+        )
 
     chunks = chunk_text(
         text,
