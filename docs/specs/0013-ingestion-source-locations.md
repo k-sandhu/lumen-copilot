@@ -17,7 +17,9 @@ source parts, so a chunk crossing a page boundary can name both pages.
 
 Persist text and map on the document and locations on its chunks in the same
 tenant-scoped transaction. Search indexing/backfill carries locations as
-non-analyzed provenance. Permission-filtered hydration passes locations through
+non-analyzed provenance with an additive `source_locations` object mapping
+(`enabled: false`). It changes neither ranking nor permission filters.
+Permission-filtered hydration passes locations through
 to retrieved passages, enabling citation consumers to name the source part.
 No permission predicate, tool policy or citation display changes here.
 
@@ -37,7 +39,10 @@ Deployment backfills nothing: old documents have null retained text and empty
 maps, which means unknown location, not page 1. Operators must re-ingest retained
 bytes or upload a new document for maps. Search reindex copies stored chunks
 and locations, without reparsing. Re-ingestion replaces chunk IDs under current
-semantics; historical citation offsets are never rewritten or retargeted.
+semantics. Stored historical offsets/passages are not rewritten; previous source
+generations are not retained, so explicit successful re-ingestion may leave old
+citations stale or unresolved. Historical resolution remains a known limitation,
+not a guarantee that an old offset can address a newly rendered source.
 
 Deferred: source versions, page images, bounding boxes, cell/block identities,
 stable historical citation identity, canonical structured parsing and UI for
