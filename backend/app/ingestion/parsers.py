@@ -227,26 +227,79 @@ def _parse_pptx(data: bytes) -> str:
 
 
 def _parse_xlsx(data: bytes) -> str:
-    """Extract cell text from an XLSX (``openpyxl``, imported lazily).
+    """Render sheet names, labelled coordinates, formats and formula caches."""
+    import zipfile
+    from xml.etree import ElementTree
 
-    Reads values only (``data_only=True``) and renders each non-empty row as a
-    tab-joined line, sheets separated by a blank line. Read-only mode keeps the
-    workbook off the heap for large sheets.
-    """
     from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
 
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        sheets: list[str] = []
-        for worksheet in workbook.worksheets:
-            rows: list[str] = []
-            for row in worksheet.iter_rows(values_only=True):
-                cells = [str(cell) for cell in row if cell is not None]
-                if cells:
-                    rows.append("\t".join(cells))
-            if rows:
-                sheets.append("\n".join(rows))
-        workbook.close()
+        try:
+            formulas = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
+            try:
+                sheets: list[str] = []
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    for worksheet, formula_sheet in zip(
+                        workbook.worksheets, formulas.worksheets, strict=True
+                    ):
+                        rows: list[str] = []
+                        headers: list[str] = []
+                        for number, (row, formula_row) in enumerate(
+                            zip(worksheet.iter_rows(), formula_sheet.iter_rows(), strict=True),
+                            start=1,
+                        ):
+                            if not any(cell.value is not None for cell in formula_row):
+                                continue
+                            first = not headers
+                            if first:
+                                headers = [
+                                    str(cell.value) if cell.value is not None else ""
+                                    for cell in row
+                                ]
+                            cells: list[str] = []
+                            for column, (cell, formula) in enumerate(
+                                zip(row, formula_row, strict=True), start=1
+                            ):
+                                coordinate = f"{get_column_letter(column)}{number}"
+                                label = (
+                                    f" [{headers[column - 1]}]"
+                                    if not first and headers[column - 1]
+                                    else ""
+                                )
+                                value = str(cell.value) if cell.value is not None else ""
+                                if cell.value is not None and cell.number_format != "General":
+                                    value += f" [format={cell.number_format}]"
+                                if formula.data_type == "f":
+                                    cache = (
+                                        "cached value unavailable"
+                                        if cell.value is None
+                                        else "cached value supplied; freshness unknown"
+                                    )
+                                    value += f" [formula={formula.value}; {cache}]"
+                                cells.append(f"{coordinate}{label}={value}")
+                            rows.append(
+                                f"Row {number} (Sheet {worksheet.title}): " + " | ".join(cells)
+                            )
+                        if rows:
+                            merges: list[str] = []
+                            # ReadOnlyWorksheet omits merged ranges. Stream the same
+                            # archive member for source metadata without loading a
+                            # second full worksheet or extracting files to disk.
+                            with archive.open(worksheet._worksheet_path) as content:
+                                for _, element in ElementTree.iterparse(content, events=("end",)):
+                                    if element.tag.endswith("}mergeCell"):
+                                        merges.append(element.attrib["ref"])
+                                    element.clear()
+                            heading = [f"Sheet: {worksheet.title}"]
+                            if merges:
+                                heading.append("Merged cells: " + ", ".join(merges))
+                            sheets.append("\n".join(heading + rows))
+            finally:
+                formulas.close()
+        finally:
+            workbook.close()
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse XLSX: {type(exc).__name__}") from exc
     return "\n\n".join(sheets)
