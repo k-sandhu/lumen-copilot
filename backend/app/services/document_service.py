@@ -67,7 +67,8 @@ from app.db.repositories import (
     GroupRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Document, DocumentStatus
+from app.domain.entities import AuditOutcome, Document, DocumentStatus, Role
+from app.domain.ingestion import ExtractionDiagnostics
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document, permitted_document_ids
 from app.services.audit import AuditSink
@@ -94,6 +95,7 @@ class DocumentView:
 
     document: Document
     chunk_count: int
+    extraction_diagnostics: ExtractionDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +246,7 @@ class DocumentService:
         source_ip: str,
         upload_allowed_content_types: frozenset[str],
         max_upload_bytes: int,
+        roles: tuple[Role, ...] = (),
     ) -> None:
         self._session = session
         self._documents = DocumentRepository(session, tenant_id)
@@ -251,6 +254,7 @@ class DocumentService:
         self._chunks = ChunkRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._roles = roles
         self._groups = GroupRepository(session, tenant_id)
         # The requester's read allow-set — the SAME object retrieval keys its
         # permission predicate off (ADR-0019 §2 mode split, spec 0004 §2.2).
@@ -286,7 +290,32 @@ class DocumentService:
 
     async def _view(self, document: Document) -> DocumentView:
         count = await self._documents.count_chunks(document.id)
-        return DocumentView(document=document, chunk_count=count)
+        view = DocumentView(
+            document=document,
+            chunk_count=count,
+            extraction_diagnostics=self._diagnostics(document),
+        )
+        await self._audit_diagnostics(view)
+        return view
+
+    def _diagnostics(self, document: Document) -> ExtractionDiagnostics | None:
+        if Role.ADMIN not in self._roles:
+            return None
+        value = (document.ingestion_metadata or {}).get("extraction_diagnostics")
+        return ExtractionDiagnostics.from_dict(value) if isinstance(value, dict) else None
+
+    async def _audit_diagnostics(self, view: DocumentView) -> None:
+        if view.extraction_diagnostics is not None:
+            await self._audit.emit(
+                action=AuditAction.DOCUMENT_VIEWED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="document",
+                resource_id=str(view.document.id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={"form": "extraction_diagnostics"},
+            )
 
     async def _visible(self, document_id: UUID) -> Document | None:
         """Fetch a document the caller may **read**, or ``None`` (→ 404).
@@ -520,7 +549,16 @@ class DocumentService:
         # no chunks is absent from the mapping and defaults to 0, exactly as the
         # single-id count returns for a document ingestion has not populated yet.
         chunk_counts = await self._documents.count_chunks_for([d.id for d in visible])
-        items = [DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible]
+        items = [
+            DocumentView(
+                document=d,
+                chunk_count=chunk_counts.get(d.id, 0),
+                extraction_diagnostics=self._diagnostics(d),
+            )
+            for d in visible
+        ]
+        for item in items:
+            await self._audit_diagnostics(item)
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     async def get(self, document_id: UUID) -> DocumentView | None:

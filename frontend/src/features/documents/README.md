@@ -91,3 +91,12 @@ Contract-true today against mocks. At BE integration, confirm: multipart `POST
 `pending`; `GET /documents/{id}/content` 302s to a presigned URL whose CORS allows the
 SPA origin (or streams bytes 200 same-origin via the proxy); and the size/type caps
 return 413/415 with a `Problem` body.
+
+## Extraction inspection
+
+Spec [0016](../../../../docs/specs/0016-extraction-diagnostics.md) adds administrator
+inspection in the document drawer. Render only diagnostics supplied by the
+permissioned API; frontend roles never grant document visibility. Counts describe
+the latest extraction attempt and may outlive a subsequent embedding failure.
+Blank parts are not classified as scans. Unknown table coverage stays unknown;
+native cell text presence does not prove row/column fidelity or visual completeness.
