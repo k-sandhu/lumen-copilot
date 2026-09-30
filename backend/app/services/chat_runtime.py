@@ -67,6 +67,7 @@ from app.db.repositories import (
     MessageRepository,
     SessionSummaryRepository,
     TenantRepository,
+    TenantToolPolicyRepository,
     ToolInvocationRepository,
 )
 from app.db.tenant_context import bind_tenant
@@ -101,6 +102,7 @@ from app.services.provider_models import (
     ModelRouteResolver,
     is_provider_model_id,
 )
+from app.services.tools.compatibility import LEGACY, permitted_names
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.handles import EvidenceHandles, select_cited_handles
 from app.services.tools.impls import retrieval as _retrieval_impl
@@ -906,6 +908,17 @@ class ChatRuntime:
         # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
         allowed = assistant_config.allowed if assistant_config is not None else default_allowlist()
+        policies = await TenantToolPolicyRepository(session, tenant_id).list_all()
+        blocked = {
+            policy.tool_name
+            for policy in policies
+            if not policy.enabled or policy.requires_approval
+            if policy.tool_name in LEGACY | {"search_passages", "find_documents", "read_document"}
+        }
+        allowed = permitted_names(allowed, blocked)
+        executable = (
+            permitted_names(allowed | LEGACY, blocked) if assistant_config is None else allowed
+        )
         # The tenant's registered+enabled MCP tools (issue #227), resolved per-run
         # (never a global registration — they are tenant-scoped and dynamic, so a
         # cross-tenant leak is impossible; INV-1). Resolved ONLY when the allow-list
@@ -946,7 +959,7 @@ class ChatRuntime:
             session, tenant_id, assistant_config
         )
         runner = ToolRunner(
-            allowed=allowed,
+            allowed=executable,
             invocations=ToolInvocationRepository(session, tenant_id),
             audit=audit,
             actor=AuditActor.user(self._principal.user_id),
@@ -1160,12 +1173,13 @@ class ChatRuntime:
         sandbox = self._build_sandbox_seam(
             session=session,
             state=state,
-            allowed=allowed,
+            allowed=executable,
             session_id=session_id,
             assistant_message_id=assistant_message_id,
         )
         tool_context = ToolContext(
             principal=self._principal,
+            handles=handles,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
             # Pinned documents (spec 0007 #429): passage search narrows to these

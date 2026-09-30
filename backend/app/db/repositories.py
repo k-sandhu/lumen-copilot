@@ -234,6 +234,12 @@ def to_document(row: models.Document) -> Document:
         acl_synced_at=row.acl_synced_at,
         acl_scope_ids=tuple(row.acl_scope_ids) if row.acl_scope_ids is not None else None,
         external_id=row.external_id,
+        title=row.title,
+        source_path=row.source_path,
+        source_modified_at=row.source_modified_at,
+        discovery_metadata=(
+            dict(row.discovery_metadata) if row.discovery_metadata is not None else None
+        ),
     )
 
 
@@ -1625,6 +1631,10 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None = None,
         acl_synced_at: datetime | None = None,
         acl_scope_ids: Sequence[str] | None = None,
+        title: str | None = None,
+        source_path: str | None = None,
+        source_modified_at: datetime | None = None,
+        discovery_metadata: dict[str, object] | None = None,
     ) -> Document:
         """Create a document row — the ACL-mode write seam (ADR-0019 §2).
 
@@ -1650,6 +1660,10 @@ class DocumentRepository(_TenantScopedRepository):
             acl_synced_at=acl_synced_at,
             acl_scope_ids=list(acl_scope_ids) if acl_scope_ids is not None else None,
             external_id=external_id,
+            title=title,
+            source_path=source_path,
+            source_modified_at=source_modified_at,
+            discovery_metadata=discovery_metadata,
         )
         self._session.add(row)
         await self._session.flush()
@@ -1682,6 +1696,10 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None,
         acl_synced_at: datetime | None,
         acl_scope_ids: Sequence[str] | None,
+        title: str | None = None,
+        source_path: str | None = None,
+        source_modified_at: datetime | None = None,
+        discovery_metadata: dict[str, object] | None = None,
     ) -> Document | None:
         """Refresh an existing connector document in place (incremental upsert).
 
@@ -1707,6 +1725,10 @@ class DocumentRepository(_TenantScopedRepository):
         row.acl_principals = list(acl_principals) if acl_principals is not None else None
         row.acl_synced_at = acl_synced_at
         row.acl_scope_ids = list(acl_scope_ids) if acl_scope_ids is not None else None
+        row.title = title
+        row.source_path = source_path
+        row.source_modified_at = source_modified_at
+        row.discovery_metadata = discovery_metadata
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)

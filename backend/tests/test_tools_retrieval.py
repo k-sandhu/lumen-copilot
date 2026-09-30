@@ -160,6 +160,7 @@ async def _call(session: AsyncSession, principal: Principal, name: str, args: di
 
 
 _RETRIEVAL_TOOLS = frozenset({"search_text", "search_documents", "list_documents", "get_document"})
+_CANONICAL_RETRIEVAL_TOOLS = frozenset({"search_passages", "find_documents", "read_document"})
 
 
 def test_registry_discovers_the_retrieval_tools() -> None:
@@ -176,20 +177,20 @@ def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
 
 def test_default_allowlist_is_the_read_only_retrieval_tools() -> None:
     # Ad-hoc chat's default allow-list = the read-only default-offered tools:
-    # the four retrieval tools (list_documents auto-joined on discovery, #371)
-    # plus ask_user, the interactive clarifying-question tool (spec 0006 #429).
-    assert default_allowlist() == _RETRIEVAL_TOOLS | {"ask_user"}
+    # the canonical task-shaped corpus tools plus ask_user. Legacy tool names
+    # remain registered, but aren't default offered.
+    assert default_allowlist() == _CANONICAL_RETRIEVAL_TOOLS | {"ask_user"}
 
 
 def test_tool_specs_render_the_allowlist_to_llm_specs() -> None:
     specs = tool_specs(default_allowlist())
     names = {s.name for s in specs}
-    assert names == _RETRIEVAL_TOOLS | {"ask_user"}
+    assert names == _CANONICAL_RETRIEVAL_TOOLS | {"ask_user"}
     # Each spec carries the JSON-Schema parameters the model fills in.
     by_name = {s.name: s for s in specs}
-    assert by_name["search_text"].parameters["required"] == ["query"]
-    # list_documents is a pure enumeration — no required args (no query needed).
-    assert by_name["list_documents"].parameters.get("required", []) == []
+    assert by_name["search_passages"].parameters["required"] == ["query"]
+    # find_documents can enumerate with an empty query and needs no required args.
+    assert by_name["find_documents"].parameters.get("required", []) == []
 
 
 # --- search_documents -------------------------------------------------------

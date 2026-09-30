@@ -53,6 +53,9 @@ export interface ToolOption {
  * — the failure mode #505 is about.
  */
 const LABELS: Record<string, string> = {
+  search_passages: 'Search passages',
+  find_documents: 'Find documents',
+  read_document: 'Read document',
   search_text: 'Text search',
   search_documents: 'Document search',
   list_documents: 'List documents',

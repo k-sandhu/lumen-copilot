@@ -45,15 +45,17 @@ known handle (text/name/id).
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
 from app.db.repositories import GrantRepository, GroupRepository
+from app.domain.discovery import DocumentPage, DocumentRead
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
-from app.retrieval import queries
+from app.retrieval import discovery, queries
 from app.retrieval.fusion import rrf_score
 from app.retrieval.permissions import AllowSet
 from app.search import OpenSearchStore, SearchAllowFilter, get_search_store
@@ -89,9 +91,8 @@ class RetrievalService:
         self._session = session
         self._gateway = gateway
         self._store = store
-        # Group membership resolved once per service instance (ADR-0022 §5).
-        # The service is built per request, so this never outlives the request
-        # and cannot make a group removal lag — see _resolve_allow_set.
+        # Retain the snapshot field for additive compatibility with evidence
+        # read-back; it never authorizes a later read in an agent answer.
         self._allow_set_cache: dict[UUID, AllowSet] = {}
 
     def _search_store(self) -> OpenSearchStore:
@@ -107,13 +108,11 @@ class RetrievalService:
 
         Group membership needs a read, so it cannot come from the pure
         :meth:`AllowSet.for_principal`; it is resolved here — the one place the
-        retrieval chokepoint builds an allow-set — and memoized for this request
-        only. A user in no groups gets an empty set, which narrows the allow-set
+        retrieval chokepoint builds an allow-set. Each read refreshes membership:
+        an agent answer can span a revocation even within one request. A user
+        in no groups gets an empty set, which narrows the allow-set
         to ownership plus their own user grants (fail closed).
         """
-        cached = self._allow_set_cache.get(principal.user_id)
-        if cached is not None:
-            return cached
         group_ids = await GroupRepository(self._session, principal.tenant_id).group_ids_for_user(
             principal.user_id
         )
@@ -225,7 +224,11 @@ class RetrievalService:
         # excludes (deleted/revoked between index and read) is dropped, and the
         # citation offsets come from the relational row, never the index.
         rows = await queries.load_passages(
-            self._session, allow_set=allow_set, chunk_ids=[h.chunk_id for h in hits]
+            self._session,
+            allow_set=allow_set,
+            chunk_ids=[h.chunk_id for h in hits],
+            collection_ids=collection_ids,
+            document_ids=document_ids,
         )
         passages: list[RetrievedPassage] = []
         for hit in hits:  # engine ranking order preserved
@@ -278,6 +281,64 @@ class RetrievalService:
         ]
 
     # --- agent tools (the WS ChatToolCall vocabulary, AC-3) -----------------
+
+    async def find_documents(
+        self,
+        *,
+        principal: Principal,
+        query: str = "",
+        limit: int = 10,
+        cursor: str | None = None,
+        sort: str = "title_asc",
+        source: str | None = None,
+        mime_type: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
+    ) -> DocumentPage:
+        self._allow_set_cache.pop(principal.user_id, None)
+        return await discovery.find_documents(
+            self._session,
+            allow=await self._resolve_allow_set(principal),
+            query=query,
+            limit=limit,
+            cursor=cursor,
+            sort=sort,
+            source=source,
+            mime_type=mime_type,
+            created_after=created_after,
+            created_before=created_before,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+
+    async def read_document(
+        self,
+        *,
+        principal: Principal,
+        document_id: UUID,
+        start: int = 0,
+        end: int | None = None,
+        max_passages: int = 5,
+        collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
+    ) -> DocumentRead | None:
+        self._allow_set_cache.pop(principal.user_id, None)
+        return await discovery.read_document(
+            self._session,
+            allow=await self._resolve_allow_set(principal),
+            document_id=document_id,
+            start=start,
+            end=end,
+            max_passages=max_passages,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
 
     async def search_text(
         self,

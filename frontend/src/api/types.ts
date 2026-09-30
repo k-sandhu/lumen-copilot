@@ -1886,6 +1886,9 @@ export interface ChatWebCitation {
  * falls back to a generic label (see ToolActivity).
  */
 export type ChatTool =
+  | 'search_passages'
+  | 'find_documents'
+  | 'read_document'
   | 'search_text'
   | 'search_documents'
   | 'list_documents'

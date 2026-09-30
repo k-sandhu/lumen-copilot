@@ -313,6 +313,14 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Public discovery metadata from the connector, never connector config or
+    # credentials. Uploads may leave these NULL and fall back to filename.
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_modified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    discovery_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # The object-store key (tenant-prefixed, content-addressed; app.storage.keys).
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)

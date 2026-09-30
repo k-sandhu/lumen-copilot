@@ -11,7 +11,26 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { ToolCatalogEntry } from '@/api';
-import { toToolOption, toToolOptions } from './tools';
+import { toToolOption, toToolOptions, toolLabel } from './tools';
+
+describe('task-shaped corpus tool labels', () => {
+  it.each([
+    ['search_passages', 'Search passages'],
+    ['find_documents', 'Find documents'],
+    ['read_document', 'Read document'],
+  ])('labels %s as %s', (name, label) => {
+    expect(toolLabel(name)).toBe(label);
+  });
+
+  it.each([
+    ['search_text', 'Text search'],
+    ['search_documents', 'Document search'],
+    ['list_documents', 'List documents'],
+    ['get_document', 'Read document'],
+  ])('retains the legacy %s label', (name, label) => {
+    expect(toolLabel(name)).toBe(label);
+  });
+});
 
 function entry(over: Partial<ToolCatalogEntry> = {}): ToolCatalogEntry {
   return {
