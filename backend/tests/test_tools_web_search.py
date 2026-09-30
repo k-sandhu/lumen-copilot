@@ -68,7 +68,9 @@ class _StubService:
 def _patch_service(monkeypatch: pytest.MonkeyPatch, service: _StubService) -> None:
     """Route ``build_web_search_service`` in the impl to a stub (no Redis/HTTP)."""
     monkeypatch.setattr(
-        web_search_impl, "build_web_search_service", lambda *a, **k: service  # noqa: ARG005
+        web_search_impl,
+        "build_web_search_service",
+        lambda *a, **k: service,  # noqa: ARG005
     )
 
 
@@ -187,7 +189,8 @@ async def test_enabled_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_service(monkeypatch, _StubService(results=()))
     result = await web_search_impl._web_search({"query": "python"}, _ctx())
     assert result.ok is True
-    assert result.summary == "0 results"
+    assert result.summary == "provider empty: 0 results"
+    assert result.payload is not None and result.payload["reason"] == "provider_empty"
 
 
 async def test_enabled_missing_query(monkeypatch: pytest.MonkeyPatch) -> None:
