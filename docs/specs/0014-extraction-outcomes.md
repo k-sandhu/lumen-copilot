@@ -19,12 +19,14 @@ not complete visual/table/image interpretation. Record successful outcomes only
 after index synchronization succeeds.
 
 Add optional `Document.searchable`, computed from ready lifecycle and positive
-chunk count. It is false for empty extraction, failures and unfinished attempts.
+chunk count and no empty/failed/unsupported outcome. It is false for empty
+extraction, failures and unfinished attempts, including inconsistent legacy state.
 The independent readiness fix makes ready imply search refresh visibility; until
 both changes land the pre-existing early-ready window remains a deployment risk.
 Frontend status display prioritizes queued/processing lifecycle, then distinguishes
 empty, unsupported, failed, partial and indexed; legacy missing metadata retains
-existing status labels. Empty extraction never gets a searchable label.
+existing status labels except that ready with zero chunks shows no indexed text
+and unknown stage completion. Empty extraction never gets a searchable label.
 
 Acceptance: synthetic blank PDF, corrupt native bytes, unsupported MIME, partial
 PDF and ordinary text produce distinct persisted outcomes; repeated empty runs

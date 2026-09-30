@@ -17,6 +17,9 @@ from app.services.document_service import DocumentView
         (DocumentStatus.READY, 1, "indexed", True),
         (DocumentStatus.PROCESSING, 1, None, False),
         (DocumentStatus.FAILED, 0, "unsupported", False),
+        (DocumentStatus.READY, 1, "empty", False),
+        (DocumentStatus.READY, 1, "failed", False),
+        (DocumentStatus.READY, 1, "unsupported", False),
     ],
 )
 def test_status_contract_distinguishes_native_outcome_and_searchability(
