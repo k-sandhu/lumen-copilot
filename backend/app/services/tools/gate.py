@@ -57,8 +57,9 @@ from app.domain.tools import (
     APPROVAL_REASON_POLICY_ABSENT,
     APPROVAL_REASON_POLICY_DISABLED,
     APPROVAL_REASON_POLICY_UNREADABLE,
+    APPROVAL_SCOPE_TENANT_PREAPPROVAL,
 )
-from app.services.tools.types import ApprovalDecision, ApprovalRequest
+from app.services.tools.types import ApprovalDecision, ApprovalRecord, ApprovalRequest
 
 log = get_logger(__name__)
 
@@ -134,7 +135,27 @@ class PolicyApprovalGate:
                 ),
             )
         # Pre-approved for the tenant: enabled AND no longer requiring approval.
-        return ApprovalDecision.allow()
+        #
+        # INV-7 admits this as a "recorded approval" only since the spec 0004 §2.5
+        # amendment (#518), and only because the approval is genuinely recorded: the
+        # admin who set the row, the row itself, and a hash of the arguments the grant
+        # covered all travel with the decision into `tool_invocations` and the
+        # `tool.invoked` audit event. Before that, an allow carried nothing at all, so
+        # "recorded approval" described a boolean.
+        #
+        # It is still a TENANT-wide grant, not per-invocation review: a prompt-injected
+        # call in a pre-approved tenant executes. That residual risk is stated in the
+        # amended invariant and is what #501 removes.
+        return ApprovalDecision.allow(
+            ApprovalRecord(
+                scope=APPROVAL_SCOPE_TENANT_PREAPPROVAL,
+                policy_id=policy.id,
+                # May be None: `updated_by` is SET NULL, so a grant outlives the admin
+                # who made it. Recording None is honest; inventing an identity is not.
+                approved_by=policy.updated_by,
+                arguments_hash=request.arguments_hash,
+            )
+        )
 
 
 __all__ = ["PolicyApprovalGate"]
