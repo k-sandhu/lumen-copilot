@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import models
 from app.db.repositories import to_document
 from app.domain.entities import Document
+from app.domain.ingestion import SourceLocation
 from app.retrieval.permissions import AllowSet
 from app.search.filters import acl_freshness_floor
 
@@ -70,6 +71,7 @@ class PassageRow:
     text: str
     char_start: int
     char_end: int
+    source_locations: tuple[SourceLocation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +319,9 @@ def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT
     )
 
 
-def _base_chunk_select() -> Select[tuple[UUID, UUID, str, int, str, int, int]]:
+def _base_chunk_select() -> (
+    Select[tuple[UUID, UUID, str, int, str, int, int, list[dict[str, object]] | None]]
+):
     """A chunk-joined-document select carrying the columns passages need.
 
     Joins ``chunks`` to their ``documents`` so a hit carries the document name +
@@ -331,6 +335,7 @@ def _base_chunk_select() -> Select[tuple[UUID, UUID, str, int, str, int, int]]:
         models.Chunk.text,
         models.Chunk.char_start,
         models.Chunk.char_end,
+        models.Chunk.source_locations,
     ).join(models.Document, models.Chunk.document_id == models.Document.id)
 
 
@@ -417,7 +422,7 @@ async def load_passages(
     stmt = _permission_filter(stmt, allow_set)
     result = await session.execute(stmt)
     rows: dict[UUID, PassageRow] = {}
-    for cid, document_id, filename, ordinal, text, char_start, char_end in result.all():
+    for cid, document_id, filename, ordinal, text, char_start, char_end, locations in result.all():
         rows[cid] = PassageRow(
             chunk_id=cid,
             document_id=document_id,
@@ -426,6 +431,7 @@ async def load_passages(
             text=text,
             char_start=char_start,
             char_end=char_end,
+            source_locations=tuple(SourceLocation.from_dict(value) for value in locations or []),
         )
     return rows
 

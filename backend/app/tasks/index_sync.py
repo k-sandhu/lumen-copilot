@@ -79,6 +79,7 @@ def _to_indexed(document: Document, chunks: list[Chunk]) -> list[IndexedChunk]:
             embedding=chunk.embedding,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
+            source_locations=chunk.source_locations,
             acl_enforced=document.acl_enforced,
             acl_principals=document.acl_principals or (),
             acl_synced_at=document.acl_synced_at,

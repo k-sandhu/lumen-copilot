@@ -520,9 +520,7 @@ class DocumentService:
         # no chunks is absent from the mapping and defaults to 0, exactly as the
         # single-id count returns for a document ingestion has not populated yet.
         chunk_counts = await self._documents.count_chunks_for([d.id for d in visible])
-        items = [
-            DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible
-        ]
+        items = [DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible]
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     async def get(self, document_id: UUID) -> DocumentView | None:
@@ -567,8 +565,8 @@ class DocumentService:
         the router, indistinguishable from missing. A **visible** document that
         is not ``ready`` has no text yet → :class:`ConflictError`
         (``document_not_ready`` → 409, INV-8's illegal-state arm). The text is
-        the ingestion parser output reassembled exactly from the stored chunks
-        (:func:`reassemble_chunk_texts` — overlap-aware), capped at
+        the retained ingestion parser output, with overlap-aware reconstruction
+        from stored chunks for legacy documents, capped at
         ``max_bytes`` UTF-8 bytes on a character boundary with ``truncated``
         set. Audited ``document.viewed`` (INV-6).
         """
@@ -581,7 +579,11 @@ class DocumentService:
                 code="document_not_ready",
             )
         chunks = await self._chunks.list_for_document(document_id)
-        text = reassemble_chunk_texts(chunks)
+        text = (
+            document.source_text
+            if document.source_text is not None
+            else reassemble_chunk_texts(chunks)
+        )
         truncated = False
         encoded = text.encode("utf-8")
         if len(encoded) > max_bytes:

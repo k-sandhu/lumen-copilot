@@ -120,6 +120,14 @@ export interface CollectionList {
 /** Ingestion lifecycle (parse → chunk → embed). */
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
+export interface SourceLocation {
+  kind: 'page' | 'slide' | 'sheet';
+  name: string;
+  number: number;
+  char_start: number;
+  char_end: number;
+}
+
 /** A document's metadata, including its ingestion status. */
 export interface Document {
   id: string;
@@ -135,6 +143,8 @@ export interface Document {
   chunk_count: number;
   created_at: string;
   updated_at: string;
+  /** Exact source-part map; absent/empty means unknown for legacy documents. */
+  source_locations?: SourceLocation[];
 }
 
 /** 200 from GET /documents — a cursor page of documents. */

@@ -242,6 +242,7 @@ class RetrievalService:
                     char_start=row.char_start,
                     char_end=row.char_end,
                     score=hit.score,
+                    source_locations=row.source_locations,
                 )
             )
         return passages

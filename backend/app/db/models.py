@@ -318,6 +318,8 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ingestion_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
     # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
@@ -383,6 +385,7 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     )
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_locations: Mapped[list[dict[str, object]] | None] = mapped_column(_JSON, nullable=True)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 

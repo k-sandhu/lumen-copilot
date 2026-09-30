@@ -43,6 +43,7 @@ import httpx
 from app.core.config import Settings
 from app.core.errors import DependencyError
 from app.core.logging import get_logger
+from app.domain.ingestion import SourceLocation
 from app.search.filters import SearchAllowFilter
 
 log = get_logger(__name__)
@@ -85,6 +86,7 @@ class IndexedChunk:
     acl_principals: tuple[str, ...] = ()
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] = ()
+    source_locations: tuple[SourceLocation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +119,11 @@ def _acl_mapping_properties() -> dict[str, Any]:
         "acl_synced_at": {"type": "date"},
         "acl_scope_ids": {"type": "keyword"},
     }
+
+
+def _provenance_mapping_properties() -> dict[str, Any]:
+    """Additive source metadata, carried without changing retrieval scoring."""
+    return {"source_locations": {"type": "object", "enabled": False}}
 
 
 def _index_body(dimensions: int) -> dict[str, Any]:
@@ -156,6 +163,7 @@ def _index_body(dimensions: int) -> dict[str, Any]:
                 # mode-split predicate, shared verbatim with the additive
                 # mapping update an already-deployed index receives.
                 **_acl_mapping_properties(),
+                **_provenance_mapping_properties(),
             },
         },
     }
@@ -377,7 +385,9 @@ class OpenSearchStore:
         await self._request(
             "PUT",
             f"/{self._index}/_mapping",
-            json_body={"properties": _acl_mapping_properties()},
+            json_body={
+                "properties": {**_acl_mapping_properties(), **_provenance_mapping_properties()}
+            },
         )
         # PUT of a search pipeline is a full upsert — idempotent by nature.
         await self._request(
@@ -441,6 +451,7 @@ class OpenSearchStore:
                 "text": chunk.text,
                 "char_start": chunk.char_start,
                 "char_end": chunk.char_end,
+                "source_locations": [location.to_dict() for location in chunk.source_locations],
                 # Mirrored source ACL (ADR-0019 §2): always written explicitly
                 # so an enforced document's chunks can never fall back to the
                 # non-enforced branch by omission. ``acl_synced_at`` is null
