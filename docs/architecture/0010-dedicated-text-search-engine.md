@@ -56,7 +56,6 @@ Retrieved chunks are still hydrated and permission-re-checked against Postgres (
 - **Topology (decided):** a **single shared index** with a **mandatory `tenant_id` filter** on every query (routing by tenant). Per-tenant indices are a future option only if isolation/scale demands.
 - **Write path:** a **Celery task** ([tasks/](../../backend/app/tasks/)) upserts/deletes chunk docs (text + embedding + metadata) on ingest and document mutation — never in the request path. Document/source deletion cascades to index deletes.
 - **Backfill:** an idempotent, resumable reindex command for the existing corpus.
-- **Source-part provenance ([#621](https://github.com/k-sandhu/lumen-copilot/issues/621)):** chunks additionally carry optional page/slide/sheet spans into retained extracted text. The additive `source_locations` object mapping is non-analyzed (`enabled: false`); it changes neither ranking nor permission filters. Reindex copies persisted maps; documents predating map extraction remain unknown until re-ingestion. See [spec 0013](../specs/0013-ingestion-source-locations.md).
 
 ### 6. Local stack + config (base stack)
 
