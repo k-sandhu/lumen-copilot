@@ -46,21 +46,13 @@ _SNIPPET_BUDGET = 600
 
 
 def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
-    """The EXACT snippet string a passage renders as in the tool reply (#431 NEW-1).
+    """Complete model-visible passage, also retained verbatim by compaction.
 
-    The single source of truth for the model-visible snippet form:
-    stripped, trimmed to the (tool-capped) budget, with the truncation
-    ellipsis when over budget. ``_render_passages`` composes the reply from
-    this, and the chat runtime records the same string as the "rendered
-    snippet" the compactor must preserve verbatim — deriving both through one
-    helper so they can never drift (a digest presenting a truncated sentence
-    as complete would weaken the ADR-0016 §3.1 verbatim guarantee).
+    ``budget`` remains accepted for callers using the legacy signature. Evidence
+    is bounded by passage count and context fitting, never by cutting a passage
+    in half. The runtime uses this same helper for compaction protection.
     """
-    capped = max(1, min(budget, _SNIPPET_BUDGET))
-    snippet = text.strip()
-    if len(snippet) > capped:
-        snippet = snippet[:capped].rstrip() + "…"
-    return snippet
+    return text.strip()
 
 
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
@@ -82,10 +74,8 @@ def _render_passages(
     """Render retrieved passages as the tool reply the model reads.
 
     Each passage is labelled with its source document + chunk id so the model can
-    attribute a claim, and trimmed to ``snippet_budget`` chars so the context
-    stays bounded — the assembler lowers that budget under a tight window (#424
-    review, finding 2). The full snippet still travels to the citation via the
-    passage object, so trimming the model's view never weakens INV-3.
+    attribute a claim. Complete passages keep late facts visible; count ceilings
+    and the context engine bound the input cost before each model call.
     """
     blocks: list[str] = []
     for i, p in enumerate(passages, start=1):
@@ -230,7 +220,8 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "Hybrid semantic + keyword search over the documents the user can "
             "access (their own and any shared with them). Use this to find "
             "evidence for the question. Returns ranked passages with their source "
-            "document and a snippet. Search again with a refined query if results "
+            "document and complete passage text. Count limits and the context "
+            "engine bound evidence cost. Search again with a refined query if results "
             "are thin."
         ),
         json_schema={

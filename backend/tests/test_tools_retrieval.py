@@ -381,17 +381,20 @@ async def test_tight_budget_clamps_every_retrieval_tool(
     assert spy.list_k == 3  # list_documents now honours the tight ceiling too
 
 
-def test_rendered_snippet_is_the_single_source_of_the_model_visible_form() -> None:
-    """#431 re-review NEW-1: the snippet string the tool reply shows and the one
-    the runtime records for compaction derive from ONE helper — byte-identical,
-    ellipsis and rstrip included — so a digest can never present a truncated
-    sentence as complete."""
+async def test_search_text_returns_the_complete_passage_at_any_snippet_budget(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    """A snippet budget must not truncate evidence returned to the model (#611).
+
+    The full passage, including a fact beyond character 600, must be available in
+    both the tool result and its citation-bearing passages, even when the context
+    assembler supplies a smaller display budget.
+    """
     from app.domain.retrieval import RetrievedPassage
     from app.services.tools.impls.retrieval import _render_passages, rendered_snippet
 
-    # A passage longer than the budget, with a whitespace boundary right at the
-    # cut point (the rstrip + ellipsis case the review flagged).
-    text = ("evidence word " * 60).strip()  # ~840 chars, spaces throughout
+    # Put the late fact beyond the historical 600-character truncation point.
+    text = ("evidence word " * 60).strip() + " LATE FACT: the launch date is 2031-04-19."
     passage = RetrievedPassage(
         chunk_id=uuid.uuid4(),
         document_id=uuid.uuid4(),
@@ -402,28 +405,41 @@ def test_rendered_snippet_is_the_single_source_of_the_model_visible_form() -> No
         char_end=len(text),
         score=0.5,
     )
-    budget = 600
-    expected = rendered_snippet(text, budget)
-    assert expected.endswith("…")  # over-budget ⇒ visible truncation marker
-    assert not expected[:-1].endswith(" ")  # rstrip applied before the ellipsis
-    # The tool reply embeds EXACTLY that string.
-    assert expected in _render_passages([passage], budget)
+    assert len(text) > 600
+    assert "LATE FACT: the launch date is 2031-04-19." in text[600:]
 
-    # A short passage renders unchanged (no ellipsis) through the same helper.
-    short = rendered_snippet("short text", budget)
-    assert short == "short text"
-    assert short in _render_passages(
-        [
-            RetrievedPassage(
-                chunk_id=uuid.uuid4(),
-                document_id=uuid.uuid4(),
-                document_name="d",
-                ord=0,
-                text="short text",
-                char_start=0,
-                char_end=10,
-                score=None,
-            )
-        ],
-        budget,
-    )
+    # Keep the formatting helper's output byte-identical to the entire evidence;
+    # reducing the context budget must not change the evidence itself.
+    assert rendered_snippet(text, 600) == text
+    assert rendered_snippet(text, 300) == text
+    assert _render_passages([passage], 600).endswith(text)
+    assert _render_passages([passage], 300).endswith(text)
+
+    # Exercise the actual registered search tool: the full returned passage and
+    # the model-visible snippet must both preserve the same late fact.
+    class _PassageRetrieval(_RecordingRetrieval):
+        async def search_text(
+            self,
+            *,
+            principal: object,
+            query: str,
+            k: int,
+            collection_ids: object = None,
+            document_ids: object = None,
+        ) -> list:
+            return [passage]
+
+    _, world = session_and_world
+    for budget in (600, 300):
+        ctx = ToolContext(
+            principal=_principal(world.alice, world.tenant_a),
+            retrieval=_PassageRetrieval(),  # type: ignore[arg-type]
+            collection_ids=None,
+            snippet_budget=budget,
+        )
+        result = await get_tool("search_text").handler({"query": "launch date"}, ctx)
+        assert result.ok is True
+        assert result.passages == (passage,)
+        assert result.passages[0].text == text
+        assert text in result.content
+        assert "LATE FACT: the launch date is 2031-04-19." in result.content
