@@ -258,6 +258,9 @@ class RetrievalService:
         document_ids: list[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         """Rehydrate exact evidence under current permissions and effective scope."""
+        # A group can be revoked while the model composes this answer. Refresh
+        # request-cached membership before every evidence read-back.
+        self._allow_set_cache.pop(principal.user_id, None)
         allow_set = await self._resolve_allow_set(principal)
         rows = await queries.load_passages(
             self._session,
