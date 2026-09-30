@@ -54,6 +54,7 @@ from app.db.session import tenant_session_scope
 from app.domain.entities import DocumentStatus
 from app.domain.llm import Embedding
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
+from app.ingestion.fingerprint import FingerprintError, build_ingestion_fingerprint
 from app.llm import LLMGateway
 from app.search import OpenSearchStore
 from app.storage import ObjectStore
@@ -167,11 +168,21 @@ async def ingest_document_async(
     )
 
     if not chunks:
+        try:
+            fingerprint = build_ingestion_fingerprint(
+                data,
+                mime_type=mime_type,
+                chunk_size=settings.ingestion_chunk_size,
+                overlap=settings.ingestion_chunk_overlap,
+                embeddings=[],
+            )
+        except FingerprintError as exc:
+            raise IngestionError(f"could not fingerprint extraction: {exc}") from exc
         # An empty/blank document parses to nothing — a valid, terminal outcome:
         # ready with zero chunks (idempotently clears any prior chunks).
         async with tenant_session_scope(tenant_id) as session:
             await DocumentRepository(session, tenant_id).set_extraction(
-                document_id, text=text, locations=parsed.locations
+                document_id, text=text, locations=parsed.locations, fingerprint=fingerprint
             )
             await ChunkRepository(session, tenant_id).replace_for_document(document_id, [])
             await DocumentRepository(session, tenant_id).set_status(
@@ -195,6 +206,17 @@ async def ingest_document_async(
     if len(embeddings) != len(chunks):  # pragma: no cover — gateway contract guard
         raise IngestionError(f"embedding count {len(embeddings)} != chunk count {len(chunks)}")
 
+    try:
+        fingerprint = build_ingestion_fingerprint(
+            data,
+            mime_type=mime_type,
+            chunk_size=settings.ingestion_chunk_size,
+            overlap=settings.ingestion_chunk_overlap,
+            embeddings=embeddings,
+        )
+    except FingerprintError as exc:
+        raise IngestionError(f"could not fingerprint extraction: {exc}") from exc
+
     # --- Phase 3: persist chunks + mark ready (one transaction, idempotent). -
     chunk_inputs = [
         ChunkInput(
@@ -208,7 +230,7 @@ async def ingest_document_async(
     ]
     async with tenant_session_scope(tenant_id) as session:
         await DocumentRepository(session, tenant_id).set_extraction(
-            document_id, text=text, locations=parsed.locations
+            document_id, text=text, locations=parsed.locations, fingerprint=fingerprint
         )
         persisted = await ChunkRepository(session, tenant_id).replace_for_document(
             document_id, chunk_inputs

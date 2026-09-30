@@ -18,6 +18,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from app.domain.chat import AskUserQuestion
@@ -738,6 +739,11 @@ class Document:
     source_text: str | None = None
     source_locations: tuple[SourceLocation, ...] = ()
     ingestion_metadata: dict[str, object] | None = None
+
+    @property
+    def ingestion_fingerprint(self) -> dict[str, object] | None:
+        value = (self.ingestion_metadata or {}).get("ingestion_fingerprint")
+        return cast(dict[str, object], value) if isinstance(value, dict) else None
 
 
 @dataclass(frozen=True, slots=True)
