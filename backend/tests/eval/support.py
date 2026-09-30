@@ -30,7 +30,7 @@ import hashlib
 import math
 import re
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -40,6 +40,8 @@ from app.auth.principal import Principal
 from app.db import models
 from app.domain.llm import Embedding
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
+from app.llm import LLMGateway
+from app.retrieval import RetrievalService
 from app.retrieval.permissions import AllowSet
 
 _EMBED_DIM = 256
@@ -209,6 +211,22 @@ class OfflineRetrieval:
     def __init__(self, session: AsyncSession, *, embedder: DeterministicEmbedder) -> None:
         self._session = session
         self._embedder = embedder
+
+    async def read_passages(
+        self,
+        *,
+        principal: Principal,
+        chunk_ids: list[UUID],
+        collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
+    ) -> list[RetrievedPassage]:
+        # Read-back is a real permissioned SQL read; only ranking remains faked.
+        return await RetrievalService(self._session, gateway=cast(LLMGateway, None)).read_passages(
+            principal=principal,
+            chunk_ids=chunk_ids,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
 
     async def search_text(
         self,
