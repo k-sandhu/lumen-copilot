@@ -1,9 +1,10 @@
 # Documents — collections, upload & viewer (`features/documents`)
 
-The frontend documents slice (issue #49), built against the **frozen** `/collections`
-and `/documents` contract (`contracts/openapi.yaml` 0.1.0) and honoring spec 0004
-(security & domain invariants). It builds in parallel with the backend (ADR-0006):
-conform to the contract, mock the responses in dev and tests.
+The frontend documents slice (issue #49), built against the `/collections` and
+`/documents` contract in `contracts/openapi.yaml` and honoring spec 0004 (security
+& domain invariants) plus spec 0014 (native extraction outcomes). It builds in
+parallel with the backend (ADR-0006): conform to the contract, mock the responses
+in dev and tests.
 
 This slice STACKS on the #48 auth foundation — it reuses the `api/` client (bearer +
 silent refresh), the auth `RouteGuard`, the app chrome, and the shared UI primitives;
@@ -100,6 +101,7 @@ with the chat citations UI, not here.
 
 Contract-true today against mocks. At BE integration, confirm: multipart `POST
 /documents` accepts `file` + `collection_id` and returns a `Document` at status
-`pending`; `GET /documents/{id}/content` 302s to a presigned URL whose CORS allows the
-SPA origin (or streams bytes 200 same-origin via the proxy); and the size/type caps
-return 413/415 with a `Problem` body.
+`pending`; subsequent document reads project the native extraction outcome and
+searchability; `GET /documents/{id}/content` 302s to a presigned URL whose CORS allows
+the SPA origin (or streams bytes 200 same-origin via the proxy); and the size/type
+caps return 413/415 with a `Problem` body.
