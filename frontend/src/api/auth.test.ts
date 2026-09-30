@@ -2,7 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { login, refresh, getCurrentUser, installAuthRefresh, logout } from './auth';
 import { ApiError } from './client';
 import { setActiveAuthSlot } from './authSlot';
-import { getAccessToken, setAccessToken, clearAccessToken } from './token';
+import {
+  getAccessToken,
+  setAccessToken,
+  clearAccessToken,
+  getPrincipalGeneration,
+  subscribeToken,
+} from './token';
 
 function jsonResponse(body: unknown, status = 200, contentType = 'application/json'): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -438,6 +444,78 @@ describe('refresh', () => {
     expect(getAccessToken()).toBe('jwt-after-winner');
     expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slot);
   });
+
+  it.each(['delayed marker', 'lost marker'] as const)(
+    'preserves the principal through repeated supersession before the winner arrives (%s) (R4-001)',
+    async (completionNotice) => {
+      vi.useFakeTimers();
+      const slot = 'abababab-abab-4bab-8bab-abababababab';
+      setAccessToken('jwt-still-valid', 'login', slot);
+      const generation = getPrincipalGeneration();
+      const changes: Array<string | null> = [];
+      const unsubscribe = subscribeToken((token) => changes.push(token));
+      let winningCookieInstalled = false;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+        Promise.resolve(
+          winningCookieInstalled
+            ? jsonResponse({
+                access_token: 'jwt-after-delayed-winner',
+                token_type: 'bearer',
+                expires_in: 900,
+              })
+            : problemResponse(401, { code: 'refresh_superseded' }),
+        ),
+      );
+      let refreshError: unknown;
+      const pending = refresh().catch((error: unknown) => {
+        refreshError = error;
+        return undefined;
+      });
+
+      try {
+        // Advance only the retry timers: three obsolete-secret responses do
+        // not prove expiry or revocation while the winning headers are held.
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(300);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+        expect(refreshError).toBeUndefined();
+        expect(getAccessToken()).toBe('jwt-still-valid');
+        expect(getPrincipalGeneration()).toBe(generation);
+        expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slot);
+        expect(changes).toEqual([]);
+
+        winningCookieInstalled = true;
+        if (completionNotice === 'delayed marker') {
+          const newValue = JSON.stringify({
+            slot,
+            revision: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+          });
+          localStorage.setItem('lumen.auth-refresh-revision', newValue);
+          window.dispatchEvent(
+            new StorageEvent('storage', {
+              key: 'lumen.auth-refresh-revision',
+              newValue,
+              storageArea: localStorage,
+            }),
+          );
+        } else {
+          // A tab can crash after installing headers and before publishing;
+          // no completion event is needed for the next safe cookie retry.
+          await vi.advanceTimersByTimeAsync(300);
+        }
+        await expect(pending).resolves.toMatchObject({
+          access_token: 'jwt-after-delayed-winner',
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(4);
+        expect(getPrincipalGeneration()).toBe(generation);
+        expect(changes).toEqual(['jwt-after-delayed-winner']);
+        expect(localStorage.getItem('lumen.active-auth-slot')).toBe(slot);
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
 });
 
 describe('getCurrentUser', () => {

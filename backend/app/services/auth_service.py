@@ -76,11 +76,24 @@ class IssuedTokens:
 
     access: MintedAccessToken
     refresh_token: str
+    refresh_expires_at: datetime
     cleanup_auth_slots: tuple[UUID, ...] = ()
 
 
 class AuthSlotCollisionError(ConflictError):
     """A verified login tried to reuse a globally existing auth-slot UUID."""
+
+
+class AuthSessionCapacityError(ConflictError):
+    """Cookie-producing families remain outstanding until absolute expiry."""
+
+    code = "auth_session_capacity"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Authentication session capacity reached. Retry after existing sessions expire."
+        )
+        self.cleanup_auth_slots: tuple[UUID, ...] = ()
 
 
 def _is_auth_slot_primary_key_collision(exc: IntegrityError, session_id: UUID | None) -> bool:
@@ -137,6 +150,13 @@ class AuthService:
                     expires_at=expires_at,
                     token_id=session_id,
                 )
+                # A revoked family can still have undelivered Set-Cookie
+                # headers. Two active-cap windows allow ordinary retirement
+                # while bounding all outstanding names without new state.
+                if await repository.count_unexpired_families(user.id) > (
+                    2 * self._settings.auth_session_max_active
+                ):
+                    raise AuthSessionCapacityError()
         except IntegrityError as exc:
             if not _is_auth_slot_primary_key_collision(exc, session_id):
                 raise
@@ -161,6 +181,7 @@ class AuthService:
         return IssuedTokens(
             access=access,
             refresh_token=raw_refresh,
+            refresh_expires_at=expires_at,
             cleanup_auth_slots=cleanup,
         )
 
@@ -184,7 +205,7 @@ class AuthService:
         )
         if not rotated:
             raise InvalidTokenError()
-        return IssuedTokens(access=access, refresh_token=raw_refresh)
+        return IssuedTokens(access=access, refresh_token=raw_refresh, refresh_expires_at=expires_at)
 
     # --- use-cases ----------------------------------------------------------
 
@@ -272,6 +293,29 @@ class AuthService:
                 metadata={"reason": "slot_collision"},
             )
             raise
+        except AuthSessionCapacityError as exc:
+            # Reject issuance without freeing the late-header budget. Existing
+            # owned stale names can still drain on this denied response.
+            exc.cleanup_auth_slots = await RefreshTokenRepository(
+                self._session, user.tenant_id
+            ).enforce_active_session_cap(
+                user_id=user.id,
+                max_active=self._settings.auth_session_max_active,
+                preserve_ids={previous_session_id} if previous_session_id is not None else set(),
+                presented_cookie_ids=presented_cookie_session_ids,
+                cleanup_limit=cleanup_limit,
+            )
+            await AuditSink(AuditEventRepository(self._session, user.tenant_id)).emit(
+                action=AuditAction.AUTH_LOGIN_FAILED,
+                actor=AuditActor.user(user.id),
+                resource_type="session",
+                resource_id=str(user.id),
+                outcome=AuditOutcome.DENIED,
+                request_id=request_id or "unknown",
+                source_ip=source_ip or "unknown",
+                metadata={"reason": "session_capacity"},
+            )
+            raise
         await AuditEventRepository(self._session, user.tenant_id).record(
             action="auth.login",
             resource_type="session",
@@ -293,10 +337,11 @@ class AuthService:
     ) -> IssuedTokens:
         """Rotate a valid refresh token into a fresh access + refresh pair.
 
-        Slot-aware rotation updates one stable session-family row under a lock;
-        legacy rotation revokes the presented row and issues another. In both
-        modes, replaying the old secret fails. An expired, revoked, unknown, or
-        missing token raises :class:`InvalidTokenError` → 401 (INV-4).
+        Both modes rotate one stable family row, locking the owning user before
+        revalidating/locking its token. Legacy resolves by exact hash; slots
+        resolve by id before comparing the secret. Replaying the old secret
+        fails. An expired, revoked, unknown, or missing token raises
+        :class:`InvalidTokenError` → 401 (INV-4).
         """
         if not raw_refresh_token:
             raise InvalidTokenError()
@@ -308,12 +353,34 @@ class AuthService:
         # below stay within the resolved token's tenant.
         await bind_bypass(self._session)
         lookup = UserLookupRepository(self._session)
-        token = (
+        owner = (
             await lookup.find_refresh_token_session(session_id)
             if session_id is not None
             else await lookup.find_refresh_token_owner(token_hash)
         )
-        if token is None or token.revoked_at is not None:
+        if owner is None:
+            raise InvalidTokenError()
+
+        # Login, refresh, and logout acquire the owning user before any token
+        # lock. The unlocked lookup grants no authority; revalidation below
+        # sees a committed winner even when this session cached the old row.
+        await bind_tenant(self._session, owner.tenant_id)
+        user = await UserRepository(self._session, owner.tenant_id).lock_for_auth_session_admission(
+            owner.user_id
+        )
+        if user is None:
+            raise InvalidTokenError()
+        token = (
+            await lookup.find_refresh_token_session(session_id, lock=True)
+            if session_id is not None
+            else await lookup.find_refresh_token_owner(token_hash, lock=True)
+        )
+        if (
+            token is None
+            or token.tenant_id != owner.tenant_id
+            or token.user_id != user.id
+            or token.revoked_at is not None
+        ):
             raise InvalidTokenError()
         if _as_utc(token.expires_at) <= datetime.now(UTC):
             raise InvalidTokenError()
@@ -322,26 +389,13 @@ class AuthService:
             # or delete the row now holding the winner's current credential.
             raise RefreshSupersededError()
 
-        # Identity resolved → re-scope the GUC from the bypass sentinel to the
-        # token's tenant, so the lookups + rotation writes below run under that
-        # tenant's RLS scope (#17, defense in depth).
-        await bind_tenant(self._session, token.tenant_id)
-        user = await UserRepository(self._session, token.tenant_id).get(token.user_id)
-        if user is None:
-            raise InvalidTokenError()
-
-        if session_id is not None:
-            # The UUID row id is the stable session-family routing key. Refresh
-            # and logout lock the same row, so their commit order is decisive.
-            return await self._rotate_session_tokens(
-                user,
-                session_id=session_id,
-                expected_hash=token_hash,
-            )
-
-        # Legacy fixed-cookie compatibility: exact-hash revoke + new row.
-        await RefreshTokenRepository(self._session, token.tenant_id).revoke(token_hash)
-        return await self._issue_tokens(user)
+        # Legacy also rotates in place: each refresh needs no new admission or
+        # extra cookie-producing family, while exact-hash replay still fails.
+        return await self._rotate_session_tokens(
+            user,
+            session_id=token.id,
+            expected_hash=token_hash,
+        )
 
     async def logout(
         self,
@@ -351,22 +405,27 @@ class AuthService:
         request_id: str | None = None,
         source_ip: str | None = None,
         session_id: UUID | None = None,
-    ) -> None:
+    ) -> bool:
         """Revoke the selected session family/token and audit the logout.
 
-        Idempotent: an absent/already-revoked token is not an error (the client
-        is logging out regardless). Revocation is tenant-scoped to the caller.
+        Owned already-revoked families are idempotent. An unowned/unknown slot
+        returns False after a denied audit so the router can commit it and omit
+        all deletion headers. Legacy absent tokens remain idempotent.
         """
         # The principal carries the tenant, so bind the RLS GUC to it for the
         # revoke + audit write (#17; a no-op off Postgres). ``/auth/logout`` does
         # not depend on ``current_tenant`` (it takes the principal directly), so
         # the GUC is bound here rather than by the request dependency.
         await bind_tenant(self._session, principal.tenant_id)
+        await UserRepository(self._session, principal.tenant_id).lock_for_auth_session_admission(
+            principal.user_id
+        )
+        owned = True
         if session_id is not None:
             # Bearer tenant+user bind this routing id. The old Cookie header may
             # carry a pre-rotation secret; family revocation intentionally does
             # not depend on that stale value.
-            await RefreshTokenRepository(self._session, principal.tenant_id).revoke_session(
+            owned = await RefreshTokenRepository(self._session, principal.tenant_id).revoke_session(
                 session_id, user_id=principal.user_id
             )
         elif raw_refresh_token:
@@ -377,11 +436,12 @@ class AuthService:
             action="auth.logout",
             resource_type="session",
             resource_id=str(principal.user_id),
-            outcome=AuditOutcome.ALLOWED,
+            outcome=AuditOutcome.ALLOWED if owned else AuditOutcome.DENIED,
             actor_id=principal.user_id,
             request_id=request_id,
             source_ip=source_ip,
         )
+        return owned
 
     async def _record_login_failed(
         self,

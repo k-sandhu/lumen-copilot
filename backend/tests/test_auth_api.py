@@ -22,6 +22,8 @@ import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 import pytest
@@ -399,10 +401,11 @@ async def test_auth_slot_is_routing_metadata_not_refresh_authority(
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize("same_tenant", [False, True])
 async def test_logout_slot_is_bound_to_bearer_tenant_and_user(
-    app: FastAPI,
     client: AsyncClient,
     sessionmaker: async_sessionmaker[AsyncSession],
+    same_tenant: bool,
 ) -> None:
     slot_a = "abababab-abab-4bab-8bab-abababababab"
     slot_b = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc"
@@ -418,8 +421,10 @@ async def test_logout_slot_is_bound_to_bearer_tenant_and_user(
     other_email = "other-tenant@example.test"
     other_password = "other-tenant-password"
     async with sessionmaker() as session:
-        other_tenant = await TenantRepository(session).create(name="Other tenant")
-        await UserRepository(session, other_tenant.id).create(
+        tenant_id = (await session.execute(select(User.tenant_id))).scalar_one()
+        if not same_tenant:
+            tenant_id = (await TenantRepository(session).create(name="Other tenant")).id
+        await UserRepository(session, tenant_id).create(
             email=other_email,
             password_hash=hash_password(other_password),
             roles=[Role.MEMBER],
@@ -439,18 +444,40 @@ async def test_logout_slot_is_bound_to_bearer_tenant_and_user(
             "Authorization": f"Bearer {login_b.json()['access_token']}",
             "X-Lumen-Auth-Slot": slot_a,
         },
-        cookies={cookie_a_name: raw_a},
     )
-    assert mismatch.status_code == 204
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as persona_a:
-        still_live = await persona_a.post(
-            "/api/v1/auth/refresh",
-            headers={"X-Lumen-Auth-Slot": slot_a},
-            cookies={cookie_a_name: raw_a},
-        )
+    assert mismatch.status_code == 404
+    assert "set-cookie" not in mismatch.headers
+    assert client.cookies.get(cookie_a_name) == raw_a
+    async with sessionmaker() as session:
+        denial = (
+            await session.execute(select(AuditEvent).where(AuditEvent.action == "auth.logout"))
+        ).scalar_one()
+        assert denial.outcome == "denied"
+    still_live = await client.post("/api/v1/auth/refresh", headers={"X-Lumen-Auth-Slot": slot_a})
     assert still_live.status_code == 200
+
+
+async def test_owned_revoked_logout_is_idempotent_and_unknown_slot_has_no_deletion(
+    client: AsyncClient,
+) -> None:
+    slot = str(uuid.uuid4())
+    login = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": slot},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    bearer = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    for _ in range(2):
+        owned = await client.post(
+            "/api/v1/auth/logout", headers={**bearer, "X-Lumen-Auth-Slot": slot}
+        )
+        assert owned.status_code == 204
+        assert f"lumen_refresh_token_{slot}=" in owned.headers["set-cookie"]
+    unknown = await client.post(
+        "/api/v1/auth/logout", headers={**bearer, "X-Lumen-Auth-Slot": str(uuid.uuid4())}
+    )
+    assert unknown.status_code == 404
+    assert "set-cookie" not in unknown.headers
 
 
 async def test_reusing_an_active_auth_slot_fails_without_overwriting_it(
@@ -619,7 +646,7 @@ async def test_slot_login_cap_bounds_active_rows_and_exact_cookie_namespace(
                 },
                 json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
             )
-            assert response.status_code == 200
+            assert response.status_code == (200 if index < 6 else 409)
             max_set_cookie_headers = max(
                 max_set_cookie_headers,
                 len(response.headers.get_list("set-cookie")),
@@ -654,12 +681,12 @@ async def test_legacy_login_path_cannot_bypass_active_session_cap(
     bounded = get_settings().model_copy(update={"auth_session_max_active": 2})
     app.dependency_overrides[get_settings_dep] = lambda: bounded
     try:
-        for _ in range(8):
+        for index in range(8):
             response = await client.post(
                 "/api/v1/auth/login",
                 json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
             )
-            assert response.status_code == 200
+            assert response.status_code == (200 if index < 4 else 409)
         async with sessionmaker() as session:
             rows = (await session.execute(select(RefreshToken))).scalars().all()
         assert len([row for row in rows if row.revoked_at is None]) == 2
@@ -780,7 +807,7 @@ async def test_oversized_owned_cookie_namespace_drains_in_bounded_header_batches
                 },
                 json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
             )
-            assert response.status_code == 200
+            assert response.status_code == 409
             set_cookies = response.headers.get_list("set-cookie")
             response_cookie_bytes = sum(
                 len(value.encode("latin-1")) + len(b"set-cookie: \r\n") for value in set_cookies
@@ -822,6 +849,167 @@ def test_auth_session_cap_config_is_small_and_validated() -> None:
         Settings(AUTH_SESSION_MAX_ACTIVE=1)
     with pytest.raises(ValueError):
         Settings(AUTH_SESSION_MAX_ACTIVE=17)
+
+
+async def test_held_login_headers_cannot_exceed_outstanding_cookie_budget(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """All admissions commit before any new cookie headers reach the jar (R4-002)."""
+    bounded = get_settings().model_copy(update={"auth_session_max_active": 2})
+    app.dependency_overrides[get_settings_dep] = lambda: bounded
+    try:
+        await assert_held_login_cookie_budget(app, client)
+    finally:
+        app.dependency_overrides.pop(get_settings_dep, None)
+
+
+async def test_slot_cookie_expiry_matches_absolute_server_deadline(
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    slot = uuid.uuid4()
+    response = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": str(slot)},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert response.status_code == 200
+    cookie = SimpleCookie(response.headers["set-cookie"])[f"lumen_refresh_token_{slot}"]
+    assert not cookie["max-age"]
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(RefreshToken).where(RefreshToken.id == slot))
+        ).scalar_one()
+        assert parsedate_to_datetime(cookie["expires"]) == row.expires_at.replace(
+            tzinfo=UTC, microsecond=0
+        )
+
+
+async def test_revoked_families_keep_admission_budget_until_expiry(
+    app: FastAPI,
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    bounded = get_settings().model_copy(update={"auth_session_max_active": 2})
+    app.dependency_overrides[get_settings_dep] = lambda: bounded
+    try:
+        async with sessionmaker() as session:
+            user = (await session.execute(select(User))).scalar_one()
+            session.add_all(
+                RefreshToken(
+                    id=uuid.uuid4(),
+                    tenant_id=user.tenant_id,
+                    user_id=user.id,
+                    token_hash=f"{index + 1:064x}",
+                    revoked_at=datetime.now(UTC),
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+                for index in range(4)
+            )
+            await session.commit()
+        denied = await client.post(
+            "/api/v1/auth/login",
+            headers={"X-Lumen-Auth-Slot": str(uuid.uuid4())},
+            json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+        )
+        assert denied.status_code == 409
+        assert denied.json()["code"] == "auth_session_capacity"
+        assert "set-cookie" not in denied.headers
+        async with sessionmaker() as session:
+            rows = (await session.execute(select(RefreshToken))).scalars().all()
+            assert len(rows) == 4
+            for row in rows:
+                row.expires_at = datetime.now(UTC) - timedelta(days=1)
+            await session.commit()
+        admitted = await client.post(
+            "/api/v1/auth/login",
+            headers={"X-Lumen-Auth-Slot": str(uuid.uuid4())},
+            json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+        )
+        assert admitted.status_code == 200
+        async with sessionmaker() as session:
+            denial = (
+                await session.execute(
+                    select(AuditEvent).where(AuditEvent.action == "auth.login_failed")
+                )
+            ).scalar_one()
+            assert denial.outcome == "denied"
+            assert denial.event_metadata == {"reason": "session_capacity"}
+    finally:
+        app.dependency_overrides.pop(get_settings_dep, None)
+
+
+async def assert_held_login_cookie_budget(application: FastAPI, client: AsyncClient) -> None:
+    """Shared offline/live probe: ASGI response barriers are after the real commit."""
+    selected = str(uuid.uuid4())
+    first = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": selected},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert first.status_code == 200
+    selected_cookie = f"lumen_refresh_token_{selected}"
+    selected_secret = client.cookies.get(selected_cookie)
+    started: asyncio.Queue[int] = asyncio.Queue()
+    releases: list[asyncio.Event] = []
+
+    async def hold_headers(scope, receive, send):  # type: ignore[no-untyped-def]
+        release = asyncio.Event()
+        releases.append(release)
+
+        async def held_send(message):  # type: ignore[no-untyped-def]
+            if message["type"] == "http.response.start":
+                started.put_nowait(message["status"])
+                await release.wait()
+            await send(message)
+
+        await application(scope, receive, held_send)
+
+    pending: list[asyncio.Task] = []
+    async with AsyncClient(
+        transport=ASGITransport(app=hold_headers), base_url="http://test"
+    ) as held:
+        held.cookies.update(client.cookies)
+        try:
+            statuses = []
+            for _ in range(20):
+                pending.append(
+                    asyncio.create_task(
+                        held.post(
+                            "/api/v1/auth/login",
+                            headers={
+                                "X-Lumen-Auth-Slot": str(uuid.uuid4()),
+                                "X-Lumen-Previous-Auth-Slot": selected,
+                            },
+                            json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+                        )
+                    )
+                )
+                # Each request sees only the original cookie. Stage the next
+                # request after this commit, with every response still held.
+                statuses.append(await started.get())
+            assert statuses == [200] * 3 + [409] * 17
+        finally:
+            # Install accepted headers in reverse admission order, including
+            # names revoked by later admissions. No transport timing is used.
+            for release, task in zip(reversed(releases), reversed(pending), strict=True):
+                release.set()
+                await task
+
+        names = [cookie.name for cookie in held.cookies.jar]
+        assert len([name for name in names if name.startswith("lumen_refresh_token_")]) <= 4
+        assert held.cookies.get(selected_cookie) == selected_secret
+        for task in pending:
+            response = task.result()
+            if response.status_code == 409:
+                assert response.json()["code"] == "auth_session_capacity"
+            else:
+                cookie = response.headers.get_list("set-cookie")[0].lower()
+                assert "expires=" in cookie
+                assert "max-age=" not in cookie
+        survivor = await client.post(
+            "/api/v1/auth/refresh", headers={"X-Lumen-Auth-Slot": selected}
+        )
+        assert survivor.status_code == 200
 
 
 async def test_malformed_auth_slot_is_rejected_without_creating_a_cookie(

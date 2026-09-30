@@ -166,25 +166,36 @@ export function publishAuthRefresh(slot: string | null): void {
   }
 }
 
-/** Wait for a winning tab, or briefly yield before a safe one-time retry. */
+/** Wait for a winning tab, or briefly yield before another safe cookie retry. */
 export function waitForAuthRefresh(
   slot: string | null,
   previousRevision: string | null,
+  signal?: AbortSignal,
   timeoutMs = 300,
 ): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   if (getAuthRefreshRevision(slot) !== previousRevision) return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const listener: RefreshRevisionListener = (noticeSlot, revision) => {
       if (noticeSlot !== slot || revision === previousRevision) return;
       finish();
     };
-    const finish = () => {
+    const cleanup = () => {
       clearTimeout(timer);
       refreshRevisionListeners.delete(listener);
+      signal?.removeEventListener('abort', abort);
+    };
+    const finish = () => {
+      cleanup();
       resolve();
+    };
+    const abort = () => {
+      cleanup();
+      reject(signal?.reason);
     };
     refreshRevisionListeners.add(listener);
     const timer = setTimeout(finish, timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }
 

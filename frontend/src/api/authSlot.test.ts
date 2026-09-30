@@ -1,16 +1,18 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearActiveAuthSlotIfMatches,
   createAuthSlot,
   getActiveAuthSlot,
   isAuthSlot,
   setActiveAuthSlot,
+  waitForAuthRefresh,
 } from './authSlot';
 
 const SLOT_A = '11111111-1111-4111-8111-111111111111';
 const SLOT_B = '22222222-2222-4222-8222-222222222222';
 
 beforeEach(() => localStorage.clear());
+afterEach(() => vi.useRealTimers());
 
 describe('auth-slot routing metadata', () => {
   it('generates and admits only RFC-4122 version-4 UUID selectors', () => {
@@ -39,5 +41,22 @@ describe('auth-slot routing metadata', () => {
 
     clearActiveAuthSlotIfMatches(SLOT_B);
     expect(getActiveAuthSlot()).toBeNull();
+  });
+
+  it('cancels a superseded-cookie wait immediately without leaving a retry timer (R4-001)', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const pending = waitForAuthRefresh(SLOT_A, null, controller.signal);
+    let rejection: unknown;
+    void pending.catch((error: unknown) => {
+      rejection = error;
+    });
+    const reason = new DOMException('Principal changed', 'AbortError');
+    controller.abort(reason);
+    await Promise.resolve();
+
+    expect(rejection).toBe(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

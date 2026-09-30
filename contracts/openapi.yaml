@@ -111,7 +111,12 @@ paths:
         refresh-token family whose id is the supplied X-Lumen-Auth-Slot UUID and
         whose cookie name is unique to that slot. Invalid credentials → 401 with
         a generic message (no account-existence disclosure). Reusing an existing
-        slot never overwrites it and returns 409.
+        slot never overwrites it and returns 409. Admission also returns 409 with
+        code auth_session_capacity when unexpired families (including revoked
+        ones with potentially undelivered cookie headers) reach twice
+        AUTH_SESSION_MAX_ACTIVE. Owned stale cookies may be expired on that
+        denied response; no new refresh cookie is issued. Slot cookies use
+        absolute expiry, so delayed headers cannot restart their lifetime.
       tags: [auth]
       security: []
       parameters:
@@ -140,7 +145,11 @@ paths:
         For a slot-aware session, requires both the selected slot id and that
         slot's independently random HttpOnly token. Rotation updates the same
         family row under a database lock; the slot alone grants no authority.
-        Slotless clients retain the legacy fixed-cookie rotation path.
+        All paths resolve ownership without a token lock, lock the owning user,
+        then revalidate and lock the token. Slotless clients retain exact-hash
+        fixed-cookie rotation, updating the same row without new admission.
+        An obsolete slot secret returns refresh_superseded (401) without
+        revocation or deletion; this is retryable after winning headers arrive.
       tags: [auth]
       security: []
       parameters:
@@ -162,7 +171,9 @@ paths:
         With X-Lumen-Auth-Slot, the authenticated bearer principal revokes that
         tenant/user-bound session family under the same row lock used by refresh,
         even when the request carried a pre-rotation cookie. The response expires
-        only that slot's unique cookie, so a late logout cannot erase a newer
+        only that slot's unique cookie after ownership is proven. An unknown or
+        unowned slot returns 404 with no deletion; an owned already-revoked
+        family remains idempotent (204). A late logout cannot erase a newer
         login's distinct cookie. Slotless clients retain the legacy exact-token
         path and receive no shared-cookie deletion; its revoked cookie is unusable.
       tags: [auth]
@@ -171,6 +182,7 @@ paths:
       responses:
         "204": { description: Logged out. }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
   /auth/me:

@@ -10,18 +10,28 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
-from sqlalchemy import Table, select, text
+from sqlalchemy import Table, event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.auth import hash_password
+from app.auth import (
+    InvalidTokenError,
+    Principal,
+    RefreshSupersededError,
+    hash_password,
+    hash_refresh_token,
+)
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.models import AuditEvent, RefreshToken, Tenant, User
 from app.db.repositories import RefreshTokenRepository, UserRepository
-from app.services.auth_service import AuthService, AuthSlotCollisionError
+from app.domain.entities import User as UserEntity
+from app.services.auth_service import AuthService, AuthSlotCollisionError, IssuedTokens
 
 _DATABASE_URL = os.environ.get("AUTH_RACE_DATABASE_URL")
 _live = pytest.mark.skipif(
@@ -37,27 +47,114 @@ _AUTH_TABLES: list[Table] = [
 ]
 
 
-async def _wait_until_blocked(task: asyncio.Task[bool]) -> None:
-    """Prove the second transaction has not passed the first row lock."""
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+@dataclass(frozen=True)
+class _LegacyRace:
+    factory: async_sessionmaker[AsyncSession]
+    tenant_id: uuid.UUID
+    user_id: uuid.UUID
+    session_id: uuid.UUID
+    secret: str
+    email: str
+    password: str
+    settings: Settings
 
 
-async def _locked_slot_hash(
-    factory: async_sessionmaker[AsyncSession], session_id: uuid.UUID
-) -> str | None:
-    """Lock by routing id, then return the current hash for service-side compare."""
-    async with factory() as session:
-        row = (
-            await session.execute(
-                select(RefreshToken).where(RefreshToken.id == session_id).with_for_update()
+@pytest.fixture
+async def legacy_auth_race() -> AsyncIterator[_LegacyRace]:
+    assert _DATABASE_URL is not None
+    engine = create_async_engine(_DATABASE_URL)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    race = _LegacyRace(
+        factory=factory,
+        tenant_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        secret="legacy-refresh-before-rotation",
+        email="legacy-race@example.test",
+        password="legacy-race-password",
+        settings=Settings(AUTH_SESSION_MAX_ACTIVE=2),
+    )
+    async with engine.begin() as connection:
+        privilege = (
+            await connection.execute(
+                text(
+                    "SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls "
+                    "FROM pg_roles WHERE rolname = current_user"
+                )
             )
-        ).scalar_one_or_none()
-        return row.token_hash if row is not None else None
+        ).one()
+        assert tuple(privilege) == (False, False, False, False)
+        await connection.run_sync(
+            lambda sync_connection: Base.metadata.create_all(sync_connection, tables=_AUTH_TABLES)
+        )
+    try:
+        async with factory() as seed:
+            seed.add(Tenant(id=race.tenant_id, name="Legacy refresh race"))
+            await seed.flush()
+            seed.add(
+                User(
+                    id=race.user_id,
+                    tenant_id=race.tenant_id,
+                    email=race.email,
+                    password_hash=hash_password(race.password),
+                    roles=["member"],
+                )
+            )
+            await seed.flush()
+            seed.add(
+                RefreshToken(
+                    id=race.session_id,
+                    tenant_id=race.tenant_id,
+                    user_id=race.user_id,
+                    token_hash=hash_refresh_token(race.secret),
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+            await seed.commit()
+        yield race
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.drop_all(
+                    sync_connection, tables=list(reversed(_AUTH_TABLES))
+                )
+            )
+        await engine.dispose()
+
+
+async def _backend_pid(session: AsyncSession) -> int:
+    return int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
+
+
+async def _wait_until_blocked[T](
+    factory: async_sessionmaker[AsyncSession],
+    task: asyncio.Task[T],
+    *,
+    waiting_pid: int,
+    blocking_pid: int,
+) -> str:
+    """Observe the actual PostgreSQL blocker, without elapsed-time guesses."""
+    async with factory() as observer:
+        while not task.done():
+            row = (
+                await observer.execute(
+                    text(
+                        "SELECT query FROM pg_stat_activity "
+                        "WHERE pid = :waiting_pid "
+                        "AND :blocking_pid = ANY(pg_blocking_pids(pid))"
+                    ),
+                    {"waiting_pid": waiting_pid, "blocking_pid": blocking_pid},
+                )
+            ).one_or_none()
+            if row is not None:
+                return str(row.query)
+    # Propagate an unexpected production error rather than spinning forever.
+    await task
+    pytest.fail("Concurrent operation completed without waiting for the held database lock")
 
 
 async def _admit_session(
-    factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     user_id: uuid.UUID,
@@ -66,25 +163,24 @@ async def _admit_session(
     presented_ids: frozenset[uuid.UUID],
     expires_at: datetime,
 ) -> tuple[uuid.UUID, ...]:
-    async with factory() as session:
-        locked = await UserRepository(session, tenant_id).lock_for_auth_session_admission(user_id)
-        assert locked is not None
-        repository = RefreshTokenRepository(session, tenant_id)
-        await repository.create(
-            user_id=user_id,
-            token_hash=new_id.hex * 2,
-            expires_at=expires_at,
-            token_id=new_id,
-        )
-        cleanup = await repository.enforce_active_session_cap(
-            user_id=user_id,
-            max_active=2,
-            preserve_ids={selected_id, new_id},
-            presented_cookie_ids=presented_ids,
-            cleanup_limit=8,
-        )
-        await session.commit()
-        return cleanup
+    locked = await UserRepository(session, tenant_id).lock_for_auth_session_admission(user_id)
+    assert locked is not None
+    repository = RefreshTokenRepository(session, tenant_id)
+    await repository.create(
+        user_id=user_id,
+        token_hash=new_id.hex * 2,
+        expires_at=expires_at,
+        token_id=new_id,
+    )
+    cleanup = await repository.enforce_active_session_cap(
+        user_id=user_id,
+        max_active=2,
+        preserve_ids={selected_id, new_id},
+        presented_cookie_ids=presented_ids,
+        cleanup_limit=8,
+    )
+    await session.commit()
+    return cleanup
 
 
 async def _login_exact_slot(
@@ -111,6 +207,168 @@ async def _login_exact_slot(
             return ("collision", None, None)
         await session.commit()
         return ("success", tokens.access.token, tokens.refresh_token)
+
+
+@_live
+@pytest.mark.live
+@pytest.mark.parametrize(
+    "operation", ["legacy-refresh", "slot-refresh", "legacy-logout", "slot-logout"]
+)
+async def test_login_refresh_and_logout_lock_user_before_any_token_row(
+    legacy_auth_race: _LegacyRace, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Actual auth services share one global lock order (R4-004)."""
+    race = legacy_auth_race
+    user_locked = asyncio.Event()
+    release_login = asyncio.Event()
+    refresh_lock_attempted = asyncio.Event()
+    first_refresh_lock: list[str] = []
+    original_lock = UserRepository.lock_for_auth_session_admission
+
+    async with race.factory() as login_session, race.factory() as refresh_session:
+        login_pid = await _backend_pid(login_session)
+        refresh_pid = await _backend_pid(refresh_session)
+        connection = await refresh_session.connection()
+        connection_info = connection.sync_connection.info
+        connection_info["observe_refresh_order"] = True
+        sync_engine = connection.sync_connection.engine
+
+        async def held_login_lock(
+            repository: UserRepository, user_id: uuid.UUID
+        ) -> UserEntity | None:
+            user = await original_lock(repository, user_id)
+            if repository._session is login_session:
+                user_locked.set()
+                await release_login.wait()
+            return user
+
+        def observe_lock(
+            conn: Any,
+            cursor: Any,
+            statement: str,
+            parameters: Any,
+            context: Any,
+            executemany: bool,
+        ) -> None:
+            if (
+                conn.info.get("observe_refresh_order")
+                and "FOR UPDATE" in statement
+                and not first_refresh_lock
+            ):
+                first_refresh_lock.append(statement)
+                refresh_lock_attempted.set()
+
+        monkeypatch.setattr(UserRepository, "lock_for_auth_session_admission", held_login_lock)
+        event.listen(sync_engine, "before_cursor_execute", observe_lock)
+        login_task = asyncio.create_task(
+            AuthService(login_session, race.settings).login(
+                email=race.email,
+                password=race.password,
+                session_id=uuid.uuid4(),
+                request_id="login-refresh-order",
+                source_ip="127.0.0.1",
+            )
+        )
+        refresh_task: asyncio.Task[IssuedTokens] | asyncio.Task[bool] | None = None
+        try:
+            await user_locked.wait()
+            service = AuthService(refresh_session, race.settings)
+            session_id = race.session_id if operation.startswith("slot") else None
+            if operation.endswith("refresh"):
+                refresh_task = asyncio.create_task(
+                    service.refresh(raw_refresh_token=race.secret, session_id=session_id)
+                )
+            else:
+                refresh_task = asyncio.create_task(
+                    service.logout(
+                        Principal(user_id=race.user_id, tenant_id=race.tenant_id, roles=()),
+                        raw_refresh_token=race.secret,
+                        session_id=session_id,
+                        request_id="login-logout-order",
+                        source_ip="127.0.0.1",
+                    )
+                )
+            await refresh_lock_attempted.wait()
+            # Assert before releasing login: no token lock may be held while
+            # refresh waits for the same user login already owns.
+            assert "FROM users" in first_refresh_lock[0], first_refresh_lock[0]
+            blocking_query = await _wait_until_blocked(
+                race.factory,
+                refresh_task,
+                waiting_pid=refresh_pid,
+                blocking_pid=login_pid,
+            )
+            assert "FROM users" in blocking_query
+            release_login.set()
+            await login_task
+            await login_session.commit()
+            tokens = await refresh_task
+            await refresh_session.commit()
+            if isinstance(tokens, IssuedTokens):
+                assert tokens.refresh_token != race.secret
+            else:
+                assert tokens is True
+        finally:
+            if refresh_task is not None and not refresh_task.done():
+                refresh_task.cancel()
+                await asyncio.gather(refresh_task, return_exceptions=True)
+            release_login.set()
+            await asyncio.gather(login_task, return_exceptions=True)
+            event.remove(sync_engine, "before_cursor_execute", observe_lock)
+            connection_info.pop("observe_refresh_order", None)
+
+    async with race.factory() as verify:
+        rows = (await verify.execute(select(RefreshToken))).scalars().all()
+        assert len(rows) == 2  # Login inserted one; refresh/logout inserted none.
+        family = next(row for row in rows if row.id == race.session_id)
+        if isinstance(tokens, IssuedTokens):
+            assert family.revoked_at is None
+            assert family.token_hash == hash_refresh_token(tokens.refresh_token)
+        else:
+            assert family.revoked_at is not None
+
+
+@_live
+@pytest.mark.live
+async def test_concurrent_legacy_refresh_revalidates_after_user_lock_and_preserves_family(
+    legacy_auth_race: _LegacyRace,
+) -> None:
+    """One legacy secret produces one winner and keeps one stable row (R4-004)."""
+    race = legacy_auth_race
+    async with race.factory() as winner, race.factory() as loser:
+        winner_pid = await _backend_pid(winner)
+        loser_pid = await _backend_pid(loser)
+        winning_tokens = await AuthService(winner, race.settings).refresh(
+            raw_refresh_token=race.secret,
+        )
+        loser_task = asyncio.create_task(
+            AuthService(loser, race.settings).refresh(raw_refresh_token=race.secret)
+        )
+        try:
+            blocked_query = await _wait_until_blocked(
+                race.factory, loser_task, waiting_pid=loser_pid, blocking_pid=winner_pid
+            )
+            assert "FROM users" in blocked_query, blocked_query
+            await winner.commit()
+            with pytest.raises(InvalidTokenError):
+                await loser_task
+            await loser.rollback()
+        finally:
+            if not loser_task.done():
+                loser_task.cancel()
+                await asyncio.gather(loser_task, return_exceptions=True)
+
+    async with race.factory() as verify:
+        rows = (await verify.execute(select(RefreshToken))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].id == race.session_id
+        assert rows[0].revoked_at is None
+        assert rows[0].token_hash == hash_refresh_token(winning_tokens.refresh_token)
+        next_tokens = await AuthService(verify, race.settings).refresh(
+            raw_refresh_token=winning_tokens.refresh_token,
+        )
+        assert next_tokens.refresh_token != winning_tokens.refresh_token
+        await verify.commit()
 
 
 @_live
@@ -167,6 +425,8 @@ async def test_refresh_and_logout_commit_order_serializes_one_session_row() -> N
 
         # Refresh locks/rotates first; logout waits, then revokes the NEW hash.
         async with factory() as refresh_session, factory() as logout_session:
+            refresh_pid = await _backend_pid(refresh_session)
+            logout_pid = await _backend_pid(logout_session)
             refreshed = await RefreshTokenRepository(refresh_session, tenant_id).rotate_session(
                 session_id,
                 user_id=user_id,
@@ -180,7 +440,9 @@ async def test_refresh_and_logout_commit_order_serializes_one_session_row() -> N
                     session_id, user_id=user_id
                 )
             )
-            await _wait_until_blocked(logout_task)
+            await _wait_until_blocked(
+                factory, logout_task, waiting_pid=logout_pid, blocking_pid=refresh_pid
+            )
             await refresh_session.commit()
             assert await logout_task is True
             await logout_session.commit()
@@ -207,6 +469,8 @@ async def test_refresh_and_logout_commit_order_serializes_one_session_row() -> N
             await seed.commit()
 
         async with factory() as logout_session, factory() as refresh_session:
+            logout_pid = await _backend_pid(logout_session)
+            refresh_pid = await _backend_pid(refresh_session)
             revoked = await RefreshTokenRepository(logout_session, tenant_id).revoke_session(
                 replacement_id, user_id=user_id
             )
@@ -220,7 +484,9 @@ async def test_refresh_and_logout_commit_order_serializes_one_session_row() -> N
                     expires_at=expires_at,
                 )
             )
-            await _wait_until_blocked(refresh_task)
+            await _wait_until_blocked(
+                factory, refresh_task, waiting_pid=refresh_pid, blocking_pid=logout_pid
+            )
             await logout_session.commit()
             assert await refresh_task is False
             await refresh_session.commit()
@@ -283,7 +549,9 @@ async def test_concurrent_session_admission_is_serialized_and_never_exceeds_cap(
 
         # Hold the serialized admission boundary after T1 inserted. T2 must not
         # count the same pre-insert set and independently admit above the cap.
-        async with factory() as first:
+        async with factory() as first, factory() as second:
+            first_pid = await _backend_pid(first)
+            second_pid = await _backend_pid(second)
             locked = await UserRepository(first, tenant_id).lock_for_auth_session_admission(user_id)
             assert locked is not None
             first_repo = RefreshTokenRepository(first, tenant_id)
@@ -302,7 +570,7 @@ async def test_concurrent_session_admission_is_serialized_and_never_exceeds_cap(
             )
             second_task = asyncio.create_task(
                 _admit_session(
-                    factory,
+                    second,
                     tenant_id=tenant_id,
                     user_id=user_id,
                     selected_id=selected_id,
@@ -311,8 +579,9 @@ async def test_concurrent_session_admission_is_serialized_and_never_exceeds_cap(
                     expires_at=expires_at,
                 )
             )
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(second_task), timeout=0.2)
+            await _wait_until_blocked(
+                factory, second_task, waiting_pid=second_pid, blocking_pid=first_pid
+            )
             await first.commit()
             assert await second_task == (first_new,)
 
@@ -352,8 +621,8 @@ async def test_concurrent_same_slot_loser_observes_winner_without_revoking_it() 
     user_id = uuid.uuid4()
     session_id = uuid.uuid4()
     expires_at = datetime.now(UTC) + timedelta(days=1)
-    old_hash = "e" * 64
-    winning_hash = "f" * 64
+    old_secret = "same-slot-refresh-before-rotation"
+    settings = Settings()
 
     async with engine.begin() as connection:
         await connection.run_sync(
@@ -381,36 +650,48 @@ async def test_concurrent_same_slot_loser_observes_winner_without_revoking_it() 
                     id=session_id,
                     tenant_id=tenant_id,
                     user_id=user_id,
-                    token_hash=old_hash,
+                    token_hash=hash_refresh_token(old_secret),
                     expires_at=expires_at,
                 )
             )
             await seed.commit()
 
-        async with factory() as winner:
-            rotated = await RefreshTokenRepository(winner, tenant_id).rotate_session(
-                session_id,
-                user_id=user_id,
-                expected_hash=old_hash,
-                new_hash=winning_hash,
-                expires_at=expires_at,
+        async with factory() as winner, factory() as loser:
+            winner_pid = await _backend_pid(winner)
+            loser_pid = await _backend_pid(loser)
+            winning_tokens = await AuthService(winner, settings).refresh(
+                raw_refresh_token=old_secret,
+                session_id=session_id,
             )
-            assert rotated is True
-            loser_task = asyncio.create_task(_locked_slot_hash(factory, session_id))
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(loser_task), timeout=0.2)
+            loser_task = asyncio.create_task(
+                AuthService(loser, settings).refresh(
+                    raw_refresh_token=old_secret,
+                    session_id=session_id,
+                )
+            )
+            await _wait_until_blocked(
+                factory, loser_task, waiting_pid=loser_pid, blocking_pid=winner_pid
+            )
             await winner.commit()
-            # The old implementation's id+old-hash predicate became no row here,
-            # which led the client to destroy the shared winner. ID-first lookup
-            # instead returns the winner's hash for a safe mismatch 401.
-            assert await loser_task == winning_hash
+            # This calls the production lookup and typed service error. An
+            # obsolete-hash SQL predicate would lose the family after commit
+            # and raise InvalidTokenError instead of non-destructive supersession.
+            with pytest.raises(RefreshSupersededError):
+                await loser_task
+            await loser.rollback()
 
         async with factory() as verify:
             row = (
                 await verify.execute(select(RefreshToken).where(RefreshToken.id == session_id))
             ).scalar_one()
-            assert row.token_hash == winning_hash
+            assert row.token_hash == hash_refresh_token(winning_tokens.refresh_token)
             assert row.revoked_at is None
+            next_tokens = await AuthService(verify, settings).refresh(
+                raw_refresh_token=winning_tokens.refresh_token,
+                session_id=session_id,
+            )
+            assert next_tokens.refresh_token != winning_tokens.refresh_token
+            await verify.commit()
     finally:
         async with engine.begin() as connection:
             await connection.run_sync(

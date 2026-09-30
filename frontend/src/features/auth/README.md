@@ -103,13 +103,19 @@ Browser cancellation remains transport cleanup only: it cannot retract response
 headers the browser already accepted. Cookie safety therefore lives at the wire
 and server boundary. Each login's strict UUIDv4 slot is both its unique cookie
 suffix and the stable `refresh_tokens.id`; only its canonical lowercase,
-hyphenated wire spelling is accepted. Refresh locks by row ID before verifying
+hyphenated wire spelling is accepted. Refresh resolves ownership without a token
+lock, locks the owning user, then locks by row ID before verifying
 the token hash, so a blocked same-slot loser receives `refresh_superseded` without
 revoking the winner or deleting its cookie. Tabs use Web Locks when available and
-a non-secret completion revision for a quick retry; both are optional and the
-server remains correct for lockless/crashed/non-SPA clients. Bearer-authenticated
+a non-secret completion revision for a quick retry; both are optional. A
+superseded response keeps the selector/principal intact and continues cancellable
+polling until winning headers arrive, even if the completion notice is lost.
+Invalid, expired, and revoked credentials still tear down normally. The server
+remains correct for lockless/crashed/non-SPA clients. Bearer-authenticated
 logout revokes the tenant/user-bound row even if it captured a pre-rotation
-cookie. A late logout expires only its own cookie name, never a later login's.
+cookie. Ownership is proved before a cookie deletion: unowned/unknown slots
+return 404 and a denied audit without touching the jar; owned revoked families
+remain idempotent. A late logout expires only its own cookie name.
 Legacy fixed-cookie logout revokes server-side without a shared `Delete-Cookie`
 header.
 
@@ -117,8 +123,19 @@ The server serializes slot admission per tenant/user and bounds active families
 with `AUTH_SESSION_MAX_ACTIVE` (default 8, validated 2–16). It protects the new
 and currently selected active slots, revokes expired/excess families oldest-first
 with a UUID tie-break, and returns deletion headers only for exact stale slot
-names owned by that resolved user. This keeps the normal HttpOnly namespace and
-request header comfortably bounded without making cookies visible to JS.
+names owned by that resolved user, at most eight per response. All unexpired
+families, including revoked ones, also consume an outstanding-cookie budget of
+twice the active cap (default 16). Once full, further logins return
+`409 auth_session_capacity`, issue no new cookie, and still drain owned stale
+names. Revocation/deletion does not release that budget because old headers may
+still arrive. Only server-side absolute expiry releases it; slot cookies use
+`Expires` without `Max-Age`, so delayed headers cannot restart the lifetime.
+Repeated rapid logins can therefore temporarily reach capacity, even after
+logout, until an existing family expires (default refresh TTL: 14 days). This
+conservative bound avoids adding durable delivery acknowledgements. Refresh
+rotates the existing row in both slot and legacy modes and consumes no new
+admission. The cookie-backed Playwright group runs serially because its server
+state is shared; the rest of the suite keeps the normal parallel runner.
 
 Superseded/cancelled successful logins revoke their own slot, a successful switch
 retires the outgoing slot, and cross-tab selector changes revoke the old tab's

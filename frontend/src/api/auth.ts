@@ -256,7 +256,7 @@ async function performRefresh({
 }): Promise<TokenResponse> {
   return withAuthRefreshLock(authSlot, async () => {
     let revision = getAuthRefreshRevision(authSlot);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (;;) {
       if (
         signal.aborted ||
         getPrincipalGeneration() !== principalGeneration ||
@@ -278,15 +278,15 @@ async function performRefresh({
         if (
           !(error instanceof ApiError) ||
           error.status !== 401 ||
-          error.problem?.code !== 'refresh_superseded' ||
-          attempt === 2
+          error.problem?.code !== 'refresh_superseded'
         ) {
           throw error;
         }
         // The row is still valid but another document rotated it. Wait for its
-        // cookie completion marker; if APIs/storage are unavailable, a bounded
-        // delay then retry remains safe and cannot authorize a stolen old token.
-        await waitForAuthRefresh(authSlot, revision);
+        // cookie completion marker, or safely retry after a polling interval if
+        // it was lost. Repeated supersession never proves expiry/revocation;
+        // keep this principal/selector until a terminal response or cancellation.
+        await waitForAuthRefresh(authSlot, revision, signal);
         revision = getAuthRefreshRevision(authSlot);
         continue;
       }
@@ -304,7 +304,6 @@ async function performRefresh({
       publishAuthRefresh(authSlot);
       return token;
     }
-    throw new ApiError('Refresh session remained superseded', 401);
   });
 }
 

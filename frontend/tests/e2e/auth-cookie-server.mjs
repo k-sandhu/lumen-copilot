@@ -1,13 +1,16 @@
 import { createServer } from 'node:http';
 
-const port = 4174;
+const port = Number(process.env.AUTH_COOKIE_PORT ?? 4174);
 const MAX_ACTIVE_SESSIONS = 8;
+const MAX_UNEXPIRED_FAMILIES = 2 * MAX_ACTIVE_SESSIONS;
+const REFRESH_TTL_MS = 1_209_600_000;
 const AUTH_SLOT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sessions = new Map();
 let heldLogout = false;
 let heldResponse = null;
 let holdRefresh = false;
 let heldRefreshes = [];
+let heldRefreshRemainder = null;
 let holdLogin = false;
 let heldLogins = [];
 let requestLog = [];
@@ -41,8 +44,8 @@ function cookieName(slot) {
   return `lumen_refresh_token_${slot}`;
 }
 
-function setCookie(slot, value, maxAge = 1_209_600) {
-  return `${cookieName(slot)}=${value}; HttpOnly; Max-Age=${maxAge}; Path=/api/v1/auth; SameSite=Strict`;
+function setCookie(slot, value, expiresAt) {
+  return `${cookieName(slot)}=${value}; HttpOnly; Expires=${new Date(expiresAt).toUTCString()}; Path=/api/v1/auth; SameSite=Strict`;
 }
 
 function deleteCookie(slot) {
@@ -53,7 +56,7 @@ function isAuthSlot(value) {
   return typeof value === 'string' && AUTH_SLOT_PATTERN.test(value);
 }
 
-function revokeExcessSessions(persona, newSlot, previousSlot) {
+function revokeExcessSessions(persona, newSlot, previousSlot, visibleCookies) {
   const protectedSlots = new Set([newSlot]);
   const previous = sessions.get(previousSlot);
   if (previous && previous.persona === persona && !previous.revoked) {
@@ -63,16 +66,22 @@ function revokeExcessSessions(persona, newSlot, previousSlot) {
     .filter(([, session]) => session.persona === persona && !session.revoked)
     .sort((left, right) => left[1].created - right[1].created || left[0].localeCompare(right[0]));
   let excess = Math.max(0, active.length - MAX_ACTIVE_SESSIONS);
-  const cleanup = [];
   for (const [slot, session] of active) {
     if (excess === 0) break;
     if (protectedSlots.has(slot)) continue;
     session.revoked = true;
-    cleanup.push(slot);
     excess -= 1;
   }
   if (excess !== 0) throw new Error('bounded fixture could not preserve selected + new slots');
-  return cleanup;
+  // Match production's ownership intersection: names absent from the request
+  // can still have headers in flight and do not become cleanup authority.
+  return [...sessions.entries()]
+    .filter(
+      ([slot, session]) =>
+        session.persona === persona && session.revoked && cookieName(slot) in visibleCookies,
+    )
+    .slice(0, MAX_ACTIVE_SESSIONS)
+    .map(([slot]) => slot);
 }
 
 function personaFromBearer(request) {
@@ -111,9 +120,11 @@ function reset() {
     heldResponse = null;
   }
   for (const pending of heldRefreshes) pending.response.destroy();
+  heldRefreshRemainder?.pending.response.destroy();
   for (const pending of heldLogins) pending.response.destroy();
   holdRefresh = false;
   heldRefreshes = [];
+  heldRefreshRemainder = null;
   holdLogin = false;
   heldLogins = [];
   requestLog = [];
@@ -125,6 +136,7 @@ function rotateRefresh(pending) {
   const session = sessions.get(pending.slot);
   if (!session || session.revoked || pending.presented !== session.secret) return null;
   session.secret = `refresh-${session.persona}-${pending.slot}-${++sequence}`;
+  session.expiresAt = Date.now() + REFRESH_TTL_MS;
   return session;
 }
 
@@ -138,7 +150,7 @@ function writeRefreshSuccess(pending, session) {
       token_type: 'bearer',
       expires_in: 900,
     },
-    { 'Set-Cookie': setCookie(pending.slot, session.secret) },
+    { 'Set-Cookie': setCookie(pending.slot, session.secret, session.expiresAt) },
   );
 }
 
@@ -203,11 +215,22 @@ const server = createServer(async (request, response) => {
     const sendLoser = () => refreshFailure(loser, true);
     if (order === 'winner-first') {
       sendWinner();
-      setTimeout(sendLoser, 30);
+      heldRefreshRemainder = { pending: loser, send: sendLoser };
     } else {
       sendLoser();
-      setTimeout(sendWinner, 30);
+      heldRefreshRemainder = { pending: winner, send: sendWinner };
     }
+    response.writeHead(204).end();
+    return;
+  }
+  if (url.pathname === '/__control__/release-refresh-remainder') {
+    if (!heldRefreshRemainder) {
+      json(response, 409, { title: 'No pending refresh headers' });
+      return;
+    }
+    const remainder = heldRefreshRemainder;
+    heldRefreshRemainder = null;
+    remainder.send();
     response.writeHead(204).end();
     return;
   }
@@ -216,7 +239,7 @@ const server = createServer(async (request, response) => {
     if (heldResponse) {
       const { response: pending, slot } = heldResponse;
       heldResponse = null;
-      pending.writeHead(204, { 'Set-Cookie': setCookie(slot, '', 0) });
+      pending.writeHead(204, { 'Set-Cookie': deleteCookie(slot) });
       pending.end();
     }
     response.writeHead(204).end();
@@ -263,15 +286,28 @@ const server = createServer(async (request, response) => {
     if (holdLogin && persona === 'a') {
       await new Promise((resolve) => heldLogins.push(resolve));
     }
+    const now = Date.now();
+    const unexpiredFamilies = [...sessions.values()].filter(
+      (session) => session.persona === persona && session.expiresAt > now,
+    );
+    if (unexpiredFamilies.length >= MAX_UNEXPIRED_FAMILIES) {
+      record.status = 409;
+      json(response, 409, { title: 'Conflict', status: 409, code: 'auth_session_capacity' });
+      return;
+    }
+    for (const session of sessions.values()) {
+      if (session.persona === persona && session.expiresAt <= now) session.revoked = true;
+    }
     const secret = `refresh-${persona}-${slot}-${++sequence}`;
-    sessions.set(slot, { persona, secret, revoked: false, created: sequence });
-    const cleanup = revokeExcessSessions(persona, slot, previousSlot);
+    const expiresAt = now + REFRESH_TTL_MS;
+    sessions.set(slot, { persona, secret, revoked: false, created: sequence, expiresAt });
+    const cleanup = revokeExcessSessions(persona, slot, previousSlot, cookies(request));
     record.status = 200;
     json(
       response,
       200,
       { access_token: `jwt-persona-${persona}`, token_type: 'bearer', expires_in: 900 },
-      { 'Set-Cookie': [setCookie(slot, secret), ...cleanup.map(deleteCookie)] },
+      { 'Set-Cookie': [setCookie(slot, secret, expiresAt), ...cleanup.map(deleteCookie)] },
     );
     return;
   }

@@ -21,6 +21,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import (
@@ -33,8 +34,14 @@ from app.api.deps import (
 )
 from app.auth import InvalidTokenError
 from app.core.config import Settings
+from app.core.errors import NotFoundError
 from app.db.repositories import TenantRepository, UserRepository
-from app.services.auth_service import AuthService, AuthSlotCollisionError, IssuedTokens
+from app.services.auth_service import (
+    AuthService,
+    AuthSessionCapacityError,
+    AuthSlotCollisionError,
+    IssuedTokens,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -165,7 +172,10 @@ def _set_refresh_cookie(
     response.set_cookie(
         key=_refresh_cookie_name(auth_slot),
         value=tokens.refresh_token,
-        max_age=settings.refresh_token_ttl_seconds,
+        # Slot headers may arrive after revocation or even server-side expiry.
+        # An absolute expiry prevents such headers from restarting a TTL.
+        max_age=settings.refresh_token_ttl_seconds if auth_slot is None else None,
+        expires=tokens.refresh_expires_at if auth_slot is not None else None,
         httponly=True,
         secure=settings.environment != "local",
         samesite="strict",
@@ -212,7 +222,7 @@ async def login(
             json_schema_extra={"format": "uuid"},
         ),
     ] = None,  # type: ignore[assignment]
-) -> TokenResponse:
+) -> TokenResponse | Response:
     """Exchange email + password for an access token (sets refresh cookie).
 
     Invalid credentials → a generic 401 with no account-existence disclosure
@@ -237,6 +247,16 @@ async def login(
         # the canonical error handler render 409. Audit/commit failure is 500.
         await session.commit()
         raise
+    except AuthSessionCapacityError as exc:
+        await session.commit()
+        denied = JSONResponse(
+            status_code=exc.status,
+            content=exc.to_problem().model_dump(exclude_none=True),
+            media_type="application/problem+json",
+        )
+        for stale_slot in exc.cleanup_auth_slots:
+            _delete_refresh_cookie(denied, settings, stale_slot)
+        return denied
     await session.commit()
     _set_refresh_cookie(response, tokens, settings, slot_id)
     return _token_response(tokens)
@@ -298,7 +318,7 @@ async def logout(
     """
     slot_id = _auth_slot_uuid(auth_slot)
     service = AuthService(session, settings)
-    await service.logout(
+    owned = await service.logout(
         principal,
         raw_refresh_token=_presented_refresh_token(request, slot_id),
         request_id=extract_request_id(request),
@@ -306,6 +326,8 @@ async def logout(
         session_id=slot_id,
     )
     await session.commit()
+    if not owned:
+        raise NotFoundError()
     if slot_id is not None:
         _delete_refresh_cookie(response, settings, slot_id)
     response.status_code = status.HTTP_204_NO_CONTENT
