@@ -39,7 +39,11 @@ larger passage budget or narrower range rather than returning a continuation
 that would skip evidence. Typed range/cursor errors retain their safe recovery
 instructions. Every canonical and legacy retrieval read refreshes membership,
 because even one answer can span a group revocation.
+Both declared tool families emit `retrieval.query` alongside their generic tool
+events. Audited reads and uncited refusals commit through the chat route;
+independent read-back transactions verify those events and zero citations.
 
 Acceptance tests cover real metadata discovery, stable paging, literal wildcard
 characters, filter intersections, whole overlapping chunks, exact continuation,
-unknown/conversation handles, revoked permission and legacy callable names.
+unknown/conversation handles, revoked permission, committed canonical-tool
+retrieval audits and legacy callable names.
