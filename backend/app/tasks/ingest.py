@@ -52,8 +52,10 @@ from app.core.errors import AppError, DependencyError
 from app.db.repositories import ChunkInput, ChunkRepository, DocumentRepository
 from app.db.session import tenant_session_scope
 from app.domain.entities import DocumentStatus
+from app.domain.ingestion import ExtractionOutcome, native_outcome
 from app.domain.llm import Embedding
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
+from app.ingestion.parsers import UnsupportedMimeTypeError
 from app.llm import LLMGateway
 from app.search import OpenSearchStore
 from app.storage import ObjectStore
@@ -144,6 +146,7 @@ async def ingest_document_async(
         storage_key = document.storage_key
         mime_type = document.mime_type
         await documents.set_status(document_id, DocumentStatus.PROCESSING, error=None)
+        await documents.update_ingestion_metadata(document_id, {"ingestion_outcome": None})
 
     # --- Phase 2: fetch + parse + chunk + embed (outside the DB txn). --------
     # A parse failure is PERMANENT (corrupt/unsupported bytes) → fail the doc now
@@ -158,7 +161,12 @@ async def ingest_document_async(
         parsed = parse_document_with_locations(data, mime_type=mime_type)
         text = parsed.text
     except DocumentParseError as exc:
-        return await _fail(tenant_id, document_id, str(exc))
+        outcome = (
+            ExtractionOutcome.UNSUPPORTED
+            if isinstance(exc, UnsupportedMimeTypeError)
+            else ExtractionOutcome.FAILED
+        )
+        return await _fail(tenant_id, document_id, str(exc), outcome=outcome)
 
     chunks = chunk_text(
         text,
@@ -167,20 +175,23 @@ async def ingest_document_async(
     )
 
     if not chunks:
-        # An empty/blank document parses to nothing — a valid, terminal outcome:
-        # ready with zero chunks (idempotently clears any prior chunks).
+        # No native text is an explicit non-searchable terminal outcome.
+        reason = "No native text was extracted. Use a text-bearing file or an OCR-enabled workflow."
         async with tenant_session_scope(tenant_id) as session:
             await DocumentRepository(session, tenant_id).set_extraction(
                 document_id, text=text, locations=parsed.locations
             )
             await ChunkRepository(session, tenant_id).replace_for_document(document_id, [])
             await DocumentRepository(session, tenant_id).set_status(
-                document_id, DocumentStatus.READY, error=None
+                document_id, DocumentStatus.FAILED, error=reason
+            )
+            await DocumentRepository(session, tenant_id).update_ingestion_metadata(
+                document_id, {"ingestion_outcome": ExtractionOutcome.EMPTY.value}
             )
         # Clear any prior chunks from the search index too (a re-ingest of a
         # now-empty document must not leave stale index entries — ADR-0010 §5).
         await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
-        return IngestionResult(document_id, DocumentStatus.READY, 0)
+        return IngestionResult(document_id, DocumentStatus.FAILED, 0, reason)
 
     try:
         embeddings = await _embed_in_batches(
@@ -224,6 +235,10 @@ async def ingest_document_async(
     # whole pipeline as a unit; Postgres state is already durable and a re-run
     # replaces chunks + re-syncs, converging.
     await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
+    async with tenant_session_scope(tenant_id) as session:
+        await DocumentRepository(session, tenant_id).update_ingestion_metadata(
+            document_id, {"ingestion_outcome": native_outcome(parsed).value}
+        )
     return IngestionResult(document_id, DocumentStatus.READY, len(persisted))
 
 
@@ -246,7 +261,13 @@ async def _sync_index(
         raise IngestionError(f"could not index chunks: {exc.code}") from exc
 
 
-async def _fail(tenant_id: UUID, document_id: UUID, reason: str) -> IngestionResult:
+async def _fail(
+    tenant_id: UUID,
+    document_id: UUID,
+    reason: str,
+    *,
+    outcome: ExtractionOutcome = ExtractionOutcome.FAILED,
+) -> IngestionResult:
     """Mark a document ``failed`` with ``reason`` (own transaction). AC-6.
 
     A permanent failure: the reason is stored on the document row so a parse/embed
@@ -255,6 +276,9 @@ async def _fail(tenant_id: UUID, document_id: UUID, reason: str) -> IngestionRes
     async with tenant_session_scope(tenant_id) as session:
         await DocumentRepository(session, tenant_id).set_status(
             document_id, DocumentStatus.FAILED, error=reason
+        )
+        await DocumentRepository(session, tenant_id).update_ingestion_metadata(
+            document_id, {"ingestion_outcome": outcome.value}
         )
     return IngestionResult(document_id, DocumentStatus.FAILED, 0, reason)
 
