@@ -107,6 +107,17 @@ APPROVAL_REASON_APPROVAL_UNAVAILABLE = "approval_required_unavailable"
 APPROVAL_REASON_POLICY_UNREADABLE = "tool_policy_unreadable"
 #: No real approval gate is wired in this deployment (the inert deny-all default).
 APPROVAL_REASON_GATE_INERT = "approval_gate_inert"
+#: An allow lacks an applicable policy record bound to this call (INV-7, #518).
+APPROVAL_REASON_RECORD_INVALID = "approval_record_invalid"
+
+#: How a T2+ invocation was authorised (#518). One value today: spec 0004 §2.5 was
+#: amended to admit a tenant-scoped, admin-recorded pre-approval as INV-7's "recorded
+#: approval". It is a named constant rather than a bare string so that when #501 lands
+#: a per-invocation approval, the two are distinguishable IN THE AUDIT TRAIL — an
+#: auditor must be able to tell "an admin pre-approved this tool for the workspace"
+#: from "a human approved this specific call", and a trail that spells both the same
+#: way cannot answer that even in retrospect.
+APPROVAL_SCOPE_TENANT_PREAPPROVAL = "tenant_preapproval"
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +227,8 @@ class ToolHandlerResult:
 __all__ = [
     "APPROVAL_REASON_APPROVAL_UNAVAILABLE",
     "APPROVAL_REASON_GATE_INERT",
+    "APPROVAL_REASON_RECORD_INVALID",
+    "APPROVAL_SCOPE_TENANT_PREAPPROVAL",
     "APPROVAL_REASON_POLICY_ABSENT",
     "APPROVAL_REASON_POLICY_DISABLED",
     "APPROVAL_REASON_POLICY_UNREADABLE",

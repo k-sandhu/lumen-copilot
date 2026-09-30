@@ -10,6 +10,10 @@ hold source IDs, spans and a content hash, not source text. Public web records
 hold validated URLs and the exact visible evidence. Handles survive compaction
 independently of the prompt, are never reassigned and die with the conversation.
 Atomic reservations may leave numbering gaps after an aborted answer.
+Reservations commit through the coordinator's session before any tool writes,
+then restore the transaction-local tenant binding. Serial and denial-only paths
+do not acquire a second database connection. Preview reservations remain inside
+the preview's rollback boundary.
 
 The final model answer cites `[S1]` or `[W1]` inline. Only permitted, currently
 visible cited evidence is persisted. D handles are navigation only. Unknown,
@@ -25,7 +29,8 @@ would retain prose derived from forbidden evidence. The final permission read
 emits a count-only evidence-rehydration audit event in the answer transaction.
 
 Corpus REST/WS citations add optional `handle`; legacy citations retain numbered
-sources. Public web evidence is a separate additive REST `Message.web_citations`
+sources. Chat and run-detail citations use that same shape and preserve the
+handle on reload. Public web evidence is a separate additive REST `Message.web_citations`
 array and `event:web_citation` payload, with no invented document or chunk IDs.
 `done.citationCount` counts both types. Both event types arrive after final
 resolution and before the terminal; streaming and reloaded handle links resolve

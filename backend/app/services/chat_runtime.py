@@ -1126,14 +1126,14 @@ class ChatRuntime:
         finish_reason = "stop"
         total_hits = 0
         # Reserve before tools can write forward-referencing trace rows. The
-        # independent commit leaves gaps after aborts instead of reusing handles.
-        async with self._sessionmaker() as allocation_session:
-            await bind_tenant(allocation_session, tenant_id)
-            first_handle = await HandleRepository(
-                allocation_session, self._principal, session_id
-            ).reserve()
-            await allocation_session.commit()
+        # reservation commit leaves gaps after aborts instead of reusing handles.
+        # Reuse the coordinator: serial/denial-only paths must not acquire an
+        # extra pool connection. Preview's injected commit remains flush-only.
         handle_repo = HandleRepository(session, self._principal, session_id)
+        first_handle = await handle_repo.reserve()
+        await session.commit()
+        # SET LOCAL resets at commit; restore the tenant on the new transaction.
+        await bind_tenant(session, tenant_id)
         handles = EvidenceHandles(first=first_handle, existing=await handle_repo.load())
         available_handles: set[str] = set()
         web_evidence: dict[str, WebCitation] = {}

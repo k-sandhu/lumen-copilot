@@ -20,6 +20,7 @@ via monkeypatch, so the full REST→persist→stream path runs without a live mo
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -56,6 +57,7 @@ from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.main import _drain_answer_tasks, create_app, lifespan
 from app.realtime.backplane import InMemoryBackplane, StreamOwner
+from app.retrieval import RetrievalService
 from app.services.audit import AuditSink
 from app.services.provider_models import make_provider_model_id
 from app.services.secrets_service import build_secrets_service
@@ -120,7 +122,18 @@ class _ScriptedGateway:
                 finish_reason="tool_calls",
             )
         else:
-            yield StreamEvent(text="The 2024 standard deduction is $14,600.")
+            tool_text = "\n".join(
+                getattr(message, "content", "")
+                for message in msgs
+                if getattr(getattr(message, "role", None), "value", "") == "tool"
+            )
+            handle = re.search(r"\[S\d+\]", tool_text)
+            if handle is None:
+                yield StreamEvent(
+                    text="I couldn't find anything in your sources that answers that."
+                )
+            else:
+                yield StreamEvent(text=f"The 2024 standard deduction is $14,600. {handle.group(0)}")
             yield StreamEvent(finish_reason="stop")
 
 
@@ -153,8 +166,13 @@ class _CapturingGateway:
 
 
 class _FakeRetrieval:
-    def __init__(self, passage: RetrievedPassage) -> None:
+    def __init__(
+        self,
+        passage: RetrievedPassage,
+        session: AsyncSession,
+    ) -> None:
         self._passage = passage
+        self._session = session
 
     async def search_text(
         self,
@@ -174,6 +192,23 @@ class _FakeRetrieval:
 
     async def get_document(self, *, principal: object, document_id: object) -> DocumentText | None:
         return None
+
+    async def read_passages(
+        self,
+        *,
+        principal: object,
+        chunk_ids: list[uuid.UUID],
+        collection_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
+    ) -> list[RetrievedPassage]:
+        # Final citation read-back uses the real permissioned SQL chokepoint;
+        # the fake only scripts the initial search result.
+        return await RetrievalService(self._session, gateway=None).read_passages(
+            principal=principal,  # type: ignore[arg-type]
+            chunk_ids=chunk_ids,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
 
 
 @pytest_asyncio.fixture
@@ -271,15 +306,15 @@ def app(
         score=0.9,
     )
     gateway = _ScriptedGateway(seeded.alice_chunk)
-    retrieval = _FakeRetrieval(passage)
-
     monkeypatch.setattr(chat_module, "get_sessionmaker", lambda: sessionmaker)
     monkeypatch.setattr(chat_module, "get_llm_gateway", lambda: gateway)
     # Inject the fake retrieval factory + the test backplane into the runtime.
     real_runtime_cls = chat_module.ChatRuntime
 
     def _runtime_factory(**kwargs: object) -> object:
-        kwargs["retrieval_factory"] = lambda _session: retrieval
+        kwargs["retrieval_factory"] = lambda runtime_session: _FakeRetrieval(
+            passage, runtime_session
+        )
         kwargs["backplane"] = backplane
         return real_runtime_cls(**kwargs)  # type: ignore[arg-type]
 

@@ -26,6 +26,7 @@ the genuine grounding/citation chokepoint, faking only the network edges
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
 
@@ -188,11 +189,14 @@ class _GroundedAnswerGateway:
             )
             return
         joined = "\n".join(tool_texts)
-        if "No matching passages" in joined or not joined.strip():
+        handle = re.search(r"\[S\d+\]", joined)
+        if "No matching passages" in joined or handle is None:
             yield StreamEvent(text="I couldn't find anything in your sources that answers that.")
             yield StreamEvent(finish_reason="stop")
             return
-        yield StreamEvent(text="The 2024 single-filer standard deduction is $14,600.")
+        yield StreamEvent(
+            text=f"The 2024 single-filer standard deduction is $14,600. {handle.group(0)}"
+        )
         yield StreamEvent(finish_reason="stop")
 
 
