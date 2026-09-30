@@ -62,6 +62,7 @@ from app.services.tools.impls.run_python import (
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import (
     ApprovalDecision,
+    ApprovalRecord,
     ApprovalRequest,
     SandboxRun,
     ToolContext,
@@ -74,7 +75,14 @@ class _AlwaysApprove:
     """A pre-approving gate — the T2 governance path is asserted elsewhere here."""
 
     async def request(self, request: ApprovalRequest) -> ApprovalDecision:
-        return ApprovalDecision.allow()
+        return ApprovalDecision.allow(
+            ApprovalRecord(
+                scope="tenant_preapproval",
+                policy_id=uuid.uuid4(),
+                approved_by=None,
+                arguments_hash=request.arguments_hash,
+            )
+        )
 
 
 # --- A fake sandbox seam ----------------------------------------------------
@@ -452,8 +460,15 @@ async def test_approved_run_python_executes_through_gate(world: _World) -> None:
     """An approved T2 call reaches the seam and returns the run outcome (the positive)."""
 
     class _AllowGate:
-        async def request(self, request: object) -> bool:
-            return True
+        async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+            return ApprovalDecision.allow(
+                ApprovalRecord(
+                    scope="tenant_preapproval",
+                    policy_id=uuid.uuid4(),
+                    approved_by=None,
+                    arguments_hash=request.arguments_hash,
+                )
+            )
 
     artifact_id = uuid.uuid4()
     sandbox = _FakeSandbox(_run(CodeRunStatus.SUCCEEDED, stdout="ok", artifact_ids=(artifact_id,)))

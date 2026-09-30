@@ -133,12 +133,42 @@ function ToolRow({
               operator who reads the refusal hours later. Remove this warning when the
               interactive approval flow (#501) ships.
             */}
-            {tool.requires_approval ? (
+            {!tool.enabled ? (
+              <p className="mt-1 max-w-[22rem] text-xs text-foreground-muted" role="note">
+                Disabled for this tenant. Clearing approval does not enable the tool.
+              </p>
+            ) : tool.requires_approval ? (
               <p className="mt-1 max-w-[22rem] text-xs text-warning" role="note">
                 No approver exists yet, so this <strong>refuses every call</strong> for the whole
                 tenant. Clear it to pre-approve the tool.
               </p>
-            ) : null}
+            ) : tool.risk_tier === 'T1' ? (
+              <p className="mt-1 max-w-[22rem] text-xs text-foreground-muted" role="note">
+                T1 tools need no extra approval. Owner permissions, assistant autonomy, and runtime
+                availability still apply.
+              </p>
+            ) : tool.risk_tier !== 'T2' || tool.is_default ? (
+              <p className="mt-1 max-w-[22rem] text-xs text-foreground-muted" role="note">
+                No recorded tenant pre-approval applies. Approval off alone does not grant
+                execution.
+              </p>
+            ) : (
+              /*
+                Issue #518: the other half of the same honesty. Spec 0004 §2.5 was
+                amended so that clearing this counts as INV-7's "recorded approval" —
+                which means it identifies the authorising admin, and it authorises the
+                tool rather than any particular call. Nothing asks per invocation, so a
+                call a retrieved document induces the model into making also runs. The
+                admin deciding now is the person who should read that, not the operator
+                who finds it in the audit later.
+              */
+              <p className="mt-1 max-w-[22rem] text-xs text-foreground-muted" role="note">
+                Pre-approved for the whole tenant and recorded against the{' '}
+                <strong>authorising admin</strong>. Calls are not reviewed one by one, including
+                ones the assistant is talked into by document content. Other tool permissions and
+                execution controls still apply.
+              </p>
+            )}
           </>
         ) : (
           <span className="text-xs text-foreground-muted">n/a</span>
