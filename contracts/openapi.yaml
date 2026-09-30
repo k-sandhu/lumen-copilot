@@ -112,9 +112,11 @@ paths:
         whose cookie name is unique to that slot. Invalid credentials → 401 with
         a generic message (no account-existence disclosure). Reusing an existing
         slot never overwrites it and returns 409. Admission also returns 409 with
-        code auth_session_capacity when unexpired families (including revoked
+        code auth_session_capacity when unexpired admitted families (including revoked
         ones with potentially undelivered cookie headers) reach twice
-        AUTH_SESSION_MAX_ACTIVE. Owned stale cookies may be expired on that
+        AUTH_SESSION_MAX_ACTIVE. Pre-upgrade fixed-cookie rotation history is
+        not charged; every new login records admission provenance, retained
+        through refresh and revocation. Owned stale cookies may be expired on that
         denied response; no new refresh cookie is issued. Slot cookies use
         absolute expiry, so delayed headers cannot restart their lifetime.
       tags: [auth]

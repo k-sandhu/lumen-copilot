@@ -47,7 +47,7 @@ Feature (`features/auth`):
   old-generation callbacks (including paused/offline work).
 - `model/queries.ts` — `useCurrentUser` (`GET /auth/me`), `useLogin`, `useLogout`.
 - `model/useBootstrapSession.ts` — one boot-time silent refresh so a reload keeps
-  the session; until it resolves the guard shows a loading state (no login flash).
+  the session; until it resolves the guard shows a loading state (no login flash) with an explicit **Sign in again** recovery action. Recovery synchronously advances auth/principal intent, aborts restoration, clears the selected slot and credential/query/mutation holders, and shows login for fresh credentials. Late old responses cannot restore that session.
 - `components/LoginScreen.tsx` — email+password → `POST /auth/login`. Bad creds show
   a **single generic** message (AC-4: no account-existence disclosure).
 - `components/RouteGuard.tsx` — unauthenticated → login; authenticated → children;
@@ -124,8 +124,11 @@ with `AUTH_SESSION_MAX_ACTIVE` (default 8, validated 2–16). It protects the ne
 and currently selected active slots, revokes expired/excess families oldest-first
 with a UUID tie-break, and returns deletion headers only for exact stale slot
 names owned by that resolved user, at most eight per response. All unexpired
-families, including revoked ones, also consume an outstanding-cookie budget of
-twice the active cap (default 16). Once full, further logins return
+families created under the admission scheme, including revoked ones, also consume an outstanding-cookie budget of
+twice the active cap (default 16). Migration `0044_refresh_cookie_admission`
+leaves pre-upgrade fixed-cookie rotation history uncharged while preserving live
+credentials and audit history. Every new login, including legacy login, records
+`cookie_admitted=true`; rotation preserves it. Once full, further logins return
 `409 auth_session_capacity`, issue no new cookie, and still drain owned stale
 names. Revocation/deletion does not release that budget because old headers may
 still arrive. Only server-side absolute expiry releases it; slot cookies use

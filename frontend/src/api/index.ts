@@ -2,7 +2,7 @@
  * Public surface of the api/ boundary. Import from here, not from deep paths.
  * This is the ONLY module the rest of the app uses to reach the backend.
  */
-export { ApiError, request, registerRefreshHandler } from './client';
+export { ApiError, request, registerRefreshHandler, cancelInFlightRefresh } from './client';
 export type { RequestOptions } from './client';
 export { getHealth, getReadiness } from './health';
 export { login, refresh, getCurrentUser, logout, installAuthRefresh } from './auth';

@@ -187,6 +187,20 @@ const server = createServer(async (request, response) => {
     response.writeHead(204).end();
     return;
   }
+  if (url.pathname === '/__control__/commit-drop-refresh') {
+    if (heldRefreshes.length !== 1) {
+      json(response, 409, { held: heldRefreshes.length });
+      return;
+    }
+    const pending = heldRefreshes.shift();
+    const committed = rotateRefresh(pending);
+    holdRefresh = false;
+    pending.record.status = committed ? 200 : 401;
+    // The replacement exists server-side, but its headers never reach a browser.
+    pending.response.destroy();
+    response.writeHead(committed ? 204 : 409).end();
+    return;
+  }
   if (url.pathname === '/__control__/hold-login') {
     holdLogin = true;
     response.writeHead(204).end();

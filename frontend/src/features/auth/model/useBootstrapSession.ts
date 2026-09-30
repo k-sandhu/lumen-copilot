@@ -13,8 +13,11 @@
  * status is `unknown` and the guard shows a loading state rather than flashing
  * the login screen (AC-3).
  */
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
+  cancelInFlightRefresh,
+  clearAccessToken,
   getAccessToken,
   getAuthIntentGeneration,
   isAuthIntentCurrent,
@@ -22,6 +25,7 @@ import {
   registerRefreshHandler,
 } from '@/api';
 import { useAuthStore } from './authStore';
+import { transitionPrincipal } from './principalTransition';
 
 let bootstrapPromise: Promise<void> | null = null;
 
@@ -59,4 +63,17 @@ export function useBootstrapSession(): void {
   useEffect(() => {
     void bootstrapSession();
   }, []);
+}
+
+/** Explicit terminal recovery when the selected HttpOnly credential was lost. */
+export function useSessionRecovery(): () => void {
+  const queryClient = useQueryClient();
+  return useCallback(() => {
+    // Reserve a newer intent and clear the selector before aborting old work.
+    // Even an uncooperative late response cannot restore the abandoned session.
+    clearAccessToken();
+    void cancelInFlightRefresh();
+    // Bootstrap has no bearer, so token clearing alone emits no notification.
+    transitionPrincipal(queryClient, 'unauthenticated');
+  }, [queryClient]);
 }

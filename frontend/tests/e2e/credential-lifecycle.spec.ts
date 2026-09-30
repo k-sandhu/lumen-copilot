@@ -459,6 +459,55 @@ test.describe('shared auth cookie fixture', () => {
     });
   }
 
+  test('lost winning headers with a gone tab can recover through Sign in again (R5-002)', async ({
+    page,
+  }) => {
+    test.skip(Boolean(process.env.E2E_BASE_URL), 'Requires the owned cookie fixture.');
+    const control = COOKIE_SERVER_CONTROL;
+    await fetch(`${control}/reset`, { method: 'POST' });
+    await page.goto('/admin');
+    await loginAs(page, 'a');
+    const selectedSlot = await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'));
+    const originalCookie = (await page.context().cookies()).find(
+      (cookie) => cookie.name === `lumen_refresh_token_${selectedSlot}`,
+    );
+    expect(originalCookie).toBeDefined();
+    expect(await page.evaluate(() => Boolean(navigator.locks))).toBe(true);
+    await fetch(`${control}/hold-refresh`, { method: 'POST' });
+    const winner = await page.context().newPage();
+    await winner.goto('/admin');
+    await expect.poll(async () => (await cookieServerState(control)).heldRefreshes).toBe(1);
+    // Closing the document before dropping its committed response prevents any
+    // failure handler from clearing the shared selector. Web Locks stay enabled.
+    await winner.close();
+    expect((await fetch(`${control}/commit-drop-refresh`, { method: 'POST' })).status).toBe(204);
+    expect(
+      (await page.context().cookies()).find((cookie) => cookie.name === originalCookie?.name),
+    ).toEqual(originalCookie);
+    await page.reload();
+    await expect
+      .poll(
+        async () =>
+          (await cookieServerState(control)).requests.filter(
+            ({ path, status }) => path.endsWith('/auth/refresh') && status === 401,
+          ).length,
+      )
+      .toBeGreaterThanOrEqual(1);
+    await expect(page.getByRole('status')).toHaveText('Restoring your session…');
+    expect(await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'))).toBe(
+      selectedSlot,
+    );
+    await page.getByRole('button', { name: /^sign in again$/i }).click();
+    await expect(page.getByRole('heading', { name: /sign in to your workspace/i })).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'))).toBeNull();
+    await loginAs(page, 'b');
+    const slotB = await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'));
+    expect(slotB).not.toBe(selectedSlot);
+    await page.reload();
+    await expect(page.getByRole('button', { name: /account menu/i })).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem('lumen.active-auth-slot'))).toBe(slotB);
+  });
+
   test('real HttpOnly cookie jar survives held A logout after B login and restart (R2-001/R2-003)', async ({
     page,
   }) => {

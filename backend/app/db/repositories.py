@@ -1145,12 +1145,14 @@ class RefreshTokenRepository(_TenantScopedRepository):
         token_hash: str,
         expires_at: datetime,
         token_id: UUID | None = None,
+        cookie_admitted: bool = False,
     ) -> RefreshToken:
         values: dict[str, object] = {
             "tenant_id": self._tenant_id,
             "user_id": user_id,
             "token_hash": token_hash,
             "expires_at": expires_at,
+            "cookie_admitted": cookie_admitted,
         }
         if token_id is not None:
             values["id"] = token_id
@@ -1170,11 +1172,13 @@ class RefreshTokenRepository(_TenantScopedRepository):
         return _to_refresh_token(row) if row is not None else None
 
     async def count_unexpired_families(self, user_id: UUID) -> int:
-        """Count every name whose issuance headers can still install a cookie.
+        """Count admitted names whose headers can still install a cookie.
 
         Revocation and request-visible cleanup do not prove that older headers
         cannot arrive later. Keep that family's budget until its absolute expiry.
         The caller holds the owning user lock before admission or rotation.
+        Pre-upgrade legacy rotations shared one fixed name and were not admitted
+        under this scheme; retaining their history must not block valid login.
         """
         stmt = (
             select(func.count())
@@ -1183,6 +1187,7 @@ class RefreshTokenRepository(_TenantScopedRepository):
                 models.RefreshToken.tenant_id == self._tenant_id,
                 models.RefreshToken.user_id == user_id,
                 models.RefreshToken.expires_at > datetime.now(UTC),
+                models.RefreshToken.cookie_admitted.is_(True),
             )
         )
         return int((await self._session.execute(stmt)).scalar_one())

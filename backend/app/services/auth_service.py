@@ -149,6 +149,7 @@ class AuthService:
                     token_hash=hash_refresh_token(raw_refresh),
                     expires_at=expires_at,
                     token_id=session_id,
+                    cookie_admitted=True,
                 )
                 # A revoked family can still have undelivered Set-Cookie
                 # headers. Two active-cap windows allow ordinary retirement

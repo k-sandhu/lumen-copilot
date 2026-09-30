@@ -178,6 +178,9 @@ class RefreshToken(TenantScopedMixin, Base):
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Historical legacy rotations shared one fixed cookie. Only rows admitted
+    # under the bounded scheme reserve outstanding cookie-issuance capacity.
+    cookie_admitted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

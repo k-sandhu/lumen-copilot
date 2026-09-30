@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session, get_settings_dep, require_roles
-from app.auth import Principal, hash_password, hashing
+from app.auth import Principal, hash_password, hash_refresh_token, hashing
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.models import AuditEvent, RefreshToken, User
@@ -768,6 +768,9 @@ async def test_oversized_owned_cookie_namespace_drains_in_bounded_header_batches
                     user_id=user.id,
                     token_hash=f"{index + 1:064x}",
                     expires_at=expires_at,
+                    # These are admitted unique slot cookies, not fixed-cookie
+                    # legacy rotations from before the admission scheme.
+                    cookie_admitted=True,
                 )
                 for index, slot in enumerate(seeded_slots)
             )
@@ -863,6 +866,65 @@ async def test_held_login_headers_cannot_exceed_outstanding_cookie_budget(
         app.dependency_overrides.pop(get_settings_dep, None)
 
 
+async def test_pre_upgrade_legacy_refresh_history_does_not_block_slot_login(
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """17 old rotations shared one fixed cookie; none admitted a slot (R5-001)."""
+    now = datetime.now(UTC)
+    legacy_secret = "pre-upgrade-current-refresh-secret"
+    async with sessionmaker() as session:
+        user = (await session.execute(select(User))).scalar_one()
+        legacy_rows = [
+            RefreshToken(
+                id=uuid.uuid4(),
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                token_hash=hash_refresh_token(legacy_secret if index == 16 else f"old-{index}"),
+                created_at=now - timedelta(minutes=17 - index),
+                expires_at=now + timedelta(days=14),
+                revoked_at=now if index < 16 else None,
+            )
+            for index in range(17)
+        ]
+        session.add_all(legacy_rows)
+        await session.commit()
+        original_history = {row.id: (row.token_hash, row.revoked_at) for row in legacy_rows}
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Lumen-Auth-Slot": str(uuid.uuid4())},
+        json={"email": _DEV_EMAIL, "password": _DEV_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    assert "lumen_refresh_token_" in response.headers["set-cookie"]
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(RefreshToken))).scalars().all()
+        assert len(rows) == 18
+        assert {
+            row.id: (row.token_hash, row.revoked_at.replace(tzinfo=UTC) if row.revoked_at else None)
+            for row in rows
+            if row.id in original_history
+        } == original_history
+        assert (
+            not (
+                await session.execute(
+                    select(AuditEvent).where(AuditEvent.action == "auth.login_failed")
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    # The rollout preserves the current legacy credential as well as history.
+    client.cookies.set(
+        "lumen_refresh_token", legacy_secret, domain="test.local", path="/api/v1/auth"
+    )
+    refreshed = await client.post("/api/v1/auth/refresh")
+    assert refreshed.status_code == 200
+    async with sessionmaker() as session:
+        assert len((await session.execute(select(RefreshToken))).scalars().all()) == 18
+
+
 async def test_slot_cookie_expiry_matches_absolute_server_deadline(
     client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -901,6 +963,7 @@ async def test_revoked_families_keep_admission_budget_until_expiry(
                     user_id=user.id,
                     token_hash=f"{index + 1:064x}",
                     revoked_at=datetime.now(UTC),
+                    cookie_admitted=True,
                     expires_at=datetime.now(UTC) + timedelta(days=1),
                 )
                 for index in range(4)
