@@ -773,6 +773,10 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     # the REST AskUserQuestion payload verbatim, so the UI can re-render the
     # options after reload. NULL for every other turn.
     question: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # Immutable answer-level provenance, independent of chunk/citation cascades.
+    # NULL means unknown (legacy); [] means explicitly no source documents.
+    # No document FK: deletion must retain the id so recall fails closed.
+    source_document_ids: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
     citations: Mapped[list[Citation]] = relationship(

@@ -135,7 +135,10 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0045_embedding_contract"]
+    assert list(script.get_heads()) == ["0046_message_source_provenance"]
+    provenance = script.get_revision("0046_message_source_provenance")
+    assert provenance is not None
+    assert provenance.down_revision == "0045_embedding_contract"
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"

@@ -52,6 +52,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -103,11 +104,18 @@ from app.services.provider_models import (
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
+from app.services.tools.impls.recall import READ_CONVERSATION_TOOL_NAME
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
 from app.services.tools.mcp_bridge import is_mcp_tool_name
 from app.services.tools.registry import default_allowlist, tool_specs
 from app.services.tools.runner import ToolRunner
-from app.services.tools.types import SandboxToolRunner, ToolContext, ToolDefinition
+from app.services.tools.types import (
+    SandboxToolRunner,
+    ToolContext,
+    ToolDefinition,
+    TranscriptReader,
+)
+from app.services.transcript_recall import SessionTranscriptReader
 
 log = get_logger(__name__)
 
@@ -765,6 +773,7 @@ class ChatRuntime:
         summary: str | None = None,
         evidence: Sequence[tuple[UUID, UUID]] = (),
         mentioned_documents: Sequence[tuple[UUID, str]] = (),
+        compaction_cursor: tuple[datetime, UUID] | None = None,
     ) -> bool:
         """Produce the grounded answer for ``stream_id`` end-to-end.
 
@@ -848,6 +857,7 @@ class ChatRuntime:
                     summary=summary,
                     evidence=evidence,
                     mentioned_documents=mentioned_documents,
+                    compaction_cursor=compaction_cursor,
                 )
         except asyncio.CancelledError:
             # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
@@ -912,6 +922,7 @@ class ChatRuntime:
         summary: str | None = None,
         evidence: Sequence[tuple[UUID, UUID]] = (),
         mentioned_documents: Sequence[tuple[UUID, str]] = (),
+        compaction_cursor: tuple[datetime, UUID] | None = None,
     ) -> _RunResult:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
@@ -1075,6 +1086,7 @@ class ChatRuntime:
         # permitted name is REDACTED from the summary text before it can reach
         # the prompt (#446 finding 1 — revocation-safe memory).
         evidence_lines: list[str] = []
+        evidence_sources: set[UUID] = set()
         by_doc: dict[UUID, list[UUID]] = {}
         for doc_id, chunk_id in evidence:
             by_doc.setdefault(doc_id, []).append(chunk_id)
@@ -1104,6 +1116,7 @@ class ChatRuntime:
                 evidence_lines.append(
                     f"{name} (document_id {doc_id}; cited chunk(s): {chunks_note})"
                 )
+                evidence_sources.add(doc_id)
             if summary:
                 for doc_id, name in mentioned_documents:
                     if doc_id not in permitted and name and name in summary:
@@ -1136,6 +1149,7 @@ class ChatRuntime:
             counter=self._token_counter_for(route_state.route.model),
             summary=summary,
             evidence_lines=tuple(evidence_lines),
+            evidence_document_ids=tuple(evidence_sources),
         )
         messages: list[ChatMessage] = assembled.messages
         await self._emit_step(state, key="prepare", label="Preparing", step_state="completed")
@@ -1143,6 +1157,10 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
+        # Account for ALL initial prompt inputs and every appended tool reply.
+        # Keep this snapshot independently of fit_transcript: content that a
+        # prior model call saw can still influence the answer after compaction.
+        prompt_context = list(messages)
         # Which tool CALL carried which passages — (chunk_id, RENDERED snippet)
         # pairs in passage order (#415). The rendered snippet (trimmed to the
         # run's snippet budget, exactly as ``_render_passages`` showed it) is what
@@ -1214,6 +1232,15 @@ class ChatRuntime:
             snippet_budget=assembled.snippet_budget,
             session_id=session_id,
             sandbox=sandbox,
+            # The #569 own-conversation read seam, bound to THIS session so the
+            # tool has no session argument to point elsewhere. Built only when
+            # the allow-list offers ``read_conversation`` (deny-by-default).
+            transcript=self._build_transcript_seam(
+                session=session,
+                allowed=allowed,
+                session_id=session_id,
+                compaction_cursor=compaction_cursor,
+            ),
             # Read-only test/preview mode (F-AB-5, issue #215): a T1 file-writing tool
             # builds + validates but persists nothing, so a test run mutates no state.
             # ``run_python`` (T2) is already denied for a test run because the sandbox
@@ -1358,14 +1385,28 @@ class ChatRuntime:
                 # the provider protocol pairs each tool reply to its request,
                 # and a deterministic order keeps the prompt prefix stable for
                 # caching (ADR-0016 §2) regardless of completion order.
-                messages.append(
-                    ChatMessage(
-                        role=Role.TOOL,
-                        content=result.content,
-                        tool_call_id=call.id,
-                        name=call.name,
-                    )
+                tool_message = ChatMessage(
+                    role=Role.TOOL,
+                    content=result.content,
+                    tool_call_id=call.id,
+                    name=call.name,
+                    source_document_ids=(
+                        tuple(
+                            sorted(
+                                {
+                                    *result.source_document_ids,
+                                    *result.document_ids,
+                                    *(p.document_id for p in result.passages),
+                                },
+                                key=str,
+                            )
+                        )
+                        if result.ok and result.source_document_ids is not None
+                        else None
+                    ),
                 )
+                messages.append(tool_message)
+                prompt_context.append(tool_message)
                 # Remember this call's passages as (chunk_id, rendered snippet)
                 # so the compactor can protect/re-embed its cited evidence (#415).
                 # The snippet is derived through the SAME renderer the tool reply
@@ -1452,6 +1493,7 @@ class ChatRuntime:
                 content=ask_question.question,
                 citations=[],
                 question=ask_question,
+                prompt_context=prompt_context,
             )
             await self._record_usage_scopes(
                 session=session,
@@ -1601,6 +1643,7 @@ class ChatRuntime:
             model=route_state.model,
             content=answer_text,
             citations=list(cited.values()),
+            prompt_context=prompt_context,
         )
         # Evidence carry-forward WRITE (#416): the NEXT answer's digest is this
         # answer's cited ids — IDs only (ADR-0016 §3.2), replaced wholesale (a
@@ -1793,6 +1836,34 @@ class ChatRuntime:
                 message_id=assistant_message_id,
                 next_seq=state.next_seq,
             )
+        )
+
+    def _build_transcript_seam(
+        self,
+        *,
+        session: AsyncSession,
+        allowed: frozenset[str],
+        session_id: UUID,
+        compaction_cursor: tuple[datetime, UUID] | None = None,
+    ) -> TranscriptReader | None:
+        """Build the ``read_conversation`` seam, or ``None`` (#569).
+
+        Same deny-by-default shape as the sandbox seam: built only when this
+        run's allow-list actually offers the tool, so a session that cannot
+        recall carries no recall plumbing and a stray invocation reports a typed
+        ``ok=False`` instead of reaching the messages table.
+
+        Bound to ONE ``session_id`` here, at construction, where the value comes
+        from the runtime rather than from model output — the tool's schema has no
+        session argument, so there is nothing to smuggle one through.
+        """
+        if READ_CONVERSATION_TOOL_NAME not in allowed:
+            return None
+        return SessionTranscriptReader(
+            session=session,
+            principal=self._principal,
+            session_id=session_id,
+            compaction_cursor=compaction_cursor,
         )
 
     async def _salvage_usage_after_failure(
@@ -2577,6 +2648,18 @@ class ChatRuntime:
                         retrieval=self._retrieval_factory(call_session),
                         artifacts=None,
                         sandbox=None,
+                        # The #569 transcript seam is a READ seam that is not
+                        # ``retrieval``, so it needs its own rebind: left as-is
+                        # it would keep the RUNTIME session and use it from a
+                        # coroutine overlapping every other fanned-out call —
+                        # the same shared-session race that keeps MCP tools out
+                        # of the fan-out. The view shares the per-answer recall
+                        # budget, so fanning out cannot buy extra calls.
+                        transcript=(
+                            None
+                            if context.transcript is None
+                            else context.transcript.for_session(call_session)
+                        ),
                     )
 
             async def _worker(i: int) -> tuple[int, ToolResult]:
@@ -2675,6 +2758,7 @@ class ChatRuntime:
         content: str,
         citations: list[GroundedCitation],
         question: AskUserQuestion | None = None,
+        prompt_context: Sequence[ChatMessage] | None = None,
     ) -> list[GroundedCitation]:
         """Persist the assistant message + its citations; return citations w/ ids.
 
@@ -2687,6 +2771,16 @@ class ChatRuntime:
         """
         message_repo = MessageRepository(session, tenant_id)
         citation_repo = CitationRepository(session, tenant_id)
+        # Single provenance calculation for answers and questions. Known sources
+        # cannot heal an unknown input. A missing context is UNKNOWN too, never
+        # an optimistic empty snapshot or a citation-only approximation.
+        sources = {citation.document_id for citation in citations}
+        provenance_known = prompt_context is not None
+        for message in prompt_context or ():
+            if message.source_document_ids is None:
+                provenance_known = False
+            else:
+                sources.update(message.source_document_ids)
         await message_repo.add_with_id(
             message_id=assistant_message_id,
             session_id=session_id,
@@ -2694,6 +2788,7 @@ class ChatRuntime:
             content=content,
             model=model,
             question=question,
+            source_document_ids=sorted(sources, key=str) if provenance_known else None,
         )
         stored: list[GroundedCitation] = []
         for citation in citations:

@@ -45,12 +45,15 @@ known handle (text/name/id).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
-from app.db.repositories import GrantRepository, GroupRepository
+from app.db.repositories import GrantRepository, GroupRepository, MessageRepository
+from app.domain.entities import Message
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
 from app.retrieval import queries
@@ -364,6 +367,37 @@ class RetrievalService:
             )
             for position, row in enumerate(rows)
         ]
+
+    async def search_conversation(
+        self,
+        *,
+        principal: Principal,
+        messages: MessageRepository,
+        session_id: UUID,
+        before_created_at: datetime,
+        before_message_id: UUID,
+        terms: Sequence[str],
+        limit: int,
+        mentioned_documents: tuple[tuple[UUID, str], ...],
+    ) -> list[Message]:
+        """Authorize transcript sources and stored mentions BEFORE matching (#569).
+
+        The bound reader owns session ownership and the fixed compaction cursor.
+        This chokepoint owns source permissions; SQL filters candidates before
+        its hard scan cap. The repository simply clips permitted prose and matches
+        literal terms in Python over that bounded set. No unknown or forbidden
+        assistant body can produce even a match/no-match signal.
+        """
+        allow_set = await self._resolve_allow_set(principal)
+        return await messages.search_for_session_before(
+            session_id,
+            before_created_at=before_created_at,
+            before_message_id=before_message_id,
+            terms=terms,
+            limit=limit,
+            permitted_document_ids=queries.permitted_document_id_query(allow_set=allow_set),
+            mentioned_documents=mentioned_documents,
+        )
 
     async def permitted_document_names(
         self, *, principal: Principal, document_ids: list[UUID]

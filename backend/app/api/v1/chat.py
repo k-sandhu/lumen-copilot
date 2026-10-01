@@ -422,7 +422,13 @@ def _to_chat_messages(history: tuple[Message, ...]) -> list[ChatMessage]:
         role = role_map.get(m.role)
         if role is None:
             continue
-        out.append(ChatMessage(role=role, content=m.content))
+        out.append(
+            ChatMessage(
+                role=role,
+                content=m.content,
+                source_document_ids=m.source_document_ids if role is Role.ASSISTANT else (),
+            )
+        )
     return out
 
 
@@ -1022,6 +1028,7 @@ def _schedule_answer(
             summary=result.summary,
             evidence=result.evidence,
             mentioned_documents=result.mentioned_documents,
+            compaction_cursor=result.compaction_cursor,
         )
         # Rolling-summary refresh (#416, ADR-0016 §3.2): enqueued AFTER a
         # successful answer, off the event loop (the #401 lesson — a Celery

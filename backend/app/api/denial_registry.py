@@ -63,6 +63,11 @@ NON_RESOURCE_DENIAL_SEAMS = {
     "app.services.tools.runner.ToolRunner": (
         "tool refusals use tool.invoked/tool.result; T2 intent/results retain durable AuditSink"
     ),
+    "app.services.transcript_recall.SessionTranscriptReader.recall": (
+        "internal runtime-bound current-session read; the model cannot choose session/message ids; "
+        "missing/wrong-owner bindings return no turns and log miswiring, not a resource 403/404; "
+        "the tool invocation/result retain ToolRunner audit ownership"
+    ),
 }
 
 

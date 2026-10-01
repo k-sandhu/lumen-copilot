@@ -331,6 +331,19 @@ def permitted_document_names(
     return stmt
 
 
+def permitted_document_id_query(*, allow_set: AllowSet) -> Select[tuple[str]]:
+    """Permission subquery for durable transcript sources; no content or ranking.
+
+    Normalize UUID text for PostgreSQL and SQLite's UUID storage. Missing/deleted,
+    foreign-tenant and revoked sources remain absent under the SAME predicate as
+    passage and document reads, including connector ACLs and group grants.
+    """
+    return select(func.replace(cast(models.Document.id, String), "-", "")).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        _document_permitted(allow_set),
+    )
+
+
 def valid_chunk_pairs(*, tenant_id: object, chunk_ids: list[UUID]) -> Select[tuple[UUID, UUID]]:
     """(chunk_id, document_id) for chunks that really exist in this tenant.
 

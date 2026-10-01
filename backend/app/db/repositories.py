@@ -32,7 +32,18 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import (
+    Select,
+    and_,
+    case,
+    cast,
+    delete,
+    func,
+    or_,
+    select,
+    update,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -118,6 +129,7 @@ from app.domain.entities import (
     UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
+from app.domain.recall import MAX_RECALL_TURN_CHARS, clip_recall_text
 from app.domain.scheduling import Cadence, StructuredCadence
 
 
@@ -423,6 +435,11 @@ def _to_message(row: models.Message) -> Message:
         # Lenient rehydration (spec 0006): a malformed stored payload yields
         # None and the message still renders as plain content — never a 500.
         question=AskUserQuestion.from_payload(row.question),
+        source_document_ids=(
+            tuple(UUID(d) for d in row.source_document_ids)
+            if row.source_document_ids is not None
+            else None
+        ),
     )
 
 
@@ -3899,6 +3916,9 @@ class SavedSearchRepository(_TenantScopedRepository):
         return True
 
 
+_MAX_TRANSCRIPT_SCAN_TURNS = 200
+
+
 class MessageRepository(_TenantScopedRepository):
     """Messages within one tenant."""
 
@@ -3930,6 +3950,7 @@ class MessageRepository(_TenantScopedRepository):
         content: str,
         model: str | None = None,
         question: AskUserQuestion | None = None,
+        source_document_ids: Sequence[UUID] | None = None,
     ) -> Message:
         """Persist a message under a **pre-minted** id (the streamed answer path).
 
@@ -3949,10 +3970,30 @@ class MessageRepository(_TenantScopedRepository):
             # The clarifying question this turn ended with, if any (spec 0006):
             # stored as the REST payload verbatim (AskUserQuestion.to_payload).
             question=question.to_payload() if question is not None else None,
+            source_document_ids=(
+                sorted({str(d) for d in source_document_ids})
+                if source_document_ids is not None
+                else None
+            ),
         )
         self._session.add(row)
         await self._session.flush()
         return _to_message(row)
+
+    async def source_documents_for_messages(
+        self, message_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[UUID, ...] | None]:
+        """Durable ids only; unknown provenance stays unknown, never an empty set."""
+        if not message_ids:
+            return {}
+        stmt = select(models.Message.id, models.Message.source_document_ids).where(
+            models.Message.tenant_id == self._tenant_id,
+            models.Message.id.in_(message_ids),
+        )
+        return {
+            mid: tuple(UUID(d) for d in ids) if ids is not None else None
+            for mid, ids in (await self._session.execute(stmt)).all()
+        }
 
     async def get(self, message_id: UUID) -> Message | None:
         stmt = select(models.Message).where(
@@ -4013,6 +4054,168 @@ class MessageRepository(_TenantScopedRepository):
             stmt = stmt.limit(limit)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_message(r) for r in rows]
+
+    async def search_for_session_before(
+        self,
+        session_id: UUID,
+        *,
+        before_created_at: datetime,
+        before_message_id: UUID,
+        terms: Sequence[str] = (),
+        roles: Sequence[MessageRole] = (MessageRole.USER, MessageRole.ASSISTANT),
+        permitted_document_ids: Select[tuple[str]] | None = None,
+        mentioned_documents: Sequence[tuple[UUID, str]] = (),
+        limit: int,
+    ) -> list[Message]:
+        """The COMPACTED range of a session — turns the summary already folded (#569).
+
+        The exact set-complement of :meth:`list_for_session_after`, tolerance
+        window included, so the two partition the session: every message is in
+        the live window or in this one, never both and never neither. Written as
+        the literal negation of that predicate rather than as an independent
+        "``<=`` the cursor" — an independently-derived bound would drift the
+        moment either side is retuned, and a drift here is either a turn the
+        model can never reach (a gap) or one it reads twice (wasted budget).
+
+        ``terms`` are ANDed, case-insensitively, as substrings of the content —
+        thin on purpose: this is a navigational aid over one bounded
+        conversation, not a second retrieval engine (that is ``search_text``,
+        which is permission-filtered and ranked). Ordered NEWEST first and
+        capped at ``limit``, because "as we discussed earlier" almost always
+        means the most recent mention; the caller re-orders chronologically for
+        rendering.
+
+        ``roles`` defaults to the two conversational roles: a persisted
+        ``system`` row is prompt scaffolding, not something the user said or was
+        told, and recall must not hand the model its own scaffolding back.
+
+        Recall supplies the retrieval chokepoint's permission subquery. Only
+        user turns and assistant turns with complete, currently permitted source
+        snapshots and stored mentions enter the newest 200 candidates. A forbidden
+        stored-name mention withholds the whole assistant turn before that cap or
+        matching. Python clips and matches literal terms over the permitted set.
+        SQL binds name collections once; it never expands names into expressions.
+        The raw mode (no permission subquery) exists for structural range/partition
+        checks.
+        """
+        window_start = before_created_at - timedelta(seconds=1)
+        conditions = [
+            models.Message.tenant_id == self._tenant_id,
+            models.Message.session_id == session_id,
+            models.Message.role.in_([r.value for r in roles]),
+            # NOT (created_at > cursor OR (created_at > window_start AND id > cursor_id))
+            # — de Morgan'd so the comparison stays indexable.
+            models.Message.created_at <= before_created_at,
+            or_(
+                models.Message.created_at <= window_start,
+                models.Message.id <= before_message_id,
+            ),
+        ]
+        if permitted_document_ids is not None:
+            ids = models.Message.source_document_ids
+            dialect = self._session.get_bind().dialect.name
+            # CASE keeps JSON null/SQL NULL away from array expansion, regardless
+            # of the database's predicate evaluation order. UNKNOWN fails closed.
+            if dialect == "postgresql":
+                known = func.jsonb_typeof(ids) == "array"
+                source_ids = func.jsonb_array_elements_text(
+                    case((known, ids), else_=cast("[]", JSONB))
+                ).table_valued("value")
+            else:
+                known = func.json_type(ids) == "array"
+                source_ids = func.json_each(case((known, ids), else_="[]")).table_valued("value")
+            forbidden_source = (
+                select(source_ids.c.value)
+                .where(func.replace(source_ids.c.value, "-", "").not_in(permitted_document_ids))
+                .correlate(models.Message)
+                .exists()
+            )
+            conditions.append(
+                or_(
+                    models.Message.role == MessageRole.USER.value,
+                    and_(known, ~forbidden_source),
+                )
+            )
+        revoked_names: list[str] = []
+        if permitted_document_ids is not None and mentioned_documents:
+            # One JSON collection bind, not an IN-list or one SQL expression
+            # per name. The same retrieval predicate authorizes stored mentions.
+            mention_ids = [doc.hex for doc, name in mentioned_documents if name]
+            if self._session.get_bind().dialect.name == "postgresql":
+                mentions = func.jsonb_array_elements_text(cast(mention_ids, JSONB)).table_valued(
+                    "value"
+                )
+            else:
+                mentions = func.json_each(json.dumps(mention_ids)).table_valued("value")
+            permitted_mentions = set(
+                (
+                    await self._session.execute(
+                        select(mentions.c.value).where(mentions.c.value.in_(permitted_document_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            revoked_names = [
+                name
+                for doc, name in mentioned_documents
+                if name and doc.hex not in permitted_mentions
+            ]
+
+        if permitted_document_ids is not None and mentioned_documents:
+            # One collection bind and one correlated membership predicate. Check
+            # ORIGINAL stored text, including overlapping names and names beyond
+            # the display bound, before forbidden turns can consume the scan cap.
+            if self._session.get_bind().dialect.name == "postgresql":
+                names = func.jsonb_array_elements_text(cast(revoked_names, JSONB)).table_valued(
+                    "value"
+                )
+                occurs = func.strpos(models.Message.content, names.c.value) > 0
+            else:
+                names = func.json_each(json.dumps(revoked_names)).table_valued("value")
+                occurs = func.instr(models.Message.content, names.c.value) > 0
+            forbidden_mention = (
+                select(names.c.value).where(occurs).correlate(models.Message).exists()
+            )
+            conditions.append(
+                or_(models.Message.role == MessageRole.USER.value, ~forbidden_mention)
+            )
+        stmt = (
+            select(models.Message)
+            .where(*conditions)
+            .order_by(models.Message.created_at.desc(), models.Message.id.desc())
+            .limit(_MAX_TRANSCRIPT_SCAN_TURNS)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+
+        lowered_terms = [term.lower() for term in terms]
+        matches: list[Message] = []
+        for row in rows:
+            # Derive recall dependencies from the stored row and stored mention
+            # map BEFORE clipping. Even names entirely past the cut
+            # remain dependencies of a contributing turn. Never scan output text.
+            mentioned_ids = tuple(
+                sorted(
+                    {
+                        doc
+                        for doc, name in mentioned_documents
+                        if row.role == MessageRole.ASSISTANT.value and name and name in row.content
+                    },
+                    key=str,
+                )
+            )
+            content = clip_recall_text(row.content, MAX_RECALL_TURN_CHARS)
+            # Python substrings keep %, _ and backslash literal by construction.
+            # Withheld rows were excluded by SQL before this content is inspected.
+            lowered_content = content.lower()
+            message = replace(
+                _to_message(row), content=content, mentioned_document_ids=mentioned_ids
+            )
+            if all(term in lowered_content for term in lowered_terms):
+                matches.append(message)
+        # Do not mutate an identity-mapped ORM message (or depend on a cached raw
+        # content field); the clipped projection is strictly read-only.
+        return matches[: max(1, limit)]
 
     async def list_for_session(self, session_id: UUID) -> list[Message]:
         stmt = (
@@ -4299,6 +4502,32 @@ class CitationRepository(_TenantScopedRepository):
             )
             for row in rows
         ]
+
+    async def document_ids_for_messages(self, message_ids: list[UUID]) -> dict[UUID, set[UUID]]:
+        """``{message_id: {document_id}}`` for many messages — **ids only** (#569).
+
+        Deliberately not :meth:`list_for_messages_hydrated_batch`. That one joins
+        ``chunks`` for the snippet text, and the recall seam's whole job is to
+        decide whether a turn's text may be shown *before* any of it is loaded.
+        Pulling passage prose into a process that must not emit it is how a
+        redaction becomes one forgotten field away from a leak; not selecting the
+        column at all is a property of the query, not of the code that follows it.
+        """
+        if not message_ids:
+            return {}
+        stmt = (
+            select(models.Citation.message_id, models.Chunk.document_id)
+            .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Citation.message_id.in_(message_ids),
+                models.Chunk.tenant_id == self._tenant_id,
+            )
+        )
+        out: dict[UUID, set[UUID]] = {}
+        for message_id, document_id in (await self._session.execute(stmt)).all():
+            out.setdefault(message_id, set()).add(document_id)
+        return out
 
     async def list_for_message_hydrated(self, message_id: UUID) -> list[CitationView]:
         """Citations for a message, joined to source document + chunk text.
