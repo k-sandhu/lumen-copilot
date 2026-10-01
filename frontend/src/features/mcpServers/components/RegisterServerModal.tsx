@@ -25,6 +25,7 @@ import { ApiError } from '@/api';
 import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
 import { Icon } from '@/ui';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
+import { scrubCredentialInput, useCredentialDomCleanup } from '@/lib/credentialDom';
 import { useFocusTrap } from '@/lib/useFocusTrap';
 import { useRegisterMcpServer } from '../model/queries';
 import { registerErrorMessage, validateEndpoint } from '../model/presentation';
@@ -51,6 +52,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
   const retainedNameRef = useRef<HTMLInputElement | null>(null);
   const retainedEndpointRef = useRef<HTMLInputElement | null>(null);
   const secretRef = useRef<SecretInputHandle | null>(null);
+  const { rememberRoot, clearDom } = useCredentialDomCleanup();
 
   const [name, setName] = useState('');
   const [transport, setTransport] = useState<McpTransport>('streamable_http');
@@ -86,12 +88,13 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
     if (node) retainedEndpointRef.current = node;
   }, []);
   const hardBlankDom = useCallback(() => {
+    clearDom();
     // Blank the live controls synchronously before a parent unmounts the dialog;
     // retained refs also cover extension-held controls after React detaches them.
-    if (retainedNameRef.current) retainedNameRef.current.value = '';
-    if (retainedEndpointRef.current) retainedEndpointRef.current.value = '';
+    if (retainedNameRef.current) scrubCredentialInput(retainedNameRef.current);
+    if (retainedEndpointRef.current) scrubCredentialInput(retainedEndpointRef.current);
     secretRef.current?.reset();
-  }, []);
+  }, [clearDom]);
 
   const clearForm = useCallback(() => {
     hardBlankDom();
@@ -159,7 +162,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
       {
         onSuccess: closeAndClear,
         onError: () => nameRef.current?.focus(),
-        onSettled: () => secretRef.current?.reset(),
+        onSettled: clearForm,
       },
     );
   }
@@ -191,7 +194,7 @@ export function RegisterServerModal({ open, onClose }: RegisterServerModalProps)
           </button>
         </header>
 
-        <form onSubmit={handleSubmit} autoComplete="off" noValidate>
+        <form ref={rememberRoot} onSubmit={handleSubmit} autoComplete="off" noValidate>
           <div className="space-y-4 px-5 py-4">
             <p className="text-sm text-foreground-muted">
               Connect a remote MCP server. We’ll register it (pending), then you can test it to

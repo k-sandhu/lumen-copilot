@@ -145,11 +145,32 @@ test('A saves a provider, logs out, then B sees blank provider fields in the sam
   const retainedName = await name.elementHandle();
   const retainedUrl = await baseUrl.elementHandle();
   const retainedKey = await apiKey.elementHandle();
+  const detachedSecret = 'r8-browser-typed-detached-secret';
+  await apiKey.fill(detachedSecret);
+  const retainedSubtree = await form.evaluateHandle((node, typedSecret) => {
+    node.setAttribute('data-credential-copy', typedSecret);
+    node.setAttribute('aria-description', `Draft ${typedSecret}`);
+    const mirror = document.createElement('input');
+    mirror.type = 'hidden';
+    mirror.value = typedSecret;
+    mirror.defaultValue = typedSecret;
+    mirror.setAttribute('data-credential-copy', typedSecret);
+    mirror.setAttribute('aria-label', `Copy ${typedSecret}`);
+    node.append(mirror);
+    const detached = mirror.cloneNode(true) as HTMLInputElement;
+    node.append(detached);
+    detached.remove();
+    return [node, detached];
+  }, detachedSecret);
   await form.getByRole('button', { name: /show api key/i }).click();
-  await name.evaluate((node) => ((node as HTMLInputElement).value = 'manager-persona-a'));
-  await baseUrl.evaluate(
-    (node) => ((node as HTMLInputElement).value = 'https://manager-persona-a.example'),
-  );
+  await name.evaluate((node) => {
+    (node as HTMLInputElement).value = 'manager-persona-a';
+    (node as HTMLInputElement).defaultValue = 'manager-persona-a';
+  });
+  await baseUrl.evaluate((node) => {
+    (node as HTMLInputElement).value = 'https://manager-persona-a.example';
+    (node as HTMLInputElement).defaultValue = 'https://manager-persona-a.example';
+  });
   await apiKey.evaluate((node) => ((node as HTMLInputElement).value = 'manager-persona-a-secret'));
   await page.getByRole('button', { name: /account menu/i }).click();
   await page.getByRole('button', { name: /sign out/i }).click();
@@ -160,6 +181,27 @@ test('A saves a provider, logs out, then B sees blank provider fields in the sam
   expect(await retainedUrl!.evaluate((node) => (node as HTMLInputElement).value)).toBe('');
   expect(await retainedKey!.evaluate((node) => (node as HTMLInputElement).value)).toBe('');
   expect(await retainedKey!.evaluate((node) => (node as HTMLInputElement).type)).toBe('password');
+  const retainedSnapshot = await retainedSubtree.evaluate((roots) => {
+    const representations: string[] = [];
+    function visit(node: Node) {
+      if (node.nodeValue) representations.push(node.nodeValue);
+      if (node instanceof Element) {
+        representations.push(
+          node.outerHTML,
+          ...Array.from(node.attributes, (attribute) => attribute.value),
+        );
+      }
+      if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+        representations.push(node.value, node.defaultValue);
+      }
+      for (const child of node.childNodes) visit(child);
+    }
+    for (const root of roots) visit(root);
+    return JSON.stringify(representations);
+  });
+  for (const sentinel of [detachedSecret, 'manager-persona-a-secret', 'manager-persona-a']) {
+    expect(retainedSnapshot).not.toContain(sentinel);
+  }
   expect(requests.find(({ path }) => path.endsWith('/auth/logout'))?.authorization).toBe(
     'Bearer jwt-persona-a',
   );

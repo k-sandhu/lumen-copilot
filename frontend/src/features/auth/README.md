@@ -61,8 +61,13 @@ Credential inputs use explicit browser semantics:
   `autocomplete="new-password"`. Base URL and MCP endpoint use `type="url"`,
   URL input mode, no spellcheck, and no automatic capitalization.
 - Reveal is an accessible, non-submit button with an announced pressed state.
-  Every reset blanks the actual input and restores password masking, including
-  manager-style DOM writes that never dispatched a React input event.
+  Every reset blanks the input property, reflected default and `value` attributes,
+  and restores password masking, including manager-style DOM writes that never
+  dispatched a React input event. Form-local cleanup also scrubs secret-bearing
+  attributes (including `data-*` and `aria-*`), text copies, and hidden/mirrored
+  inputs. Removed descendants are retained only until the next scrub so cleanup
+  reaches copies detached before the form itself; the observer, draft strings,
+  and node holders are released at teardown.
 - Credential drafts start blank and stay in component state/ephemeral request
   holders. TanStack MutationCache receives only an opaque submission number;
   passwords, provider keys, and MCP tokens never enter persisted stores, browser
@@ -70,7 +75,11 @@ Credential inputs use explicit browser semantics:
   never seed an input with an existing key.
 - Forms clear on submission success/failure, cancel where offered, unmount,
   identity change, and logout; detached controls are blanked too. Untouched
-  optional secrets are omitted from requests.
+  optional secrets are omitted from requests. These forms use local React state
+  and refs rather than a separate form-state library; their resets clear the
+  drafts (including adjacent email/name/URL fields on settlement) as well as the
+  DOM and ephemeral submission holders. Authored field names, autocomplete and
+  accessibility semantics survive cleanup. Reveal never uses the clipboard.
 
 Logout clears the local bearer, credential holders, and both caches synchronously
 before best-effort server revocation with the captured outgoing bearer. A

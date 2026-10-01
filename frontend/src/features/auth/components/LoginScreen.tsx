@@ -25,6 +25,7 @@ import type { FormEvent } from 'react';
 import { ApiError } from '@/api';
 import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
+import { scrubCredentialInput, useCredentialDomCleanup } from '@/lib/credentialDom';
 import { Icon } from '@/ui';
 import { useLogin } from '../model/queries';
 
@@ -51,6 +52,7 @@ export function LoginScreen() {
   const [password, setPassword] = useState('');
   const emailRef = useRef<HTMLInputElement | null>(null);
   const passwordRef = useRef<SecretInputHandle | null>(null);
+  const { rememberRoot, clearDom } = useCredentialDomCleanup();
   const emailId = useId();
   const passwordId = useId();
   const errorId = useId();
@@ -59,9 +61,10 @@ export function LoginScreen() {
     if (node) emailRef.current = node;
   }, []);
   const hardBlankDom = useCallback(() => {
-    if (emailRef.current) emailRef.current.value = '';
+    clearDom();
+    if (emailRef.current) scrubCredentialInput(emailRef.current);
     passwordRef.current?.reset();
-  }, []);
+  }, [clearDom]);
   const clearForm = useCallback(() => {
     hardBlankDom();
     setEmail('');
@@ -76,7 +79,7 @@ export function LoginScreen() {
     login.submit(
       { email, password },
       {
-        onSettled: () => passwordRef.current?.reset(),
+        onSettled: clearForm,
       },
     );
   }
@@ -122,7 +125,7 @@ export function LoginScreen() {
             Grounded, permission-checked answers over the sources you already trust.
           </p>
 
-          <form className="mt-6 flex flex-col gap-4" onSubmit={onSubmit}>
+          <form ref={rememberRoot} className="mt-6 flex flex-col gap-4" onSubmit={onSubmit}>
             <div className="flex flex-col gap-1.5">
               <label htmlFor={emailId} className="text-sm font-medium text-foreground-muted">
                 Email
