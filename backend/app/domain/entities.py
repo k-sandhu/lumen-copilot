@@ -753,6 +753,8 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    ingestion_attempts: int = 0
+    ingestion_failure: dict[str, object] | None = None
     kind: DocumentKind = DocumentKind.DOCUMENT
     duration_ms: int | None = None
     transcript_language: str | None = None
@@ -1059,6 +1061,7 @@ class Chunk:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    embedding_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

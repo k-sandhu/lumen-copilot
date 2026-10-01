@@ -390,6 +390,7 @@ def _build_service(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
     request: Request,
 ) -> SourcesService:
     """Assemble the per-request service from the identity + adapter + audit seams.
@@ -406,6 +407,7 @@ def _build_service(
         audit=make_audit_sink(tenant_id),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
+        embedding_space_fingerprint=settings.embedding_space_fingerprint,
     )
 
 
@@ -420,6 +422,7 @@ async def list_sources(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> SourceListResponse:
@@ -430,6 +433,7 @@ async def list_sources(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     page = await service.list_page(cursor=cursor, limit=limit)
@@ -449,12 +453,14 @@ async def create_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
 ) -> SourceResponse | GdriveSourceResponse:
     """Add a source — a web URL (any member) or a managed connector (admin only).
 
     Web: validates + SSRF-checks the URL (ADR-0009 §3) — a blocked or invalid
     URL is **422** (``url_blocked``); the source returns ``pending`` with the
-    first sync enqueued. Managed (``gdrive``): admin-gated at action time
+    first sync enqueued. A known-failed embedding startup contract is **503**
+    before persistence. Managed (``gdrive``): admin-gated at action time
     (ADR-0019 §1 — non-admin is **403**, audited); the source is created
     ``pending_auth`` and syncs only after the connect flow completes. Errors are
     typed ``AppError``\\ s mapped by the global handler.
@@ -465,6 +471,7 @@ async def create_source(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     if isinstance(body, WebSourceCreateRequest):
@@ -488,6 +495,7 @@ async def sync_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
 ) -> SourceResponse | GdriveSourceResponse:
     """Re-sync one of the caller's sources (re-fetch + re-index); else 404.
 
@@ -496,7 +504,8 @@ async def sync_source(
     success codes). A non-owner or cross-tenant **web** source is **404**
     (INV-1/INV-2). Managed sources are admin-gated at action time (**403**,
     ADR-0019 §1) and cannot sync while awaiting consent (**409**
-    ``source_pending_auth``, INV-8).
+    ``source_pending_auth``, INV-8). A known-failed embedding startup contract
+    is **503** without a status change.
     """
     service = _build_service(
         session=session,
@@ -504,6 +513,7 @@ async def sync_source(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     result = await service.resync(source_id)
@@ -525,6 +535,7 @@ async def delete_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
 ) -> Response:
     """Delete a source; removes its docs + objects (+ backing collection if empty), else 404."""
     service = _build_service(
@@ -533,6 +544,7 @@ async def delete_source(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     deleted = await service.delete(source_id)

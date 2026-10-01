@@ -20,7 +20,7 @@ Composition (the adapter wires four collaborators, none of which it *is*):
   source of truth, before becoming a citable passage — defense in depth) and
   for the relational agent tools (``search_documents`` / ``list_documents`` /
   ``get_document``);
-* the #36 ``llm/`` gateway ``embed()`` to embed the query (bge-m3) — the only
+* the #36 ``llm/`` gateway ``embed()`` to embed the query — the only
   model caller (ADR-0004); the gateway is injected so the service is testable
   with a fake and never imports LiteLLM.
 
@@ -158,7 +158,7 @@ class RetrievalService:
     ) -> list[RetrievedPassage]:
         """Permission-filtered hybrid passage search (the chokepoint API, AC-1/AC-2).
 
-        Embeds ``query`` via the #36 gateway (bge-m3), then runs **one**
+        Embeds ``query`` via the #36 gateway, then runs **one**
         OpenSearch hybrid query (BM25 ⊕ kNN, score-normalized by the engine's
         search pipeline — ADR-0010) carrying the INV-1/INV-2
         :class:`SearchAllowFilter` in both legs, and hydrates the ranked hits
@@ -231,6 +231,15 @@ class RetrievalService:
         for hit in hits:  # engine ranking order preserved
             row = rows.get(hit.chunk_id)
             if row is None:
+                continue
+            # OpenSearch is derived and can lag a retry/re-delivery. Hydration
+            # admits only the exact Ready Postgres generation and coordinate
+            # space that produced the hit; stale/failed publications are never
+            # citable even if their engine rows still exist (R1-002/R1-006).
+            if (
+                hit.ingestion_attempt != row.ingestion_attempt
+                or hit.embedding_fingerprint != row.embedding_fingerprint
+            ):
                 continue
             passages.append(
                 RetrievedPassage(
