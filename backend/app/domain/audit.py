@@ -34,7 +34,14 @@ class AuditAction(str, enum.Enum):
     AUTH_LOGIN_FAILED = "auth.login_failed"
     AUTH_LOGOUT = "auth.logout"
     COLLECTION_CREATED = "collection.created"
+    # Direct multipart/media lifecycle (spec 0008 / ADR-0023 / #571). The
+    # capability/storage ids are never audit metadata; these actions record the
+    # state transition only. Completion reuses DOCUMENT_UPLOADED below.
+    DOCUMENT_UPLOAD_STARTED = "document.upload_started"
+    DOCUMENT_UPLOAD_ABORTED = "document.upload_aborted"
+    DOCUMENT_UPLOAD_EXPIRED = "document.upload_expired"
     DOCUMENT_UPLOADED = "document.uploaded"
+    DOCUMENT_TRANSCRIBED = "document.transcribed"
     DOCUMENT_VIEWED = "document.viewed"
     DOCUMENT_DOWNLOADED = "document.downloaded"
     DOCUMENT_DELETED = "document.deleted"

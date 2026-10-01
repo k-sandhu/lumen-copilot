@@ -90,4 +90,15 @@ describe('SearchResultRow', () => {
     }
     expect(button.className).not.toMatch(/truncate|overflow-hidden/);
   });
+
+  it('does not render a zero timestamp when REST media fields are omitted', () => {
+    render(
+      <SearchResultRow
+        result={{
+          ...base,
+        }}
+      />,
+    );
+    expect(screen.queryByText('0:00')).not.toBeInTheDocument();
+  });
 });

@@ -1,7 +1,7 @@
 # Lumen Copilot — one-command local stack (ADR-0005).
 #   cp .env.example .env  &&  docker compose up --build
 # Brings up: Postgres+pgvector, Redis, MinIO, OpenSearch, SearXNG, backend (web),
-# Celery worker, redbeat beat, frontend.
+# General + bounded media Celery workers, redbeat beat, frontend.
 # The sandbox-runner (ADR-0020) is OPT-IN via the `sandbox` compose profile —
 #   docker compose --profile sandbox up
 # — because code execution is explicitly enabled per deploy/tenant. The runner is
@@ -50,6 +50,10 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # Community MinIO configures browser CORS process-wide (its bucket-level
+      # PutBucketCors endpoint returns NotImplemented). Keep this identical to
+      # the backend's declared origin set; no wildcard local default.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${S3_CORS_ALLOWED_ORIGINS:-http://localhost:47180}
     ports:
       - "${MINIO_PORT:-47184}:9000"
       - "${MINIO_CONSOLE_PORT:-47185}:9001"
@@ -60,6 +64,34 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Community MinIO does not implement S3's AbortIncompleteMultipartUpload
+  # lifecycle action. This pinned companion removes only incomplete uploads
+  # older than the configured backstop, including an orphan created before its
+  # database session was committed. It never targets completed objects.
+  minio-multipart-reaper:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" >/dev/null 2>&1;
+        do sleep 2; done;
+        while true; do
+          mc rm --incomplete --recursive --force
+          --older-than "$${UPLOAD_INCOMPLETE_LIFECYCLE_DAYS}d"
+          "local/$${S3_BUCKET}/" || true;
+          sleep "$${UPLOAD_MULTIPART_REAPER_INTERVAL_SECONDS}";
+        done
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-lumen-uploads}
+      UPLOAD_INCOMPLETE_LIFECYCLE_DAYS: ${UPLOAD_INCOMPLETE_LIFECYCLE_DAYS:-2}
+      UPLOAD_MULTIPART_REAPER_INTERVAL_SECONDS: ${UPLOAD_MULTIPART_REAPER_INTERVAL_SECONDS:-900}
+    depends_on:
+      minio:
+        condition: service_healthy
 
   opensearch:
     # The single retrieval store (ADR-0010): BM25 lexical + kNN vectors in one
@@ -137,13 +169,15 @@ services:
       # network (#241): sign them against MinIO's published host port. Deployments
       # with a real public object-store URL override this via .env / host env.
       S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:47184}
-      # Serve document /content by STREAMING it inline through the API (same
-      # origin) rather than 302-ing to a presigned MinIO URL (#242). The viewer
-      # fetches the bytes and renders them; an inline same-origin response needs
-      # no CORS, whereas a browser fetch that follows the 302 to MinIO would be a
-      # cross-origin read MinIO does not expose by default → the preview fails.
-      # Deployments that put object storage behind a CORS-enabled endpoint or a
-      # CDN can flip this to "true" to serve bytes straight from storage.
+      # Direct multipart PUTs and signed Range GETs originate from the SPA.
+      # Community MinIO receives the same allow-list above as process config;
+      # S3 deployments leave external management false and use PutBucketCors.
+      S3_CORS_ALLOWED_ORIGINS: ${S3_CORS_ALLOWED_ORIGINS:-http://localhost:47180}
+      S3_CORS_MANAGED_EXTERNALLY: ${S3_CORS_MANAGED_EXTERNALLY:-true}
+      S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY: ${S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY:-true}
+      # Legacy produced-artifact delivery only. Uploaded documents use v2 signed
+      # access capabilities and their bytes never transit FastAPI. Keep artifact
+      # streaming same-origin locally; a CORS-enabled CDN may flip this to true.
       DOCUMENT_CONTENT_REDIRECT: ${DOCUMENT_CONTENT_REDIRECT:-false}
       # Settings defaults to the published host port for a backend launched
       # directly on the host. Inside Compose, callers must use the service DNS
@@ -275,11 +309,15 @@ services:
     build:
       context: ./backend
     restart: unless-stopped
-    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info"]
+    # General tasks only. Media is isolated below so FFmpeg/provider work cannot
+    # consume every slot needed by chat runs, connector sync, and maintenance.
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--queues=celery"]
     environment:
       # Mirror the backend: the host OPENROUTER_API_KEY always wins, .env is the
       # fallback (the worker embeds/queries through the same LLM gateway).
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-x-ai/grok-stt-1.0}
+      TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://openrouter.ai/api/v1}
       # The dedicated runner's internal API (compose network only). The worker calls
       # this to execute a sandbox code run — it holds NO Docker socket itself.
       SANDBOX_RUNNER_URL: ${SANDBOX_RUNNER_URL:-http://sandbox-runner:8000}
@@ -306,6 +344,40 @@ services:
         condition: service_healthy
       # Wait for the web service (which runs `alembic upgrade head` on boot) so the
       # worker's identical entrypoint migration is a no-op — never a concurrent upgrade.
+      backend:
+        condition: service_healthy
+
+  # Direct-media ingestion gets its own queue and deliberately small pool
+  # (ADR-0023). One long video therefore cannot multiply into unbounded FFmpeg,
+  # temporary-disk, memory, and paid-transcription pressure. Deployments may
+  # raise the cap explicitly after sizing those resources.
+  media-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command:
+      - "celery"
+      - "-A"
+      - "app.tasks.celery_app"
+      - "worker"
+      - "--loglevel=info"
+      - "--queues=media-ingestion"
+      - "--concurrency=${MEDIA_WORKER_CONCURRENCY:-1}"
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-x-ai/grok-stt-1.0}
+      TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://openrouter.ai/api/v1}
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
       backend:
         condition: service_healthy
 
