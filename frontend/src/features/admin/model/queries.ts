@@ -52,6 +52,7 @@ import {
   refreshLlmProvider,
 } from '@/api';
 import { currentUserQueryKey } from '@/features/auth';
+import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 import type {
   LlmProviderUpdate,
   LlmProviderCreate,
@@ -116,9 +117,7 @@ export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, st
     mutationFn: (memberId) => attestMemberIdentity(memberId),
     onSuccess: (member) => {
       qc.setQueryData<MemberList>(membersQueryKey, (prev) =>
-        prev
-          ? { ...prev, items: prev.items.map((m) => (m.id === member.id ? member : m)) }
-          : prev,
+        prev ? { ...prev, items: prev.items.map((m) => (m.id === member.id ? member : m)) } : prev,
       );
       void qc.invalidateQueries({ queryKey: membersQueryKey });
     },
@@ -137,7 +136,13 @@ export function useAttestMemberIdentity(): UseMutationResult<Member, unknown, st
 export const memberRosterQueryKey = [...membersQueryKey, 'roster'] as const;
 
 export function useMemberRoster(): UseInfiniteQueryResult<InfiniteData<MemberList>> {
-  return useInfiniteQuery<MemberList, Error, InfiniteData<MemberList>, typeof memberRosterQueryKey, string | undefined>({
+  return useInfiniteQuery<
+    MemberList,
+    Error,
+    InfiniteData<MemberList>,
+    typeof memberRosterQueryKey,
+    string | undefined
+  >({
     queryKey: memberRosterQueryKey,
     queryFn: ({ pageParam, signal }) =>
       listMembers(pageParam === undefined ? {} : { cursor: pageParam }, signal),
@@ -457,10 +462,10 @@ export function useLlmProviders(): UseQueryResult<LlmProviderList> {
   });
 }
 
-export function useCreateLlmProvider(): UseMutationResult<LlmProvider, unknown, LlmProviderCreate> {
+export function useCreateLlmProvider() {
   const qc = useQueryClient();
-  return useMutation<LlmProvider, unknown, LlmProviderCreate>({
-    mutationFn: (body) => createLlmProvider(body),
+  return useEphemeralMutation<LlmProvider, unknown, LlmProviderCreate>({
+    mutationFn: (body, { signal }) => createLlmProvider(body, signal),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
     },
