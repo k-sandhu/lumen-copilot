@@ -32,6 +32,7 @@ from app.db.repositories import (
     AuditEventRepository,
     CollectionRepository,
     DocumentRepository,
+    DocumentUploadRepository,
     TenantRepository,
     UserRepository,
 )
@@ -54,6 +55,13 @@ class _FakeObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.deleted: list[str] = []
+        self.aborted: list[str] = []
+
+    async def abort_multipart_upload(
+        self, *, tenant_id: str, key: str, provider_upload_id: str
+    ) -> None:
+        assert_key_owned_by(key, tenant_id)
+        self.aborted.append(provider_upload_id)
 
     async def delete(self, tenant_id: str, key: str) -> None:
         assert_key_owned_by(key, tenant_id)
@@ -210,6 +218,35 @@ async def test_delete_removes_distinct_backing_objects(
     assert set(store.deleted) == {key_a, key_b}
 
 
+async def test_delete_locks_collection_against_concurrent_upload_initiation(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, owner_id = seeded
+    store = _FakeObjectStore()
+    original = CollectionRepository.get
+    lock_values: list[bool] = []
+
+    async def recording_get(
+        repo: CollectionRepository, collection_id: uuid.UUID, *, lock: bool = False
+    ):
+        lock_values.append(lock)
+        return await original(repo, collection_id, lock=lock)
+
+    monkeypatch.setattr(CollectionRepository, "get", recording_get)
+    async with sessionmaker() as session:
+        collection = await CollectionRepository(session, tenant_id).create(
+            owner_id=owner_id, name="C", description=None
+        )
+        await session.commit()
+        assert await _service(session, tenant_id=tenant_id, owner_id=owner_id, store=store).delete(
+            collection.id
+        )
+
+    assert lock_values == [True]
+
+
 async def test_delete_removes_shared_object_exactly_once(
     sessionmaker: async_sessionmaker[AsyncSession], seeded: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
@@ -297,3 +334,51 @@ async def test_delete_keeps_object_referenced_by_survivor_in_other_collection(
         assert ok is True
         assert store.deleted == []
         assert await DocumentRepository(session, tenant_id).count_by_storage_key(shared) == 1
+
+
+async def test_delete_aborts_active_multipart_before_cascading_its_janitor_row(
+    sessionmaker: async_sessionmaker[AsyncSession], seeded: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tenant_id, owner_id = seeded
+    store = _FakeObjectStore()
+    async with sessionmaker() as session:
+        collection = await CollectionRepository(session, tenant_id).create(
+            owner_id=owner_id, name="Uploads", description=None
+        )
+        upload_id = uuid.uuid4()
+        document_id = uuid.uuid4()
+        key = f"{tenant_id}/quarantine/{document_id}/meeting.mp3"
+        await DocumentUploadRepository(session, tenant_id).create(
+            upload_id=upload_id,
+            document_id=document_id,
+            owner_id=owner_id,
+            collection_id=collection.id,
+            filename="meeting.mp3",
+            mime_type="audio/mpeg",
+            size_bytes=8,
+            storage_key=key,
+            provider_upload_id="provider-private",
+            part_size_bytes=5 * 1024 * 1024,
+            part_count=1,
+            expires_at=created_at_plus_hour(),
+        )
+        await session.commit()
+
+        deleted = await _service(
+            session, tenant_id=tenant_id, owner_id=owner_id, store=store
+        ).delete(collection.id)
+        await session.commit()
+
+        assert deleted is True
+        assert store.aborted == ["provider-private"]
+        assert store.deleted == [key]
+        assert (
+            await DocumentUploadRepository(session, tenant_id).get_for_owner(upload_id, owner_id)
+            is None
+        )
+
+
+def created_at_plus_hour():
+    from datetime import UTC, datetime, timedelta
+
+    return datetime.now(UTC) + timedelta(hours=1)

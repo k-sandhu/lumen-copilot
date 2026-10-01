@@ -16,6 +16,103 @@ from __future__ import annotations
 from collections.abc import Collection
 
 from app.core.errors import ValidationError
+from app.domain.entities import DocumentKind
+
+AUDIO_CONTENT_TYPES = frozenset(
+    {
+        "audio/wav",
+        "audio/x-wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/aac",
+        "audio/flac",
+        "audio/ogg",
+        "audio/webm",
+    }
+)
+VIDEO_CONTENT_TYPES = frozenset({"video/mp4", "video/webm"})
+
+# Filename suffixes are an early control-plane consistency check, not a claim
+# about the object's bytes. Container/parser validation still happens in the
+# quarantined ingestion worker. Ambiguous containers deliberately admit both
+# accepted families; a generic browser declaration uses the first canonical
+# type, matching the frontend's safe inference.
+_EXTENSION_CONTENT_TYPES: dict[str, tuple[str, ...]] = {
+    "pdf": ("application/pdf",),
+    "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",),
+    "pptx": ("application/vnd.openxmlformats-officedocument.presentationml.presentation",),
+    "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",),
+    "txt": ("text/plain",),
+    "md": ("text/markdown",),
+    "wav": ("audio/wav",),
+    "mp3": ("audio/mpeg",),
+    "m4a": ("audio/mp4",),
+    "aac": ("audio/aac",),
+    "flac": ("audio/flac",),
+    "ogg": ("audio/ogg",),
+    "mp4": ("video/mp4", "audio/mp4"),
+    "webm": ("video/webm", "audio/webm"),
+}
+
+# Browser/platform aliases are accepted only with the suffix that disambiguates
+# them, then collapsed to the canonical type persisted in the upload session.
+_EXTENSION_MIME_ALIASES: dict[str, dict[str, str]] = {
+    "m4a": {"audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4"},
+    "mp3": {"audio/mp3": "audio/mpeg"},
+    "wav": {
+        "audio/vnd.wave": "audio/wav",
+        "audio/x-wav": "audio/wav",
+        "audio/wave": "audio/wav",
+    },
+}
+
+
+def normalize_content_type(content_type: str) -> str:
+    return content_type.split(";", 1)[0].strip().lower()
+
+
+def canonical_content_type_for_filename(filename: str, content_type: str) -> str:
+    """Return a suffix-compatible canonical declaration or reject it early.
+
+    An unknown/missing suffix is unsupported (415 after service mapping). A
+    known suffix paired with a different otherwise plausible MIME declaration
+    is malformed metadata (422). ``application/octet-stream`` is accepted only
+    when a known suffix supplies the missing type, and known browser aliases are
+    similarly scoped to their matching suffix. This prevents an allowlisted MIME
+    from disguising an executable/unknown filename while preserving safe browser
+    interoperability.
+    """
+    stem, separator, extension = filename.rpartition(".")
+    normalized_extension = extension.lower()
+    expected = _EXTENSION_CONTENT_TYPES.get(normalized_extension)
+    if not separator or not stem or expected is None:
+        raise ValidationError(
+            "filename extension is not supported",
+            code="filename_extension_not_allowed",
+        )
+
+    declared = normalize_content_type(content_type)
+    if declared == "application/octet-stream":
+        return expected[0]
+    if declared in expected:
+        return declared
+    alias = _EXTENSION_MIME_ALIASES.get(normalized_extension, {}).get(declared)
+    if alias is not None:
+        return alias
+    raise ValidationError(
+        "filename extension does not match the declared content type",
+        code="filename_content_type_mismatch",
+    )
+
+
+def document_kind_for_content_type(content_type: str) -> DocumentKind:
+    """Classify an allowlisted declaration into its processing/viewer family."""
+    declared = normalize_content_type(content_type)
+    if declared in AUDIO_CONTENT_TYPES:
+        return DocumentKind.AUDIO
+    if declared in VIDEO_CONTENT_TYPES:
+        return DocumentKind.VIDEO
+    return DocumentKind.DOCUMENT
 
 
 def validate_upload(
@@ -33,7 +130,7 @@ def validate_upload(
             machine-readable ``code`` so the API can map it precisely.
     """
     # Normalize: a declared type may carry parameters, e.g. "text/plain; charset=utf-8".
-    declared = content_type.split(";", 1)[0].strip().lower()
+    declared = normalize_content_type(content_type)
     if declared not in {ct.lower() for ct in allowed_content_types}:
         raise ValidationError(
             f"content-type {content_type!r} is not allowed",

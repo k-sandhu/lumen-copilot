@@ -120,6 +120,9 @@ export interface CollectionList {
 /** Ingestion lifecycle (parse → chunk → embed). */
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
+/** Processing/viewer family derived from the validated MIME type (spec 0008). */
+export type DocumentKind = 'document' | 'audio' | 'video';
+
 /** A document's metadata, including its ingestion status. */
 export interface Document {
   id: string;
@@ -128,9 +131,13 @@ export interface Document {
   size_bytes: number;
   collection_id: string;
   owner_id: string;
+  /** Validated viewer family; migration backfills ordinary documents. */
+  kind: DocumentKind;
+  /** Zero-based player duration for media; null for ordinary documents. */
+  duration_ms: number | null;
   status: DocumentStatus;
   /** Failure reason when status is failed. */
-  error?: string;
+  error?: string | null;
   /** Number of indexed chunks (0 until ingestion completes). */
   chunk_count: number;
   created_at: string;
@@ -160,6 +167,116 @@ export interface DocumentText {
   chunk_count: number;
   /** True when the server capped the text (DOCUMENT_TEXT_MAX_BYTES). */
   truncated: boolean;
+}
+
+// --- Direct multipart uploads + media transcript (spec 0008 / #571) -------
+
+export interface DocumentUploadCreate {
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  collection_id: string;
+  last_modified_at?: string | null;
+}
+
+export type DocumentUploadState =
+  | 'initiated'
+  | 'completing'
+  | 'completed'
+  | 'aborted'
+  | 'expired'
+  | 'failed';
+
+export interface UploadedPart {
+  part_number: number;
+  etag: string;
+  size_bytes: number;
+}
+
+export interface DocumentUploadSession {
+  id: string;
+  document_id: string;
+  state: DocumentUploadState;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  collection_id: string;
+  part_size_bytes: number;
+  part_count: number;
+  completed_parts: UploadedPart[];
+  expires_at: string;
+  error?: string | null;
+  document: Document | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SignedUploadPart {
+  part_number: number;
+  url: string;
+  expires_at: string;
+  required_headers: Record<string, string>;
+}
+
+export interface SignedUploadPartList {
+  items: SignedUploadPart[];
+}
+
+export interface CompleteUploadPart {
+  part_number: number;
+  etag: string;
+}
+
+export type DocumentAccessPurpose = 'preview' | 'download';
+
+export interface DocumentAccessUrl {
+  url: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  expires_at: string;
+  purpose: DocumentAccessPurpose;
+  supports_byte_ranges: boolean;
+}
+
+export type SpeakerNameStatus = 'unknown' | 'inferred';
+export type SpeakerNameMethod = 'self_introduction' | 'contextual_dialogue';
+
+export interface TranscriptSpeaker {
+  speaker_id: string;
+  display_name: string | null;
+  name_status: SpeakerNameStatus;
+  name_confidence: number | null;
+  name_method: SpeakerNameMethod | null;
+  evidence_segment_ids: string[];
+}
+
+export interface TranscriptSegment {
+  id: string;
+  ordinal: number;
+  speaker_id: string;
+  start_ms: number;
+  end_ms: number;
+  char_start: number;
+  char_end: number;
+  text: string;
+  confidence?: number | null;
+}
+
+export interface TranscriptPage {
+  document_id: string;
+  duration_ms: number;
+  language: string | null;
+  transcription_model: string;
+  speakers: TranscriptSpeaker[];
+  items: TranscriptSegment[];
+  next_cursor: string | null;
+}
+
+export interface TranscriptQuery {
+  cursor?: string;
+  limit?: number;
+  around_ms?: number;
 }
 
 // --- Artifacts (contracts/openapi.yaml §artifacts, CC-B #208 / panel #222) ---
@@ -269,6 +386,12 @@ export interface Citation {
   snippet: string;
   char_start: number;
   char_end: number;
+  /** Paired player-relative media span; both omitted for ordinary documents. */
+  time_start_ms?: number;
+  time_end_ms?: number;
+  transcript_segment_id?: string;
+  speaker_id?: string;
+  speaker_name?: string;
   /** Optional retrieval/rerank score. */
   score?: number;
   /**
@@ -482,6 +605,12 @@ export interface SearchResult {
   permission: PermissionState;
   /** Source document id when the result resolves to a document (click-through). */
   document_id?: string;
+  document_kind?: DocumentKind;
+  time_start_ms?: number;
+  time_end_ms?: number;
+  transcript_segment_id?: string;
+  speaker_id?: string;
+  speaker_name?: string;
   /** Optional retrieval/rerank score. */
   score?: number;
 }
@@ -498,6 +627,11 @@ export interface SearchCitation {
   snippet?: string;
   char_start?: number;
   char_end?: number;
+  time_start_ms?: number;
+  time_end_ms?: number;
+  transcript_segment_id?: string;
+  speaker_id?: string;
+  speaker_name?: string;
 }
 
 /**
@@ -578,6 +712,10 @@ export type AuditEventType =
   | 'collection.created'
   | 'document.deleted'
   | 'document.downloaded'
+  | 'document.transcribed'
+  | 'document.upload_aborted'
+  | 'document.upload_expired'
+  | 'document.upload_started'
   | 'document.uploaded'
   | 'document.viewed'
   | 'group.created'
@@ -1850,6 +1988,11 @@ export interface ChatCitation {
   snippet: string;
   charStart: number;
   charEnd: number;
+  timeStartMs?: number;
+  timeEndMs?: number;
+  transcriptSegmentId?: string;
+  speakerId?: string;
+  speakerName?: string;
   score?: number;
 }
 
