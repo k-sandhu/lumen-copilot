@@ -23,6 +23,7 @@ from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDen
 from app.services.document_upload_service import (
     DocumentUploadService,
     UploadCompletionRejected,
+    UploadProviderNotFound,
 )
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
@@ -134,7 +135,7 @@ async def sweep_expired_uploads_async(
                             store=store,
                             settings=settings,
                         ).recover_completing(current.id)
-                    except NotFoundError:
+                    except (NotFoundError, UploadProviderNotFound):
                         pass
                     except ValidationError as exc:
                         if exc.code not in {

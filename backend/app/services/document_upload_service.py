@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 import binascii
 import math
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, TypeVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import event
@@ -62,6 +63,31 @@ _REJECTION_ACTION_BY_OPERATION: dict[UploadControlOperation, AuditAction] = {
     "abort": AuditAction.DOCUMENT_UPLOAD_ABORTED,
     "complete": AuditAction.DOCUMENT_UPLOADED,
 }
+
+
+_ProviderResult = TypeVar("_ProviderResult")
+
+
+class UploadProviderNotFound(AppError):
+    """Operational storage absence after upload authorization, preserving its problem."""
+
+
+async def _storage_operation(operation: Awaitable[_ProviderResult]) -> _ProviderResult:
+    """Keep storage absence operational, with the adapter's unchanged problem shape.
+
+    Upload ownership has already been checked. A missing multipart handle is a
+    lifecycle error, not a resource-visibility decision for the denial wrapper.
+    """
+    try:
+        return await operation
+    except NotFoundError as error:
+        raise UploadProviderNotFound(
+            error.detail,
+            status=error.status,
+            code=error.code,
+            title=error.title,
+            field_errors=error.field_errors,
+        ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,10 +485,12 @@ class DocumentUploadService:
                 code="upload_state_conflict",
             )
 
-        provider_parts = await self._store.list_multipart_parts(
-            tenant_id=str(self._tenant_id),
-            key=upload.storage_key,
-            provider_upload_id=upload.provider_upload_id,
+        provider_parts = await _storage_operation(
+            self._store.list_multipart_parts(
+                tenant_id=str(self._tenant_id),
+                key=upload.storage_key,
+                provider_upload_id=upload.provider_upload_id,
+            )
         )
         self._validate_provider_parts(upload, parts, provider_parts)
         await self._uploads.set_state(upload.id, self._owner_id, DocumentUploadState.COMPLETING)
@@ -501,17 +529,21 @@ class DocumentUploadService:
         except NotFoundError:
             # The durable boundary committed but the provider completion did
             # not: verify the still-live parts before the one irreversible call.
-            provider_parts = await self._store.list_multipart_parts(
-                tenant_id=str(self._tenant_id),
-                key=upload.storage_key,
-                provider_upload_id=upload.provider_upload_id,
+            provider_parts = await _storage_operation(
+                self._store.list_multipart_parts(
+                    tenant_id=str(self._tenant_id),
+                    key=upload.storage_key,
+                    provider_upload_id=upload.provider_upload_id,
+                )
             )
             self._validate_provider_parts(upload, parts, provider_parts)
-            stored = await self._store.complete_multipart_upload(
-                tenant_id=str(self._tenant_id),
-                key=upload.storage_key,
-                provider_upload_id=upload.provider_upload_id,
-                parts=[(part.part_number, part.etag) for part in parts],
+            stored = await _storage_operation(
+                self._store.complete_multipart_upload(
+                    tenant_id=str(self._tenant_id),
+                    key=upload.storage_key,
+                    provider_upload_id=upload.provider_upload_id,
+                    parts=[(part.part_number, part.etag) for part in parts],
+                )
             )
         return await self._finalize_verified(upload, stored, recovered=recovered)
 
@@ -544,17 +576,21 @@ class DocumentUploadService:
         try:
             stored = await self._store.head(str(self._tenant_id), upload.storage_key)
         except NotFoundError:
-            provider_parts = await self._store.list_multipart_parts(
-                tenant_id=str(self._tenant_id),
-                key=upload.storage_key,
-                provider_upload_id=upload.provider_upload_id,
+            provider_parts = await _storage_operation(
+                self._store.list_multipart_parts(
+                    tenant_id=str(self._tenant_id),
+                    key=upload.storage_key,
+                    provider_upload_id=upload.provider_upload_id,
+                )
             )
             self._validate_provider_part_layout(upload, provider_parts)
-            stored = await self._store.complete_multipart_upload(
-                tenant_id=str(self._tenant_id),
-                key=upload.storage_key,
-                provider_upload_id=upload.provider_upload_id,
-                parts=[(part.part_number, part.etag) for part in provider_parts],
+            stored = await _storage_operation(
+                self._store.complete_multipart_upload(
+                    tenant_id=str(self._tenant_id),
+                    key=upload.storage_key,
+                    provider_upload_id=upload.provider_upload_id,
+                    parts=[(part.part_number, part.etag) for part in provider_parts],
+                )
             )
         return await self._finalize_verified(upload, stored, recovered=True)
 
@@ -574,10 +610,12 @@ class DocumentUploadService:
         )
         completed: list[UploadedPart] = []
         if upload.state is DocumentUploadState.INITIATED:
-            completed = await self._store.list_multipart_parts(
-                tenant_id=str(self._tenant_id),
-                key=upload.storage_key,
-                provider_upload_id=upload.provider_upload_id,
+            completed = await _storage_operation(
+                self._store.list_multipart_parts(
+                    tenant_id=str(self._tenant_id),
+                    key=upload.storage_key,
+                    provider_upload_id=upload.provider_upload_id,
+                )
             )
         return UploadSessionView(
             upload=upload,

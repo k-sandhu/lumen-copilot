@@ -204,7 +204,7 @@ async def _commit_rejection(
     """
     if not preserve_transaction:
         await session.rollback()
-    if permission_denied or error.status in {403, 404}:
+    if permission_denied:
         # The terminal service wrapper already persisted exactly one denial on
         # the independent audit pool. Never write or commit it a second time.
         return
