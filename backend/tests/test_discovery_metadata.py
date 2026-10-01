@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.db.session as db_session
 from app.connectors.base import FetchedDoc
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -98,6 +98,24 @@ class _IndexStore:
         self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
     ) -> None: ...
 
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None: ...
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -139,6 +157,7 @@ async def _seed_source() -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
             audit=AuditSink(AuditEventRepository(session, tenant.id)),
             request_id="metadata-test",
             source_ip="127.0.0.1",
+            embedding_space_fingerprint=get_settings().embedding_space_fingerprint,
         )
         source = await service.add(source_type="web", url="http://93.184.216.34/metadata-test")
         await session.commit()
