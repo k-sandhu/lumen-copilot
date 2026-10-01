@@ -152,6 +152,9 @@ for (const mode of ['typed', 'change-only', 'eventless'] as const) {
     const retainedKey = await apiKey.elementHandle();
     const detachedSecret = `r9-browser-${mode}-detached-secret`;
     const retainedForm = await form.elementHandle();
+    // Reveal before injecting so its React render cannot erase an eventless key.
+    await form.getByRole('button', { name: /show api key/i }).click();
+    await expect(apiKey).toHaveAttribute('type', 'text');
     if (mode === 'typed') await apiKey.fill(detachedSecret);
     else if (mode === 'change-only') {
       await apiKey.evaluate((node, key) => {
@@ -188,7 +191,6 @@ for (const mode of ['typed', 'change-only', 'eventless'] as const) {
       await expect(apiKey).toHaveValue('');
       await expect(apiKey).toHaveJSProperty('defaultValue', '');
     }
-    await form.getByRole('button', { name: /show api key/i }).click();
     await name.evaluate((node) => {
       (node as HTMLInputElement).value = 'manager-persona-a';
       (node as HTMLInputElement).defaultValue = 'manager-persona-a';
@@ -202,6 +204,14 @@ for (const mode of ['typed', 'change-only', 'eventless'] as const) {
         (node) => ((node as HTMLInputElement).value = 'manager-persona-a-secret'),
       );
     await page.getByRole('button', { name: /account menu/i }).click();
+    if (mode === 'eventless') {
+      // This must still be a native-only secret at the actual logout boundary.
+      // A prior React render must not make the retained-node check vacuous.
+      await expect(apiKey).toHaveValue(detachedSecret);
+      await expect(apiKey).toHaveJSProperty('defaultValue', '');
+      await expect(apiKey).toHaveAttribute('type', 'text');
+      expect(await retainedKey!.evaluate((node) => node.isConnected)).toBe(true);
+    }
     await page.getByRole('button', { name: /sign out/i }).click();
     await expect(page.getByRole('button', { name: /sign in/i })).toBeVisible();
     await expect
@@ -210,6 +220,7 @@ for (const mode of ['typed', 'change-only', 'eventless'] as const) {
     expect(await retainedUrl!.evaluate((node) => (node as HTMLInputElement).value)).toBe('');
     expect(await retainedKey!.evaluate((node) => (node as HTMLInputElement).value)).toBe('');
     expect(await retainedKey!.evaluate((node) => (node as HTMLInputElement).type)).toBe('password');
+    expect(await retainedKey!.evaluate((node) => node.isConnected)).toBe(false);
     expect(await retainedForm!.evaluate((node) => node.isConnected)).toBe(false);
     const residual = await foreignCopies.evaluate(({ form: node, text }) => ({
       attribute: node.getAttribute('data-manager-copy'),
