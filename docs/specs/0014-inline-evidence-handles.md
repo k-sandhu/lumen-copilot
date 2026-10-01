@@ -30,6 +30,10 @@ before final persistence, the complete speculative answer is retracted and
 replaced with the honest zero-citation fallback. Removing its marker alone
 would retain prose derived from forbidden evidence. The final permission read
 emits a count-only evidence-rehydration audit event in the answer transaction.
+Multiple revisions of one chunk retain distinct handle candidates during the
+answer. A cited current revision is persisted with its matching handle; citing
+an old revision, or mixing old and current revisions, triggers the same complete
+answer retraction. Chunk-level deduplication must not discard a later handle.
 
 Corpus REST/WS citations add optional `handle`; legacy citations retain numbered
 sources. The handle coexists with media timestamp, transcript-segment and speaker
