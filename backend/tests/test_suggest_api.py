@@ -37,7 +37,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import Role
+from app.domain.entities import DocumentStatus, Role
 from app.domain.retrieval import RetrievedPassage
 from app.main import create_app
 
@@ -68,6 +68,7 @@ async def _seed_doc(
             size_bytes=10,
             storage_key=f"{tenant_id}/{name}",
             acl_enforced=False,
+            status=DocumentStatus.READY,
         )
         await s.commit()
 

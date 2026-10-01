@@ -31,11 +31,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import NoReturn
 from uuid import UUID
 
 import httpx
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors.base import (
@@ -64,6 +66,7 @@ from app.core.errors import DependencyError, NotFoundError
 from app.db import models
 from app.db.repositories import (
     AuditEventRepository,
+    ChunkRepository,
     DocumentRepository,
     SourceRepository,
     UserRepository,
@@ -79,6 +82,7 @@ from app.domain.entities import (
     SourceStatus,
     WebSourceMode,
 )
+from app.ingestion.contract import ensure_embedding_contract
 from app.llm import LLMGateway
 from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService, build_secrets_service
@@ -89,7 +93,7 @@ from app.tasks.index_sync import (
     stamp_index_acl_stale_async,
     sync_document_index_async,
 )
-from app.tasks.ingest import ingest_document_async
+from app.tasks.ingest import IngestionResult, ingest_document_async
 from app.tasks.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
 from app.tasks.runner import run_task
 
@@ -118,6 +122,18 @@ class SyncResult:
     status: SourceStatus
     indexed_count: int
     error: str | None = None
+
+
+class SourceFinalizationError(DependencyError):
+    """A terminal transaction needs redrive with its original safe outcome."""
+
+    def __init__(self, reason: str, indexed_count: int | None) -> None:
+        super().__init__(
+            "Source terminal state is awaiting the database.",
+            code="source_finalize_database_error",
+        )
+        self.reason = reason
+        self.indexed_count = indexed_count
 
 
 def _safe_filename(title: str, index: int) -> str:
@@ -242,11 +258,15 @@ async def sync_source_async(
     # --- Phase 3: reconcile (replace prior docs) then ingest each fetched doc. -
     detected_mode = _detect_mode(source_type, fetched, config)
     indexed = 0
+    failed = 0
     orphaned_keys: list[str] = []
     async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
         prior = await documents.list_for_source(source_id)
         for stale in prior:
+            await ChunkRepository(session, tenant_id).archive_legacy_for_reconciliation(
+                stale.id, replacement_fingerprint=settings.embedding_space_fingerprint
+            )
             await documents.delete(stale.id)
         # Flush the queued deletes so the count below sees the POST-delete state.
         # The app sessionmaker runs autoflush=False (db/session.py), and
@@ -297,7 +317,7 @@ async def sync_source_async(
 
     for index, fetched_doc in enumerate(fetched):
         try:
-            await _ingest_one(
+            outcome = await _ingest_one(
                 tenant_id,
                 source_id=source_id,
                 owner_id=owner_id,
@@ -316,14 +336,25 @@ async def sync_source_async(
                 url=fetched_doc.url,
                 error=type(exc).__name__,
             )
+            failed += 1
             continue
-        indexed += 1
+        if outcome.status is DocumentStatus.READY:
+            indexed += 1
+        else:
+            failed += 1
+            log.warning(
+                "source_sync.doc_terminal_failure",
+                source_id=str(source_id),
+                document_id=str(outcome.document_id),
+                status=outcome.status.value,
+            )
 
-    if fetched and indexed == 0:
+    if failed:
         return await _fail(
             tenant_id,
             source_id,
-            f"all {len(fetched)} fetched document(s) failed to ingest",
+            f"{failed} of {len(fetched)} fetched document(s) failed to ingest",
+            indexed_count=indexed,
         )
 
     # --- Phase 4: advance the source to ready. -------------------------------
@@ -375,7 +406,7 @@ async def _ingest_one(
     settings: Settings,
     object_store: ObjectStore,
     gateway: LLMGateway,
-) -> None:
+) -> IngestionResult:
     """Store one fetched doc + register a Document + run the ingestion pipeline.
 
     Reuses the existing pipeline end-to-end: the payload is stored as an object
@@ -419,7 +450,7 @@ async def _ingest_one(
         document_id = document.id
 
     # Reuse the ingestion pipeline (parse → chunk → embed → persist) verbatim.
-    await ingest_document_async(
+    return await ingest_document_async(
         tenant_id,
         document_id,
         settings=settings,
@@ -771,7 +802,7 @@ async def _sync_incremental(
                 )
         for document_id in page_doc_ids:
             try:
-                await ingest_document_async(
+                outcome = await ingest_document_async(
                     tenant_id,
                     document_id,
                     settings=settings,
@@ -785,7 +816,16 @@ async def _sync_incremental(
                     document_id=str(document_id),
                     error=type(exc).__name__,
                 )
-        upserted += len(page_doc_ids)
+                continue
+            if outcome.status is DocumentStatus.READY:
+                upserted += 1
+            else:
+                log.warning(
+                    "source_sync.doc_terminal_failure",
+                    source_id=str(source_id),
+                    document_id=str(document_id),
+                    status=outcome.status.value,
+                )
         deleted_count += len(deleted_docs)
         examined_ids.update(page_doc_ids)
         if incomplete_page:
@@ -807,10 +847,12 @@ async def _sync_incremental(
     unrecovered = incomplete_run or source.acl_resync_required
     async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
-        indexed = len(await documents.list_for_source(source_id))
+        source_documents = await documents.list_for_source(source_id)
+        indexed = sum(1 for document in source_documents if document.status is DocumentStatus.READY)
+        failed_documents = len(source_documents) - indexed
         sources = SourceRepository(session, tenant_id)
 
-        if not unrecovered and enforce_acl:
+        if not unrecovered and not failed_documents and enforce_acl:
             # Attest FIRST — a complete, gap-free replay proves the documents it
             # did not report are unchanged, and this can only ever NARROW the
             # stale set (it never revives a NULL stamp; see
@@ -837,7 +879,24 @@ async def _sync_incremental(
                     stale_documents=stale_remaining,
                 )
 
-        if unrecovered:
+        if failed_documents:
+            failure_reason = (
+                f"{failed_documents} of {len(source_documents)} source document(s) "
+                "failed or remain non-ready"
+            )
+            await sources.update_status(
+                source_id,
+                status=SourceStatus.ERROR,
+                indexed_count=indexed,
+                last_error=failure_reason,
+                set_last_error=True,
+            )
+            if enforce_acl:
+                unmapped = await _count_unmapped(session, tenant_id, source_id)
+                await sources.record_acl_health(
+                    source_id, acl_synced_at=None, unmapped_acl_count=unmapped
+                )
+        elif unrecovered:
             # An unrecovered mirror is NOT a healthy source: no ready status, no
             # fresh source-level acl_synced_at. Every acl_enforced document is
             # already stamped stale (denied) and `acl_resync_required` is
@@ -892,6 +951,18 @@ async def _sync_incremental(
                 source_id=str(source_id),
                 error=exc.code,
             )
+    if failed_documents:
+        failure_reason = (
+            f"{failed_documents} of {failed_documents + indexed} source document(s) "
+            "failed or remain non-ready"
+        )
+        log.warning(
+            "source_sync.incremental_document_failures",
+            source_id=str(source_id),
+            ready_documents=indexed,
+            failed_documents=failed_documents,
+        )
+        return SyncResult(source_id, SourceStatus.ERROR, indexed, failure_reason)
     if unrecovered:
         log.warning(
             "source_sync.incremental_incomplete",
@@ -975,23 +1046,36 @@ async def _fail_reauthorize(tenant_id: UUID, source_id: UUID, *, source_type: st
     return SyncResult(source_id, SourceStatus.ERROR, 0, REAUTHORIZE_REQUIRED)
 
 
-async def _fail(tenant_id: UUID, source_id: UUID, reason: str) -> SyncResult:
+async def _fail(
+    tenant_id: UUID,
+    source_id: UUID,
+    reason: str,
+    *,
+    indexed_count: int | None = 0,
+) -> SyncResult:
     """Mark a source ``error`` with ``reason`` (own transaction). ADR-0009 §4.
 
-    ``indexed_count=0`` is written explicitly: the failed sync already deleted the
-    source's prior documents (Phase 3), so a stale non-zero count from an earlier
-    successful sync must not survive (e.g. "error / 2 indexed" with an empty doc
-    list). ``update_status`` leaves ``indexed_count`` untouched unless supplied (#157).
+    A post-reconciliation failure supplies the actual Ready count (default zero).
+    ``None`` denotes pre-claim failure: no documents were reconciled, so read and
+    preserve the source's retained count in this fresh transaction. If that read
+    fails, the finalization error keeps ``None`` so the redrive repeats the read;
+    an update/commit failure instead carries the count already resolved.
     """
-    async with tenant_session_scope(tenant_id) as session:
-        await SourceRepository(session, tenant_id).update_status(
-            source_id,
-            status=SourceStatus.ERROR,
-            indexed_count=0,
-            last_error=reason,
-            set_last_error=True,
-        )
-    return SyncResult(source_id, SourceStatus.ERROR, 0, reason)
+    try:
+        async with tenant_session_scope(tenant_id) as session:
+            if indexed_count is None:
+                source = await SourceRepository(session, tenant_id).get(source_id)
+                indexed_count = source.indexed_count if source is not None else 0
+            await SourceRepository(session, tenant_id).update_status(
+                source_id,
+                status=SourceStatus.ERROR,
+                indexed_count=indexed_count,
+                last_error=reason,
+                set_last_error=True,
+            )
+    except SQLAlchemyError as exc:
+        raise SourceFinalizationError(reason, indexed_count) from exc
+    return SyncResult(source_id, SourceStatus.ERROR, indexed_count, reason)
 
 
 def _resolve_collection_id(config: dict[str, object]) -> UUID | None:
@@ -1061,7 +1145,14 @@ async def _record_mode(
     acks_late=True,
     max_retries=None,
 )
-def sync_source(self: object, tenant_id: str, source_id: str) -> dict[str, object]:
+def sync_source(
+    self: object,
+    tenant_id: str,
+    source_id: str,
+    *,
+    terminal_error: str | None = None,
+    terminal_indexed_count: int | None = 0,
+) -> dict[str, object]:
     """Celery entrypoint: sync one connected source (the sync wrapper).
 
     Resolves config + adapters, runs :func:`sync_source_async` on a fresh event
@@ -1075,19 +1166,85 @@ def sync_source(self: object, tenant_id: str, source_id: str) -> dict[str, objec
     settings = get_settings()
     tid = UUID(tenant_id)
     sid = UUID(source_id)
+    if terminal_error is not None:
+        # Once work is exhausted, retry ONLY the terminal transaction. Sources
+        # (especially a first web source) have no stranded-document recovery
+        # path, so never acknowledge an uncommitted outcome (R3-001).
+        return _as_dict(
+            _finalize_source_failure(
+                self, tid, sid, terminal_error, terminal_indexed_count, settings=settings
+            )
+        )
     object_store = ObjectStore(settings)
     gateway = LLMGateway(settings)
 
-    result = run_task(
-        sync_source_async(
+    async def _run() -> SyncResult:
+        # Connector ingestion uses the same vector space as uploads. Validate
+        # the complete DB/index/provider contract before claiming the source or
+        # creating any documents, so a drifted worker fails closed (R1-005/006).
+        await ensure_embedding_contract(settings)
+        return await sync_source_async(
             tid,
             sid,
             settings=settings,
             object_store=object_store,
             gateway=gateway,
         )
-    )
+
+    try:
+        result = run_task(_run())
+    except SourceFinalizationError as exc:
+        _retry_source_finalization(self, exc, settings=settings)
+    except DependencyError as exc:
+        # Contract/dependency faults before the source core claims its row are
+        # retryable. Use the same bounded exponential policy as document
+        # ingestion, then publish an explicit terminal Error so a broker-
+        # accepted source can never remain Pending forever (R2-002). Persist
+        # only the stable adapter code, never provider detail/payload.
+        retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+        if retries < settings.ingestion_max_retries:
+            countdown = settings.ingestion_retry_backoff_seconds * (2**retries)
+            raise self.retry(exc=exc, countdown=countdown) from exc  # type: ignore[attr-defined]
+        reason = (
+            "Embedding contract preflight failed after "
+            f"{settings.ingestion_max_retries} retries ({exc.code})."
+        )
+        result = _finalize_source_failure(self, tid, sid, reason, None, settings=settings)
     return _as_dict(result)
+
+
+def _finalize_source_failure(
+    task: object,
+    tenant_id: UUID,
+    source_id: UUID,
+    reason: str,
+    indexed_count: int | None,
+    *,
+    settings: Settings,
+) -> SyncResult:
+    """Commit the terminal outcome or schedule its independent redrive."""
+    try:
+        return run_task(_fail(tenant_id, source_id, reason, indexed_count=indexed_count))
+    except SourceFinalizationError as exc:
+        _retry_source_finalization(task, exc, settings=settings)
+
+
+def _retry_source_finalization(
+    task: object, failure: SourceFinalizationError, *, settings: Settings
+) -> NoReturn:
+    """Keep terminal publication alive beyond the bounded source-work budget."""
+    retries = int(getattr(getattr(task, "request", None), "retries", 0) or 0)
+    countdown = settings.ingestion_retry_backoff_seconds * (
+        2 ** min(retries, settings.ingestion_max_retries)
+    )
+    raise task.retry(  # type: ignore[attr-defined]
+        exc=failure,
+        countdown=countdown,
+        kwargs={
+            "terminal_error": failure.reason,
+            "terminal_indexed_count": failure.indexed_count,
+        },
+    ) from failure
 
 
 def _as_dict(result: SyncResult) -> dict[str, object]:
