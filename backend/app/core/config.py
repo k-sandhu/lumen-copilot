@@ -363,10 +363,58 @@ class Settings(BaseSettings):
     # and the actual transfer still goes directly to/from storage, not through
     # the API process (AC-3).
     s3_presign_ttl_seconds: int = Field(default=900, alias="S3_PRESIGN_TTL_SECONDS")
+    # Browser/storage data-plane CORS. Credentials are never sent to storage.
+    # S3 providers normally accept PutBucketCors at bootstrap. OSS MinIO uses a
+    # process-level allow-list instead, so Compose explicitly marks that setting
+    # externally managed after wiring the same origin set into the MinIO service.
+    s3_cors_allowed_origins: Annotated[frozenset[str], NoDecode] = Field(
+        default=frozenset({"http://localhost:47180"}), alias="S3_CORS_ALLOWED_ORIGINS"
+    )
+    s3_cors_managed_externally: bool = Field(default=False, alias="S3_CORS_MANAGED_EXTERNALLY")
+    # AWS-compatible stores install AbortIncompleteMultipartUpload through the
+    # bucket lifecycle API. Community MinIO does not implement that lifecycle
+    # action, so Compose runs a pinned ``mc rm --incomplete --older-than``
+    # reaper and explicitly declares the cleanup mechanism external here.
+    s3_incomplete_multipart_cleanup_managed_externally: bool = Field(
+        default=False,
+        alias="S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY",
+    )
+    upload_part_size_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=5 * 1024 * 1024,
+        alias="UPLOAD_PART_SIZE_BYTES",
+    )
+    upload_max_parts: int = Field(default=10_000, ge=1, le=10_000, alias="UPLOAD_MAX_PARTS")
+    upload_sign_batch_size: int = Field(
+        # Frozen wire contract + browser uploader both page at 100. This cannot
+        # be deploy-tuned lower without advertising the value on the session.
+        default=100,
+        ge=100,
+        le=100,
+        alias="UPLOAD_SIGN_BATCH_SIZE",
+    )
+    upload_session_ttl_seconds: int = Field(
+        default=24 * 60 * 60, ge=60, alias="UPLOAD_SESSION_TTL_SECONDS"
+    )
+    upload_incomplete_lifecycle_days: int = Field(
+        default=2,
+        ge=1,
+        le=365,
+        alias="UPLOAD_INCOMPLETE_LIFECYCLE_DAYS",
+    )
+    upload_janitor_interval_seconds: int = Field(
+        default=15 * 60, ge=60, alias="UPLOAD_JANITOR_INTERVAL_SECONDS"
+    )
+    upload_janitor_batch_size: int = Field(
+        default=100, ge=1, le=1000, alias="UPLOAD_JANITOR_BATCH_SIZE"
+    )
     # Hard upper bound on a single uploaded object (bytes). Default 50 MiB.
     # Validated before storing so an over-limit upload is a typed 4xx, never a
     # silent drop or a 500 (AC-4 / AC-6).
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
+    max_media_upload_bytes: int = Field(
+        default=5 * 1024 * 1024 * 1024, ge=1, alias="MAX_MEDIA_UPLOAD_BYTES"
+    )
     # Allowlisted upload content-types (AC-4). The declared type is checked
     # against this set before storing. NOTE: a client-declared content-type is
     # not a security guarantee — sniffing/parsing-sandbox hardening is CC-5/OD-4,
@@ -380,6 +428,16 @@ class Settings(BaseSettings):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
                 "text/plain",
                 "text/markdown",
+                "audio/wav",
+                "audio/x-wav",
+                "audio/mpeg",
+                "audio/mp4",
+                "audio/aac",
+                "audio/flac",
+                "audio/ogg",
+                "audio/webm",
+                "video/mp4",
+                "video/webm",
             }
         ),
         alias="UPLOAD_ALLOWED_CONTENT_TYPES",
@@ -391,16 +449,22 @@ class Settings(BaseSettings):
         """Accept a comma-separated env string as the content-type allowlist."""
         return _string_set(value)
 
+    @field_validator("s3_cors_allowed_origins", mode="before")
+    @classmethod
+    def _split_s3_cors_origins(cls, value: object) -> object:
+        return _string_set(value)
+
     # --- Artifact store (CC-12 / issue #208) --------------------------------
     # Files agents/runs *produce* (distinct from uploaded documents): stored via
     # the same ObjectStore under an ``artifacts/`` prefix, but with their own cap
-    # and a **broader** allowlist (agent output is more varied than an upload).
+    # and a distinct allowlist (agent output includes formats that are not
+    # ingestible documents, while document uploads now also include media).
     # Hard upper bound on a single produced artifact (bytes). Default 50 MiB.
     # Validated before storing so an over-cap artifact is a typed 422, never a
     # silent drop or a 500 (#208 AC-2).
     max_artifact_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_ARTIFACT_BYTES")
-    # Allowlisted artifact content-types (#208 AC-2). Broader than the upload set:
-    # also csv/json/png/svg/xlsx/docx/pptx/md/txt/html — the formats a file-writing
+    # Allowlisted artifact content-types (#208 AC-2):
+    # csv/json/png/svg/xlsx/docx/pptx/md/txt/html — the formats a file-writing
     # tool or code sandbox typically emits. The declared type is checked against
     # this set before storing (a client-declared type is a usability/allowlist
     # check, not a security guarantee — sniffing is fenced OUT, OD-4). Comma-
@@ -471,12 +535,9 @@ class Settings(BaseSettings):
             raise ValueError("ARTIFACT_RETENTION_DAYS must be a positive number of days, or unset")
         return value
 
-    # When true (default), GET /documents/{id}/content responds 302 to a
-    # short-TTL presigned GET URL (CC-12, the contract's primary path) so the
-    # bytes transfer directly from storage, not through the API process. When
-    # false, the API streams the bytes inline (application/octet-stream) — useful
-    # where a redirect is undesirable (e.g. same-origin embedding). Both are
-    # contract-valid (the 200 and 302 responses are both defined).
+    # Legacy produced-artifact delivery knob only (#208/#242). Uploaded document
+    # content is retired from v1 and uses the v2 signed-capability endpoint.
+    # True redirects artifact bytes to storage; false streams artifacts inline.
     document_content_redirect: bool = Field(default=True, alias="DOCUMENT_CONTENT_REDIRECT")
     # Cap on the extracted text served by GET /documents/{id}/text (#244), in
     # UTF-8 bytes. The viewer needs readable text, not an unbounded payload —
@@ -503,6 +564,42 @@ class Settings(BaseSettings):
 
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    # OpenRouter speech-to-text adapter (ADR-0023's narrow LiteLLM exception).
+    transcription_model: str = Field(default="x-ai/grok-stt-1.0", alias="TRANSCRIPTION_MODEL")
+    transcription_base_url: str = Field(
+        default="https://openrouter.ai/api/v1", alias="TRANSCRIPTION_BASE_URL"
+    )
+    transcription_timeout_seconds: float = Field(
+        default=60.0, gt=0, le=300, alias="TRANSCRIPTION_TIMEOUT_SECONDS"
+    )
+    transcription_chunk_seconds: int = Field(
+        default=600, ge=1, le=600, alias="TRANSCRIPTION_CHUNK_SECONDS"
+    )
+    transcription_chunk_overlap_seconds: int = Field(
+        default=1, ge=1, le=60, alias="TRANSCRIPTION_CHUNK_OVERLAP_SECONDS"
+    )
+    transcription_provider_options_json: dict[str, object] = Field(
+        default_factory=lambda: dict[str, object](diarize=True),
+        alias="TRANSCRIPTION_PROVIDER_OPTIONS_JSON",
+    )
+    transcription_require_diarization: bool = Field(
+        default=True, alias="TRANSCRIPTION_REQUIRE_DIARIZATION"
+    )
+    media_max_duration_seconds: int = Field(
+        default=8 * 60 * 60, ge=1, alias="MEDIA_MAX_DURATION_SECONDS"
+    )
+    ffmpeg_path: str = Field(default="ffmpeg", min_length=1, alias="FFMPEG_PATH")
+    ffprobe_path: str = Field(default="ffprobe", min_length=1, alias="FFPROBE_PATH")
+
+    @model_validator(mode="after")
+    def _validate_transcription_chunk_overlap(self) -> Settings:
+        if self.transcription_chunk_overlap_seconds >= self.transcription_chunk_seconds:
+            raise ValueError(
+                "TRANSCRIPTION_CHUNK_OVERLAP_SECONDS must be smaller than "
+                "TRANSCRIPTION_CHUNK_SECONDS"
+            )
+        return self
+
     # The gateway FALLBACK model for callers that pass ``model=None`` to
     # ``LLMGateway`` (in practice only ``SearchService._direct_answer``, the
     # optional cited direct answer on /search). This is NOT the chat default and

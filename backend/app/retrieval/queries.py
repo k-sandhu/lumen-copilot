@@ -66,10 +66,54 @@ class PassageRow:
     chunk_id: UUID
     document_id: UUID
     document_name: str
+    document_kind: str
+    duration_ms: int | None
     ord: int
     text: str
     char_start: int
     char_end: int
+    time_start_ms: int | None
+    time_end_ms: int | None
+    transcript_segment_id: UUID | None
+    transcript_segment_document_id: UUID | None
+    speaker_id: str | None
+    speaker_name: str | None
+
+
+def _valid_passage_provenance(row: PassageRow) -> bool:
+    """Fail closed before malformed source timing can become a citation.
+
+    Database checks protect the local pair ordering. This hydration guard also
+    applies the cross-row duration invariant and prevents ordinary documents
+    from accidentally acquiring media-only provenance (spec 0008 §5 / INV-3).
+    """
+    media_values = (
+        row.time_start_ms,
+        row.time_end_ms,
+        row.transcript_segment_id,
+        row.transcript_segment_document_id,
+        row.speaker_id,
+        row.speaker_name,
+    )
+    if row.document_kind == "document":
+        return all(value is None for value in media_values)
+    if row.document_kind not in {"audio", "video"}:
+        return False
+    start, end = row.time_start_ms, row.time_end_ms
+    return (
+        row.duration_ms is not None
+        and start is not None
+        and end is not None
+        and 0 <= start < end <= row.duration_ms
+        and (
+            row.transcript_segment_id is None
+            or row.transcript_segment_document_id == row.document_id
+        )
+        # A chunk spanning several turns has no truthful single segment id.
+        # Speaker display metadata, when present, must still be internally
+        # coherent even though both segment and speaker are optional.
+        and (row.speaker_name is None or row.speaker_id is not None)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,8 +263,8 @@ async def get_permitted_document(
     """The permitted-document **point read** — one row, one predicate (INV-2).
 
     Every non-retrieval read path that resolves a single document by id routes
-    through here (``/documents/{id}``, its ``/content``, ``/text``, and the
-    presigned object URL), so a document point read is governed by **exactly**
+    through here (``/documents/{id}``, ``/text``, and the v2 signed-access /
+    transcript endpoints), so a document point read is governed by **exactly**
     the mode-split predicate retrieval uses — :func:`_document_permitted` — and
     not by a second, weaker rule.
 
@@ -317,21 +361,59 @@ def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT
     )
 
 
-def _base_chunk_select() -> Select[tuple[UUID, UUID, str, int, str, int, int]]:
+def _base_chunk_select() -> (
+    Select[
+        tuple[
+            UUID,
+            UUID,
+            str,
+            str,
+            int | None,
+            int,
+            str,
+            int,
+            int,
+            int | None,
+            int | None,
+            UUID | None,
+            UUID | None,
+            str | None,
+            str | None,
+        ]
+    ]
+):
     """A chunk-joined-document select carrying the columns passages need.
 
     Joins ``chunks`` to their ``documents`` so a hit carries the document name +
     owner (the latter for the permission predicate, the former for citations).
     """
-    return select(
-        models.Chunk.id,
-        models.Chunk.document_id,
-        models.Document.filename,
-        models.Chunk.ord,
-        models.Chunk.text,
-        models.Chunk.char_start,
-        models.Chunk.char_end,
-    ).join(models.Document, models.Chunk.document_id == models.Document.id)
+    return (
+        select(
+            models.Chunk.id,
+            models.Chunk.document_id,
+            models.Document.filename,
+            models.Document.kind,
+            models.Document.duration_ms,
+            models.Chunk.ord,
+            models.Chunk.text,
+            models.Chunk.char_start,
+            models.Chunk.char_end,
+            models.Chunk.time_start_ms,
+            models.Chunk.time_end_ms,
+            models.Chunk.transcript_segment_id,
+            models.TranscriptSegment.document_id.label("transcript_segment_document_id"),
+            models.Chunk.speaker_id,
+            models.Chunk.speaker_name,
+        )
+        .join(models.Document, models.Chunk.document_id == models.Document.id)
+        .outerjoin(
+            models.TranscriptSegment,
+            and_(
+                models.TranscriptSegment.id == models.Chunk.transcript_segment_id,
+                models.TranscriptSegment.tenant_id == models.Chunk.tenant_id,
+            ),
+        )
+    )
 
 
 async def semantic_search(
@@ -417,16 +499,42 @@ async def load_passages(
     stmt = _permission_filter(stmt, allow_set)
     result = await session.execute(stmt)
     rows: dict[UUID, PassageRow] = {}
-    for cid, document_id, filename, ordinal, text, char_start, char_end in result.all():
-        rows[cid] = PassageRow(
+    for (
+        cid,
+        document_id,
+        filename,
+        document_kind,
+        duration_ms,
+        ordinal,
+        text,
+        char_start,
+        char_end,
+        time_start_ms,
+        time_end_ms,
+        transcript_segment_id,
+        transcript_segment_document_id,
+        speaker_id,
+        speaker_name,
+    ) in result.all():
+        row = PassageRow(
             chunk_id=cid,
             document_id=document_id,
             document_name=filename,
+            document_kind=document_kind,
+            duration_ms=duration_ms,
             ord=ordinal,
             text=text,
             char_start=char_start,
             char_end=char_end,
+            time_start_ms=time_start_ms,
+            time_end_ms=time_end_ms,
+            transcript_segment_id=transcript_segment_id,
+            transcript_segment_document_id=transcript_segment_document_id,
+            speaker_id=speaker_id,
+            speaker_name=speaker_name,
         )
+        if _valid_passage_provenance(row):
+            rows[cid] = row
     return rows
 
 
