@@ -15,16 +15,20 @@
  * triggers exactly one silent refresh + retry (AC-2/AC-4).
  */
 import { request, registerRefreshHandler } from './client';
-import { setAccessToken, clearAccessToken } from './token';
+import { setAccessToken, clearAccessToken, getAccessToken } from './token';
 import type { CurrentUser, LoginRequest, TokenResponse } from './types';
 
 /** Exchange email + password for an access token (AC-1). Stores the token. */
-export async function login(body: LoginRequest): Promise<TokenResponse> {
+export async function login(body: LoginRequest, signal?: AbortSignal): Promise<TokenResponse> {
   const token = await request<TokenResponse>('/auth/login', {
     method: 'POST',
     json: body,
     skipAuth: true,
+    signal,
   });
+  // Credential holders abort on unmount/logout. Do not install a token from a
+  // transport that settled despite cancellation.
+  signal?.throwIfAborted();
   setAccessToken(token.access_token);
   return token;
 }
@@ -35,7 +39,7 @@ export async function refresh(): Promise<TokenResponse> {
     method: 'POST',
     skipAuth: true,
   });
-  setAccessToken(token.access_token);
+  setAccessToken(token.access_token, 'refresh');
   return token;
 }
 
@@ -45,17 +49,20 @@ export function getCurrentUser(signal?: AbortSignal): Promise<CurrentUser> {
 }
 
 /**
- * Revoke the session server-side and clear local state (AC-2). The in-memory
- * token is cleared even if the network call fails, so the client always ends up
- * logged out locally — never wedged in a half-authenticated state.
+ * Clear the local session synchronously (AC-2), then attempt revocation with
+ * the captured outgoing bearer. Network completion never clears a later login.
  */
 export async function logout(): Promise<void> {
+  const bearer = getAccessToken();
+  clearAccessToken();
   try {
-    await request<void>('/auth/logout', { method: 'POST' });
+    await request<void>('/auth/logout', {
+      method: 'POST',
+      skipAuth: true,
+      headers: bearer ? { Authorization: `Bearer ${bearer}` } : undefined,
+    });
   } catch {
     // Best-effort revocation; local logout proceeds regardless.
-  } finally {
-    clearAccessToken();
   }
 }
 

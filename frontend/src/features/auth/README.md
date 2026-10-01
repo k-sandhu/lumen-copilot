@@ -30,8 +30,9 @@ Transport (the `api/` boundary — the only backend caller):
 Feature (`features/auth`):
 
 - `model/authStore.ts` — coarse session status (`unknown` | `authenticated` |
-  `unauthenticated`) in Zustand. Subscribes to the token holder so a cleared token
-  (failed refresh / logout) deterministically routes back to login. The user
+  `unauthenticated`) in Zustand. `model/PrincipalLifecycle.tsx` observes the token
+  holder and cancels queries, wipes credentials, and clears both query/mutation
+  caches before updating status on login, failed refresh, and logout. The user
   _object_ is server state and lives in TanStack Query, not here.
 - `model/queries.ts` — `useCurrentUser` (`GET /auth/me`), `useLogin`, `useLogout`.
 - `model/useBootstrapSession.ts` — one boot-time silent refresh so a reload keeps
@@ -49,6 +50,46 @@ refresh-then-retry, and a failed refresh ends in the login screen. The negative
 paths (bad creds → generic error, expired token → refresh+retry, failed refresh →
 login) are covered in `authClient.test.ts`, `auth.test.ts`, `LoginScreen.test.tsx`,
 and `RouteGuard.test.tsx`.
+
+## Credential fields and local lifecycle (#580)
+
+Credential inputs use explicit browser semantics:
+
+- Login email uses `type="email"`, `name="email"`, and `autocomplete="username"`;
+  the login password uses `name="password"` and `autocomplete="current-password"`.
+- Provider/MCP credentials use domain-specific names and `SecretInput` with
+  `autocomplete="new-password"`. Base URL and MCP endpoint use `type="url"`,
+  URL input mode, no spellcheck, and no automatic capitalization.
+- Reveal is an accessible, non-submit button with an announced pressed state.
+  Every reset blanks the actual input and restores password masking, including
+  manager-style DOM writes that never dispatched a React input event.
+- Credential drafts start blank and stay in component state/ephemeral request
+  holders. TanStack MutationCache receives only an opaque submission number;
+  passwords, provider keys, and MCP tokens never enter persisted stores, browser
+  storage, URLs, logs, or errors. Read responses contain only masked hints and
+  never seed an input with an existing key.
+- Forms clear on submission success/failure, cancel where offered, unmount,
+  identity change, and logout; detached controls are blanked too. Untouched
+  optional secrets are omitted from requests.
+
+Logout clears the local bearer, credential holders, and both caches synchronously
+before best-effort server revocation with the captured outgoing bearer. A
+subsequent login in the same tab loads fresh account data. Ordinary refresh keeps
+the same account's cache. Queued credential variables are discarded on a local
+boundary and active credential requests receive an abort signal. Abort is
+transport cleanup, not rollback of work already accepted and audited by the
+server.
+
+Standards-correct hints and `autocomplete="off"` cannot force a nonstandard
+password manager to reclassify fields or erase its private vault. On shared or
+managed browsers, use separate browser profiles and the manager's site exclusions
+where needed. Application cleanup covers its own state and retained DOM nodes;
+an extension can still inject values again after a reset.
+
+This regression covers sequential A → logout → B in one tab/browser context.
+Concurrent multi-tab/multi-principal session isolation is tracked separately in
+[#646](https://github.com/k-sandhu/lumen-copilot/issues/646) /
+[#647](https://github.com/k-sandhu/lumen-copilot/pull/647).
 
 ## Wiring it up at the wire-up with the live BE (#19)
 
