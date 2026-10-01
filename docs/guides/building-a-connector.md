@@ -208,7 +208,8 @@ with nothing to hold, there is nothing to launder: `create_async_engine(...)`,
 helper all fail the same way, for *binding the object at all*. Reading a Lumen
 **infrastructure** field (`database_url`, `s3_secret_key`, `redis_url`,
 `jwt_secret`, `secrets_encryption_key`, …) is refused even through the one legal
-shape.
+shape. The `audit_db_*` capacity and deadline settings belong to Lumen's
+independent audit database pool and are also forbidden to connector code.
 
 `<field>` must be listed in `ALLOWED_DEPLOYMENT_CONFIG`. Storing a bound method
 such as `dump = get_settings().model_dump` also retains the settings object and

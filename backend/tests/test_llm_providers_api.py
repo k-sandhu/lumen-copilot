@@ -297,9 +297,7 @@ async def test_create_discovers_models_and_round_trips(
     assert len(discovery.requests) == before + 1
 
     # delete → 204, gone
-    resp = await client.delete(
-        f"/api/v1/admin/llm-providers/{provider_id}", headers=_auth(token)
-    )
+    resp = await client.delete(f"/api/v1/admin/llm-providers/{provider_id}", headers=_auth(token))
     assert resp.status_code == 204
     resp = await client.get("/api/v1/admin/llm-providers", headers=_auth(token))
     assert resp.json()["items"] == []
@@ -498,9 +496,7 @@ async def test_non_admin_is_403_on_every_path(
             f"/api/v1/admin/llm-providers/{fake}", json={"name": "x"}, headers=_auth(member)
         ),
         await client.delete(f"/api/v1/admin/llm-providers/{fake}", headers=_auth(member)),
-        await client.post(
-            f"/api/v1/admin/llm-providers/{fake}/refresh", headers=_auth(member)
-        ),
+        await client.post(f"/api/v1/admin/llm-providers/{fake}/refresh", headers=_auth(member)),
     ]
     for resp in calls:
         assert resp.status_code == 403, resp.text
@@ -512,6 +508,7 @@ async def test_non_admin_is_403_on_every_path(
 async def test_cross_tenant_provider_is_404(
     client: AsyncClient,
     seeded: _Seeded,
+    durable_audit_ledger,
 ) -> None:
     admin_a = await _login(client, seeded.admin_a_email)
     provider_id = (await _create(client, admin_a)).json()["id"]
@@ -523,14 +520,18 @@ async def test_cross_tenant_provider_is_404(
             json={"name": "x"},
             headers=_auth(admin_b),
         ),
-        await client.delete(
-            f"/api/v1/admin/llm-providers/{provider_id}", headers=_auth(admin_b)
-        ),
+        await client.delete(f"/api/v1/admin/llm-providers/{provider_id}", headers=_auth(admin_b)),
         await client.post(
             f"/api/v1/admin/llm-providers/{provider_id}/refresh", headers=_auth(admin_b)
         ),
     ):
         assert resp.status_code == 404, resp.text  # never 403
+
+    assert [event.metadata["attempted_action"] for event in durable_audit_ledger.events] == [
+        "llm_provider.update",
+        "llm_provider.delete",
+        "llm_provider.refresh",
+    ]
 
     # And tenant B's list never shows tenant A's provider.
     resp = await client.get("/api/v1/admin/llm-providers", headers=_auth(admin_b))

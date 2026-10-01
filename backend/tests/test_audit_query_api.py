@@ -39,6 +39,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Role
 from app.main import create_app
 from app.services.audit import AuditSink
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -352,14 +353,40 @@ async def test_malformed_cursor_is_422(client: AsyncClient, seeded: _Seeded) -> 
 
 
 async def test_member_is_forbidden_403(
-    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
 ) -> None:
     # Even with events present, a member never reads the trail.
     await _seed_event(sessionmaker, tenant_id=seeded.tenant_a)
     token = await _login(client, seeded.member_email)
-    resp = await client.get("/api/v1/audit", headers=_auth(token))
+    resp = await client.get(
+        "/api/v1/audit",
+        headers={**_auth(token), "x-request-id": "req-audit-denied"},
+    )
     assert resp.status_code == 403
     assert resp.headers["content-type"].startswith("application/problem+json")
+
+    async with sessionmaker() as session:
+        member = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.member_email)
+    assert member is not None
+    denied = [event for event in durable_audit_ledger.events if event.action == "permission.denied"]
+    assert len(denied) == 1
+    event = denied[0]
+    assert event.tenant_id == seeded.tenant_a
+    assert event.actor_id == member.id
+    assert event.outcome is AuditOutcome.DENIED
+    assert event.resource_type == "api_route"
+    assert event.resource_id == "/api/v1/audit"
+    assert event.request_id == "req-audit-denied"
+    assert event.source_origin == "client"
+    assert event.source_ip is not None
+    assert event.metadata == {
+        "attempted_action": "GET /api/v1/audit",
+        "reason": "missing_required_role",
+        "required_roles": ["admin", "security"],
+    }
 
 
 # --- Negative: tenant isolation (INV-1 → cross-tenant excluded) -------------

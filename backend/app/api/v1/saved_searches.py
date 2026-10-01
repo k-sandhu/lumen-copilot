@@ -18,10 +18,16 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
-from app.api.deps import CurrentTenant, CurrentUser, DbSession
+from app.api.deps import (
+    AuditSinkFactory,
+    CurrentTenant,
+    CurrentUser,
+    DbSession,
+    authenticated_denial_context,
+)
 from app.core.errors import NotFoundError
 from app.domain.entities import SavedSearch
 from app.services.saved_searches_service import SavedSearchService
@@ -110,16 +116,45 @@ def _to_response(saved: SavedSearch) -> SavedSearchResponse:
     )
 
 
-@router.get("", response_model=SavedSearchListResponse)
-async def list_saved_searches(
+def _build_service(
+    *,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
+    request: Request,
+) -> SavedSearchService:
+    return SavedSearchService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
+    )
+
+
+@router.get("", response_model=SavedSearchListResponse)
+async def list_saved_searches(
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> SavedSearchListResponse:
     """List the caller's saved searches (newest-updated first, cursor-paginated)."""
-    service = SavedSearchService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     page = await service.list(cursor=cursor, limit=limit)
     return SavedSearchListResponse(
         items=[_to_response(s) for s in page.items], next_cursor=page.next_cursor
@@ -129,12 +164,20 @@ async def list_saved_searches(
 @router.post("", response_model=SavedSearchResponse, status_code=status.HTTP_201_CREATED)
 async def create_saved_search(
     body: SavedSearchCreate,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> SavedSearchResponse:
     """Save a search (query + optional filters) under a name."""
-    service = SavedSearchService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     saved = await service.create(
         name=body.name,
         query=body.query,
@@ -149,12 +192,20 @@ async def create_saved_search(
 @router.get("/{saved_search_id}", response_model=SavedSearchResponse)
 async def get_saved_search(
     saved_search_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> SavedSearchResponse:
     """Get one of the caller's saved searches (404 if not visible)."""
-    service = SavedSearchService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     saved = await service.get(saved_search_id)
     if saved is None:
         raise NotFoundError("Saved search not found.")
@@ -165,12 +216,20 @@ async def get_saved_search(
 async def update_saved_search(
     saved_search_id: UUID,
     body: SavedSearchUpdate,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> SavedSearchResponse:
     """Rename or change one of the caller's saved searches (404 if not visible)."""
-    service = SavedSearchService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     fields = body.model_fields_set
     saved = await service.update(
         saved_search_id,
@@ -192,12 +251,20 @@ async def update_saved_search(
 @router.delete("/{saved_search_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_saved_search(
     saved_search_id: UUID,
+    request: Request,
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    make_audit_sink: AuditSinkFactory,
 ) -> Response:
     """Delete one of the caller's saved searches (404 if not visible)."""
-    service = SavedSearchService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    service = _build_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
     deleted = await service.delete(saved_search_id)
     if not deleted:
         raise NotFoundError("Saved search not found.")

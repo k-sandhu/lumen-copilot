@@ -1405,6 +1405,53 @@ class CollectionRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return _to_collection(row)
 
+    async def delete_owned(self, collection_id: UUID, *, owner_id: UUID) -> list[Document] | None:
+        """Lock visibility and the exact cascade snapshot until the caller finishes.
+
+        A parent FOR UPDATE conflicts with the KEY SHARE taken by document FK
+        inserts, so committed uploads are included and later uploads cannot slip
+        between this snapshot and deletion. Child locks also serialize document
+        deletes/updates. Return domain documents for audit and object cleanup;
+        None is the same non-visible result for absent, foreign and private ids.
+        """
+        stmt = (
+            select(models.Collection)
+            .where(
+                models.Collection.tenant_id == self._tenant_id,
+                models.Collection.id == collection_id,
+                models.Collection.owner_id == owner_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        documents = (
+            (
+                await self._session.execute(
+                    select(models.Document)
+                    .where(
+                        models.Document.tenant_id == self._tenant_id,
+                        models.Document.collection_id == collection_id,
+                    )
+                    .order_by(models.Document.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        snapshot = [to_document(document) for document in documents]
+        # A caller may have loaded this relationship earlier. Refresh it under
+        # the parent lock so the ORM cascade uses the same current document set.
+        await self._session.refresh(row, attribute_names=["documents"])
+        if not await self.delete(collection_id):
+            return None
+        await self._session.flush()
+        return snapshot
+
     async def delete(self, collection_id: UUID) -> bool:
         stmt = select(models.Collection).where(
             models.Collection.tenant_id == self._tenant_id,
@@ -5581,19 +5628,23 @@ def _classify_source_ip(
     if zone_index >= 0:
         candidate = candidate[:zone_index]
 
-    # Parse to VALIDATE, but store the candidate text rather than `str(parsed)`.
-    # Python's canonical form is not Postgres's: `ipaddress` renders
-    # `::ffff:1.2.3.4` as `::ffff:102:304`, while `select '::ffff:1.2.3.4'::inet`
-    # keeps the dotted form. Normalising here would quietly rewrite the address an
-    # operator sees in the audit trail into a different spelling than the database
-    # itself would have stored. (Note `ip_address` PRESERVES a zone id, so the strip
-    # above — not the parse — is what keeps link-local addresses out of `INET`.)
+    # PostgreSQL INET canonicalises text on round-trip. Canonicalise *before* both
+    # insert and idempotent-payload comparison so an expanded IPv6 spelling or a
+    # dotted IPv4-mapped IPv6 address cannot commit successfully and then fail its
+    # own equality check (R3-001). `ip_interface` preserves host bits for the INET
+    # forms carrying a prefix (`10.1.2.3/8`); `ip_network(strict=False)` would
+    # silently rewrite that value to `10.0.0.0/8`.
     try:
-        ipaddress.ip_address(candidate)
+        canonical = str(ipaddress.ip_address(candidate))
     except ValueError:
         try:
-            # `INET` also accepts CIDR (`10.0.0.0/8`) — a network, not an address.
-            ipaddress.ip_network(candidate, strict=False)
+            # `INET` accepts an address plus a prefix, retaining host bits.
+            interface = ipaddress.ip_interface(candidate)
+            canonical = (
+                str(interface.ip)
+                if interface.network.prefixlen == interface.max_prefixlen
+                else str(interface)
+            )
         except ValueError:
             lowered = text.lower()
             if lowered == AuditSourceOrigin.SYSTEM.value:
@@ -5605,7 +5656,7 @@ def _classify_source_ip(
             # caller to log, because silently losing every address is how a
             # misconfigured proxy destroys audit fidelity without anyone noticing.
             return AuditSourceOrigin.UNKNOWN, None, text
-    return AuditSourceOrigin.CLIENT, candidate, None
+    return AuditSourceOrigin.CLIENT, canonical, None
 
 
 class AuditEventRepository(_TenantScopedRepository):
@@ -5620,6 +5671,7 @@ class AuditEventRepository(_TenantScopedRepository):
     async def record(
         self,
         *,
+        event_id: UUID | None = None,
         action: str,
         resource_type: str,
         outcome: AuditOutcome,
@@ -5651,25 +5703,109 @@ class AuditEventRepository(_TenantScopedRepository):
                 resource_type=resource_type,
                 value_length=len(unrecognised),
             )
-        row = models.AuditEvent(
-            source_origin=origin.value,
-            tenant_id=self._tenant_id,
-            actor_id=actor_id,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            outcome=outcome.value,
-            request_id=request_id,
-            source_ip=stored_ip,
-            event_metadata=metadata or {},
-        )
-        self._session.add(row)
+        values: dict[str, object] = {
+            "source_origin": origin.value,
+            "tenant_id": self._tenant_id,
+            "actor_id": actor_id,
+            "action": action,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "outcome": outcome.value,
+            "request_id": request_id,
+            "source_ip": stored_ip,
+            "event_metadata": metadata or {},
+        }
+        if event_id is None:
+            # Ordinary audit events keep the original append-only behavior: a
+            # fresh server identity is generated by the ORM for each call.
+            row = models.AuditEvent(**values)
+            self._session.add(row)
+            await self._session.flush()
+            return _to_audit_event(row)
+
+        # Durable denial commits can time out after PostgreSQL made the row
+        # durable but before the client received the COMMIT acknowledgement.
+        # Their server-generated event id is therefore a semantic operation key:
+        # retry the exact insert, converge on one PK row, then prove that any
+        # pre-existing row is byte-for-byte the same canonical envelope.  Merely
+        # observing a PK conflict is not success: a foreign-tenant collision is
+        # deliberately invisible (INV-1), and a same-tenant payload mismatch
+        # could otherwise acknowledge the wrong security event.
+        values["id"] = event_id
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            await self._session.execute(
+                pg_insert(models.AuditEvent)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
+        elif dialect == "sqlite":
+            await self._session.execute(
+                sqlite_insert(models.AuditEvent)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
+        else:  # The supported stack is PostgreSQL; SQLite is the offline test adapter.
+            raise RuntimeError(f"Unsupported audit idempotency dialect: {dialect}")
         await self._session.flush()
-        return _to_audit_event(row)
+
+        stored_row = (
+            await self._session.execute(
+                select(models.AuditEvent).where(
+                    models.AuditEvent.tenant_id == self._tenant_id,
+                    models.AuditEvent.id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if stored_row is None:
+            raise RuntimeError(
+                "Audit idempotency key collided with an event outside the bound tenant."
+            )
+
+        expected_payload = (
+            self._tenant_id,
+            actor_id,
+            action,
+            resource_type,
+            resource_id,
+            outcome.value,
+            request_id,
+            origin.value,
+            stored_ip,
+            metadata or {},
+        )
+        stored_payload = (
+            stored_row.tenant_id,
+            stored_row.actor_id,
+            stored_row.action,
+            stored_row.resource_type,
+            stored_row.resource_id,
+            stored_row.outcome,
+            stored_row.request_id,
+            stored_row.source_origin,
+            str(stored_row.source_ip) if stored_row.source_ip is not None else None,
+            dict(stored_row.event_metadata),
+        )
+        if stored_payload != expected_payload:
+            raise RuntimeError("Audit idempotency key resolved to a different canonical payload.")
+        return _to_audit_event(stored_row)
+
+    async def get(self, event_id: UUID) -> AuditEvent | None:
+        """Read one event inside the bound tenant for commit reconciliation."""
+        row = (
+            await self._session.execute(
+                select(models.AuditEvent).where(
+                    models.AuditEvent.tenant_id == self._tenant_id,
+                    models.AuditEvent.id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return _to_audit_event(row) if row is not None else None
 
     async def record_committed(
         self,
         *,
+        event_id: UUID | None = None,
         action: str,
         resource_type: str,
         outcome: AuditOutcome,
@@ -5694,6 +5830,7 @@ class AuditEventRepository(_TenantScopedRepository):
         async with factory() as session, session.begin():
             await bind_tenant(session, self._tenant_id)
             event = await AuditEventRepository(session, self._tenant_id).record(
+                event_id=event_id,
                 action=action,
                 resource_type=resource_type,
                 outcome=outcome,

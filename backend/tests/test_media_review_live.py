@@ -1,7 +1,7 @@
 """PR #606 regression proofs on an isolated PostgreSQL database and ordinary role.
 
 Opt in with RUN_LIVE=1 and the exact DATABASE_URL below. This module resets only
-lumentest_pr606 before each invocation and drops its database/role at teardown.
+lumentest_pr604 before each invocation and drops its database/role at teardown.
 """
 
 from __future__ import annotations
@@ -19,16 +19,18 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select, text
+from sqlalchemy import Connection, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import app.tasks  # noqa: F401  isort: skip — initialize task registry before upload service
 
 from app.api.v2.uploads import _commit_rejection
+from app.auth.principal import Principal
 from app.core.config import get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.db import models
+from app.db.audit_transactions import DurableAuditTransactions
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -43,14 +45,14 @@ from app.db.repositories import (
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction
 from app.domain.entities import Document, DocumentUpload, DocumentUploadState, MessageRole, Role
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDeniedRecorder
 from app.services.collections_service import CollectionsService
 from app.services.document_upload_service import CompletePartInput
 from app.storage import UploadedPart
 from app.tasks.upload_janitor import _recovery_service, sweep_expired_uploads_async
 from tests.test_direct_upload_api import FakeMultipartStore
 
-_URL = "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr606"
+_URL = "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr604"
 _BACKEND = Path(__file__).resolve().parents[1]
 pytestmark = [
     pytest.mark.live,
@@ -67,7 +69,7 @@ def _config() -> Config:
     return cfg
 
 
-async def _admin(database: str = "lumentest_pr606") -> asyncpg.Connection:
+async def _admin(database: str = "lumentest_pr604") -> asyncpg.Connection:
     return await asyncpg.connect(
         user="lumen", password="lumen_local_dev", host="localhost", port=47182, database=database
     )
@@ -76,13 +78,13 @@ async def _admin(database: str = "lumentest_pr606") -> asyncpg.Connection:
 @pytest.fixture(scope="module")
 def live_database() -> Iterator[str]:
     assert os.environ.get("DATABASE_URL") == _URL, "refusing any other live database"
-    role = f"pr606_r2_{uuid.uuid4().hex}"
+    role = f"pr604_r11_{uuid.uuid4().hex}"
 
     async def reset() -> None:
         connection = await _admin("postgres")
         try:
-            await connection.execute("DROP DATABASE IF EXISTS lumentest_pr606 WITH (FORCE)")
-            await connection.execute("CREATE DATABASE lumentest_pr606")
+            await connection.execute("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)")
+            await connection.execute("CREATE DATABASE lumentest_pr604")
         finally:
             await connection.close()
 
@@ -101,7 +103,7 @@ def live_database() -> Iterator[str]:
     async def cleanup() -> None:
         connection = await _admin("postgres")
         try:
-            await connection.execute("DROP DATABASE IF EXISTS lumentest_pr606 WITH (FORCE)")
+            await connection.execute("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)")
             await connection.execute(f"DROP ROLE IF EXISTS {role}")
         finally:
             await connection.close()
@@ -148,6 +150,50 @@ async def restricted_session(live_database: str) -> AsyncIterator[AsyncSession]:
                 await connection.commit()
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def durable_audit_transactions(
+    live_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _wire_offline_durable_audit: None,
+) -> AsyncIterator[DurableAuditTransactions]:
+    """Use a separate real audit pool under the same restricted application role."""
+    engine = create_async_engine(_URL)
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def restrict_role(connection: Connection) -> None:
+        # Reapply on every transaction, including after a prior audit rollback.
+        connection.execute(text(f"SET LOCAL ROLE {live_database}"))
+        assert connection.execute(
+            text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        ).one() == (False, False)
+
+    provider = DurableAuditTransactions(engine, operation_timeout_seconds=10)
+    monkeypatch.setattr(
+        "app.db.session.get_durable_audit_transactions", lambda settings=None: provider
+    )
+    monkeypatch.setattr(
+        "app.api.deps.get_durable_audit_transactions", lambda settings=None: provider
+    )
+    try:
+        yield provider
+    finally:
+        await provider.dispose()
+
+
+def _collection_denials(
+    session: AsyncSession,
+    upload: DocumentUpload,
+    provider: DurableAuditTransactions,
+    request_id: str,
+) -> PermissionDeniedContext:
+    return PermissionDeniedContext(
+        PermissionDeniedRecorder(provider, tenant_id=upload.tenant_id, request_session=session),
+        principal=Principal(upload.owner_id, upload.tenant_id, (Role.MEMBER,)),
+        request_id=request_id,
+        source_ip="127.0.0.1",
+    )
 
 
 async def _seed() -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
@@ -559,6 +605,7 @@ async def test_collection_delete_at_durable_completion_boundary_under_rls(
     restricted_session: AsyncSession,
     live_database: str,
     monkeypatch: pytest.MonkeyPatch,
+    durable_audit_transactions: DurableAuditTransactions,
 ) -> None:
     session, store = restricted_session, FakeMultipartStore()
     upload = await _live_upload(session, store, expires_at=datetime.now(UTC) + timedelta(hours=1))
@@ -605,8 +652,9 @@ async def test_collection_delete_at_durable_completion_boundary_under_rls(
                         owner_id=upload.owner_id,
                         object_store=store,  # type: ignore[arg-type]
                         audit=AuditSink(AuditEventRepository(deleter, upload.tenant_id)),
-                        request_id="r3-delete",
-                        source_ip="127.0.0.1",
+                        denials=_collection_denials(
+                            deleter, upload, durable_audit_transactions, "r3-delete"
+                        ),
                     )
                     assert await collections.delete(upload.collection_id)
                     await deleter.commit()
@@ -637,18 +685,30 @@ async def test_collection_delete_at_durable_completion_boundary_under_rls(
         )
         is None
     )
-    event = (
-        await session.execute(
-            select(models.AuditEvent).where(
-                models.AuditEvent.resource_id == str(upload.id),
-                models.AuditEvent.action == AuditAction.PERMISSION_DENIED.value,
+    await session.rollback()
+    # Read through the independent restricted pool, after the caller rolled back.
+    async with AsyncSession(durable_audit_transactions.engine) as reader:
+        await bind_tenant(reader, upload.tenant_id)
+        event = (
+            await reader.execute(
+                select(models.AuditEvent).where(
+                    models.AuditEvent.resource_id == str(upload.id),
+                    models.AuditEvent.request_id == "upload-janitor",
+                )
             )
+        ).scalar_one()
+        await bind_tenant(reader, uuid.uuid4())
+        assert (
+            await reader.scalar(select(models.AuditEvent).where(models.AuditEvent.id == event.id))
+            is None
         )
-    ).scalar_one()
+    assert (event.action, event.outcome) == (AuditAction.PERMISSION_DENIED.value, "denied")
+    assert event.tenant_id == upload.tenant_id and event.actor_id is None
+    assert event.request_id == "upload-janitor"
+    assert event.source_origin == "system" and event.source_ip is None
     assert event.event_metadata == {
-        "operation": "complete",
-        "reason_code": "not_found_or_not_owned",
-        "status": 404,
+        "attempted_action": "document_upload.complete",
+        "reason": "not_visible",
     }
 
 
@@ -658,6 +718,7 @@ async def test_finalization_and_collection_delete_do_not_deadlock(
     live_database: str,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    durable_audit_transactions: DurableAuditTransactions,
 ) -> None:
     """Hold finalization before its FK insert; prove deletion waits, then release.
 
@@ -766,8 +827,9 @@ async def test_finalization_and_collection_delete_do_not_deadlock(
                         owner_id=upload.owner_id,
                         object_store=store,  # type: ignore[arg-type]
                         audit=AuditSink(AuditEventRepository(deleter, upload.tenant_id)),
-                        request_id="r4-concurrent-delete",
-                        source_ip="127.0.0.1",
+                        denials=_collection_denials(
+                            deleter, upload, durable_audit_transactions, "r4-concurrent-delete"
+                        ),
                     )
                     result = await collections.delete(upload.collection_id)
                     await deleter.commit()

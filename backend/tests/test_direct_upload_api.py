@@ -44,6 +44,7 @@ from app.main import create_app
 from app.services.document_upload_service import DocumentUploadService
 from app.storage import MultipartUpload, StoredObjectMetadata, UploadedPart
 from app.tasks.upload_janitor import sweep_expired_uploads_async
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -144,7 +145,9 @@ class Seeded:
 
 
 @pytest_asyncio.fixture
-async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+async def sessionmaker(
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -175,6 +178,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     factory.seeded = Seeded(  # type: ignore[attr-defined]
         tenant_a.id, tenant_b.id, collection_a.id, collection_b.id
     )
+    factory.durable_audit_ledger = durable_audit_ledger  # type: ignore[attr-defined]
     try:
         yield factory
     finally:
@@ -335,12 +339,35 @@ async def upload_rejection_audits(
             .scalars()
             .all()
         )
-    return [row for row in rows if "operation" in row.event_metadata]
+    errors = [row for row in rows if "operation" in row.event_metadata]
+    ledger = sessionmaker.durable_audit_ledger  # type: ignore[attr-defined]
+    denials = [
+        models.AuditEvent(
+            id=event.id,
+            tenant_id=event.tenant_id,
+            actor_id=event.actor_id,
+            resource_id=event.resource_id,
+            resource_type=event.resource_type,
+            action=event.action,
+            outcome=event.outcome.value,
+            request_id=event.request_id,
+            source_origin=event.source_origin,
+            source_ip=event.source_ip,
+            event_metadata=event.metadata,
+        )
+        for event in ledger.events
+        if event.tenant_id == tenant_id
+    ]
+    return [*errors, *denials]
 
 
 def assert_content_safe_rejection(event: models.AuditEvent) -> None:
     """Negative audit evidence contains policy facts, never upload/provider data."""
-    assert set(event.event_metadata) == {"operation", "reason_code", "status"}
+    assert set(event.event_metadata) == (
+        {"attempted_action", "reason"}
+        if event.action == AuditAction.PERMISSION_DENIED.value
+        else {"operation", "reason_code", "status"}
+    )
     serialized = repr(event.event_metadata).lower()
     for forbidden in (
         "private-",
@@ -540,6 +567,151 @@ async def test_initiation_rejections_are_audited_and_never_reach_storage(
         assert_content_safe_rejection(event)
 
 
+@pytest.mark.parametrize("operation", ["get", "complete"])
+@pytest.mark.parametrize("provider_method", ["list_multipart_parts", "complete_multipart_upload"])
+async def test_provider_absence_retains_lifecycle_error_instead_of_permission_denial(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeMultipartStore,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    provider_method: str,
+) -> None:
+    seeded: Seeded = sessionmaker.seeded  # type: ignore[attr-defined]
+    token = await login(client, "alice@a.test")
+    started = await initiate(client, token, seeded.collection_a, size=8)
+    assert started.status_code == 201
+    upload_id = uuid.UUID(started.json()["id"])
+    async with sessionmaker() as session:
+        upload = await session.scalar(
+            select(models.DocumentUpload).where(models.DocumentUpload.id == upload_id)
+        )
+        assert upload is not None
+        if provider_method == "complete_multipart_upload":
+            # Crash recovery reaches provider completion after HEAD finds no object.
+            await DocumentUploadRepository(session, seeded.tenant_a).set_state(
+                upload.id, upload.owner_id, DocumentUploadState.COMPLETING
+            )
+            await session.commit()
+    store.upload_parts(upload.provider_upload_id, [8])
+
+    async def missing_provider(**_kwargs: object) -> object:
+        raise NotFoundError("multipart upload not found", code="multipart_upload_not_found")
+
+    monkeypatch.setattr(store, provider_method, missing_provider)
+
+    async def attempt(target: uuid.UUID) -> Response:
+        url = f"/api/v2/document-uploads/{target}"
+        if operation == "get":
+            return await client.get(url, headers=auth(token))
+        return await client.post(
+            f"{url}/complete",
+            headers=auth(token),
+            json={"parts": [{"part_number": 1, "etag": '"etag-1"'}]},
+        )
+
+    response = await attempt(upload_id)
+    assert response.status_code == 404, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    problem = response.json()
+    assert (problem["status"], problem["code"], problem["title"], problem["detail"]) == (
+        404,
+        "multipart_upload_not_found",
+        "Not Found",
+        "multipart upload not found",
+    )
+    events = await upload_rejection_audits(sessionmaker, seeded.tenant_a)
+    assert len(events) == 1
+    event = events[0]
+    assert (event.action, event.outcome) == (
+        AuditAction.DOCUMENT_VIEWED.value
+        if operation == "get"
+        else AuditAction.DOCUMENT_UPLOADED.value,
+        "error",
+    )
+    assert event.resource_id == str(upload_id) and event.actor_id == upload.owner_id
+    assert event.event_metadata == {
+        "operation": operation,
+        "reason_code": "multipart_upload_not_found",
+        "status": 404,
+    }
+    assert_content_safe_rejection(event)
+
+    # Same status, but a genuinely absent SQL target remains one canonical denial.
+    missing_id = uuid.uuid4()
+    denied = await attempt(missing_id)
+    assert denied.status_code == 404 and denied.json()["code"] == "not_found"
+    events = await upload_rejection_audits(sessionmaker, seeded.tenant_a)
+    assert len(events) == 2
+    denial = next(event for event in events if event.resource_id == str(missing_id))
+    assert (denial.action, denial.outcome) == (AuditAction.PERMISSION_DENIED.value, "denied")
+    assert denial.event_metadata == {
+        "attempted_action": "document_upload.read"
+        if operation == "get"
+        else "document_upload.complete",
+        "reason": "not_visible",
+    }
+
+
+async def test_janitor_expires_missing_provider_without_permission_denial(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeMultipartStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: Seeded = sessionmaker.seeded  # type: ignore[attr-defined]
+    token = await login(client, "alice@a.test")
+    started = await initiate(client, token, seeded.collection_a, size=8)
+    assert started.status_code == 201
+    upload_id = uuid.UUID(started.json()["id"])
+    now = datetime.now(UTC)
+    async with sessionmaker() as session:
+        row = await session.get(models.DocumentUpload, upload_id)
+        assert row is not None
+        row.state = DocumentUploadState.COMPLETING.value
+        row.expires_at = now - timedelta(minutes=1)
+        provider_id, key = row.provider_upload_id, row.storage_key
+        await session.commit()
+
+    async def missing_provider(**_kwargs: object) -> object:
+        raise NotFoundError("multipart upload not found", code="multipart_upload_not_found")
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield session
+            await session.commit()
+
+    @asynccontextmanager
+    async def tenant_scope(_tenant: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        async with scope() as session:
+            yield session
+
+    monkeypatch.setattr(store, "list_multipart_parts", missing_provider)
+    monkeypatch.setattr("app.tasks.upload_janitor.session_scope", scope)
+    monkeypatch.setattr("app.tasks.upload_janitor.tenant_session_scope", tenant_scope)
+    result = await sweep_expired_uploads_async(now=now, object_store=store)  # type: ignore[arg-type]
+    assert (result.scanned, result.expired, result.recovered) == (1, 1, 0)
+    assert store.aborted == [provider_id] and store.deleted == [key]
+    async with sessionmaker() as reader:
+        row = await reader.get(models.DocumentUpload, upload_id)
+        assert row is not None and row.state == DocumentUploadState.EXPIRED.value
+        events = (
+            await reader.scalars(
+                select(models.AuditEvent).where(
+                    models.AuditEvent.resource_id == str(upload_id),
+                    models.AuditEvent.request_id == "upload-janitor",
+                )
+            )
+        ).all()
+    assert len(events) == 1
+    assert (events[0].action, events[0].outcome) == (
+        AuditAction.DOCUMENT_UPLOAD_EXPIRED.value,
+        "error",
+    )
+    assert not sessionmaker.durable_audit_ledger.events  # type: ignore[attr-defined]
+
+
 async def test_missing_foreign_and_nonowned_upload_controls_are_hidden_audited_and_io_free(
     client: AsyncClient,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -609,7 +781,7 @@ async def test_missing_foreign_and_nonowned_upload_controls_are_hidden_audited_a
     for event in [*tenant_a_audits, *tenant_b_audits]:
         assert event.action == AuditAction.PERMISSION_DENIED.value
         assert event.outcome == "denied"
-        assert event.event_metadata["reason_code"] == "not_found_or_not_owned"
+        assert event.event_metadata["reason"] == "not_visible"
         assert_content_safe_rejection(event)
 
 
@@ -833,31 +1005,17 @@ async def test_foreign_media_access_and_transcript_are_hidden_and_durably_audite
     assert access.status_code == transcript.status_code == 404
     assert access.json()["code"] == transcript.json()["code"] == "not_found"
 
-    async with sessionmaker() as session:
-        denials = (
-            (
-                await session.execute(
-                    select(models.AuditEvent).where(
-                        models.AuditEvent.tenant_id == seeded.tenant_a,
-                        models.AuditEvent.resource_id == str(foreign.id),
-                        models.AuditEvent.action == AuditAction.PERMISSION_DENIED.value,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
+    denials = await upload_rejection_audits(sessionmaker, seeded.tenant_a)
     assert len(denials) == 2
-    assert {event.event_metadata["operation"] for event in denials} == {
-        "access_url",
-        "transcript",
+    assert {event.event_metadata["attempted_action"] for event in denials} == {
+        "document.access_url",
+        "document.transcript.read",
     }
     for event in denials:
         assert event.outcome == "denied"
         assert event.event_metadata == {
-            "operation": event.event_metadata["operation"],
-            "reason_code": "not_found_or_not_permitted",
-            "status": 404,
+            "attempted_action": event.event_metadata["attempted_action"],
+            "reason": "not_visible",
         }
 
 
@@ -1185,9 +1343,8 @@ async def test_collection_delete_after_completion_commit_returns_audited_404(
     assert len(events) == 1
     assert events[0].resource_id == upload_id
     assert events[0].event_metadata == {
-        "operation": "complete",
-        "reason_code": "not_found_or_not_owned",
-        "status": 404,
+        "attempted_action": "document_upload.complete",
+        "reason": "not_visible",
     }
     assert_content_safe_rejection(events[0])
 

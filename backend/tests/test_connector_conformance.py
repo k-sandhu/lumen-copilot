@@ -2603,6 +2603,23 @@ def test_prohibition_scan_bites(label: str, tmp_path: Path) -> None:
 # --- the settings blacklist is enforced-complete against the live model -------
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["audit_db_pool_size", "audit_db_pool_timeout_seconds", "audit_db_operation_timeout_seconds"],
+)
+def test_connector_cannot_read_independent_audit_database_settings(
+    field: str, tmp_path: Path
+) -> None:
+    body = (
+        f"from app.core.config import get_settings\ndef go():\n    return get_settings().{field}\n"
+    )
+    violations = scan_package(_write_package(tmp_path, body))
+    assert any(
+        v.rule == "settings-seam" and "Lumen's independent audit database" in v.detail
+        for v in violations
+    ), [str(v) for v in violations]
+
+
 def test_settings_classification_is_complete() -> None:
     """Every ``Settings`` field is classified forbidden-infra XOR allowed-config.
 

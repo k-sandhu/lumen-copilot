@@ -49,6 +49,10 @@ from app.services.collections_service import CollectionsService
 from app.services.document_service import DocumentService
 from app.tasks.index_sync import sync_document_index_async
 from app.tasks.ingest import IngestionError, ingest_document_async
+from tests._audit_helpers import (
+    RecordingDurableAuditTransactions,
+    denial_context,
+)
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -698,6 +702,9 @@ async def test_document_delete_enqueues_index_sync_after_commit(
             owner_id=user_id,
             object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, tenant_id, user_id
+            ),
             request_id="r",
             source_ip="i",
         )
@@ -721,8 +728,14 @@ async def test_collection_delete_enqueues_index_sync_per_document(
             owner_id=user_id,
             object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
-            request_id="r",
-            source_ip="i",
+            denials=denial_context(
+                RecordingDurableAuditTransactions(),
+                session,
+                tenant_id,
+                user_id,
+                request_id="r",
+                source_ip="i",
+            ),
         )
         assert await svc.delete(coll_id) is True
         assert calls == []

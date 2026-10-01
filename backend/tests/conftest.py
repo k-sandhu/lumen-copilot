@@ -91,6 +91,10 @@ def _disable_dotenv_discovery() -> None:
 
 _disable_dotenv_discovery()
 
+# Imports ``app`` and therefore must remain after the hermetic test environment
+# is seeded and dotenv discovery is disabled.
+from tests._audit_helpers import RecordingDurableAuditTransactions  # noqa: E402
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _test_environment() -> None:
@@ -100,6 +104,33 @@ def _test_environment() -> None:
     from app.core.config import get_settings
 
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def durable_audit_ledger() -> RecordingDurableAuditTransactions:
+    """Per-test denial ledger, physically outside every offline SQL Session."""
+    return RecordingDurableAuditTransactions()
+
+
+@pytest.fixture(autouse=True)
+def _wire_offline_durable_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """Keep offline API/task denials off the fake configured Postgres URL.
+
+    The production provider has its own engine/pool; the unit/API suite instead
+    injects this explicit ledger.  It never falls back to the request's
+    StaticPool connection, which is exactly the false-positive R1-001 exposed.
+    """
+    monkeypatch.setattr(
+        "app.api.deps.get_durable_audit_transactions",
+        lambda settings=None: durable_audit_ledger,
+    )
+    monkeypatch.setattr(
+        "app.db.session.get_durable_audit_transactions",
+        lambda settings=None: durable_audit_ledger,
+    )
 
 
 @pytest.fixture(autouse=True)

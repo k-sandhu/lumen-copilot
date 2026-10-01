@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ValidationError
 from app.db.repositories import SavedSearchRepository
 from app.domain.entities import SavedSearch
+from app.services.audit import PermissionDeniedContext, audited_resource
 
 _MIN_LIMIT = 1
 _MAX_LIMIT = 100
@@ -72,12 +73,33 @@ class SavedSearchService:
     here.
     """
 
-    def __init__(self, session: AsyncSession, *, tenant_id: UUID, owner_id: UUID) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        owner_id: UUID,
+        denials: PermissionDeniedContext,
+    ) -> None:
         self._repo = SavedSearchRepository(session, tenant_id)
         self._owner_id = owner_id
+        self._denials = denials
+        self._denials.assert_user(tenant_id, owner_id)
 
     def _owns(self, saved: SavedSearch) -> bool:
         return saved.owner_id == self._owner_id
+
+    async def _visible(self, saved_search_id: UUID, *, attempted_action: str) -> SavedSearch | None:
+        saved = await self._repo.get(saved_search_id)
+        if saved is None or not self._owns(saved):
+            await self._denials.emit(
+                resource_type="saved_search",
+                resource_id=str(saved_search_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
+            return None
+        return saved
 
     async def create(
         self,
@@ -110,13 +132,12 @@ class SavedSearchService:
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
         return SavedSearchPage(items=page, next_cursor=next_cursor)
 
+    @audited_resource("saved_search.read", "saved_search", "saved_search_id", missing_result=True)
     async def get(self, saved_search_id: UUID) -> SavedSearch | None:
         """Fetch one of the caller's saved searches, or ``None`` if not visible (→ 404)."""
-        saved = await self._repo.get(saved_search_id)
-        if saved is None or not self._owns(saved):
-            return None
-        return saved
+        return await self._visible(saved_search_id, attempted_action="saved_search.read")
 
+    @audited_resource("saved_search.update", "saved_search", "saved_search_id", missing_result=True)
     async def update(
         self,
         saved_search_id: UUID,
@@ -136,8 +157,8 @@ class SavedSearchService:
         non-owner's saved search is never mutated and is reported as 404 (INV-2).
         Nullable filters are tri-state (``set_*`` flags pass through to the repo).
         """
-        existing = await self._repo.get(saved_search_id)
-        if existing is None or not self._owns(existing):
+        existing = await self._visible(saved_search_id, attempted_action="saved_search.update")
+        if existing is None:
             return None
         return await self._repo.update(
             saved_search_id,
@@ -151,9 +172,10 @@ class SavedSearchService:
             set_type=set_type,
         )
 
+    @audited_resource("saved_search.delete", "saved_search", "saved_search_id", missing_result=True)
     async def delete(self, saved_search_id: UUID) -> bool:
         """Delete one of the caller's saved searches; ``False`` if not visible (→ 404)."""
-        existing = await self._repo.get(saved_search_id)
-        if existing is None or not self._owns(existing):
+        existing = await self._visible(saved_search_id, attempted_action="saved_search.delete")
+        if existing is None:
             return False
         return await self._repo.delete(saved_search_id)

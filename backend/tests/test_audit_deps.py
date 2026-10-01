@@ -12,16 +12,19 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from typing import cast
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.api.deps import make_audit_sink_factory
+from app.db.audit_transactions import DurableAuditTransactions
 from app.db.base import Base
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome
 from app.services.audit import AuditSink
+from tests._audit_helpers import RecordingDurableAuditTransactions
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -48,8 +51,9 @@ async def test_factory_builds_a_tenant_scoped_sink(session: AsyncSession) -> Non
     from app.db.repositories import TenantRepository
 
     tenant = await TenantRepository(session).create(name="Acme")
+    transactions = cast(DurableAuditTransactions, RecordingDurableAuditTransactions())
 
-    make_sink = make_audit_sink_factory(session)
+    make_sink = make_audit_sink_factory(session, transactions)
     sink = make_sink(tenant.id)
     assert isinstance(sink, AuditSink)
 

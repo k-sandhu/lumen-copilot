@@ -497,6 +497,7 @@ async def test_get_other_owner_is_404(
     sessionmaker: async_sessionmaker[AsyncSession],
     seeded: _Seeded,
     monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger,
 ) -> None:
     async with _offline(sessionmaker, monkeypatch) as (client, _limiter):
         bob_token = await _login(client, seeded.bob_email)
@@ -509,6 +510,11 @@ async def test_get_other_owner_is_404(
         ):
             resp = await client.get(path, headers=_auth(alice_token))
             assert resp.status_code == 404, (path, resp.text)  # never 403
+        assert [event.metadata["attempted_action"] for event in durable_audit_ledger.events] == [
+            "mcp_server.read",
+            "mcp_server.tools.read",
+        ]
+        assert all(event.resource_id == bob_server_id for event in durable_audit_ledger.events)
 
 
 async def test_mutations_cross_tenant_are_404(

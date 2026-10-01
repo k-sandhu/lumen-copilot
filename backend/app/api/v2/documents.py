@@ -16,6 +16,7 @@ from app.api.deps import (
     DbSession,
     ObjectStoreDep,
     SettingsDep,
+    authenticated_denial_context,
     extract_request_id,
 )
 from app.core.errors import NotFoundError
@@ -89,6 +90,9 @@ def _service(
         owner_id=principal.user_id,
         store=store,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=tenant_id, principal=principal, request=request
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
         presign_ttl_seconds=settings.s3_presign_ttl_seconds,
@@ -110,7 +114,6 @@ async def create_access_url(
     service = _service(request, session, principal, tenant_id, make_audit_sink, store, settings)
     capability = await service.create_access_url(document_id, purpose=body.purpose)
     if capability is None:
-        await session.commit()
         raise NotFoundError("Document not found.")
     await session.commit()
     return AccessResponse(
@@ -143,7 +146,6 @@ async def get_transcript(
         document_id, cursor=cursor, limit=limit, around_ms=around_ms
     )
     if page is None:
-        await session.commit()
         raise NotFoundError("Document not found.")
     await session.commit()
     document = page.document

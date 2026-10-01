@@ -19,10 +19,11 @@ from app.db.session import session_scope, tenant_session_scope
 from app.db.tenant_context import bind_bypass
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentUpload, DocumentUploadState
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDeniedRecorder
 from app.services.document_upload_service import (
     DocumentUploadService,
     UploadCompletionRejected,
+    UploadProviderNotFound,
 )
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
@@ -51,6 +52,8 @@ def _recovery_service(
     settings: Settings,
 ) -> DocumentUploadService:
     """Build the system-actor service used at the irreversible S3 boundary."""
+    from app.db.session import get_durable_audit_transactions
+
     tenant_id = candidate.tenant_id
     return DocumentUploadService(
         session,
@@ -58,6 +61,16 @@ def _recovery_service(
         owner_id=candidate.owner_id,
         store=store,
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        denials=PermissionDeniedContext(
+            PermissionDeniedRecorder(
+                get_durable_audit_transactions(settings),
+                tenant_id=tenant_id,
+                request_session=session,
+            ),
+            actor=AuditActor.system(),
+            request_id="upload-janitor",
+            source_ip="system",
+        ),
         request_id="upload-janitor",
         source_ip="system",
         allowed_content_types=settings.upload_allowed_content_types,
@@ -122,7 +135,7 @@ async def sweep_expired_uploads_async(
                             store=store,
                             settings=settings,
                         ).recover_completing(current.id)
-                    except NotFoundError:
+                    except (NotFoundError, UploadProviderNotFound):
                         pass
                     except ValidationError as exc:
                         if exc.code not in {

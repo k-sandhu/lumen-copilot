@@ -199,6 +199,10 @@ CONFIG_MODULE = "app.core.config"
 # methods and unclassified attributes fail closed. Dynamic/reflective access
 # remains review-caught under the first-party trust model.
 FORBIDDEN_SETTINGS: dict[str, str] = {
+    # Dedicated audit capacity is database infrastructure owned by app.db.
+    "audit_db_pool_size": "Lumen's independent audit database pool capacity",
+    "audit_db_pool_timeout_seconds": "Lumen's independent audit database acquisition deadline",
+    "audit_db_operation_timeout_seconds": "Lumen's independent audit database operation deadline",
     # Stateful-backend endpoints owned by Lumen.
     "database_url": "Lumen's own database URL — connectors never open a connection to it",
     "redis_url": "Lumen's Redis (cache / broker / WS backplane)",

@@ -160,6 +160,19 @@ retains the prior play/pause state and never autoplays a paused player.
 
 ## 7. Security, audit, and negative acceptance
 
+Authenticated resource denials use the mandatory trusted context and durable
+terminal helper in spec 0004 §2.4, including late absence after completion's
+commit boundary. Router lifecycle error evidence remains atomic with preserved
+terminal state, but never duplicates a recorded `permission.denied`. An owned,
+visible upload whose storage multipart handle is absent retains the storage
+lifecycle `404` problem (`multipart_upload_not_found`) and exactly one
+`document.viewed/error` (status) or `document.uploaded/error` (completion), with
+safe operation, reason code, and status metadata. A missing, foreign, or
+unauthorized SQL target instead emits exactly one `permission.denied/denied`
+and the non-enumerating `404` problem (`not_found`). Signed access and
+transcript denials also persist independently of caller rollback. Janitor
+recovery uses the same service helper with system attribution.
+
 - Upload sessions, transcripts, and capabilities are tenant and owner/permission
   scoped; wrong tenant or forbidden direct read is `404` (INV-1/INV-2).
 - Missing/expired authentication is `401` (INV-4).
