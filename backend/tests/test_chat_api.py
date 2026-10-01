@@ -52,7 +52,7 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import LlmProviderStatus, MessageRole, Role, SecretKind
+from app.domain.entities import DocumentStatus, LlmProviderStatus, MessageRole, Role, SecretKind
 from app.domain.llm import StreamEvent, ToolCall
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.main import _drain_answer_tasks, create_app, lifespan
@@ -245,6 +245,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 size_bytes=10,
                 storage_key=f"{ta.id}/taxes.pdf",
                 acl_enforced=False,
+                status=DocumentStatus.READY,
             )
             chunks = await ChunkRepository(seed, ta.id).replace_for_document(
                 doc.id,
