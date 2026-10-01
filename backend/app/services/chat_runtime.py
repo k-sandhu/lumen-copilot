@@ -1147,6 +1147,9 @@ class ChatRuntime:
         # Citations keyed by chunk_id so the same passage cited across turns is
         # recorded once (INV-3 set), preserving first-seen order.
         cited: dict[UUID, GroundedCitation] = {}
+        # One chunk can change during an answer. Preserve each observed revision
+        # by handle; final permission/identity checks select the cited revision.
+        corpus_evidence: dict[str, GroundedCitation] = {}
         # Which tool CALL carried which passages — (chunk_id, RENDERED snippet)
         # pairs in passage order (#415). The rendered snippet (trimmed to the
         # run's snippet budget, exactly as ``_render_passages`` showed it) is what
@@ -1441,12 +1444,10 @@ class ChatRuntime:
                     )
                 # Record + emit citations for each newly-seen permitted passage.
                 for passage in result.passages:
-                    if passage.chunk_id in cited:
-                        continue
-                    citation = replace(
-                        GroundedCitation.from_passage(passage), handle=handles.passage(passage)
-                    )
-                    cited[passage.chunk_id] = citation
+                    handle = handles.passage(passage)
+                    citation = replace(GroundedCitation.from_passage(passage), handle=handle)
+                    corpus_evidence[handle] = citation
+                    cited.setdefault(passage.chunk_id, citation)
 
         if budget_exhausted:
             # The whole budget went to tool turns and the model never volunteered a
@@ -1642,15 +1643,15 @@ class ChatRuntime:
         answer_text = "".join(answer_chunks)
         cleaned_answer, selected_handles = select_cited_handles(answer_text, available_handles)
         selected_corpus = {
-            chunk_id: citation
-            for chunk_id, citation in cited.items()
-            if citation.handle in selected_handles
+            handle: citation
+            for handle, citation in corpus_evidence.items()
+            if handle in selected_handles
         }
         if selected_corpus:
             requested_passages = len(selected_corpus)
             fresh = await retrieval.read_passages(
                 principal=self._principal,
-                chunk_ids=list(selected_corpus),
+                chunk_ids=list(dict.fromkeys(c.chunk_id for c in selected_corpus.values())),
                 collection_ids=effective_collection_ids,
                 document_ids=document_ids,
             )
@@ -1660,8 +1661,8 @@ class ChatRuntime:
                 if handles.resolve(handles.passage(passage)) is not None
             }
             selected_corpus = {
-                chunk_id: citation
-                for chunk_id, citation in selected_corpus.items()
+                handle: citation
+                for handle, citation in selected_corpus.items()
                 if citation.handle in valid
                 and valid[citation.handle].document_id == citation.document_id
             }
@@ -1693,12 +1694,13 @@ class ChatRuntime:
             await self._retract_answer(state)
             await self._publish_text(state, [cleaned_answer])
         answer_text = cleaned_answer
-        cited = dict(
-            sorted(
-                selected_corpus.items(),
-                key=lambda item: selected_handles.index(item[1].handle or ""),
+        cited = {
+            citation.chunk_id: citation
+            for citation in sorted(
+                selected_corpus.values(),
+                key=lambda citation: selected_handles.index(citation.handle or ""),
             )
-        )
+        }
         selected_web = [web_evidence[h] for h in selected_handles if h in web_evidence]
 
         # Persist the assistant message and its citations (INV-3): the citations
