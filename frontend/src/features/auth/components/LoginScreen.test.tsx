@@ -6,9 +6,10 @@
  *         disclosure — the same message regardless of which field was wrong).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
+import { storageSnapshot } from '@/test/storageSnapshot';
 import { LoginScreen } from './LoginScreen';
 import { useAuthStore } from '../model/authStore';
 import { clearAccessToken, getAccessToken } from '@/api';
@@ -28,17 +29,48 @@ function unauthorized(detail = 'Invalid email or password.'): Response {
 }
 
 beforeEach(() => {
-  clearAccessToken();
-  useAuthStore.setState({ status: 'unauthenticated' });
+  act(() => {
+    clearAccessToken();
+    useAuthStore.setState({ status: 'unauthenticated' });
+  });
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('LoginScreen', () => {
   it('renders an accessible email/password form (AC-1)', () => {
     renderWithQuery(<LoginScreen />);
-    expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+    const email = screen.getByLabelText(/email/i);
+    expect(email).toHaveAttribute('type', 'email');
+    expect(email).toHaveAttribute('name', 'email');
+    expect(email).toHaveAttribute('autocomplete', 'username');
+    expect(email).toHaveAttribute('inputmode', 'email');
+    expect(email).toHaveAttribute('autocapitalize', 'none');
+    expect(email).toHaveAttribute('spellcheck', 'false');
+
+    const password = screen.getByLabelText(/password/i);
+    expect(password).toHaveAttribute('type', 'password');
+    expect(password).toHaveAttribute('name', 'password');
+    expect(password).toHaveAttribute('autocomplete', 'current-password');
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+  });
+
+  it('reveals the current password only through an accessible non-submit control', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const user = userEvent.setup();
+    renderWithQuery(<LoginScreen />);
+
+    const password = screen.getByLabelText(/password/i);
+    await user.type(password, 'correct horse');
+    const reveal = screen.getByRole('button', { name: /show password/i });
+    expect(reveal).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(reveal);
+    expect(password).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: /hide password/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('renders the branded front door (brand cell + heading, #116)', () => {
@@ -46,22 +78,34 @@ describe('LoginScreen', () => {
     // Brand cell names the product (never "Beacon") and the heading frames the
     // unauthenticated front door.
     expect(screen.getByText(/lumen copilot/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole('heading', { name: /sign in to your workspace/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /sign in to your workspace/i })).toBeInTheDocument();
   });
 
   it('submits credentials, stores the token, and marks authenticated (AC-1)', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(tokenResponse());
     const user = userEvent.setup();
-    renderWithQuery(<LoginScreen />);
+    const { queryClient } = renderWithQuery(<LoginScreen />);
 
     await user.type(screen.getByLabelText(/email/i), 'kw@acme.test');
-    await user.type(screen.getByLabelText(/password/i), 'correct horse');
+    const password = screen.getByLabelText(/password/i);
+    await user.type(password, 'correct horse');
     await user.click(screen.getByRole('button', { name: /sign in/i }));
 
     await waitFor(() => expect(getAccessToken()).toBe('jwt-login'));
     expect(useAuthStore.getState().status).toBe('authenticated');
+    expect(password).toHaveValue('');
+
+    const mutationState = JSON.stringify(
+      queryClient
+        .getMutationCache()
+        .getAll()
+        .map((mutation) => mutation.state),
+    );
+    expect(mutationState).not.toContain('correct horse');
+    expect(mutationState).not.toContain('jwt-login');
+    expect(storageSnapshot(window.localStorage)).not.toContain('correct horse');
+    expect(storageSnapshot(window.sessionStorage)).not.toContain('correct horse');
+    expect(window.location.href).not.toContain('correct%20horse');
 
     const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
     expect(init.method).toBe('POST');
@@ -87,6 +131,53 @@ describe('LoginScreen', () => {
     expect(alert).not.toHaveTextContent(/no such (account|user)/i);
     expect(getAccessToken()).toBeNull();
     expect(useAuthStore.getState().status).toBe('unauthenticated');
+    expect(screen.getByLabelText(/password/i)).toHaveValue('');
+  });
+
+  it('hard-resets a revealed manager-owned password after a failed login (R1-003)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(unauthorized());
+    const user = userEvent.setup();
+    renderWithQuery(<LoginScreen />);
+
+    await user.type(screen.getByLabelText(/email/i), 'persona-a@example.test');
+    const password = screen.getByLabelText(/password/i) as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: /show password/i }));
+    password.value = 'manager-owned-login-secret';
+
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+    await screen.findByRole('alert');
+
+    expect(password.value).toBe('');
+    expect(password.type).toBe('password');
+    expect(screen.getByRole('button', { name: /show password/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('clears the detached password control on unmount', async () => {
+    const user = userEvent.setup();
+    const view = renderWithQuery(<LoginScreen />);
+    const password = screen.getByLabelText(/password/i) as HTMLInputElement;
+    await user.type(password, 'unmount-only-secret');
+
+    view.unmount();
+
+    expect(password.value).toBe('');
+  });
+
+  it('hard-blanks manager-owned login fields on unmount without React events', () => {
+    const view = renderWithQuery(<LoginScreen />);
+    const email = screen.getByLabelText(/email/i) as HTMLInputElement;
+    const password = screen.getByLabelText(/password/i) as HTMLInputElement;
+    email.value = 'manager-owned@example.test';
+    password.value = 'manager-owned-login-secret';
+
+    view.unmount();
+
+    expect(email.value).toBe('');
+    expect(password.value).toBe('');
+    expect(password.type).toBe('password');
   });
 
   it('disables submit and shows a busy state while the request is in flight', async () => {

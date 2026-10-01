@@ -27,6 +27,7 @@ import { TooltipProvider } from './components/Tooltip';
 import { syncThemeToDom } from './stores/ui';
 import { applyStoredAppearance } from './ui';
 import { installAuthRefresh } from './api';
+import { PrincipalLifecycle } from './features/auth';
 
 // Reflect the persisted/system theme onto <html> before first paint.
 syncThemeToDom();
@@ -50,9 +51,11 @@ createRoot(rootElement).render(
   <StrictMode>
     <ErrorBoundary label="Application">
       <QueryClientProvider client={queryClient}>
-        <TooltipProvider delayDuration={200}>
-          <RouterProvider router={router} />
-        </TooltipProvider>
+        <PrincipalLifecycle>
+          <TooltipProvider delayDuration={200}>
+            <RouterProvider router={router} />
+          </TooltipProvider>
+        </PrincipalLifecycle>
       </QueryClientProvider>
     </ErrorBoundary>
   </StrictMode>,
