@@ -101,8 +101,9 @@ These capabilities motivate experiments; they are not measured accuracy claims.
 
 Build a checksum-fixed corpus of approximately 40–60 small synthetic or explicitly
 authorized documents, stratified by native/scanned PDF, mixed pages, columns,
-headings/furniture, merged and multi-page tables, sparse/formula/unit workbooks,
-grouped slides/notes, non-ASCII text, malformed/unsupported and intentionally
+headings/furniture, sidebars/footnotes/captions, merged and multi-page tables,
+sparse/formula/unit workbooks, grouped slides/notes, non-ASCII text,
+malformed/unsupported and intentionally
 blank files. No third-party downloaded documents enter the repository. Separate
 tuning and held-out fixtures/questions. Label reading order, important cells,
 units, native regions, gold answers and acceptable evidence spans; include
@@ -128,6 +129,29 @@ negatives remain denied; no forbidden citation, missing required audit or
 untyped parse failure. Owner-defined thresholds must assess native text and
 existing answers as well as the target table/spreadsheet/scanned cases. Publish
 paired results with format-level failures and costs before an adoption decision.
+
+### Connector exports and inspection replay
+
+Compare authorized representations of the same connector item before choosing
+an export format: native Office/PDF, structured export and flattened text/CSV
+where supplied. Freeze the source revision, permissions and downstream settings;
+record connector/export identities and checksums separately from parser identity.
+Score lost tables, units, formulas, notes and reading order, including two-column
+flow and repeated furniture. Preserve genuine repeated body text when evaluating
+header/footer exclusion. An export choice needs measured fidelity and cost;
+this proposal changes no connector or export policy.
+
+A future administrator inspector should align the original page/slide/sheet,
+ordered canonical blocks, rendered text, exact chunk ranges, provenance and
+diagnostic warnings for one extraction generation. Show unknown geometry and
+heuristic relationships explicitly. A permissioned replay with another pinned
+parser profile produces a separate candidate generation with its own diagnostics
+and fingerprint; it does not overwrite active evidence or silently retarget
+citations. Record committed inspection/replay audit events and include foreign
+tenant and unauthorized-document negatives. Promotion requires the agreed
+evaluation gates; replay authorization, storage/retention and promotion UX need
+their own contract-first implementation issue. The current native diagnostic
+summary is a first inspection step, not this full comparison/replay surface.
 
 ## Future OCR options and placement
 
