@@ -31,10 +31,9 @@ Transport (the `api/` boundary — the only backend caller):
 - [`api/chat.ts`](../../api/chat.ts) — typed session CRUD, `listMessages`,
   `sendMessage`.
 - [`api/models.ts`](../../api/models.ts) — `listModels` (the picker registry).
-- [`api/documents.ts`](../../api/documents.ts) — `fetchDocumentContent` for
-  citation click-through: fetches the original bytes with the bearer (INV-4 —
-  `GET /documents/{id}/content` is bearer-authed, not cookie-authed) and hands
-  back a `blob:` URL the viewer renders.
+- [`api/documents.ts`](../../api/documents.ts) — mints a short-lived JSON preview
+  capability and loads transcript pages. Native media/PDF reads then flow directly
+  from object storage; no document bytes cross FastAPI.
 - [`api/ws.ts`](../../api/ws.ts) — the typed WS client (reused from #48); features
   consume a hook, never the raw socket.
 
@@ -68,9 +67,9 @@ Feature (`features/chat`):
 The screens consume the design-system kit (`@/ui`) — **no contract change**, every
 signal derived from data the turn already has:
 
-- **Inline citation chips → SourceInspector:** the kit `CitationChip` opens the
-  cited document; the viewer leads with the kit `SourceInspector` (cited passage
-  `<mark>`-highlighted + freshness).
+- **Inline citation chips → SourceInspector/player:** text citations open the cited
+  passage. Media citations display their player-relative timestamp and open the
+  shared native player at that time after metadata loads, without autoplay.
 - **RetrievalTrace:** a collapsible "Looked at N sources · M passages · K
   excluded" built from the distinct cited sources, the retrieval-tool hit counts,
   and any excluded count — excluded candidates render muted (mission filter #4).
@@ -96,8 +95,9 @@ contract change** and **no invented data**:
   actions: **helpful / not-helpful** and **copy**. The footer is omitted while the
   turn is still streaming. The timestamp is labelled as the **answer** time — when
   the answer was produced — and **never** as source "freshness"/"last indexed":
-  the chat wire carries no source-provenance timestamp, so presenting the answer
-  time as source recency would fabricate provenance (GUARD #120).
+  the chat wire carries no source-indexing timestamp. Media citations can carry
+  a player-relative spoken-passage time, but neither that offset nor answer time
+  is source recency (GUARD #120).
 - **Helpful / not-helpful are LOCAL-ONLY UI** — a mutually-exclusive,
   clearable `aria-pressed` toggle. There is **no backend feedback endpoint**, so
   the vote persists **nothing** and the UI never implies it does (honest per #120).
@@ -105,10 +105,10 @@ contract change** and **no invented data**:
   the rendered answer text and flips to a transient "Copied" confirmation.
 - **Source-inspector metadata grid** (in `DocumentViewer`): the wireframe's
   **owner / last-modified / last-indexed** rows. The chat/citation wire
-  (`Citation` / `ChatCitation`) carries **none** of these — and the only timestamp
-  a chat turn has is the **answer/message time**, which is the answer's age, *not*
-  when the source was indexed or modified (that source-indexing metadata lives on
-  the separate search-result contract, not the chat citation wire). So every row —
+  (`Citation` / `ChatCitation`) carries **none** of these. Optional media citation
+  timestamps locate speech in the player; they do not report when a source was
+  indexed or modified (that indexing metadata lives on the separate search-result
+  contract). So every row —
   owner, last-modified, **and last-indexed** — renders **"Not available"** unless
   a source actually carries a real value; the answer time is never presented as
   source provenance (GUARD #120: never fabricate where a doc was last indexed).
@@ -170,5 +170,5 @@ the sanitizing pipeline — never raw, never `dangerouslySetInnerHTML`.
 
 Contract-true today against mocks. At integration, confirm: the send response's
 `stream_id`, the WS path the backend expects for subscription, and that
-`event:citation` payloads carry `documentId` + `charStart/charEnd` resolving to a
-permitted document.
+`event:citation` payloads preserve optional paired `timeStartMs/timeEndMs`, transcript
+segment and speaker fields in addition to the canonical character span.
