@@ -129,6 +129,21 @@ export interface SourceLocation {
 }
 
 /** A document's metadata, including its ingestion status. */
+export interface IngestionFingerprint {
+  schema_version: 1;
+  source_sha256: string;
+  mime_type: string;
+  parser_version: string;
+  parser_code_sha256: string;
+  parser_dependencies: Record<string, string>;
+  chunker_version: string;
+  chunker_code_sha256: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  embedding_model?: string | null;
+  embedding_dimension?: number | null;
+}
+
 export interface Document {
   id: string;
   filename: string;
@@ -145,6 +160,7 @@ export interface Document {
   updated_at: string;
   /** Exact source-part map; absent/empty means unknown for legacy documents. */
   source_locations?: SourceLocation[];
+  ingestion_fingerprint?: IngestionFingerprint | null;
 }
 
 /** 200 from GET /documents — a cursor page of documents. */
