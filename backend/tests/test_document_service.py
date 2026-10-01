@@ -1,14 +1,10 @@
-"""Document service unit tests — cursor codec + upload-validation mapping (#28).
+"""Document service unit tests — cursor codec and pagination bounds (#28).
 
 Focused tests for the pure helpers in ``app.services.document_service``:
 
 * the opaque keyset-cursor codec round-trips the boundary document id and
   rejects a malformed cursor fail-closed (INV-8 → 422), like the collections
   codec — the end-to-end pagination is covered in ``test_documents_api``;
-* ``_map_upload_validation_error`` re-maps the #22 storage ``ValidationError``
-  to the contract's distinct upload statuses (``upload_too_large`` → 413,
-  ``content_type_not_allowed`` → 415, anything else stays 422), so the API
-  surfaces 413/415/422 from the single rule owner.
 """
 
 from __future__ import annotations
@@ -18,16 +14,11 @@ import uuid
 
 import pytest
 
-from app.core.errors import (
-    PayloadTooLargeError,
-    UnsupportedMediaTypeError,
-    ValidationError,
-)
+from app.core.errors import ValidationError
 from app.services.document_service import (
     _clamp_limit,
     _decode_cursor,
     _encode_cursor,
-    _map_upload_validation_error,
 )
 
 # --- Cursor codec -----------------------------------------------------------
@@ -75,28 +66,3 @@ def test_clamp_limit_bounds() -> None:
     assert _clamp_limit(0) == 1
     assert _clamp_limit(1000) == 100
     assert _clamp_limit(37) == 37
-
-
-# --- Upload-validation error mapping (413 / 415 / 422) ----------------------
-
-
-def test_over_limit_maps_to_413() -> None:
-    err = ValidationError("too big", code="upload_too_large")
-    mapped = _map_upload_validation_error(err)
-    assert isinstance(mapped, PayloadTooLargeError)
-    assert mapped.status == 413
-
-
-def test_disallowed_type_maps_to_415() -> None:
-    err = ValidationError("nope", code="content_type_not_allowed")
-    mapped = _map_upload_validation_error(err)
-    assert isinstance(mapped, UnsupportedMediaTypeError)
-    assert mapped.status == 415
-
-
-def test_empty_upload_stays_422() -> None:
-    err = ValidationError("empty", code="empty_upload")
-    mapped = _map_upload_validation_error(err)
-    # No distinct contract status: stays the original 422 ValidationError.
-    assert mapped is err
-    assert mapped.status == 422

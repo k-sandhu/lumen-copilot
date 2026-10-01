@@ -45,6 +45,32 @@ _LIST_MAX = 50
 _SNIPPET_BUDGET = 600
 
 
+def _format_player_time(milliseconds: int) -> str:
+    """Render an integer player offset without losing millisecond precision."""
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1_000)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def _media_provenance(passage: RetrievedPassage) -> str:
+    """Model-visible speaker/time label for a valid media passage."""
+    if passage.time_start_ms is None or passage.time_end_ms is None:
+        return ""
+    speaker = passage.speaker_name or passage.speaker_id
+    identity = (
+        f", {speaker} ({passage.speaker_id})"
+        if passage.speaker_name and passage.speaker_id
+        else (f", {speaker}" if speaker else "")
+    )
+    return (
+        f", time {_format_player_time(passage.time_start_ms)}-"
+        f"{_format_player_time(passage.time_end_ms)}{identity}"
+    )
+
+
 def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
     """The EXACT snippet string a passage renders as in the tool reply (#431 NEW-1).
 
@@ -91,7 +117,8 @@ def _render_passages(
     for i, p in enumerate(passages, start=1):
         snippet = rendered_snippet(p.text, snippet_budget)
         blocks.append(
-            f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}):\n"
+            f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}"
+            f"{_media_provenance(p)}):\n"
             f"{snippet}"
         )
     return "\n\n".join(blocks)

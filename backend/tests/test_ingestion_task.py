@@ -530,6 +530,11 @@ def _patch_wrapper_collaborators(monkeypatch: pytest.MonkeyPatch, *, settings: S
     monkeypatch.setattr(ingest_module, "ObjectStore", lambda _s: object())
     monkeypatch.setattr(ingest_module, "LLMGateway", lambda _s: object())
 
+    async def _release(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(ingest_module, "_release_ingestion", _release)
+
 
 def test_wrapper_transient_fault_retries_with_exponential_backoff(
     monkeypatch: pytest.MonkeyPatch,
@@ -608,7 +613,14 @@ def test_wrapper_final_attempt_dead_letters_and_returns(
 
     fail_calls: list[tuple[uuid.UUID, uuid.UUID, str]] = []
 
-    async def _fake_fail(tid: uuid.UUID, did: uuid.UUID, reason: str) -> IngestionResult:
+    async def _fake_fail(
+        tid: uuid.UUID,
+        did: uuid.UUID,
+        reason: str,
+        *,
+        ingestion_run_id: uuid.UUID,
+    ) -> IngestionResult:
+        assert isinstance(ingestion_run_id, uuid.UUID)
         fail_calls.append((tid, did, reason))
         return IngestionResult(did, DocumentStatus.FAILED, 0, reason)
 
@@ -748,4 +760,22 @@ def test_enqueue_publishes_once_with_string_args(monkeypatch: pytest.MonkeyPatch
     kwargs = calls[0]
     assert kwargs["args"] == (str(tenant_id), str(document_id))
     assert kwargs["connection"] is conn
+    assert kwargs["queue"] == "celery"
     assert kwargs["retry"] is False
+
+
+def test_enqueue_media_uses_the_bounded_media_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Media work never shares the general worker's concurrency pool (ADR-0023)."""
+    conn = _FakeConnection()
+    monkeypatch.setattr(celery_app, "connection_for_write", lambda: conn)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        ingest_module.ingest_document,
+        "apply_async",
+        lambda *_args, **kwargs: calls.append(dict(kwargs)),
+    )
+
+    enqueue_ingestion(uuid.uuid4(), uuid.uuid4(), media=True)
+
+    assert len(calls) == 1
+    assert calls[0]["queue"] == "media-ingestion"

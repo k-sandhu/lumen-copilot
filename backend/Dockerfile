@@ -3,6 +3,12 @@
 # environment so the compose `./backend:/app` bind-mount does not shadow them.
 FROM python:3.12-slim-bookworm
 
+# Worker media runtime (spec 0008 / ADR-0023).  A versioned static image keeps
+# FFmpeg/ffprobe identical across local, CI, and production without an unpinned
+# apt resolution. Only the two binaries cross into the application image.
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/ffprobe
+
 # Faster, quieter Python in a container.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
