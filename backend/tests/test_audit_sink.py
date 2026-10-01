@@ -19,7 +19,7 @@ import pathlib
 import uuid
 from collections.abc import AsyncIterator
 from tempfile import TemporaryDirectory
-from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 
 from app.auth.principal import Principal
-from app.db import models
+from app.db import audit_transactions, models
 from app.db.audit_transactions import (
     DurableAuditTransactions,
     UnsafeAuditTransactionTopology,
@@ -387,28 +387,97 @@ async def test_caller_engine_wrapper_sharing_audit_pool_is_rejected() -> None:
         await audit_engine.dispose()
 
 
-async def test_size_one_audit_pool_exhaustion_fails_closed_within_operation_bound() -> None:
+class _AuditDeadlines:
+    """Real timeout cancellation, armed only after an observed operation stage.
+
+    The production timeout scopes still own cancellation and its conversion to
+    TimeoutError. Their clocks stay disarmed until the test observes a barrier;
+    rescheduling to an already-past deadline then expires on the next loop turn,
+    regardless of how long acquisition, flush, commit or cleanup took.
+    """
+
+    def __init__(self) -> None:
+        self.scopes: list[asyncio.Timeout] = []
+        self.expired: list[asyncio.Timeout] = []
+
+    def timeout(self, seconds: float) -> asyncio.Timeout:
+        assert seconds > 0
+        scope = asyncio.timeout(None)
+        self.scopes.append(scope)
+        return scope
+
+    def expire(self) -> None:
+        assert self.scopes, "The operation must enter its production timeout scope."
+        scope = self.scopes[-1]
+        assert scope.when() is None, "Each stage must reach a fresh timeout scope."
+        scope.reschedule(0)
+        self.expired.append(scope)
+
+
+@pytest.fixture
+def audit_deadlines(monkeypatch: pytest.MonkeyPatch) -> _AuditDeadlines:
+    deadlines = _AuditDeadlines()
+    # Patch only this adapter's asyncio reference. SQLAlchemy, pytest and the
+    # handshake controller retain real asyncio, including Timeout's semantics.
+    local_asyncio = SimpleNamespace(**vars(asyncio))
+    local_asyncio.timeout = deadlines.timeout
+    monkeypatch.setattr(audit_transactions, "asyncio", local_asyncio)
+    return deadlines
+
+
+async def _expire_audit_attempt(
+    emission: asyncio.Task[AuditEvent], entered: asyncio.Event, deadlines: _AuditDeadlines
+) -> None:
+    """Expire only after the required stage, or fail if it was never reached."""
+    progress = asyncio.create_task(entered.wait())
+    try:
+        completed, _ = await asyncio.wait({emission, progress}, return_when=asyncio.FIRST_COMPLETED)
+        assert progress in completed, "Audit operation finished before the required stage."
+        assert not emission.done(), "Audit operation must still be awaiting the stage's result."
+        deadlines.expire()
+    finally:
+        progress.cancel()
+        await asyncio.gather(progress, return_exceptions=True)
+
+
+async def test_size_one_audit_pool_exhaustion_fails_closed_within_operation_bound(
+    monkeypatch: pytest.MonkeyPatch, audit_deadlines: _AuditDeadlines
+) -> None:
     """R1-001: an occupied audit pool cannot hang a denial or fall back to caller SQL."""
     audit_engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=AsyncAdaptedQueuePool,
         pool_size=1,
         max_overflow=0,
-        pool_timeout=30,
+        pool_timeout=None,  # Only the handshake-controlled adapter deadline expires.
     )
     caller_engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=0.1)
+    transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=10)
+    entered = [asyncio.Event(), asyncio.Event()]
+    acquisitions = 0
     try:
         async with audit_engine.connect():  # occupy the provider's only slot
+            queue = audit_engine.sync_engine.pool._pool._queue
+            real_get = queue.get
+
+            async def _observe_blocked_acquisition() -> object:
+                nonlocal acquisitions
+                assert acquisitions < 2, "An exhausted reconciliation cannot retry."
+                assert queue.empty()
+                assert audit_engine.sync_engine.pool.checkedout() == 1
+                entered[acquisitions].set()
+                acquisitions += 1
+                return await real_get()
+
+            monkeypatch.setattr(queue, "get", _observe_blocked_acquisition)
             async with AsyncSession(caller_engine) as caller:
                 recorder = PermissionDeniedRecorder(
                     transactions,
                     tenant_id=uuid.uuid4(),
                     request_session=caller,
                 )
-                started = monotonic()
-                with pytest.raises(TimeoutError):
-                    await recorder.emit(
+                emission = asyncio.create_task(
+                    recorder.emit(
                         actor=AuditActor.user(uuid.uuid4()),
                         resource_type="assistant",
                         resource_id=str(uuid.uuid4()),
@@ -417,14 +486,27 @@ async def test_size_one_audit_pool_exhaustion_fails_closed_within_operation_boun
                         request_id="req-audit-pool-exhausted",
                         source_ip="unknown",
                     )
-                assert monotonic() - started < 1
+                )
+                try:
+                    for barrier in entered:
+                        await _expire_audit_attempt(emission, barrier, audit_deadlines)
+                    with pytest.raises(TimeoutError):
+                        await emission
+                finally:
+                    emission.cancel()
+                    await asyncio.gather(emission, return_exceptions=True)
+                assert acquisitions == 2
+                assert all(scope.expired() for scope in audit_deadlines.expired)
+                assert len(audit_deadlines.expired) == 2
+            assert audit_engine.sync_engine.pool.checkedout() == 1
+        assert audit_engine.sync_engine.pool.checkedout() == 0
     finally:
         await transactions.dispose()
         await caller_engine.dispose()
 
 
 async def test_timed_out_sink_releases_size_one_audit_capacity(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, audit_deadlines: _AuditDeadlines
 ) -> None:
     """The operation deadline fails closed and does not leak its only connection."""
     temporary = TemporaryDirectory(prefix="lumen-audit579-poisoned-")
@@ -435,7 +517,7 @@ async def test_timed_out_sink_releases_size_one_audit_capacity(
         max_overflow=0,
     )
     caller_engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=0.1)
+    transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=10)
     invalidated: list[object] = []
     sa_event.listen(
         audit_engine.sync_engine.pool,
@@ -457,19 +539,25 @@ async def test_timed_out_sink_releases_size_one_audit_capacity(
                 request_session=caller,
             )
             original_record = AuditEventRepository.record
+            entered = [asyncio.Event(), asyncio.Event()]
+            release = asyncio.Event()
+            flushed = 0
 
             async def _flush_then_never_return(
                 repository: AuditEventRepository,
                 *args: object,
                 **kwargs: object,
             ) -> None:
+                nonlocal flushed
                 await original_record(repository, *args, **kwargs)  # type: ignore[arg-type]
-                await asyncio.Event().wait()
+                assert flushed < 2, "The failed sink cannot retry more than once."
+                entered[flushed].set()
+                flushed += 1
+                await release.wait()
 
             monkeypatch.setattr(AuditEventRepository, "record", _flush_then_never_return)
-            started = monotonic()
-            with pytest.raises(TimeoutError):
-                await recorder.emit(
+            emission = asyncio.create_task(
+                recorder.emit(
                     actor=AuditActor.user(uuid.uuid4()),
                     resource_type="assistant",
                     resource_id=str(uuid.uuid4()),
@@ -478,7 +566,19 @@ async def test_timed_out_sink_releases_size_one_audit_capacity(
                     request_id="req-sink-timeout",
                     source_ip="unknown",
                 )
-            assert monotonic() - started < 1
+            )
+            try:
+                for barrier in entered:
+                    await _expire_audit_attempt(emission, barrier, audit_deadlines)
+                with pytest.raises(TimeoutError):
+                    await emission
+            finally:
+                release.set()
+                emission.cancel()
+                await asyncio.gather(emission, return_exceptions=True)
+            assert flushed == 2
+            assert all(scope.expired() for scope in audit_deadlines.expired)
+            assert len(audit_deadlines.expired) == 2
             assert len(invalidated) == 2
             assert audit_engine.sync_engine.pool.checkedout() == 0
 
@@ -503,22 +603,8 @@ async def test_timed_out_sink_releases_size_one_audit_capacity(
         temporary.cleanup()
 
 
-async def _release_record_attempt(
-    emission: asyncio.Task[AuditEvent], entered: asyncio.Event, release: asyncio.Event
-) -> None:
-    """Observe the required attempt or fail immediately if the operation finished."""
-    progress = asyncio.create_task(entered.wait())
-    try:
-        completed, _ = await asyncio.wait({emission, progress}, return_when=asyncio.FIRST_COMPLETED)
-        assert progress in completed, "Audit operation finished before the required record attempt."
-        release.set()
-    finally:
-        progress.cancel()
-        await asyncio.gather(progress, return_exceptions=True)
-
-
 async def test_transient_pre_persistence_timeout_retries_the_same_event_identity(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, audit_deadlines: _AuditDeadlines
 ) -> None:
     """R2-003: a bounded retry reuses one guard-assigned id and persists one row."""
     temporary = TemporaryDirectory(prefix="lumen-audit579-retry-")
@@ -548,7 +634,6 @@ async def test_transient_pre_persistence_timeout_retries_the_same_event_identity
             if len(attempted_ids) == 1:
                 entered.set()
                 await release.wait()
-                raise TimeoutError("Injected pre-persistence timeout after the record handshake.")
             return await original_record(repository, *args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(AuditEventRepository, "record", _stall_once)
@@ -570,13 +655,15 @@ async def test_transient_pre_persistence_timeout_retries_the_same_event_identity
                 )
             )
             try:
-                await _release_record_attempt(emission, entered, release)
+                await _expire_audit_attempt(emission, entered, audit_deadlines)
                 event = await emission
             finally:
                 release.set()
                 await asyncio.gather(emission, return_exceptions=True)
 
         assert attempted_ids == [event.id, event.id]
+        assert len(audit_deadlines.expired) == 1
+        assert audit_deadlines.expired[0].expired()
         async with audit_factory() as readback:
             events = await AuditEventRepository(readback, tenant.id).list_recent()
             assert [stored.id for stored in events] == [event.id]
@@ -587,7 +674,7 @@ async def test_transient_pre_persistence_timeout_retries_the_same_event_identity
 
 
 async def test_second_pre_persistence_timeout_fails_closed_after_one_retry(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, audit_deadlines: _AuditDeadlines
 ) -> None:
     """R2-003: a final absent reconciliation never turns two timeouts into success."""
     temporary = TemporaryDirectory(prefix="lumen-audit579-double-timeout-")
@@ -619,7 +706,6 @@ async def test_second_pre_persistence_timeout_fails_closed_after_one_retry(
             attempted_ids.append(kwargs.get("event_id"))  # type: ignore[arg-type]
             entered[attempt].set()
             await release[attempt].wait()
-            raise TimeoutError("Injected pre-persistence timeout after the record handshake.")
 
         monkeypatch.setattr(AuditEventRepository, "record", _always_stall)
         async with AsyncSession(caller_engine) as caller:
@@ -641,7 +727,7 @@ async def test_second_pre_persistence_timeout_fails_closed_after_one_retry(
             )
             try:
                 for attempt in range(2):
-                    await _release_record_attempt(emission, entered[attempt], release[attempt])
+                    await _expire_audit_attempt(emission, entered[attempt], audit_deadlines)
                 with pytest.raises(TimeoutError):
                     await emission
             finally:
@@ -650,6 +736,8 @@ async def test_second_pre_persistence_timeout_fails_closed_after_one_retry(
                 await asyncio.gather(emission, return_exceptions=True)
 
         assert len(attempted_ids) == 2
+        assert len(audit_deadlines.expired) == 2
+        assert all(scope.expired() for scope in audit_deadlines.expired)
         assert attempted_ids[0] is not None
         assert attempted_ids[0] == attempted_ids[1]
         async with audit_factory() as readback:
@@ -661,7 +749,7 @@ async def test_second_pre_persistence_timeout_fails_closed_after_one_retry(
 
 
 async def test_post_commit_lost_ack_reconciles_exactly_once_and_leaves_no_commit_task(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, audit_deadlines: _AuditDeadlines
 ) -> None:
     """R2-003: committed-but-timed-out is success, never a duplicate or detached commit."""
     temporary = TemporaryDirectory(prefix="lumen-audit579-lost-ack-")
@@ -672,7 +760,7 @@ async def test_post_commit_lost_ack_reconciles_exactly_once_and_leaves_no_commit
         max_overflow=0,
     )
     caller_engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=0.05)
+    transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=10)
     try:
         async with audit_engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
@@ -684,6 +772,7 @@ async def test_post_commit_lost_ack_reconciles_exactly_once_and_leaves_no_commit
         real_commit = AsyncSession.commit
         real_invalidate = AsyncSession.invalidate
         committed = asyncio.Event()
+        release = asyncio.Event()
         cancelled_after_commit = asyncio.Event()
         invalidated_sessions: list[AsyncSession] = []
         delayed_once = False
@@ -694,8 +783,9 @@ async def test_post_commit_lost_ack_reconciles_exactly_once_and_leaves_no_commit
             if audit_session.bind is audit_engine and not delayed_once:
                 delayed_once = True
                 committed.set()
+                assert asyncio.current_task() is emission, "COMMIT must not run in a detached task."
                 try:
-                    await asyncio.Event().wait()
+                    await release.wait()
                 finally:
                     cancelled_after_commit.set()
 
@@ -713,19 +803,31 @@ async def test_post_commit_lost_ack_reconciles_exactly_once_and_leaves_no_commit
                 tenant_id=tenant.id,
                 request_session=caller,
             )
-            event = await recorder.emit(
-                actor=AuditActor.user(uuid.uuid4()),
-                resource_type="chat_session",
-                resource_id=str(uuid.uuid4()),
-                attempted_action="chat.session.read",
-                reason="not_visible",
-                request_id="req-post-commit-lost-ack",
-                source_ip="203.0.113.90",
+            emission = asyncio.create_task(
+                recorder.emit(
+                    actor=AuditActor.user(uuid.uuid4()),
+                    resource_type="chat_session",
+                    resource_id=str(uuid.uuid4()),
+                    attempted_action="chat.session.read",
+                    reason="not_visible",
+                    request_id="req-post-commit-lost-ack",
+                    source_ip="203.0.113.90",
+                )
             )
+            try:
+                await _expire_audit_attempt(emission, committed, audit_deadlines)
+                event = await emission
+                assert cancelled_after_commit.is_set(), "COMMIT must unwind before emit returns."
+            finally:
+                release.set()
+                emission.cancel()
+                await asyncio.gather(emission, return_exceptions=True)
 
         assert committed.is_set()
         assert cancelled_after_commit.is_set()
         assert len(invalidated_sessions) == 1
+        assert len(audit_deadlines.expired) == 1
+        assert audit_deadlines.expired[0].expired()
         # Reusing the sole slot immediately proves cleanup/reconciliation did not
         # strand a commit coroutine or the invalidated connection in the pool.
         async with AsyncSession(caller_engine) as caller:
