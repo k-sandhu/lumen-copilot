@@ -62,8 +62,8 @@ export function listMcpServers(
  * any `auth` write-only via CC-C; the returned server has status `pending` until
  * the first `test` probe.
  */
-export function registerMcpServer(body: McpServerCreate): Promise<McpServer> {
-  return request<McpServer>('/mcp-servers', { method: 'POST', json: body });
+export function registerMcpServer(body: McpServerCreate, signal?: AbortSignal): Promise<McpServer> {
+  return request<McpServer>('/mcp-servers', { method: 'POST', json: body, signal });
 }
 
 /** Get one MCP server by id (404 if not yours / cross-tenant — INV-1/INV-2). */
