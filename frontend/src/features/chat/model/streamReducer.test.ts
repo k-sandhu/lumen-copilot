@@ -253,6 +253,76 @@ describe('reduceStream', () => {
     expect(s.citations).toHaveLength(0);
   });
 
+  it('rejects an unpaired or reversed media timestamp before it reaches the viewer', () => {
+    const base = {
+      id: 'media-bad',
+      documentId: 'doc-1',
+      documentName: 'meeting.mp4',
+      chunkId: 'chunk-1',
+      snippet: 'said this',
+      charStart: 0,
+      charEnd: 9,
+    };
+    const unpaired: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 2,
+      name: 'citation',
+      data: { ...base, timeStartMs: 1000 },
+    };
+    const reversed: EventEnvelope = {
+      ...unpaired,
+      seq: 3,
+      data: { ...base, timeStartMs: 2000, timeEndMs: 1000 },
+    };
+    const s = fold(initialStreamState, start(0), unpaired, reversed);
+    expect(s.citations).toHaveLength(0);
+  });
+
+  it('rejects speaker/segment metadata without valid paired integer timestamps', () => {
+    const base = {
+      id: 'media-metadata-bad',
+      documentId: 'doc-1',
+      documentName: 'meeting.mp4',
+      chunkId: 'chunk-1',
+      snippet: 'said this',
+      charStart: 0,
+      charEnd: 9,
+    };
+    const payloads = [
+      { ...base, speakerId: 'speaker-1' },
+      { ...base, timeStartMs: 1000, timeEndMs: 2000, speakerName: 7 },
+      { ...base, timeStartMs: 1000, timeEndMs: 2000, transcriptSegmentId: false },
+      { ...base, timeStartMs: 1000.5, timeEndMs: 2000, speakerId: 'speaker-1' },
+    ];
+    const events = payloads.map<EventEnvelope>((data, index) => ({
+      type: 'event',
+      streamId: SID,
+      seq: index + 2,
+      name: 'citation',
+      data,
+    }));
+
+    const rejected = fold(initialStreamState, start(0), ...events);
+    expect(rejected.citations).toHaveLength(0);
+
+    const valid: EventEnvelope = {
+      type: 'event',
+      streamId: SID,
+      seq: 9,
+      name: 'citation',
+      data: {
+        ...base,
+        timeStartMs: 1000,
+        timeEndMs: 2000,
+        transcriptSegmentId: 'segment-1',
+        speakerId: 'speaker-1',
+        speakerName: 'John',
+      },
+    };
+    expect(fold(initialStreamState, start(0), valid).citations).toHaveLength(1);
+  });
+
   it('reaches done with the terminal summary (AC-2 persist trigger)', () => {
     const s = fold(initialStreamState, start(0), delta(1, 'hi'), citation(2, 'c'), done(3, 1));
     expect(s.phase).toBe('done');

@@ -321,8 +321,6 @@ async def test_document_delete_enqueues_index_sync_after_commit(
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
             request_id="r",
             source_ip="i",
-            upload_allowed_content_types=frozenset({"text/plain"}),
-            max_upload_bytes=1024,
         )
         assert await svc.delete(doc_id) is True
         assert calls == []  # not before commit

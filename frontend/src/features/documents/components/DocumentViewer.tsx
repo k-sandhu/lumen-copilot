@@ -1,12 +1,11 @@
 /**
  * Document viewer (#49 AC-3, re-skinned for #89) — a right-side drawer that
- * surfaces the document's trust signals before its bytes: a metadata grid, the
+ * surfaces the document's trust signals before its preview: a metadata grid, the
  * parse → chunk → embed → ready INGESTION TRACE (so a user can see exactly how a
  * file became answerable), and — when opened on a cited passage — the cited
  * SourceInspector passage. The preview itself is the shared
- * `DocumentPreviewBody` (#242/#245): authenticated blob fetch for
- * browser-renderable types, server-extracted text for office types, and a
- * download-original affordance everywhere.
+ * `DocumentPreviewBody`: signed PDF/media access, timestamped media transcript,
+ * server-extracted office text, and signed downloads.
  *
  * A11y: role="dialog" aria-modal, focus moves into the drawer on open and is
  * restored on close, Escape and a backdrop click dismiss. Loading / error /
@@ -130,7 +129,7 @@ export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerPro
             </section>
           )}
 
-          {/* Preview (shared body: blob iframe / extracted text / download) */}
+          {/* Preview (shared signed media/PDF, extracted text, and download body) */}
           <section aria-label="Preview" className="p-4">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-foreground-muted">
               Preview
@@ -185,4 +184,3 @@ function StatusLine({ doc }: { doc: Document }) {
           : 'Queued';
   return <StatusDot tone={tone} label={label} />;
 }
-

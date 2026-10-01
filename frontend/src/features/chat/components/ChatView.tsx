@@ -19,7 +19,7 @@ import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useModels } from '@/features/models';
 import { useChatStore, type SessionScope, type ViewerTarget } from '../model/chatStore';
 import { initialModes, modeAvailability } from '../model/presentation';
-import type { UiCitation } from '../model/citation';
+import { fromRestCitation, type UiCitation } from '../model/citation';
 import '../chat.css';
 import { useMessages, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
@@ -193,17 +193,30 @@ export function ChatView() {
           <ErrorBoundary label="Context panel">
             <ContextPanel
               sessionId={activeSessionId}
-              onOpenCitation={(c) =>
+              onOpenCitation={(c) => {
+                const citation = fromRestCitation(c);
                 openViewer({
                   kind: 'document',
-                  id: `${c.document_id}:${c.char_start}`,
-                  documentId: c.document_id,
-                  documentName: c.document_name,
-                  charStart: c.char_start,
-                  charEnd: c.char_end,
-                  snippet: c.snippet,
-                })
-              }
+                  id: citation.id,
+                  ...(citation.handle !== undefined ? { handle: citation.handle } : {}),
+                  documentId: citation.documentId,
+                  documentName: citation.documentName,
+                  charStart: citation.charStart,
+                  charEnd: citation.charEnd,
+                  ...(citation.timeStartMs !== undefined
+                    ? { timeStartMs: citation.timeStartMs }
+                    : {}),
+                  ...(citation.timeEndMs !== undefined ? { timeEndMs: citation.timeEndMs } : {}),
+                  ...(citation.transcriptSegmentId !== undefined
+                    ? { transcriptSegmentId: citation.transcriptSegmentId }
+                    : {}),
+                  ...(citation.speakerId !== undefined ? { speakerId: citation.speakerId } : {}),
+                  ...(citation.speakerName !== undefined
+                    ? { speakerName: citation.speakerName }
+                    : {}),
+                  snippet: citation.snippet,
+                });
+              }}
               onOpenArtifact={(id) => {
                 setArtifactFocus(id);
                 openPanel('artifacts');
@@ -266,6 +279,13 @@ export function ChatView() {
                   snippet: viewer.snippet,
                   charStart: viewer.charStart,
                   charEnd: viewer.charEnd,
+                  ...(viewer.timeStartMs !== undefined ? { timeStartMs: viewer.timeStartMs } : {}),
+                  ...(viewer.timeEndMs !== undefined ? { timeEndMs: viewer.timeEndMs } : {}),
+                  ...(viewer.transcriptSegmentId !== undefined
+                    ? { transcriptSegmentId: viewer.transcriptSegmentId }
+                    : {}),
+                  ...(viewer.speakerId !== undefined ? { speakerId: viewer.speakerId } : {}),
+                  ...(viewer.speakerName !== undefined ? { speakerName: viewer.speakerName } : {}),
                 }}
                 // No source owner / last-modified / last-indexed is on the chat
                 // wire, and the answer/message time is the answer's age, not the
@@ -531,8 +551,8 @@ function ActiveSession({
 
   // Opening a citation forwards only what the citation wire provides about the
   // source; the answer-time `meta` is NOT source provenance and is intentionally
-  // not forwarded as freshness/last-indexed (#120). A web citation (#221)
-  // forwards its `url` so the inspector opens the web-source pane. Stable
+  // not forwarded as freshness/last-indexed (#120). The discriminated citation
+  // variant selects the document or web source pane. Stable
   // identity (useCallback) so it does not defeat every MessageBubble's memo (the
   // single highest-leverage prop on the render path, #495).
   const onOpenCitation = useCallback(
@@ -556,6 +576,13 @@ function ActiveSession({
           charStart: c.charStart,
           charEnd: c.charEnd,
           snippet: c.snippet,
+          ...(c.timeStartMs !== undefined ? { timeStartMs: c.timeStartMs } : {}),
+          ...(c.timeEndMs !== undefined ? { timeEndMs: c.timeEndMs } : {}),
+          ...(c.transcriptSegmentId !== undefined
+            ? { transcriptSegmentId: c.transcriptSegmentId }
+            : {}),
+          ...(c.speakerId !== undefined ? { speakerId: c.speakerId } : {}),
+          ...(c.speakerName !== undefined ? { speakerName: c.speakerName } : {}),
         });
     },
     [openViewer],
