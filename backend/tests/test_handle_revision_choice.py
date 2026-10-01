@@ -18,8 +18,10 @@ from app.realtime.backplane import InMemoryBackplane
 from app.services.prompts.grounded_answer import NO_SOURCES_FALLBACK
 from tests.test_chat_handle_contract import _visible_answer
 from tests.test_chat_runtime import _Ctx, _drain, _FakeRetrieval, _passage, _runtime
+from tests.test_chat_runtime import ctx as _runtime_ctx
 
 pytest_plugins = ("tests.test_chat_runtime",)
+ctx = _runtime_ctx
 
 
 class _Revisions(_FakeRetrieval):
