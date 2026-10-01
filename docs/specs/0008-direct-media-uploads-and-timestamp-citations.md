@@ -43,6 +43,10 @@ or an unambiguous direct-address/response exchange); otherwise the UI says
    provider multipart upload, verifies stored size and metadata with `HEAD`,
    creates exactly one pending `Document`, emits `document.uploaded` exactly
    once, commits, and only then enqueues ingestion.
+   Deletion, completion, and recovery acquire the collection row lock before
+   the upload row lock, including reacquisition after the durable commit.
+   Existence and state are rechecked under those locks so document insertion's
+   collection foreign key cannot deadlock with collection deletion.
 6. Abort is idempotent before completion. Expired sessions are failed closed and
    a janitor aborts abandoned provider uploads. A completed session cannot be
    aborted (`409`). Cross-tenant or non-owned sessions are hidden as `404`.

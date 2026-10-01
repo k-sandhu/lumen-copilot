@@ -76,8 +76,9 @@ async def _owner_collection(
     return user.id, collection.id
 
 
+@pytest.mark.parametrize("lock", [False, True])
 async def test_upload_sessions_are_owner_and_tenant_scoped(
-    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID]
+    session: AsyncSession, two_tenants: tuple[uuid.UUID, uuid.UUID], lock: bool
 ) -> None:
     tenant_a, tenant_b = two_tenants
     owner_id, collection_id = await _owner_collection(session, tenant_a, email="media-owner@a.test")
@@ -99,13 +100,24 @@ async def test_upload_sessions_are_owner_and_tenant_scoped(
     )
 
     assert created.state is DocumentUploadState.INITIATED
-    reloaded = await DocumentUploadRepository(session, tenant_a).get_for_owner(upload_id, owner_id)
+    reloaded = await DocumentUploadRepository(session, tenant_a).get_for_owner(
+        upload_id, owner_id, lock=lock
+    )
     assert reloaded is not None
     assert reloaded.id == created.id
     assert reloaded.document_id == created.document_id
     assert reloaded.provider_upload_id == created.provider_upload_id
     assert (
-        await DocumentUploadRepository(session, tenant_b).get_for_owner(upload_id, owner_id) is None
+        await DocumentUploadRepository(session, tenant_b).get_for_owner(
+            upload_id, owner_id, lock=lock
+        )
+        is None
+    )
+    assert (
+        await DocumentUploadRepository(session, tenant_a).get_for_owner(
+            upload_id, uuid.uuid4(), lock=lock
+        )
+        is None
     )
 
 

@@ -2396,13 +2396,35 @@ class DocumentUploadRepository(_TenantScopedRepository):
     async def get_for_owner(
         self, upload_id: UUID, owner_id: UUID, *, lock: bool = False
     ) -> DocumentUpload | None:
+        if lock:
+            # Collection deletion locks parent -> uploads. Match that order in
+            # completion/recovery (including reacquisition after a commit), or
+            # document insertion's collection FK forms the opposite lock edge.
+            # The join discovers the parent without locking the upload; both
+            # tenant predicates and the owner predicate retain the 404 boundary.
+            parent = (
+                select(models.Collection.id)
+                .join(
+                    models.DocumentUpload,
+                    models.DocumentUpload.collection_id == models.Collection.id,
+                )
+                .where(
+                    models.Collection.tenant_id == self._tenant_id,
+                    models.DocumentUpload.tenant_id == self._tenant_id,
+                    models.DocumentUpload.id == upload_id,
+                    models.DocumentUpload.owner_id == owner_id,
+                )
+                .with_for_update(of=models.Collection)
+            )
+            if (await self._session.execute(parent)).scalar_one_or_none() is None:
+                return None
         stmt = select(models.DocumentUpload).where(
             models.DocumentUpload.tenant_id == self._tenant_id,
             models.DocumentUpload.id == upload_id,
             models.DocumentUpload.owner_id == owner_id,
         )
         if lock:
-            stmt = stmt.with_for_update()
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_document_upload(row) if row is not None else None
 

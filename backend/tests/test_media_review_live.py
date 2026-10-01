@@ -42,7 +42,7 @@ from app.db.repositories import (
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction
-from app.domain.entities import DocumentUpload, DocumentUploadState, MessageRole, Role
+from app.domain.entities import Document, DocumentUpload, DocumentUploadState, MessageRole, Role
 from app.services.audit import AuditSink
 from app.services.collections_service import CollectionsService
 from app.services.document_upload_service import CompletePartInput
@@ -650,3 +650,180 @@ async def test_collection_delete_at_durable_completion_boundary_under_rls(
         "reason_code": "not_found_or_not_owned",
         "status": 404,
     }
+
+
+@pytest.mark.parametrize("mode", ["complete", "recover_parts", "recover_head", "janitor"])
+async def test_finalization_and_collection_delete_do_not_deadlock(
+    restricted_session: AsyncSession,
+    live_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Hold finalization before its FK insert; prove deletion waits, then release.
+
+    The database's blocker graph is the handshake: with the old order deletion
+    waits on the upload while holding its parent, and releasing the insert forms
+    a deadlock. With parent-first locks deletion waits on the parent instead.
+    No sleeps, deadlines, or elapsed-time assertions decide the interleaving.
+    """
+    session, store = restricted_session, FakeMultipartStore()
+    now = datetime.now(UTC)
+    upload = await _live_upload(
+        session,
+        store,
+        expires_at=now + (timedelta(hours=1) if mode != "janitor" else -timedelta(minutes=1)),
+    )
+    await bind_tenant(session, upload.tenant_id)
+    if mode != "complete":
+        await DocumentUploadRepository(session, upload.tenant_id).set_state(
+            upload.id, upload.owner_id, DocumentUploadState.COMPLETING
+        )
+        await session.commit()
+        await bind_tenant(session, upload.tenant_id)
+    if mode == "recover_head":
+        await store.complete_multipart_upload(provider_upload_id=upload.provider_upload_id)
+
+    completion_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+    finalizing, deletion_started, release_insert = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    deletion_pid: int | None = None
+    original_create = DocumentRepository.create
+
+    async def gated_create(repo: DocumentRepository, **kwargs: object) -> Document:
+        if kwargs.get("document_id") == upload.document_id:
+            finalizing.set()
+            await release_insert.wait()
+        return await original_create(repo, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(DocumentRepository, "create", gated_create)
+    enqueued: list[uuid.UUID] = []
+    indexed: list[uuid.UUID] = []
+    monkeypatch.setattr("app.tasks.enqueue_ingestion", lambda t, d, **kw: enqueued.append(d))
+    monkeypatch.setattr("app.tasks.enqueue_index_sync", lambda t, d: indexed.append(d))
+    service = _recovery_service(
+        session=session, candidate=upload, store=store, settings=get_settings()
+    )  # type: ignore[arg-type]
+
+    @asynccontextmanager
+    async def tenant_scope(tenant: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        await bind_tenant(session, tenant)
+        yield session
+        await session.commit()
+
+    @asynccontextmanager
+    async def discovery_scope() -> AsyncIterator[AsyncSession]:
+        engine = create_async_engine(_URL)
+        try:
+            async with AsyncSession(engine) as discovery:
+                yield discovery
+        finally:
+            await engine.dispose()
+
+    monkeypatch.setattr("app.tasks.upload_janitor.tenant_session_scope", tenant_scope)
+    monkeypatch.setattr("app.tasks.upload_janitor.session_scope", discovery_scope)
+
+    async def complete() -> object:
+        try:
+            if mode == "janitor":
+                result = await sweep_expired_uploads_async(now=now, object_store=store)  # type: ignore[arg-type]
+                assert (result.scanned, result.recovered, result.expired) == (1, 1, 0)
+                return result
+            result = (
+                await service.complete(upload.id, [CompletePartInput(1, '"etag-1"')])
+                if mode == "complete"
+                else await service.recover_completing(upload.id)
+            )
+            assert result is not None and result.id == upload.document_id
+            await session.commit()
+            return result
+        except BaseException:
+            await session.rollback()
+            raise
+
+    async def delete() -> bool:
+        nonlocal deletion_pid
+        await finalizing.wait()
+        engine = create_async_engine(_URL)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f"SET ROLE {live_database}"))
+                await connection.commit()
+                assert (
+                    await connection.execute(
+                        text(
+                            "SELECT rolsuper, rolbypassrls FROM pg_roles "
+                            "WHERE rolname = current_user"
+                        )
+                    )
+                ).one() == (False, False)
+                deletion_pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+                await connection.commit()
+                async with AsyncSession(connection, expire_on_commit=False) as deleter:
+                    await bind_tenant(deleter, upload.tenant_id)
+                    deletion_started.set()
+                    collections = CollectionsService(
+                        deleter,
+                        tenant_id=upload.tenant_id,
+                        owner_id=upload.owner_id,
+                        object_store=store,  # type: ignore[arg-type]
+                        audit=AuditSink(AuditEventRepository(deleter, upload.tenant_id)),
+                        request_id="r4-concurrent-delete",
+                        source_ip="127.0.0.1",
+                    )
+                    result = await collections.delete(upload.collection_id)
+                    await deleter.commit()
+                    return result
+        finally:
+            deletion_started.set()
+            await engine.dispose()
+
+    completing, deleting = asyncio.create_task(complete()), asyncio.create_task(delete())
+    try:
+        await finalizing.wait()
+        await deletion_started.wait()
+        assert deletion_pid is not None and completion_pid is not None
+        observer = await _admin()
+        try:
+            while completion_pid not in await observer.fetchval(
+                "SELECT pg_blocking_pids($1)", deletion_pid
+            ):
+                assert not deleting.done(), "deletion must contend with locked finalization"
+        finally:
+            await observer.close()
+        release_insert.set()
+        results = await asyncio.gather(completing, deleting, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert not errors, f"concurrent finalization/delete failed: {errors}"
+        assert results[1] is True
+    finally:
+        release_insert.set()
+        for task in (completing, deleting):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(completing, deleting, return_exceptions=True)
+
+    await bind_tenant(session, upload.tenant_id)
+    assert await CollectionRepository(session, upload.tenant_id).get(upload.collection_id) is None
+    assert await DocumentRepository(session, upload.tenant_id).get(upload.document_id) is None
+    assert (
+        await DocumentUploadRepository(session, upload.tenant_id).get_for_owner(
+            upload.id, upload.owner_id
+        )
+        is None
+    )
+    events = (
+        (
+            await session.execute(
+                select(models.AuditEvent).where(
+                    models.AuditEvent.resource_id == str(upload.document_id)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert sorted(event.action for event in events) == sorted(
+        [AuditAction.DOCUMENT_UPLOADED.value, AuditAction.DOCUMENT_DELETED.value]
+    )
+    assert store.complete_calls == [upload.provider_upload_id]
+    assert store.deleted == [upload.storage_key] and store.aborted == []
+    assert enqueued == indexed == [upload.document_id]
