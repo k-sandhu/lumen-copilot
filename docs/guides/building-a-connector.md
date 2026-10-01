@@ -165,6 +165,17 @@ All other `app` dependencies fail closed, including `app.api`, `app.services`,
 API/service layer (ADR-0004). In particular, `from app.api.deps import
 get_settings_dep` or a renamed settings reexport cannot bypass the config seal.
 
+In-repo dotted imports must bind the allowed module explicitly: use
+`import app.domain.entities as entities` or
+`from app.domain.entities import Source`. An unaliased
+`import app.domain.entities` binds the root `app` namespace, which can expose
+API/service modules loaded during normal application startup. The scan rejects
+every unaliased `import app.<...>` and every root-qualified `app.<anything>`
+reference, including in package initializers, helper modules and nested
+packages. Use the alias (`entities.Source`) or imported symbol (`Source`). The
+config exception still requires `from app.core.config import get_settings`
+and the exact field-read shape below.
+
 The conformance suite independently audits all four shared modules and every
 pure-domain module for unsafe imports, Settings/accessor reexports and exposed
 infrastructure handles. Config itself is the intentional exception: only the

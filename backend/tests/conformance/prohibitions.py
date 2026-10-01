@@ -31,6 +31,9 @@ checked from the **filesystem**: every connector-shaped subpackage must expose
 package modules, pure ``app.domain`` types, the four exact shared modules used
 by web/Drive, and the sealed config accessor below. All other ``app`` imports
 fail, including API/service wrappers that could reexport Settings or a session.
+In-repo dotted imports require an alias or a from-import; unaliased imports
+bind the broader root ``app`` namespace. Root-qualified ``app.*`` references
+are refused too, regardless of which import introduced the namespace.
 The existing :data:`FORBIDDEN_IMPORTS` add specific remediation messages for
 the vault, DB and object store. Deliberately **not** banned: ``sqlalchemy`` itself. The ADR
 prohibits touching *Lumen's* database, not the existence of SQL — a future
@@ -214,6 +217,7 @@ FORBIDDEN_SETTINGS: dict[str, str] = {
     "opensearch_username": "Lumen's search-store credential",
     "opensearch_password": "Lumen's search-store credential",
     "openrouter_api_key": "Lumen's LLM-provider API key",
+    "sandbox_runner_token": "Lumen's sandbox-runner credential — never connector-owned",
     "jwt_secret": "Lumen's token-signing key",
     "secrets_encryption_key": (
         "the vault's master key — reading it is the secrets-service prohibition "
@@ -236,17 +240,22 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "access_token_ttl_seconds",
         "artifact_allowed_content_types",
         "artifact_retention_days",
+        "chat_answer_max_tokens",
         "chat_max_tool_turns",
         "chat_model_registry",
         "chat_prompt_cache_enabled",
         "chat_shutdown_grace_seconds",
         "chat_suggestions_count",
         "chat_suggestions_enabled",
+        "chat_suggestions_grace_seconds",
+        "chat_suggestions_model",
         "chat_suggestions_timeout_seconds",
         "chat_summary_enabled",
         "chat_summary_keep_messages",
         "chat_summary_min_batch",
         "chat_summary_model",
+        "chat_text_coalesce_chars",
+        "chat_text_coalesce_seconds",
         "chat_tool_concurrency",
         "connector_acl_max_age_hours",
         "connector_ingest_recovery_batch",
@@ -259,9 +268,12 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "context_compaction_digest_chars",
         "context_fallback_max_input_tokens",
         "context_output_headroom_tokens",
+        "context_proactive_compaction_enabled",
         "document_content_redirect",
         "document_text_max_bytes",
         "environment",
+        "ffmpeg_path",
+        "ffprobe_path",
         "gdrive_fetch_max_bytes",
         "gdrive_oauth_client_id",
         "gdrive_oauth_client_secret",
@@ -277,12 +289,16 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "llm_embedding_api_base",
         "llm_embedding_dimensions",
         "llm_embedding_model",
+        "llm_interactive_max_attempts",
+        "llm_interactive_timeout_seconds",
         "llm_model",
+        "llm_terminal_publish_margin_seconds",
         "llm_timeout_seconds",
         "log_level",
         "logo_allowed_content_types",
         "max_artifact_bytes",
         "max_logo_bytes",
+        "max_media_upload_bytes",
         "max_upload_bytes",
         "mcp_allowed_transports",
         "mcp_call_timeout_seconds",
@@ -290,6 +306,7 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "mcp_endpoint_allowlist",
         "mcp_rate_max_per_window",
         "mcp_rate_window_seconds",
+        "media_max_duration_seconds",
         "opensearch_timeout_seconds",
         "redbeat_key_prefix",
         "redbeat_lock_timeout_seconds",
@@ -301,6 +318,9 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "run_rate_max_per_window",
         "run_rate_window_seconds",
         "run_retry_backoff_seconds",
+        "s3_cors_allowed_origins",
+        "s3_cors_managed_externally",
+        "s3_incomplete_multipart_cleanup_managed_externally",
         "s3_presign_ttl_seconds",
         "sandbox_cpus",
         "sandbox_daily_runtime_seconds_per_tenant",
@@ -310,15 +330,31 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "sandbox_memory_bytes",
         "sandbox_output_bytes_cap",
         "sandbox_pids_limit",
+        "sandbox_preinstalled_packages",
         "sandbox_runtime",
         "sandbox_scratch_bytes",
+        "sandbox_session_limits_enabled",
         "sandbox_wall_clock_seconds",
         "search_direct_answer_max_tokens",
         "service_name",
         "source_sync_rate_backoff_seconds",
         "source_sync_rate_max_per_window",
         "source_sync_rate_window_seconds",
+        "transcription_base_url",
+        "transcription_chunk_overlap_seconds",
+        "transcription_chunk_seconds",
+        "transcription_model",
+        "transcription_provider_options_json",
+        "transcription_require_diarization",
+        "transcription_timeout_seconds",
         "upload_allowed_content_types",
+        "upload_incomplete_lifecycle_days",
+        "upload_janitor_batch_size",
+        "upload_janitor_interval_seconds",
+        "upload_max_parts",
+        "upload_part_size_bytes",
+        "upload_session_ttl_seconds",
+        "upload_sign_batch_size",
         "version",
         "web_search_default_k",
         "web_search_enabled",
@@ -615,6 +651,16 @@ def _disallowed_imports(
     for node in ast.walk(tree):
         targets: list[str]
         if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("app.") and alias.asname is None:
+                    yield (
+                        node.lineno,
+                        (
+                            f"imports `{alias.name}` without an alias, binding the root `app` "
+                            f"namespace — use `import {alias.name} as module` or "
+                            f"`from {alias.name} import Name` for an allowlisted module"
+                        ),
+                    )
             targets = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
             base = _import_from_base(node, module_name, is_init)
@@ -627,6 +673,16 @@ def _disallowed_imports(
             if node.level == 0 and base != "app" and not base.startswith("app."):
                 continue
             targets = [f"{base}.{alias.name}" for alias in node.names]
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "app":
+                yield (
+                    node.lineno,
+                    (
+                        f"uses root-qualified `app.{node.attr}` — use an aliased allowlisted "
+                        "module or a from-import instead of the root `app` namespace"
+                    ),
+                )
+            continue
         else:
             continue
         for target in targets:

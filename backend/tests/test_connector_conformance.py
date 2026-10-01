@@ -1844,6 +1844,120 @@ def test_r12_001_allowed_imports_preserve_connector_dependencies(body: str, tmp_
     assert scan_package(_write_package(tmp_path, body)) == []
 
 
+@pytest.mark.parametrize(
+    "imported",
+    ["app.domain.entities", "app.connectors.base", "app.core.logging", "app.net.egress"],
+)
+@pytest.mark.parametrize(
+    "filename", ["connector.py", "__init__.py", "helpers.py", "nested/__init__.py"]
+)
+async def test_r13_001_bootstrapped_root_import_diagnostic_is_rejected(
+    imported: str, filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal bootstrap exposes the API wrapper through an unaliased allowed import."""
+    import sys
+
+    from app.core.config import Settings
+
+    importlib.import_module("app.main")
+    assert "app.api.deps" in sys.modules
+    synthetic = Settings.model_construct(
+        database_url="postgresql+asyncpg://synthetic:synthetic@invalid/r13",
+        jwt_secret="synthetic-r13-signing-key",
+        secrets_encryption_key="synthetic-r13-vault-key",
+    )
+    monkeypatch.setattr("app.api.deps.get_settings_dep", lambda: synthetic)
+    body = (
+        f"import {imported}\n"
+        "from app.connectors.base import ConnectorHealth\n"
+        "async def health():\n"
+        "    email = 'synthetic@example.invalid'\n"
+        "    settings = app.api.deps.get_settings_dep()\n"
+        "    return ConnectorHealth(\n"
+        "        healthy=True,\n"
+        "        detail=f'{email}; config={settings.model_dump()}',\n"
+        "    )\n"
+    )
+    package = _write_package(tmp_path, "")
+    path = package / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    namespace: dict[str, Any] = {}
+    exec(compile(body, str(path), "exec"), namespace)
+    health = await namespace["health"]()
+    assert isinstance(health, ConnectorHealth) and health.healthy
+    # Only synthetic values are used; no real settings or secrets enter the diagnostic.
+    assert all(
+        value in health.detail
+        for value in (
+            synthetic.database_url,
+            synthetic.jwt_secret,
+            synthetic.secrets_encryption_key,
+        )
+    )
+    violations = scan_package(package)
+    assert any(
+        v.rule == "connector-import-allowlist"
+        and "without an alias" in v.detail
+        and f"import {imported} as" in v.detail
+        and f"from {imported} import" in v.detail
+        for v in violations
+    ), violations
+    assert any(
+        v.rule == "connector-import-allowlist" and "root-qualified" in v.detail for v in violations
+    ), violations
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "def probe():\n    return app.api.deps.get_settings_dep()\n",
+        "def probe():\n    return app.domain.entities.Source\n",
+        "import app.domain.entities as entities\n"
+        "def probe():\n    return app.api.deps.get_settings_dep()\n",
+        "from app.domain.entities import Source\n"
+        "def probe():\n    return app.api.deps.get_settings_dep()\n",
+    ],
+)
+def test_r13_001_root_qualified_references_fail_without_a_root_import(
+    body: str, tmp_path: Path
+) -> None:
+    violations = scan_package(_write_package(tmp_path, body))
+    assert any(
+        v.rule == "connector-import-allowlist" and "root-qualified" in v.detail for v in violations
+    ), violations
+
+
+@pytest.mark.parametrize(
+    "filename", ["connector.py", "__init__.py", "helpers.py", "nested/__init__.py"]
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import app.domain.entities as entities\n",
+        "import app.connectors.base as base\n",
+        "import app.core.logging as logging\n",
+        "import app.net.egress as egress\n",
+        "import app.connectors.synthetic_connector.helpers as helpers\n",
+        "from app.domain.entities import Source\n",
+        "from app.connectors.base import ConnectorHealth\n",
+        "from app.core.logging import get_logger\n",
+        "from app.net.egress import resolve_safe_ip\n",
+        "from app.core.config import get_settings\n"
+        "def config():\n    return (get_settings().gdrive_oauth_client_id,\n"
+        "        get_settings().gdrive_oauth_client_secret, get_settings().web_user_agent)\n",
+    ],
+)
+def test_r13_001_aliased_and_from_imports_remain_allowed(
+    body: str, filename: str, tmp_path: Path
+) -> None:
+    package = _write_package(tmp_path, "")
+    path = package / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    assert scan_package(package) == []
+
+
 def _assert_safe_connector_dependency(module_name: str) -> None:
     """Independently audit shared dependency imports and actual reexports."""
     from app.core.config import Settings, get_settings
