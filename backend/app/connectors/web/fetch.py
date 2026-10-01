@@ -350,10 +350,10 @@ async def fetch_url(
             await active.aclose()
 
 
-__all__ = [
+__all__ = (
     "ALLOWED_CONTENT_TYPES",
     "FetchResult",
     "UrlBlockedError",
     "fetch_url",
     "validate_url_syntactic",
-]
+)

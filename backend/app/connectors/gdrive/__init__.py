@@ -8,6 +8,6 @@ the framework's guarded clients.
 
 from app.connectors.gdrive.connector import GdriveConnector
 
-CONNECTOR = GdriveConnector()
+CONNECTOR = GdriveConnector
 
-__all__ = ["CONNECTOR", "GdriveConnector"]
+__all__ = ("CONNECTOR", "GdriveConnector")
