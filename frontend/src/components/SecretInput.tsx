@@ -3,7 +3,7 @@ import type { InputHTMLAttributes } from 'react';
 import { Icon } from '@/ui';
 import { cn } from '@/lib/cn';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
-import { scrubCredentialInput, useCredentialDomCleanup } from '@/lib/credentialDom';
+import { scrubCredentialInput } from '@/lib/credentialDom';
 
 export interface SecretInputProps
   extends Omit<
@@ -56,7 +56,6 @@ export const SecretInput = forwardRef<SecretInputHandle, SecretInputProps>(funct
   const inputRef = useRef<HTMLInputElement | null>(null);
   const mounted = useRef(true);
   const [revealed, setRevealed] = useState(false);
-  const { rememberRoot, clearDom } = useCredentialDomCleanup();
   // React assigns null to ordinary refs before passive unmount cleanup. Keep the
   // last node long enough to blank a detached control, then let the component
   // (and this ref) be collected.
@@ -65,7 +64,6 @@ export const SecretInput = forwardRef<SecretInputHandle, SecretInputProps>(funct
   }, []);
 
   const hardReset = useCallback(() => {
-    clearDom();
     if (inputRef.current) {
       scrubCredentialInput(inputRef.current);
       inputRef.current.type = 'password';
@@ -73,7 +71,7 @@ export const SecretInput = forwardRef<SecretInputHandle, SecretInputProps>(funct
     if (!mounted.current) return;
     onValueChange('');
     setRevealed(false);
-  }, [onValueChange, clearDom]);
+  }, [onValueChange]);
 
   useImperativeHandle(forwardedRef, () => ({ reset: hardReset }), [hardReset]);
   useCredentialClearer(hardReset);
@@ -85,18 +83,17 @@ export const SecretInput = forwardRef<SecretInputHandle, SecretInputProps>(funct
     mounted.current = true;
     return () => {
       mounted.current = false;
-      clearDom();
       if (inputRef.current) {
         scrubCredentialInput(inputRef.current);
         inputRef.current.type = 'password';
       }
     };
-  }, [clearDom]);
+  }, []);
 
   const action = revealed ? 'Hide' : 'Show';
 
   return (
-    <div ref={rememberRoot} className={cn('relative', wrapperClassName)}>
+    <div className={cn('relative', wrapperClassName)}>
       <input
         {...inputProps}
         ref={rememberInput}

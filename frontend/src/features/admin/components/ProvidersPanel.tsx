@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { SecretInput, type SecretInputHandle } from '@/components/SecretInput';
 import { useCredentialClearer } from '@/lib/credentialLifecycle';
-import { scrubCredentialInput, useCredentialDomCleanup } from '@/lib/credentialDom';
+import { scrubCredentialInput } from '@/lib/credentialDom';
 import { Icon, StatusDot, type StatusTone } from '@/ui';
 import { ApiError } from '@/api';
 import type { LlmProvider, LlmProviderStatus } from '@/api';
@@ -245,7 +245,6 @@ function AddProviderForm({
   const nameRef = useRef<HTMLInputElement | null>(null);
   const baseUrlRef = useRef<HTMLInputElement | null>(null);
   const apiKeyRef = useRef<SecretInputHandle | null>(null);
-  const { rememberRoot, clearDom } = useCredentialDomCleanup();
   const apiKeyId = useId();
   const canSubmit = name.trim().length > 0 && baseUrl.trim().length > 0 && !submitting;
 
@@ -256,11 +255,10 @@ function AddProviderForm({
     if (node) baseUrlRef.current = node;
   }, []);
   const hardBlankDom = useCallback(() => {
-    clearDom();
     if (nameRef.current) scrubCredentialInput(nameRef.current);
     if (baseUrlRef.current) scrubCredentialInput(baseUrlRef.current);
     apiKeyRef.current?.reset();
-  }, [clearDom]);
+  }, []);
   const clearForm = useCallback(() => {
     hardBlankDom();
     setName('');
@@ -289,7 +287,6 @@ function AddProviderForm({
 
   return (
     <form
-      ref={rememberRoot}
       onSubmit={handleSubmit}
       autoComplete="off"
       aria-label="Add LLM provider"

@@ -63,11 +63,9 @@ Credential inputs use explicit browser semantics:
 - Reveal is an accessible, non-submit button with an announced pressed state.
   Every reset blanks the input property, reflected default and `value` attributes,
   and restores password masking, including manager-style DOM writes that never
-  dispatched a React input event. Form-local cleanup also scrubs secret-bearing
-  attributes (including `data-*` and `aria-*`), text copies, and hidden/mirrored
-  inputs. Removed descendants are retained only until the next scrub so cleanup
-  reaches copies detached before the form itself; the observer, draft strings,
-  and node holders are released at teardown.
+  dispatched a React input event. Cleanup uses refs to the application-rendered
+  controls, including detached controls. It does not keep a draft history,
+  observe foreign DOM nodes, or search arbitrary attributes/text for secrets.
 - Credential drafts start blank and stay in component state/ephemeral request
   holders. TanStack MutationCache receives only an opaque submission number;
   passwords, provider keys, and MCP tokens never enter persisted stores, browser
@@ -92,8 +90,17 @@ server.
 Standards-correct hints and `autocomplete="off"` cannot force a nonstandard
 password manager to reclassify fields or erase its private vault. On shared or
 managed browsers, use separate browser profiles and the manager's site exclusions
-where needed. Application cleanup covers its own state and retained DOM nodes;
-an extension can still inject values again after a reset.
+where needed. Application cleanup guarantees blank values/defaults and cleared
+React drafts, refs, ephemeral request holders and auth/query state at the
+documented boundaries. It covers the attributes/text the application renders;
+these forms render no plaintext-secret copies outside their input values/defaults.
+It cannot clear copies a third-party script makes in its own DOM nodes or in
+attributes the application did not render, even when those attributes are added
+to an application-owned form. Such copies may survive logout or form removal,
+including a detached span or a `data-manager-copy` attribute created before
+cleanup. A script can also inject values again after a reset. Those external
+copies and the manager's vault are outside #580's scope; they are not evidence
+of an application-owned draft surviving cleanup.
 
 This regression covers sequential A → logout → B in one tab/browser context.
 Concurrent multi-tab/multi-principal session isolation is tracked separately in

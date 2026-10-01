@@ -42,9 +42,8 @@ function FormRoute({ kind }: { kind: Form }) {
   );
 }
 
-// Traverse the retained subtree itself, rather than querying only connected DOM.
-// Detached descendants are passed separately because a manager may remove its
-// mirror before the application clears the form, and still hold that node.
+// Traverse retained application DOM, including reflected attributes/defaults.
+// Foreign attributes/nodes are checked separately as documented residuals.
 function expectScrubbed(roots: Node[], secret = SECRET) {
   function visit(node: Node) {
     expect(node.nodeValue ?? '').not.toContain(secret);
@@ -66,34 +65,102 @@ function expectScrubbed(roots: Node[], secret = SECRET) {
   }
 }
 
-function addCopies(root: HTMLFormElement, secret: string) {
-  root.setAttribute('data-credential-copy', secret);
-  root.setAttribute('aria-description', `Draft ${secret}`);
-  const mirror = document.createElement('input');
-  mirror.type = 'hidden';
-  mirror.name = 'credential_mirror';
-  mirror.value = secret;
-  mirror.defaultValue = secret;
-  mirror.setAttribute('data-credential-copy', secret);
-  mirror.setAttribute('aria-label', `Copy ${secret}`);
-  root.append(mirror);
-  const detached = mirror.cloneNode(true) as HTMLInputElement;
-  const text = document.createElement('span');
-  text.hidden = true;
-  text.textContent = secret;
-  root.append(detached, text);
-  detached.remove();
-  text.remove();
-  return [root, detached, text];
-}
-
 beforeEach(() => {
   clearAccessToken();
   useAuthStore.setState({ status: 'unauthenticated' });
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe('R7-001: typed secrets leave no live or retained DOM representation', () => {
+describe('R7-001: typed secrets leave no live or retained application DOM representation', () => {
+  it.each(['change-only', 'eventless'] as const)(
+    'R8 ownership recheck: %s writes leave owned state blank at local logout',
+    async (mode) => {
+      const response = deferred<Response>();
+      const started = deferred<RequestInit>();
+      vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+        if (init?.method === 'POST') {
+          started.resolve(init);
+          return response.promise;
+        }
+        return Promise.resolve(json({ items: [] }));
+      });
+      setAccessToken('jwt-a');
+      useAuthStore.setState({ status: 'authenticated' });
+      const view = renderWithQuery(<FormRoute kind="provider" />);
+      await screen.findByText(/no llm providers registered/i);
+      const input = screen.getByLabelText(/api key/i) as HTMLInputElement;
+      const form = input.closest('form')!;
+      const ownedInputs = [...form.querySelectorAll('input')];
+      if (mode === 'change-only') {
+        fireEvent.change(input, { target: { value: SECRET } });
+        expect(input.defaultValue).toBe(SECRET);
+      } else input.value = SECRET;
+      // These copies are authored by a foreign script, not by React.
+      form.setAttribute('data-manager-copy', SECRET);
+      const foreignText = document.createElement('span');
+      foreignText.textContent = SECRET;
+      form.append(foreignText);
+      foreignText.remove();
+      if (mode === 'change-only') {
+        fireEvent.change(input, { target: { value: '' } });
+        expect(input.value).toBe('');
+        expect(input.defaultValue).toBe('');
+      }
+      let revocation!: Promise<void>;
+      act(() => {
+        revocation = logout();
+      });
+      expect(new Headers((await started.promise).headers).get('Authorization')).toBe(
+        'Bearer jwt-a',
+      );
+      expect(form.isConnected).toBe(false);
+      expectScrubbed(ownedInputs);
+      expect(input.type).toBe('password');
+      expect(JSON.stringify(view.queryClient.getQueryCache().getAll())).not.toContain(SECRET);
+      expect(JSON.stringify(view.queryClient.getMutationCache().getAll())).not.toContain(SECRET);
+      expect(storageSnapshot(localStorage)).not.toContain(SECRET);
+      expect(storageSnapshot(sessionStorage)).not.toContain(SECRET);
+      expect(location.href).not.toContain(SECRET);
+      expect(form.getAttribute('data-manager-copy')).toBe(SECRET);
+      expect(foreignText.textContent).toBe(SECRET);
+      await act(async () => {
+        response.resolve(new Response(null, { status: 204 }));
+        await revocation;
+      });
+      act(() => setAccessToken('jwt-b'));
+      await screen.findByText(/no llm providers registered/i);
+      expect(screen.getByLabelText(/api key/i)).toHaveValue('');
+    },
+  );
+
+  it('R9 scope fence: clears owned controls without observing or hunting foreign copies', async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, 'observe');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [] }));
+    setAccessToken('jwt-a');
+    useAuthStore.setState({ status: 'authenticated' });
+    const user = userEvent.setup();
+    renderWithQuery(<FormRoute kind="provider" />);
+    await screen.findByText(/no llm providers registered/i);
+    const input = screen.getByLabelText(/api key/i) as HTMLInputElement;
+    const form = input.closest('form')!;
+    await user.type(input, SECRET);
+    form.setAttribute('data-manager-copy', SECRET);
+    const foreignText = document.createElement('span');
+    foreignText.textContent = SECRET;
+    form.append(foreignText);
+    foreignText.remove();
+    act(() => setAccessToken('jwt-b'));
+    expectScrubbed([...form.querySelectorAll('input')]);
+    expect(form.getAttribute('data-manager-copy')).toBe(SECRET);
+    expect(foreignText.textContent).toBe(SECRET);
+    expect(
+      observe.mock.calls.some(([target]) => target === form || target === input.parentElement),
+    ).toBe(false);
+    await user.click(screen.getByRole('button', { name: /show api key/i }));
+    expect(input.value).toBe('');
+    expect(input.defaultValue).toBe('');
+  });
+
   for (const kind of ['login', 'provider', 'mcp'] as const) {
     it.each(['success', 'failure', 'unmount', 'identity', 'logout'] as const)(
       `${kind}: scrub the complete retained subtree at %s`,
@@ -128,18 +195,13 @@ describe('R7-001: typed secrets leave no live or retained DOM representation', (
         await user.type(secretInput, SECRET);
         await user.click(screen.getByRole('button', { name: /show (password|api key|secret)/i }));
         const form = secretInput.closest('form')!;
-        const retained = addCopies(form, SECRET);
-        // Also exercise secret-bearing attributes on the primitive itself.
-        secretInput.setAttribute('data-credential-copy', SECRET);
-        secretInput.setAttribute('aria-description', `Revealed ${SECRET}`);
+        const retained = [form];
         if (boundary !== 'success' && boundary !== 'failure') {
           for (const input of form.querySelectorAll('input')) {
             // A manager can misclassify adjacent email/name/URL controls too.
             input.value = SECRET;
             input.defaultValue = SECRET;
             input.setAttribute('defaultValue', SECRET);
-            input.setAttribute('data-credential-copy', SECRET);
-            input.setAttribute('aria-description', `Manager copy ${SECRET}`);
           }
         }
 
@@ -154,7 +216,6 @@ describe('R7-001: typed secrets leave no live or retained DOM representation', (
             expectScrubbed(retained);
             secretInput.value = SECRET;
             secretInput.defaultValue = SECRET;
-            retained.push(...addCopies(form, SECRET));
           }
           await act(async () =>
             response.resolve(
@@ -225,7 +286,7 @@ describe('R7-001: typed secrets leave no live or retained DOM representation', (
     const input = screen.getByLabelText(/^secret/i) as HTMLInputElement;
     await user.type(input, SECRET);
     await user.click(screen.getByRole('button', { name: /show secret/i }));
-    const retained = addCopies(input.closest('form')!, SECRET);
+    const retained = [input.closest('form')!];
     await user.click(screen.getByRole('button', { name: /cancel/i }));
     expect(input.isConnected).toBe(false);
     expectScrubbed(retained);
@@ -251,12 +312,12 @@ describe('R7-001: typed secrets leave no live or retained DOM representation', (
     fireEvent.change(screen.getByLabelText(/base url/i), {
       target: { value: `https://r8.example/${SECRET}` },
     });
-    const retained = addCopies(input.closest('form')!, SECRET);
+    const retained = [input.closest('form')!];
     act(() => setAccessToken('jwt-b'));
     expectScrubbed(retained);
   });
 
-  it('scrubs earlier attribute and hidden text copies after the draft is edited and erased', async () => {
+  it('leaves no owned draft or reflected default after the draft is edited and erased', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [] }));
     setAccessToken('jwt-a');
     useAuthStore.setState({ status: 'authenticated' });
@@ -266,17 +327,10 @@ describe('R7-001: typed secrets leave no live or retained DOM representation', (
     const input = screen.getByLabelText(/api key/i) as HTMLInputElement;
     await user.type(input, SECRET);
     const form = input.closest('form')!;
-    form.setAttribute('data-credential-copy', SECRET);
-    form.setAttribute('aria-description', `Earlier ${SECRET}`);
-    const copy = document.createElement('span');
-    copy.hidden = true;
-    copy.textContent = SECRET;
-    form.append(copy);
-    copy.remove();
     await user.type(input, '-edited');
     await user.clear(input);
     act(() => setAccessToken('jwt-b'));
-    expectScrubbed([form, copy]);
+    expectScrubbed([form]);
   });
 
   it.each(['login', 'mcp'] as const)(
