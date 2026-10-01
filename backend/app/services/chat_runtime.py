@@ -100,6 +100,7 @@ from app.services.provider_models import (
     ModelRouteResolver,
     is_provider_model_id,
 )
+from app.services.tools.context_audit import ContextAuditSink
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
@@ -725,6 +726,7 @@ class ChatRuntime:
         # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
         # as unbounded (the setting's documented kill switch).
         self._answer_max_tokens = answer_max_tokens or None
+        self._context_audit: ContextAuditSink | None = None
 
     def _token_counter_for(self, model: str) -> TokenCounter:
         """The memoizing token counter for ``model`` (#491) — one per answer/model.
@@ -797,6 +799,7 @@ class ChatRuntime:
         performs NO real side effect (the load-bearing property of the harness).
         """
         state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
+        self._context_audit = None
         # Mint the absolute producer→terminal deadline for the interactive path
         # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
         # leaving the reserved margin; this anchors the WHOLE path so the terminal
@@ -832,23 +835,48 @@ class ChatRuntime:
                 # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
                 # runs AFTER that commit in its own independent transaction (it cannot
                 # roll the answer back), so this block has no trailing commit.
-                result = await self._answer(
-                    session=session,
-                    state=state,
-                    session_id=session_id,
-                    assistant_message_id=assistant_message_id,
-                    question=question,
-                    model=model,
-                    history=history,
-                    collection_ids=collection_ids,
-                    document_ids=document_ids,
-                    assistant_config=assistant_config,
-                    custom_instructions=custom_instructions,
-                    simulate_writes=simulate_writes,
-                    summary=summary,
-                    evidence=evidence,
-                    mentioned_documents=mentioned_documents,
-                )
+                try:
+                    result = await self._answer(
+                        session=session,
+                        state=state,
+                        session_id=session_id,
+                        assistant_message_id=assistant_message_id,
+                        question=question,
+                        model=model,
+                        history=history,
+                        collection_ids=collection_ids,
+                        document_ids=document_ids,
+                        assistant_config=assistant_config,
+                        custom_instructions=custom_instructions,
+                        simulate_writes=simulate_writes,
+                        summary=summary,
+                        evidence=evidence,
+                        mentioned_documents=mentioned_documents,
+                    )
+                except AppError as exc:
+                    if (
+                        exc.code == "context_too_large"
+                        and not simulate_writes
+                        and self._context_audit is not None
+                        and self._context_audit.events
+                    ):
+                        records = await ToolInvocationRepository(
+                            session, self._principal.tenant_id
+                        ).list_for_messages([assistant_message_id])
+                        # Release the failed transaction before acquiring the
+                        # restoration session. Never commit business writes or
+                        # forward references to an absent assistant message.
+                        await session.rollback()
+                        async with self._sessionmaker() as recovery:
+                            await bind_tenant(recovery, self._principal.tenant_id)
+                            await AuditSink(
+                                AuditEventRepository(recovery, self._principal.tenant_id)
+                            ).restore_context_rejected(self._context_audit.events)
+                            await ToolInvocationRepository(
+                                recovery, self._principal.tenant_id
+                            ).restore_context_rejected(records.get(assistant_message_id, []))
+                            await recovery.commit()
+                    raise
         except asyncio.CancelledError:
             # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
             # cancels every in-flight producer on SIGTERM, issue #156). In Python
@@ -916,7 +944,8 @@ class ChatRuntime:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
-        audit = AuditSink(AuditEventRepository(session, tenant_id))
+        audit = ContextAuditSink(AuditEventRepository(session, tenant_id))
+        self._context_audit = audit
         # Live run-phase progress (spec 0006 #429): transient ``event:step``
         # envelopes bracketing the phases. Nothing else streams while a model
         # turn is in flight (turns are buffered, #148), so these are what keeps
