@@ -30,7 +30,9 @@ filters rather than silent truncation.
 
 `read_document` accepts a document UUID or D handle, or reads around an S handle.
 Handles are navigation identities, never authorization. Around reads rehydrate
-the original passage and reject changed evidence. Reads select complete chunks
+the original passage and reject changed evidence, including changed media
+timestamps, transcript segment and speaker provenance even when text is unchanged.
+This check does not allocate new conversation handles. Reads select complete chunks
 intersecting the requested character range; returned boundaries may extend to
 chunk boundaries. The default passage limit is 5 (maximum 20), reduced by the
 context engine. Total length, returned range and explicit continuation identify
@@ -49,6 +51,7 @@ independent read-back transactions verify those events and zero citations.
 Acceptance tests cover real metadata discovery, stable paging, literal wildcard
 characters, filter intersections, whole overlapping chunks, exact continuation,
 unknown/conversation handles, revoked permission, committed canonical-tool
-retrieval audits and legacy callable names. The canonical context-budget route
+retrieval audits, changed media provenance on around-passage reads,
+and legacy callable names. The canonical context-budget route
 also verifies that the actual provider prompt names the offered corpus tools,
 while refusing oversized evidence before a second provider request.

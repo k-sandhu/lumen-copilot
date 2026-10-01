@@ -6,7 +6,10 @@ Depends on complete passages [#611](https://github.com/k-sandhu/lumen-copilot/is
 Tools show conversation-scoped S (passage), D (document) and W (web evidence)
 handles beside human-readable source names. IDs and offsets remain server-side.
 Every use rechecks current permissions and answer scope. Corpus identity records
-hold source IDs, spans and a content hash, not source text. Public web records
+hold source IDs, spans and a content hash, not source text. Media timestamps,
+segment and speaker provenance contribute an additional hash without storing
+transcript or speaker plaintext. Changing media provenance changes the passage
+identity, so the final permission read rejects the old handle. Public web records
 hold validated URLs and the exact visible evidence. Handles survive compaction
 independently of the prompt, are never reassigned and die with the conversation.
 Atomic reservations may leave numbering gaps after an aborted answer.
@@ -29,7 +32,9 @@ would retain prose derived from forbidden evidence. The final permission read
 emits a count-only evidence-rehydration audit event in the answer transaction.
 
 Corpus REST/WS citations add optional `handle`; legacy citations retain numbered
-sources. Chat and run-detail citations use that same shape and preserve the
+sources. The handle coexists with media timestamp, transcript-segment and speaker
+fields through persistence, reload and WebSocket delivery. Redacted citations
+retain only their nondisclosing shell, without media provenance. Chat and run-detail citations use that same shape and preserve the
 handle on reload. Public web evidence is a separate additive REST `Message.web_citations`
 array and `event:web_citation` payload, with no invented document or chunk IDs.
 `done.citationCount` counts both types. Both event types arrive after final

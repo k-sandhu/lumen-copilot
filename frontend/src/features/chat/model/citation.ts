@@ -4,6 +4,7 @@
  * carry no document/chunk ids and are accepted only with a safe HTTP(S) URL.
  */
 import type { ChatCitation, ChatWebCitation, Citation, WebCitation } from '@/api';
+import { validMediaTimeSpan } from '@/lib/mediaTime';
 
 export interface UiDocumentCitation {
   kind: 'document';
@@ -15,6 +16,11 @@ export interface UiDocumentCitation {
   snippet: string;
   charStart: number;
   charEnd: number;
+  timeStartMs?: number;
+  timeEndMs?: number;
+  transcriptSegmentId?: string;
+  speakerId?: string;
+  speakerName?: string;
   score?: number;
   /** Permission was revoked since the answer was produced. */
   redacted?: boolean;
@@ -36,11 +42,7 @@ export function kindOfCitation(citation: UiCitation): CitationKind {
   return citation.kind;
 }
 
-/**
- * The registrable, human-readable host of a URL, e.g.
- * "https://en.wikipedia.org/wiki/X?y=1" → "en.wikipedia.org". Returns null for a
- * URL we cannot parse or one that isn't HTTP(S); `www.` is stripped for a clean label.
- */
+/** The parsed host of a safe HTTP(S) URL, with www stripped. */
 export function hostOf(url: string | undefined): string | null {
   if (!url) return null;
   let parsed: URL;
@@ -58,6 +60,44 @@ export function isSafeHttpUrl(url: string | undefined): url is string {
   return hostOf(url) !== null;
 }
 
+function restMediaFields(
+  citation: Citation,
+): Pick<
+  UiDocumentCitation,
+  'timeStartMs' | 'timeEndMs' | 'transcriptSegmentId' | 'speakerId' | 'speakerName'
+> {
+  const span = validMediaTimeSpan(citation.time_start_ms, citation.time_end_ms);
+  if (!span) return {};
+  return {
+    timeStartMs: span.startMs,
+    timeEndMs: span.endMs,
+    ...(typeof citation.transcript_segment_id === 'string'
+      ? { transcriptSegmentId: citation.transcript_segment_id }
+      : {}),
+    ...(typeof citation.speaker_id === 'string' ? { speakerId: citation.speaker_id } : {}),
+    ...(typeof citation.speaker_name === 'string' ? { speakerName: citation.speaker_name } : {}),
+  };
+}
+
+function wsMediaFields(
+  citation: ChatCitation,
+): Pick<
+  UiDocumentCitation,
+  'timeStartMs' | 'timeEndMs' | 'transcriptSegmentId' | 'speakerId' | 'speakerName'
+> {
+  const span = validMediaTimeSpan(citation.timeStartMs, citation.timeEndMs);
+  if (!span) return {};
+  return {
+    timeStartMs: span.startMs,
+    timeEndMs: span.endMs,
+    ...(typeof citation.transcriptSegmentId === 'string'
+      ? { transcriptSegmentId: citation.transcriptSegmentId }
+      : {}),
+    ...(typeof citation.speakerId === 'string' ? { speakerId: citation.speakerId } : {}),
+    ...(typeof citation.speakerName === 'string' ? { speakerName: citation.speakerName } : {}),
+  };
+}
+
 export function fromRestCitation(citation: Citation): UiDocumentCitation {
   return {
     kind: 'document',
@@ -69,6 +109,7 @@ export function fromRestCitation(citation: Citation): UiDocumentCitation {
     snippet: citation.snippet,
     charStart: citation.char_start,
     charEnd: citation.char_end,
+    ...restMediaFields(citation),
     ...(citation.score !== undefined ? { score: citation.score } : {}),
     ...(citation.redacted ? { redacted: true } : {}),
   };
@@ -85,13 +126,14 @@ export function fromWsCitation(citation: ChatCitation): UiDocumentCitation {
     snippet: citation.snippet,
     charStart: citation.charStart,
     charEnd: citation.charEnd,
+    ...wsMediaFields(citation),
     ...(citation.score !== undefined ? { score: citation.score } : {}),
   };
 }
 
 /** Normalize separate public-web evidence; unsafe or malformed URLs are withheld. */
 export function fromRestWebCitation(citation: WebCitation): UiWebCitation | null {
-  if (!isSafeHttpUrl(citation.url) || !citation.handle.match(/^W[1-9][0-9]*$/)) return null;
+  if (!isSafeHttpUrl(citation.url) || !/^W[1-9][0-9]*$/.test(citation.handle)) return null;
   return {
     kind: 'web',
     id: citation.id,
@@ -104,5 +146,11 @@ export function fromRestWebCitation(citation: WebCitation): UiWebCitation | null
 
 /** Normalize a live public-web event with the same safe URL gate as REST. */
 export function fromWsWebCitation(citation: ChatWebCitation): UiWebCitation | null {
-  return fromRestWebCitation(citation);
+  return fromRestWebCitation({
+    id: citation.id,
+    handle: citation.handle,
+    url: citation.url,
+    title: citation.title,
+    snippet: citation.snippet,
+  });
 }

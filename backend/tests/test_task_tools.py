@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +14,7 @@ import pytest
 from app.auth.principal import Principal
 from app.domain.entities import Role
 from app.domain.retrieval import RetrievedPassage
-from app.domain.tools import RiskTier
+from app.domain.tools import ERROR_NOT_FOUND, RiskTier
 from app.services.tools.compatibility import permitted_names
 from app.services.tools.handles import EvidenceHandles
 from app.services.tools.registry import default_allowlist, get_tool, registered_names
@@ -343,3 +344,53 @@ async def test_revoked_document_permission_returns_no_metadata_or_body() -> None
     assert _SECRET not in result.content
     assert "Quarterly Plan" not in result.content
     assert "Finance/plan.pdf" not in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("time_start_ms", 200),
+        ("time_end_ms", 3000),
+        ("transcript_segment_id", uuid.UUID("00000000-0000-0000-0000-000000000105")),
+        ("speaker_id", "speaker-2"),
+        ("speaker_name", "Changed speaker"),
+    ],
+)
+async def test_read_around_rejects_changed_media_provenance(field: str, value: object) -> None:
+    retrieval = _FakeRetrieval()
+    retrieval.passage = replace(
+        retrieval.passage,
+        time_start_ms=100,
+        time_end_ms=2000,
+        transcript_segment_id=uuid.UUID("00000000-0000-0000-0000-000000000104"),
+        speaker_id="speaker-1",
+        speaker_name="Original speaker",
+    )
+    handles = EvidenceHandles()
+    handle = handles.passage(retrieval.passage)
+    retrieval.passage = replace(retrieval.passage, **{field: value})
+    result = await get_tool("read_document").handler(
+        {"around": handle}, _context(retrieval, handles=handles)
+    )
+    assert not result.ok
+    assert result.error == ERROR_NOT_FOUND
+    assert list(handles.entries) == [handle]
+    assert all(name != "read_document" for name, _ in retrieval.calls)
+    assert _SECRET not in result.content
+    assert "Original speaker" not in result.content
+    assert "Changed speaker" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_read_around_accepts_unchanged_media_provenance() -> None:
+    retrieval = _FakeRetrieval()
+    retrieval.passage = replace(retrieval.passage, time_start_ms=100, time_end_ms=2000)
+    handles = EvidenceHandles()
+    handle = handles.passage(retrieval.passage)
+    result = await get_tool("read_document").handler(
+        {"around": handle}, _context(retrieval, handles=handles)
+    )
+    assert result.ok
+    assert _SECRET in result.content
+    assert any(name == "read_document" for name, _ in retrieval.calls)

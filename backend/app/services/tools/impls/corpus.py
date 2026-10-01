@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from app.core.errors import ValidationError
 from app.domain.tools import ERROR_BAD_ARGS, ERROR_NOT_FOUND, RiskTier, ToolHandlerResult
+from app.services.tools.handles import EvidenceHandles
 from app.services.tools.types import ToolContext, ToolDefinition
 
 
@@ -182,11 +182,11 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
             fresh = await ctx.retrieval.read_passages(
                 principal=ctx.principal, chunk_ids=[chunk], **scopes
             )
-            if not fresh or (
-                str(fresh[0].document_id) != entry["document_id"]
-                or fresh[0].char_start != entry["char_start"]
-                or fresh[0].char_end != entry["char_end"]
-                or hashlib.sha256(fresh[0].text.encode()).hexdigest() != entry["fingerprint"]
+            # Compare the complete identity, including media provenance, in an
+            # isolated book so a stale read cannot allocate conversation handles.
+            if (
+                not fresh
+                or EvidenceHandles(existing={str(around): entry}).passage(fresh[0]) != around
             ):
                 raise LookupError
             identifier = entry["document_id"]

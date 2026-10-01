@@ -23,6 +23,7 @@ import {
   toPassageRuns,
   toPermissionLevel,
 } from '../model/presentation';
+import { formatMediaTimestamp, validMediaTimeSpan } from '@/lib/mediaTime';
 
 interface SearchResultRowProps {
   result: SearchResult;
@@ -35,6 +36,7 @@ export function SearchResultRow({ result, onOpen }: SearchResultRowProps) {
   const fresh = freshnessLabel(result.last_indexed);
   const stale = isStale(result.last_indexed);
   const level = toPermissionLevel(result.permission);
+  const mediaSpan = validMediaTimeSpan(result.time_start_ms, result.time_end_ms);
 
   return (
     <article
@@ -73,6 +75,11 @@ export function SearchResultRow({ result, onOpen }: SearchResultRowProps) {
             <span className="rounded-full bg-surface-muted px-2 py-0.5 text-xs text-foreground-muted">
               {result.type}
             </span>
+            {mediaSpan ? (
+              <span className="rounded-full bg-accent/10 px-2 py-0.5 font-mono text-xs text-accent">
+                {formatMediaTimestamp(mediaSpan.startMs)}
+              </span>
+            ) : null}
           </header>
 
           <p className="mt-2 text-sm leading-relaxed text-foreground-muted">

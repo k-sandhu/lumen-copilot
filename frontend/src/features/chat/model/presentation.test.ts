@@ -253,8 +253,8 @@ describe('sourceMetadataRows', () => {
   });
 
   it('marks last-indexed unknown when no source-indexing value is supplied (GUARD #120)', () => {
-    // The chat/citation wire carries no source-indexing timestamp. The only time
-    // a chat turn has is the ANSWER/message time — which is NOT source provenance.
+    // The chat/citation wire carries no source-indexing timestamp. Media offsets
+    // locate playback and answer time locates generation; neither is recency.
     // With nothing real supplied, "Last indexed" must be "Not available", so a
     // doc indexed months ago can never render "Last indexed: Just now".
     const indexed = sourceMetadataRows({}).find((r) => r.label === 'Last indexed');
