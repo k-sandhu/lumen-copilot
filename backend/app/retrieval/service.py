@@ -290,6 +290,11 @@ class RetrievalService:
                 char_start=row.char_start,
                 char_end=row.char_end,
                 score=0.0,
+                time_start_ms=row.time_start_ms,
+                time_end_ms=row.time_end_ms,
+                transcript_segment_id=row.transcript_segment_id,
+                speaker_id=row.speaker_id,
+                speaker_name=row.speaker_name,
             )
             for row in rows.values()
         ]

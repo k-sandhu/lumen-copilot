@@ -9,8 +9,12 @@ Every use rechecks current permissions and answer scope. Corpus identity records
 hold source IDs, spans and a content hash, not source text. Media timestamps,
 segment and speaker provenance contribute an additional hash without storing
 transcript or speaker plaintext. Changing media provenance changes the passage
-identity, so the final permission read rejects the old handle. Public web records
-hold validated URLs and the exact visible evidence. Handles survive compaction
+identity, so the final permission read rejects the old handle.
+The final SQL read preserves all media provenance fields so unchanged audio and
+video evidence resolves to the original handle. Non-ready documents remain
+excluded by the retrieval publication guard, including during revalidation.
+Public web records hold validated URLs and the exact visible evidence. Handles
+survive compaction
 independently of the prompt, are never reassigned and die with the conversation.
 Atomic reservations may leave numbering gaps after an aborted answer.
 Reservations commit through the coordinator's session before any tool writes,
