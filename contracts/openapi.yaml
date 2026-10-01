@@ -299,7 +299,7 @@ paths:
       summary: Initiate a metadata-only direct multipart upload.
       description: >
         Initiate a tenant/owner-scoped metadata-only multipart upload.
-        
+
         After collection ownership and input validation, a known-invalid embedding
         contract returns 503 before storage, upload-session, document, or enqueue
         side effects. Rejections retain their durable audit evidence. Once the
