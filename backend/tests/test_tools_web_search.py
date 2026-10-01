@@ -68,7 +68,9 @@ class _StubService:
 def _patch_service(monkeypatch: pytest.MonkeyPatch, service: _StubService) -> None:
     """Route ``build_web_search_service`` in the impl to a stub (no Redis/HTTP)."""
     monkeypatch.setattr(
-        web_search_impl, "build_web_search_service", lambda *a, **k: service  # noqa: ARG005
+        web_search_impl,
+        "build_web_search_service",
+        lambda *a, **k: service,  # noqa: ARG005
     )
 
 
@@ -95,12 +97,10 @@ def test_web_search_is_off_by_default_allowlist() -> None:
     defn = get_tool("web_search")
     assert defn.default_offered is False
     assert "web_search" not in default_allowlist()
-    # The read-only tools remain the ad-hoc default (regression); this is the
-    # full set — four retrieval tools since list_documents joined (#371), plus
-    # ask_user (spec 0006 #429/#434: the clarifying-question tool is offered by
-    # default so interactive chat can intercept it).
+    # The canonical retrieval tools and ask_user remain the ad-hoc default;
+    # web_search is intentionally absent (ADR-0014 §5).
     assert default_allowlist() == frozenset(
-        {"search_text", "search_documents", "list_documents", "get_document", "ask_user"}
+        {"search_passages", "find_documents", "read_document", "ask_user"}
     )
 
 

@@ -24,6 +24,7 @@ from app.domain.entities import Artifact, ArtifactProducedBy, CodeRunStatus
 from app.domain.tools import APPROVAL_REASON_GATE_INERT, RiskTier, ToolHandlerResult
 from app.retrieval import RetrievalService
 from app.services.artifacts_service import ArtifactLinks
+from app.services.tools.handles import EvidenceHandles
 
 
 @runtime_checkable
@@ -176,6 +177,7 @@ class ToolContext:
     session_id: UUID | None = None
     simulate_writes: bool = False
     sandbox: SandboxToolRunner | None = None
+    handles: EvidenceHandles | None = None
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and

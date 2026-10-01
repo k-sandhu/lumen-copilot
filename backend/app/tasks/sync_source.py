@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NoReturn
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 import httpx
@@ -141,6 +142,24 @@ def _safe_filename(title: str, index: int) -> str:
     base = "".join(c if c.isalnum() or c in {"-", "_", " "} else "_" for c in title).strip()
     base = base[:120] or "page"
     return f"{index:04d}-{base}.txt"
+
+
+def _public_source_path(value: str) -> str:
+    """Keep a fetched URL's public location while dropping userinfo/query/fragment."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    public_netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, public_netloc, parsed.path, "", ""))
+
+
+def _discovery_metadata(fetched: FetchedDoc, mime_type: str) -> dict[str, object]:
+    """Expose only public document attributes, never connector config or secrets."""
+    metadata: dict[str, object] = {"mime_type": mime_type}
+    if fetched.external_id is not None:
+        metadata["external_id"] = fetched.external_id
+    return metadata
 
 
 async def sync_source_async(
@@ -446,6 +465,10 @@ async def _ingest_one(
             acl_principals=sorted(acl.principals) if acl is not None else None,
             acl_synced_at=datetime.now(UTC) if acl is not None else None,
             acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+            title=fetched.title[:512],
+            source_path=_public_source_path(fetched.url),
+            source_modified_at=fetched.modified_at,
+            discovery_metadata=_discovery_metadata(fetched, mime_type),
         )
         document_id = document.id
 
@@ -720,6 +743,10 @@ async def _sync_incremental(
                             acl_principals=sorted(acl.principals) if acl is not None else None,
                             acl_synced_at=acl_stamp,
                             acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                            title=fetched_doc.title[:512],
+                            source_path=_public_source_path(fetched_doc.url),
+                            source_modified_at=fetched_doc.modified_at,
+                            discovery_metadata=_discovery_metadata(fetched_doc, mime_type),
                         )
                         assert updated is not None  # row read in this txn  # noqa: S101
                         page_doc_ids.append(existing.id)
@@ -738,6 +765,10 @@ async def _sync_incremental(
                             acl_principals=sorted(acl.principals) if acl is not None else None,
                             acl_synced_at=acl_stamp,
                             acl_scope_ids=sorted(acl.scope_ids) if acl is not None else None,
+                            title=fetched_doc.title[:512],
+                            source_path=_public_source_path(fetched_doc.url),
+                            source_modified_at=fetched_doc.modified_at,
+                            discovery_metadata=_discovery_metadata(fetched_doc, mime_type),
                         )
                         page_doc_ids.append(created.id)
 

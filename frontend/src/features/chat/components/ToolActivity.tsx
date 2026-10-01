@@ -9,6 +9,9 @@ import type { ChatTool } from '@/api';
 import type { ToolActivity as ToolActivityItem } from '../model/streamReducer';
 
 const TOOL_LABEL: Record<ChatTool, string> = {
+  search_passages: 'Searching passages',
+  find_documents: 'Finding documents',
+  read_document: 'Reading a document',
   search_text: 'Searching documents',
   search_documents: 'Looking up documents',
   list_documents: 'Listing documents',
@@ -42,10 +45,7 @@ export function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
         const failed = item.ok === false;
         return (
           <li key={item.callId}>
-            <StatusBadge
-              tone={running ? 'pending' : failed ? 'danger' : 'ok'}
-              pulse={running}
-            >
+            <StatusBadge tone={running ? 'pending' : failed ? 'danger' : 'ok'} pulse={running}>
               {describe(item)}
             </StatusBadge>
           </li>

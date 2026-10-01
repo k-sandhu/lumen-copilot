@@ -10,8 +10,8 @@ Layering (ADR-0004): orchestration only. It composes — never *is* — its
 collaborators:
 
 * the #36 ``llm/`` gateway (``stream_tools``) — the only model caller;
-* the #45 ``retrieval/`` service tools (``search_text`` / ``search_documents`` /
-  ``get_document``) — the only retrieval path, permission-filtered inside (INV-2);
+* the permissioned ``retrieval/`` tools (``search_passages`` / ``find_documents`` /
+  ``read_document`` plus callable legacy adapters) — the retrieval path (INV-2);
 * the ``realtime/`` backplane — the only pub/sub; the producer here publishes
   envelopes a decoupled WS consumer relays;
 * the ``db/`` message + citation repositories (the only SQL) and the #23 audit
@@ -67,6 +67,7 @@ from app.db.repositories import (
     MessageRepository,
     SessionSummaryRepository,
     TenantRepository,
+    TenantToolPolicyRepository,
     ToolInvocationRepository,
 )
 from app.db.tenant_context import bind_tenant
@@ -101,8 +102,10 @@ from app.services.provider_models import (
     ModelRouteResolver,
     is_provider_model_id,
 )
+from app.services.tools.compatibility import LEGACY, permitted_names
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.handles import EvidenceHandles, select_cited_handles
+from app.services.tools.impls import corpus as _corpus_impl
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
@@ -952,6 +955,17 @@ class ChatRuntime:
         # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
         allowed = assistant_config.allowed if assistant_config is not None else default_allowlist()
+        policies = await TenantToolPolicyRepository(session, tenant_id).list_all()
+        blocked = {
+            policy.tool_name
+            for policy in policies
+            if not policy.enabled or policy.requires_approval
+            if policy.tool_name in LEGACY | {"search_passages", "find_documents", "read_document"}
+        }
+        allowed = permitted_names(allowed, blocked)
+        executable = (
+            permitted_names(allowed | LEGACY, blocked) if assistant_config is None else allowed
+        )
         # The tenant's registered+enabled MCP tools (issue #227), resolved per-run
         # (never a global registration — they are tenant-scoped and dynamic, so a
         # cross-tenant leak is impossible; INV-1). Resolved ONLY when the allow-list
@@ -992,7 +1006,7 @@ class ChatRuntime:
             session, tenant_id, assistant_config
         )
         runner = ToolRunner(
-            allowed=allowed,
+            allowed=executable,
             invocations=ToolInvocationRepository(session, tenant_id),
             audit=audit,
             actor=AuditActor.user(self._principal.user_id),
@@ -1209,12 +1223,13 @@ class ChatRuntime:
         sandbox = self._build_sandbox_seam(
             session=session,
             state=state,
-            allowed=allowed,
+            allowed=executable,
             session_id=session_id,
             assistant_message_id=assistant_message_id,
         )
         tool_context = ToolContext(
             principal=self._principal,
+            handles=handles,
             retrieval=retrieval,
             collection_ids=effective_collection_ids,
             # Pinned documents (spec 0007 #429): passage search narrows to these
@@ -3503,17 +3518,18 @@ def _is_retrieval_call(call: ToolCall) -> bool:
 
     The retrieval tools additionally emit the retrieval-semantics audit event
     (query hash + document ids + hit count, spec 0004 §2.4) on top of the generic
-    ``tool.*`` events the runner emits for every tool. Keyed off the retrieval impl's
+    ``tool.*`` events the runner emits for every tool. Keyed off the corpus impls'
     declared names (``_RETRIEVAL_TOOL_NAMES``, read from ``TOOLS``) so a newly added
     retrieval tool is covered automatically and a non-retrieval tool never is.
     """
     return call.name in _RETRIEVAL_TOOL_NAMES
 
 
-# The retrieval tools' names, read once from their impl module (the single source
-# of truth for what a "retrieval tool" is) so the retrieval-specific audit stays
-# correct as tools are added elsewhere.
-_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(defn.name for defn in _retrieval_impl.TOOLS)
+# Include both declared families so canonical calls and legacy adapters receive
+# the same retrieval-semantics audit, including successful reads and refusals.
+_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
+    defn.name for defn in (*_retrieval_impl.TOOLS, *_corpus_impl.TOOLS)
+)
 
 
 __all__ = [

@@ -753,6 +753,10 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    title: str | None = None
+    source_path: str | None = None
+    source_modified_at: datetime | None = None
+    discovery_metadata: dict[str, object] | None = None
     ingestion_attempts: int = 0
     ingestion_failure: dict[str, object] | None = None
     kind: DocumentKind = DocumentKind.DOCUMENT
