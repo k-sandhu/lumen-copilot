@@ -70,6 +70,7 @@ from app.services.tools.mcp_bridge import (
 )
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import ApprovalDecision, ApprovalRecord, ApprovalRequest, ToolContext
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 from tests._mcp_fixture_server import fixture_mcp
 
 # --- world ------------------------------------------------------------------
@@ -610,6 +611,14 @@ async def test_end_to_end_discovered_tool_invokes_through_the_real_adapter(
                 owner_id=world.user_id,
                 roles=(Role.MEMBER,),
                 audit=audit,
+                denials=denial_context(
+                    RecordingDurableAuditTransactions(),
+                    world.session,
+                    world.tenant_id,
+                    world.user_id,
+                    request_id="req-e2e",
+                    source_ip="127.0.0.1",
+                ),
                 request_id="req-e2e",
                 source_ip="127.0.0.1",
                 client_factory=factory,

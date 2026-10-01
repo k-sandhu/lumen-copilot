@@ -31,7 +31,7 @@ from app.api.deps import (
     CurrentUser,
     DbSession,
     ObjectStoreDep,
-    extract_request_id,
+    authenticated_denial_context,
 )
 from app.core.errors import NotFoundError
 from app.services.collections_service import (
@@ -150,11 +150,12 @@ def _build_service(
         owner_id=principal.user_id,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=tenant_id, principal=principal, request=request
+        ),
         # The audit envelope requires a non-empty request_id / source_ip (spec
         # 0004 §2.4); fall back to a sentinel when the client supplied neither so
         # the create/delete write never fails closed on a missing correlation id.
-        request_id=extract_request_id(request) or "unknown",
-        source_ip=request.client.host if request.client else "unknown",
     )
 
 

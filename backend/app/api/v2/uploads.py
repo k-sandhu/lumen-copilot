@@ -16,6 +16,7 @@ from app.api.deps import (
     DbSession,
     ObjectStoreDep,
     SettingsDep,
+    authenticated_denial_context,
     extract_request_id,
 )
 from app.api.v1.documents import DocumentResponse, _to_response
@@ -126,6 +127,9 @@ def _service(
         owner_id=principal.user_id,
         store=store,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=tenant_id, principal=principal, request=request
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
         allowed_content_types=settings.upload_allowed_content_types,
@@ -200,12 +204,15 @@ async def _commit_rejection(
     """
     if not preserve_transaction:
         await session.rollback()
+    if permission_denied or error.status in {403, 404}:
+        # The terminal service wrapper already persisted exactly one denial on
+        # the independent audit pool. Never write or commit it a second time.
+        return
     await service.audit_rejection(
         operation=operation,
         resource_type=resource_type,
         resource_id=resource_id,
         error=error,
-        permission_denied=permission_denied,
     )
     await session.commit()
 
@@ -334,7 +341,7 @@ async def sign_parts(
 ) -> SignedPartListResponse:
     service = _service(request, session, principal, tenant_id, make_audit_sink, store, settings)
     try:
-        current = await service.expire_if_needed(upload_id)
+        current = await service.prepare_sign_parts(upload_id)
     except UploadCompletionRejected as exc:
         await _commit_rejection(
             session,
@@ -434,7 +441,7 @@ async def abort_upload(
 ) -> Response:
     service = _service(request, session, principal, tenant_id, make_audit_sink, store, settings)
     try:
-        current = await service.expire_if_needed(upload_id)
+        current = await service.prepare_abort(upload_id)
     except UploadCompletionRejected as exc:
         await _commit_rejection(
             session,
@@ -527,7 +534,7 @@ async def complete_upload(
 ) -> DocumentResponse:
     service = _service(request, session, principal, tenant_id, make_audit_sink, store, settings)
     try:
-        current = await service.expire_if_needed(upload_id)
+        current = await service.prepare_complete(upload_id)
     except UploadCompletionRejected as exc:
         await _commit_rejection(
             session,

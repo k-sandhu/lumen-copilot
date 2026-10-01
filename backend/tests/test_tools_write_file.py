@@ -48,6 +48,7 @@ from app.services.tools import registry
 from app.services.tools.impls.write_file import _write_file
 from app.services.tools.types import ToolContext
 from app.storage.keys import assert_artifact_key_owned_by, build_artifact_key
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -120,6 +121,14 @@ class _World:
             owner_id=self.user_id,
             object_store=self.store,  # type: ignore[arg-type]  # structural fake
             audit=audit,
+            denials=denial_context(
+                RecordingDurableAuditTransactions(),
+                self.session,
+                self.tenant_id,
+                self.user_id,
+                request_id="req-test",
+                source_ip="203.0.113.1",
+            ),
             request_id="req-test",
             source_ip="203.0.113.1",
             artifact_allowed_content_types=_ALLOWED,
@@ -153,9 +162,7 @@ async def world() -> AsyncIterator[_World]:
                 email="alice@acme.test", password_hash="x", roles=[Role.MEMBER]
             )
             await session.commit()
-            yield _World(
-                session=session, store=_FakeStore(), tenant_id=tenant.id, user_id=user.id
-            )
+            yield _World(session=session, store=_FakeStore(), tenant_id=tenant.id, user_id=user.id)
     finally:
         await engine.dispose()
 
@@ -213,7 +220,9 @@ async def test_text_write_persists_and_round_trips(world: _World) -> None:
 async def test_base64_write_round_trips_binary(world: _World) -> None:
     svc = world.service()
     ctx = ToolContext(
-        principal=world.principal, retrieval=object(), artifacts=svc  # type: ignore[arg-type]
+        principal=world.principal,
+        retrieval=object(),
+        artifacts=svc,  # type: ignore[arg-type]
     )
     raw = b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03"
     result = await _write_file(

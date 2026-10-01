@@ -44,7 +44,7 @@ from app.domain.entities import (
 from app.ingestion.contract import require_embedding_work_admission
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.storage import ObjectStore, StoredObjectMetadata, UploadedPart
 from app.storage.validation import (
     canonical_content_type_for_filename,
@@ -137,6 +137,7 @@ class DocumentUploadService:
         owner_id: UUID,
         store: ObjectStore,
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
         allowed_content_types: frozenset[str],
@@ -167,6 +168,12 @@ class DocumentUploadService:
         self._session_ttl_seconds = session_ttl_seconds
         self._presign_ttl_seconds = presign_ttl_seconds
         self._audit_actor = audit_actor or AuditActor.user(owner_id)
+        self._denials = denials
+        self._denials.assert_tenant(tenant_id)
+        if self._audit_actor != denials.actor:
+            raise ValueError("Upload audit actor must match the trusted denial context.")
+        if not self._audit_actor.is_system:
+            self._denials.assert_user(tenant_id, owner_id)
         self._uploads = DocumentUploadRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
         self._collections = CollectionRepository(session, tenant_id)
@@ -178,39 +185,35 @@ class DocumentUploadService:
         resource_type: str,
         resource_id: UUID,
         error: AppError,
-        permission_denied: bool = False,
     ) -> None:
         """Emit content-safe evidence for one rejected control-plane attempt.
 
         The router owns the transaction boundary: it first rolls back any
         non-durable work (unless a terminal failure must be preserved), calls
         this method, and commits the audit-only transaction before re-raising.
-        Missing, foreign-tenant, and non-owned resources deliberately share one
-        reason code and 404 response so the audit trail cannot become an
-        existence oracle. Provider ids, keys, URLs, filenames, and content are
+        Resource denials are owned by the audited service wrappers, independently
+        of this request transaction. This seam retains non-permission lifecycle
+        error evidence. Provider ids, keys, URLs, filenames, and content are
         never metadata here.
         """
         # Rejections may follow a router rollback; the RLS GUC is transaction-local.
         await bind_tenant(self._session, self._tenant_id)
         await self._audit.emit(
-            action=(
-                AuditAction.PERMISSION_DENIED
-                if permission_denied
-                else _REJECTION_ACTION_BY_OPERATION[operation]
-            ),
+            action=_REJECTION_ACTION_BY_OPERATION[operation],
             actor=self._audit_actor,
             resource_type=resource_type,
             resource_id=str(resource_id),
-            outcome=(AuditOutcome.DENIED if permission_denied else AuditOutcome.ERROR),
+            outcome=AuditOutcome.ERROR,
             request_id=self._request_id,
             source_ip=self._source_ip,
             metadata={
                 "operation": operation,
-                "reason_code": ("not_found_or_not_owned" if permission_denied else error.code),
+                "reason_code": error.code,
                 "status": error.status,
             },
         )
 
+    @audited_resource("document.upload", "collection", "collection_id", missing_result=True)
     async def initiate(
         self,
         *,
@@ -309,6 +312,7 @@ class DocumentUploadService:
             raise
         return UploadSessionView(upload=upload, completed_parts=())
 
+    @audited_resource("document_upload.read", "document_upload", "upload_id", missing_result=True)
     async def get(self, upload_id: UUID) -> UploadSessionView | None:
         # GET may perform expiry or crash recovery, so it participates in the
         # same row-lock serialization as sign/complete/abort.
@@ -323,7 +327,27 @@ class DocumentUploadService:
         upload = await self._expire_if_needed(upload)
         return await self._view(upload)
 
+    @audited_resource("document_upload.expire", "document_upload", "upload_id", missing_result=True)
     async def expire_if_needed(self, upload_id: UUID) -> UploadSessionView | None:
+        return await self._prepare(upload_id)
+
+    @audited_resource(
+        "document_upload.sign_parts", "document_upload", "upload_id", missing_result=True
+    )
+    async def prepare_sign_parts(self, upload_id: UUID) -> UploadSessionView | None:
+        return await self._prepare(upload_id)
+
+    @audited_resource("document_upload.abort", "document_upload", "upload_id", missing_result=True)
+    async def prepare_abort(self, upload_id: UUID) -> UploadSessionView | None:
+        return await self._prepare(upload_id)
+
+    @audited_resource(
+        "document_upload.complete", "document_upload", "upload_id", missing_result=True
+    )
+    async def prepare_complete(self, upload_id: UUID) -> UploadSessionView | None:
+        return await self._prepare(upload_id)
+
+    async def _prepare(self, upload_id: UUID) -> UploadSessionView | None:
         """Public terminal-expiry seam for routers to commit before returning 409."""
         upload = await self._uploads.get_for_owner(upload_id, self._owner_id, lock=True)
         if upload is None:
@@ -336,6 +360,9 @@ class DocumentUploadService:
         terminal = await self._expire_if_needed(upload)
         return UploadSessionView(upload=terminal, completed_parts=())
 
+    @audited_resource(
+        "document_upload.sign_parts", "document_upload", "upload_id", missing_result=True
+    )
     async def sign_parts(
         self, upload_id: UUID, part_numbers: list[int]
     ) -> list[SignedPartView] | None:
@@ -379,6 +406,7 @@ class DocumentUploadService:
             for part_number in part_numbers
         ]
 
+    @audited_resource("document_upload.abort", "document_upload", "upload_id", missing_result=True)
     async def abort(self, upload_id: UUID) -> bool | None:
         upload = await self._uploads.get_for_owner(upload_id, self._owner_id, lock=True)
         if upload is None:
@@ -411,6 +439,9 @@ class DocumentUploadService:
         )
         return True
 
+    @audited_resource(
+        "document_upload.complete", "document_upload", "upload_id", missing_result=True
+    )
     async def complete(self, upload_id: UUID, parts: list[CompletePartInput]) -> Document | None:
         upload = await self._uploads.get_for_owner(upload_id, self._owner_id, lock=True)
         if upload is None:
@@ -484,6 +515,9 @@ class DocumentUploadService:
             )
         return await self._finalize_verified(upload, stored, recovered=recovered)
 
+    @audited_resource(
+        "document_upload.recover", "document_upload", "upload_id", missing_result=True
+    )
     async def recover_completing(self, upload_id: UUID) -> Document | None:
         """Finalize a previously completed S3 object from durable COMPLETING."""
         upload = await self._uploads.get_for_owner(upload_id, self._owner_id, lock=True)
@@ -736,6 +770,7 @@ class DocumentAccessService:
         owner_id: UUID,
         store: ObjectStore,
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
         presign_ttl_seconds: int,
@@ -745,18 +780,20 @@ class DocumentAccessService:
         self._owner_id = owner_id
         self._store = store
         self._audit = audit
+        self._denials = denials
+        self._denials.assert_user(tenant_id, owner_id)
         self._request_id = request_id
         self._source_ip = source_ip
         self._presign_ttl_seconds = presign_ttl_seconds
         self._groups = GroupRepository(session, tenant_id)
         self._transcripts = TranscriptRepository(session, tenant_id)
 
+    @audited_resource("document.access_url", "document", "document_id", missing_result=True)
     async def create_access_url(
         self, document_id: UUID, *, purpose: str
     ) -> AccessCapability | None:
         document = await self._visible(document_id)
         if document is None:
-            await self._audit_denial(document_id, operation="access_url")
             return None
         if document.status is not DocumentStatus.READY:
             raise ConflictError(
@@ -794,6 +831,7 @@ class DocumentAccessService:
             expires_at=issued_at + timedelta(seconds=self._presign_ttl_seconds),
         )
 
+    @audited_resource("document.transcript.read", "document", "document_id", missing_result=True)
     async def get_transcript(
         self,
         document_id: UUID,
@@ -804,7 +842,6 @@ class DocumentAccessService:
     ) -> TranscriptPage | None:
         document = await self._visible(document_id)
         if document is None:
-            await self._audit_denial(document_id, operation="transcript")
             return None
         if document.kind not in {DocumentKind.AUDIO, DocumentKind.VIDEO}:
             raise ConflictError("Document is not audio or video.", code="not_media")
@@ -857,23 +894,6 @@ class DocumentAccessService:
         )
         return await get_permitted_document(
             self._session, allow_set=allow_set, document_id=document_id
-        )
-
-    async def _audit_denial(self, document_id: UUID, *, operation: str) -> None:
-        """Record a content-safe denial without revealing whether the document exists."""
-        await self._audit.emit(
-            action=AuditAction.PERMISSION_DENIED,
-            actor=AuditActor.user(self._owner_id),
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome=AuditOutcome.DENIED,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata={
-                "operation": operation,
-                "reason_code": "not_found_or_not_permitted",
-                "status": 404,
-            },
         )
 
 

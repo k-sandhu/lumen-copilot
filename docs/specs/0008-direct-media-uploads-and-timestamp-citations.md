@@ -160,6 +160,13 @@ retains the prior play/pause state and never autoplays a paused player.
 
 ## 7. Security, audit, and negative acceptance
 
+Authenticated resource denials use the mandatory trusted context and durable
+terminal helper in spec 0004 §2.4, including late absence after completion's
+commit boundary. Router lifecycle error evidence remains atomic with preserved
+terminal state, but never duplicates `permission.denied`. Signed access and
+transcript denials also persist independently of caller rollback. Janitor
+recovery uses the same service helper with system attribution.
+
 - Upload sessions, transcripts, and capabilities are tenant and owner/permission
   scoped; wrong tenant or forbidden direct read is `404` (INV-1/INV-2).
 - Missing/expired authentication is `401` (INV-4).

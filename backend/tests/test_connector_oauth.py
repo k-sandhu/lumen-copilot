@@ -438,20 +438,29 @@ async def test_full_connect_flow(
 
 
 async def test_member_create_gdrive_is_403_and_audited(
-    client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
 ) -> None:
     token = await _login(client, seeded.bob_email)
     resp = await _create_gdrive(client, token)
     assert resp.status_code == 403
-    assert "permission.denied" in await _audit_actions(sessionmaker, seeded.tenant_a)
+    assert len(durable_audit_ledger.events) == 1
+    assert durable_audit_ledger.events[0].action == "permission.denied"
 
 
-async def test_member_connect_is_403(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_member_connect_is_403(
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
+) -> None:
     admin = await _login(client, seeded.alice_email)
     source_id = (await _create_gdrive(client, admin)).json()["id"]
     member = await _login(client, seeded.bob_email)
     resp = await _connect(client, member, source_id)
     assert resp.status_code == 403
+    assert len(durable_audit_ledger.events) == 1
+    assert durable_audit_ledger.events[0].metadata == {
+        "attempted_action": "source.connect",
+        "reason": "not_admin",
+        "required_roles": ["admin"],
+    }
 
 
 async def test_member_sync_and_delete_of_managed_are_403(
@@ -686,7 +695,7 @@ async def test_admin_attests_member_identity(
 
 
 async def test_member_attest_is_403_unknown_member_is_404(
-    client: AsyncClient, seeded: _Seeded
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
 ) -> None:
     member = await _login(client, seeded.bob_email)
     resp = await client.post(
@@ -698,6 +707,13 @@ async def test_member_attest_is_403_unknown_member_is_404(
         f"/api/v1/admin/members/{uuid.uuid4()}/attest-identity", headers=_auth(admin)
     )
     assert resp.status_code == 404  # unknown/foreign member (INV-1)
+    assert len(durable_audit_ledger.events) == 2
+    service_denial = durable_audit_ledger.events[-1]
+    assert service_denial.resource_type == "user"
+    assert service_denial.metadata == {
+        "attempted_action": "user.identity.attest",
+        "reason": "not_visible",
+    }
 
 
 # --- lifecycle ---------------------------------------------------------------

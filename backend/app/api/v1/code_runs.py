@@ -27,10 +27,17 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from app.api.deps import CurrentTenant, CurrentUser, DbSession, SettingsDep
+from app.api.deps import (
+    AuditSinkFactory,
+    CurrentTenant,
+    CurrentUser,
+    DbSession,
+    SettingsDep,
+    authenticated_denial_context,
+)
 from app.domain.entities import CodeRun, CodeRunStatus, ResourceUsage
 from app.sandbox.runner import HttpSandboxRunner
 from app.sandbox.service import SandboxReadService, SandboxSessionService
@@ -117,9 +124,18 @@ async def get_code_run(
     session: DbSession,
     principal: CurrentUser,
     tenant_id: CurrentTenant,
+    request: Request,
+    make_audit_sink: AuditSinkFactory,
 ) -> CodeRunResponse:
     """Inspect one code run — status, code, output, timing, artifacts; not visible → 404."""
-    service = SandboxReadService(session, tenant_id=tenant_id, owner_id=principal.user_id)
+    service = SandboxReadService(
+        session,
+        tenant_id=tenant_id,
+        owner_id=principal.user_id,
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=tenant_id, principal=principal, request=request
+        ),
+    )
     run = await service.get(code_run_id)
     return _to_response(run)
 
@@ -135,6 +151,8 @@ async def cancel_code_run(
     principal: CurrentUser,
     tenant_id: CurrentTenant,
     settings: SettingsDep,
+    request: Request,
+    make_audit_sink: AuditSinkFactory,
 ) -> CodeRunResponse:
     """Explicitly cancel an active run and advance its sandbox generation."""
     service = SandboxSessionService(
@@ -143,6 +161,9 @@ async def cancel_code_run(
         owner_id=principal.user_id,
         runner=HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token),
         settings=settings,
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=tenant_id, principal=principal, request=request
+        ),
     )
     run = await service.cancel(code_run_id)
     await session.commit()

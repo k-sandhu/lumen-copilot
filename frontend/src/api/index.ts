@@ -158,4 +158,5 @@ export { WsClient, parseEnvelope, resolveWsUrl } from './ws';
 export type { TokenChangeReason } from './token';
 export type { WsClientOptions, WsConnectionState } from './ws';
 export { API_BASE_URL, WS_BASE_URL, DEV_PAGES_ENABLED, parseBoolFlag } from './env';
+export { AUDIT_EVENT_TYPES } from './types';
 export type * from './types';

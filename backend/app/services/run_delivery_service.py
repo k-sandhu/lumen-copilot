@@ -58,7 +58,7 @@ from app.domain.entities import (
     RunDeliveryStatus,
     ScheduleDelivery,
 )
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 
 log = get_logger(__name__)
 
@@ -161,9 +161,7 @@ async def deliver_run(
                     summary=run.summary,
                 )
         # Immediate inbox delivery (the default; also whenever inbox is opted in).
-        if config.inbox and not await deliveries.exists_for_run(
-            run.id, kind=RunDeliveryKind.INBOX
-        ):
+        if config.inbox and not await deliveries.exists_for_run(run.id, kind=RunDeliveryKind.INBOX):
             inbox_delivery = await deliveries.create(
                 recipient_id=run.owner_id,
                 run_id=run.id,
@@ -205,9 +203,7 @@ async def deliver_run(
     return delivered
 
 
-async def _delivery_config(
-    session: AsyncSession, tenant_id: UUID, run: Run
-) -> ScheduleDelivery:
+async def _delivery_config(session: AsyncSession, tenant_id: UUID, run: Run) -> ScheduleDelivery:
     """The run's delivery config — its schedule's ``delivery`` jsonb, else the inbox default.
 
     A scheduled run reads its schedule's stored ``delivery`` (``inbox``/``digest``); a
@@ -320,6 +316,7 @@ class RunDeliveryService:
         tenant_id: UUID,
         recipient_id: UUID,
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
     ) -> None:
@@ -328,6 +325,8 @@ class RunDeliveryService:
         self._tenant_id = tenant_id
         self._recipient_id = recipient_id
         self._audit = audit
+        self._denials = denials
+        self._denials.assert_user(tenant_id, recipient_id)
         self._request_id = request_id
         self._source_ip = source_ip
 
@@ -354,6 +353,7 @@ class RunDeliveryService:
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
         return RunDeliveryPage(items=page, next_cursor=next_cursor)
 
+    @audited_resource("run.delivery.read", "run_delivery", "delivery_id")
     async def mark_read(self, delivery_id: UUID) -> RunDelivery:
         """Mark one delivery read; not visible/owned → 404 (INV-1/INV-2). Idempotent.
 
@@ -364,9 +364,15 @@ class RunDeliveryService:
         """
         existing = await self._deliveries.get(delivery_id)
         if existing is None or existing.recipient_id != self._recipient_id:
+            await self._denials.emit(
+                resource_type="run_delivery",
+                resource_id=str(delivery_id),
+                attempted_action="run.delivery.read",
+                reason="not_visible",
+            )
             raise NotFoundError("Delivery not found.")
         updated = await self._deliveries.mark_read(delivery_id, read_at=datetime.now(UTC))
-        if updated is None:  # pragma: no cover — visibility already established
+        if updated is None:
             raise NotFoundError("Delivery not found.")
         run = await self._runs.get(updated.run_id)
         await _audit_delivery(

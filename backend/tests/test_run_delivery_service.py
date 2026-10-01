@@ -56,6 +56,7 @@ from app.services.run_delivery_service import (
     build_digest_for_tenant,
     deliver_run,
 )
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -213,6 +214,12 @@ async def test_completed_run_creates_inbox_delivery_for_owner(ctx: _Ctx) -> None
             tenant_id=ctx.tenant_a,
             recipient_id=ctx.alice_id,
             audit=_audit(session, ctx.tenant_a),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(),
+                session,
+                ctx.tenant_a,
+                ctx.alice_id,
+            ),
             request_id="req",
             source_ip="ip",
         )
@@ -224,8 +231,11 @@ async def test_deliver_run_is_idempotent(ctx: _Ctx) -> None:
     """A redelivered run task never double-notifies (INV-8, at-least-once safe)."""
     async with ctx.sessionmaker() as session:
         run = await _completed_run(
-            session, ctx.tenant_a, owner_id=ctx.alice_id,
-            assistant_id=ctx.assistant_a, version_id=ctx.version_a,
+            session,
+            ctx.tenant_a,
+            owner_id=ctx.alice_id,
+            assistant_id=ctx.assistant_a,
+            version_id=ctx.version_a,
         )
         first = await deliver_run(
             session, tenant_id=ctx.tenant_a, run=run, audit=_audit(session, ctx.tenant_a)
@@ -249,9 +259,13 @@ async def test_failed_run_still_delivered_never_silent(ctx: _Ctx) -> None:
     """AC-3: a failed run still reaches the inbox (visible + retryable), never silent."""
     async with ctx.sessionmaker() as session:
         run = await _completed_run(
-            session, ctx.tenant_a, owner_id=ctx.alice_id,
-            assistant_id=ctx.assistant_a, version_id=ctx.version_a,
-            status=RunStatus.FAILED, summary=None,
+            session,
+            ctx.tenant_a,
+            owner_id=ctx.alice_id,
+            assistant_id=ctx.assistant_a,
+            version_id=ctx.version_a,
+            status=RunStatus.FAILED,
+            summary=None,
         )
         delivery = await deliver_run(
             session, tenant_id=ctx.tenant_a, run=run, audit=_audit(session, ctx.tenant_a)
@@ -284,8 +298,11 @@ async def test_digest_schedule_batches_runs(ctx: _Ctx) -> None:
         schedule_id = await _schedule_with_digest(ctx, session)
         for _ in range(3):
             run = await _completed_run(
-                session, ctx.tenant_a, owner_id=ctx.alice_id,
-                assistant_id=ctx.assistant_a, version_id=ctx.version_a,
+                session,
+                ctx.tenant_a,
+                owner_id=ctx.alice_id,
+                assistant_id=ctx.assistant_a,
+                version_id=ctx.version_a,
                 schedule_id=schedule_id,
             )
             await deliver_run(
@@ -322,8 +339,12 @@ async def test_digest_batch_is_idempotent(ctx: _Ctx) -> None:
     async with ctx.sessionmaker() as session:
         schedule_id = await _schedule_with_digest(ctx, session)
         run = await _completed_run(
-            session, ctx.tenant_a, owner_id=ctx.alice_id,
-            assistant_id=ctx.assistant_a, version_id=ctx.version_a, schedule_id=schedule_id,
+            session,
+            ctx.tenant_a,
+            owner_id=ctx.alice_id,
+            assistant_id=ctx.assistant_a,
+            version_id=ctx.version_a,
+            schedule_id=schedule_id,
         )
         await deliver_run(
             session, tenant_id=ctx.tenant_a, run=run, audit=_audit(session, ctx.tenant_a)
@@ -342,8 +363,11 @@ async def test_digest_batch_is_idempotent(ctx: _Ctx) -> None:
 async def test_mark_read_stamps_and_is_idempotent(ctx: _Ctx) -> None:
     async with ctx.sessionmaker() as session:
         run = await _completed_run(
-            session, ctx.tenant_a, owner_id=ctx.alice_id,
-            assistant_id=ctx.assistant_a, version_id=ctx.version_a,
+            session,
+            ctx.tenant_a,
+            owner_id=ctx.alice_id,
+            assistant_id=ctx.assistant_a,
+            version_id=ctx.version_a,
         )
         delivery = await deliver_run(
             session, tenant_id=ctx.tenant_a, run=run, audit=_audit(session, ctx.tenant_a)
@@ -353,8 +377,15 @@ async def test_mark_read_stamps_and_is_idempotent(ctx: _Ctx) -> None:
 
     async with ctx.sessionmaker() as session:
         service = RunDeliveryService(
-            session, tenant_id=ctx.tenant_a, recipient_id=ctx.alice_id,
-            audit=_audit(session, ctx.tenant_a), request_id="req", source_ip="ip",
+            session,
+            tenant_id=ctx.tenant_a,
+            recipient_id=ctx.alice_id,
+            audit=_audit(session, ctx.tenant_a),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, ctx.tenant_a, ctx.alice_id
+            ),
+            request_id="req",
+            source_ip="ip",
         )
         read = await service.mark_read(delivery.id)
         await session.commit()
@@ -365,8 +396,15 @@ async def test_mark_read_stamps_and_is_idempotent(ctx: _Ctx) -> None:
     # Re-marking is idempotent — read_at unchanged.
     async with ctx.sessionmaker() as session:
         service = RunDeliveryService(
-            session, tenant_id=ctx.tenant_a, recipient_id=ctx.alice_id,
-            audit=_audit(session, ctx.tenant_a), request_id="req", source_ip="ip",
+            session,
+            tenant_id=ctx.tenant_a,
+            recipient_id=ctx.alice_id,
+            audit=_audit(session, ctx.tenant_a),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, ctx.tenant_a, ctx.alice_id
+            ),
+            request_id="req",
+            source_ip="ip",
         )
         again = await service.mark_read(delivery.id)
         assert again.status is RunDeliveryStatus.READ
@@ -384,8 +422,12 @@ async def test_cross_tenant_delivery_mark_read_is_404(ctx: _Ctx) -> None:
     # Carol (tenant B) has a completed run + delivery.
     async with ctx.sessionmaker() as session:
         carol_run = await _completed_run(
-            session, ctx.tenant_b, owner_id=ctx.carol_id,
-            assistant_id=ctx.assistant_b, version_id=None, trigger=RunTrigger.MANUAL,
+            session,
+            ctx.tenant_b,
+            owner_id=ctx.carol_id,
+            assistant_id=ctx.assistant_b,
+            version_id=None,
+            trigger=RunTrigger.MANUAL,
         )
         carol_delivery = await deliver_run(
             session, tenant_id=ctx.tenant_b, run=carol_run, audit=_audit(session, ctx.tenant_b)
@@ -396,8 +438,15 @@ async def test_cross_tenant_delivery_mark_read_is_404(ctx: _Ctx) -> None:
     # Alice (tenant A) cannot mark carol's delivery read — 404.
     async with ctx.sessionmaker() as session:
         service = RunDeliveryService(
-            session, tenant_id=ctx.tenant_a, recipient_id=ctx.alice_id,
-            audit=_audit(session, ctx.tenant_a), request_id="req", source_ip="ip",
+            session,
+            tenant_id=ctx.tenant_a,
+            recipient_id=ctx.alice_id,
+            audit=_audit(session, ctx.tenant_a),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, ctx.tenant_a, ctx.alice_id
+            ),
+            request_id="req",
+            source_ip="ip",
         )
         with pytest.raises(NotFoundError):
             await service.mark_read(carol_delivery.id)
@@ -407,8 +456,11 @@ async def test_other_owner_delivery_mark_read_is_404(ctx: _Ctx) -> None:
     """INV-2: a delivery addressed to another user in the same tenant is 404, not 403."""
     async with ctx.sessionmaker() as session:
         run = await _completed_run(
-            session, ctx.tenant_a, owner_id=ctx.alice_id,
-            assistant_id=ctx.assistant_a, version_id=ctx.version_a,
+            session,
+            ctx.tenant_a,
+            owner_id=ctx.alice_id,
+            assistant_id=ctx.assistant_a,
+            version_id=ctx.version_a,
         )
         delivery = await deliver_run(
             session, tenant_id=ctx.tenant_a, run=run, audit=_audit(session, ctx.tenant_a)
@@ -419,8 +471,15 @@ async def test_other_owner_delivery_mark_read_is_404(ctx: _Ctx) -> None:
     # Bob (same tenant, different user) cannot see alice's delivery — 404.
     async with ctx.sessionmaker() as session:
         service = RunDeliveryService(
-            session, tenant_id=ctx.tenant_a, recipient_id=ctx.bob_id,
-            audit=_audit(session, ctx.tenant_a), request_id="req", source_ip="ip",
+            session,
+            tenant_id=ctx.tenant_a,
+            recipient_id=ctx.bob_id,
+            audit=_audit(session, ctx.tenant_a),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, ctx.tenant_a, ctx.bob_id
+            ),
+            request_id="req",
+            source_ip="ip",
         )
         with pytest.raises(NotFoundError):
             await service.mark_read(delivery.id)
@@ -433,9 +492,13 @@ async def test_manual_run_delivers_to_inbox_by_default(ctx: _Ctx) -> None:
     """A manual run (no schedule) always lands in the inbox (the v1 default)."""
     async with ctx.sessionmaker() as session:
         run = await _completed_run(
-            session, ctx.tenant_a, owner_id=ctx.alice_id,
-            assistant_id=ctx.assistant_a, version_id=ctx.version_a,
-            schedule_id=None, trigger=RunTrigger.MANUAL,
+            session,
+            ctx.tenant_a,
+            owner_id=ctx.alice_id,
+            assistant_id=ctx.assistant_a,
+            version_id=ctx.version_a,
+            schedule_id=None,
+            trigger=RunTrigger.MANUAL,
         )
         delivery = await deliver_run(
             session, tenant_id=ctx.tenant_a, run=run, audit=_audit(session, ctx.tenant_a)
