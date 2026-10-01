@@ -16,7 +16,8 @@ from sqlalchemy.pool import StaticPool
 import app.db.models  # noqa: F401  isort: skip
 import app.db.session as db_session
 import app.tasks.ingest as ingest_module
-from app.core.config import Settings
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS, Settings
+from app.core.errors import DependencyError
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -38,6 +39,7 @@ from app.ingestion.media import (
     build_transcript_segments,
     infer_speaker_names,
 )
+from app.search import IndexedChunk
 
 
 @pytest_asyncio.fixture
@@ -72,7 +74,7 @@ def _settings(**overrides: object) -> Settings:
         "S3_SECRET_KEY": "s",
         "S3_BUCKET": "b",
         "OPENROUTER_API_KEY": "offline-test",
-        "LLM_EMBEDDING_DIMENSIONS": "8",
+        "LLM_CANONICAL_EMBEDDING_DIMENSIONS": str(CANONICAL_EMBEDDING_DIMENSIONS),
         "INGESTION_CHUNK_SIZE": "100",
         "INGESTION_CHUNK_OVERLAP": "10",
         **overrides,
@@ -131,7 +133,112 @@ class _Gateway:
         )
 
     async def embed(self, inputs: Sequence[str]) -> list[Embedding]:
-        return [Embedding(vector=[0.25] * 8, model="fake") for _ in inputs]
+        return [
+            Embedding(vector=[0.25] * CANONICAL_EMBEDDING_DIMENSIONS, model="fake") for _ in inputs
+        ]
+
+
+@pytest.mark.parametrize("fault", [None, "embedding_dimension_mismatch", "ingestion_index_error"])
+async def test_media_uses_generation_fingerprint_and_publication_barrier(
+    sqlite_engine: None,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str | None,
+) -> None:
+    settings = _settings()
+    tenant_id, document_id = await _seed_media()
+    publications: list[IndexedChunk] = []
+    cleaned: list[int] = []
+
+    class Store:
+        async def ensure_index(self) -> None:
+            pass
+
+        async def upsert_chunks(self, chunks: Sequence[IndexedChunk], *, refresh: object) -> None:
+            async with db_session.tenant_session_scope(tenant_id) as session:
+                document = await DocumentRepository(session, tenant_id).get(document_id)
+                assert document is not None and document.status is DocumentStatus.PROCESSING
+                assert document.ingestion_attempts == 1
+            assert refresh == "wait_for", "Media Ready must wait for search visibility"
+            assert all(chunk.ingestion_attempt == 1 for chunk in chunks)
+            assert all(
+                chunk.embedding_fingerprint == settings.embedding_space_fingerprint
+                for chunk in chunks
+            )
+            assert all(chunk.time_start_ms == 100 and chunk.time_end_ms == 900 for chunk in chunks)
+            publications.extend(chunks)
+            if fault == "ingestion_index_error":
+                raise DependencyError("incomplete refresh acknowledgement", code="opensearch_error")
+
+        async def delete_document_generation(
+            self, *, ingestion_attempt: int, **kwargs: object
+        ) -> None:
+            cleaned.append(ingestion_attempt)
+
+        async def delete_older_document_generations(self, **kwargs: object) -> None:
+            pass
+
+    async def media_pipeline(
+        tid: uuid.UUID, did: uuid.UUID, *, ingestion_run_id: uuid.UUID, **kwargs: object
+    ):
+        segments = build_transcript_segments(
+            (
+                StitchedWord(
+                    text="Evidence.",
+                    start_ms=100,
+                    end_ms=900,
+                    speaker_id="speaker-1",
+                    confidence=None,
+                ),
+            )
+        )
+        drafts = build_transcript_chunks(
+            segments,
+            infer_speaker_names(segments),
+            duration_ms=2_000,
+            chunk_size=settings.ingestion_chunk_size,
+            overlap=settings.ingestion_chunk_overlap,
+        )
+        width = 1024 if fault == "embedding_dimension_mismatch" else CANONICAL_EMBEDDING_DIMENSIONS
+        count = await ingest_module._persist_media_result(
+            tid,
+            did,
+            ingestion_run_id=ingestion_run_id,
+            kind=DocumentKind.AUDIO,
+            duration_ms=2_000,
+            language="en",
+            segments=segments,
+            chunk_drafts=drafts,
+            embeddings=[Embedding(vector=[0.25] * width, model="fake") for _ in drafts],
+            settings=settings,
+        )
+        return ingest_module.IngestionResult(did, DocumentStatus.READY, count)
+
+    monkeypatch.setattr(ingest_module, "_ingest_media", media_pipeline)
+    kwargs = {
+        "settings": settings,
+        "object_store": object(),
+        "gateway": object(),
+        "search_store": Store(),
+    }
+    if fault:
+        with pytest.raises(ingest_module.IngestionError) as error:
+            await ingest_module.ingest_document_async(tenant_id, document_id, **kwargs)  # type: ignore[arg-type]
+        assert error.value.code == fault
+    else:
+        result = await ingest_module.ingest_document_async(tenant_id, document_id, **kwargs)  # type: ignore[arg-type]
+        assert result.status is DocumentStatus.READY and result.chunk_count > 0
+    async with db_session.tenant_session_scope(tenant_id) as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        assert document is not None
+        assert document.status is (DocumentStatus.FAILED if fault else DocumentStatus.READY)
+        assert document.ingestion_attempts == 1
+        if fault:
+            assert document.ingestion_failure is not None
+            assert document.ingestion_failure["code"] == fault
+    if fault == "embedding_dimension_mismatch":
+        assert not publications
+    if fault == "ingestion_index_error":
+        assert publications and cleaned == [1]
 
 
 async def test_transcription_retry_reuses_paid_chunk_checkpoints(
@@ -301,7 +408,9 @@ async def test_persisted_media_result_has_timestamp_pairs_and_exactly_one_audit(
         chunk_size=settings.ingestion_chunk_size,
         overlap=settings.ingestion_chunk_overlap,
     )
-    embeddings = [Embedding(vector=[0.25] * 8, model="fake") for _ in drafts]
+    embeddings = [
+        Embedding(vector=[0.25] * CANONICAL_EMBEDDING_DIMENSIONS, model="fake") for _ in drafts
+    ]
 
     async with db_session.session_scope() as session:
         before = await DocumentRepository(session, tenant_id).get(document_id)
@@ -383,6 +492,11 @@ async def test_persisted_media_result_has_timestamp_pairs_and_exactly_one_audit(
     assert document.status is DocumentStatus.READY
     assert document.duration_ms == 2_000
     assert len(chunks) == count == len(drafts)
+    assert all(
+        chunk.embedding_fingerprint == settings.embedding_space_fingerprint
+        and len(chunk.embedding or []) == settings.llm_embedding_dimensions
+        for chunk in chunks
+    )
     assert len(transcript) == len(segments)
     assert all(
         chunk.time_start_ms is not None
@@ -482,7 +596,9 @@ async def test_media_worker_persists_nested_overlapping_speaker_turns(sqlite_eng
         language="en",
         segments=segments,
         chunk_drafts=drafts,
-        embeddings=[Embedding(vector=[0.25] * 8, model="fake") for _ in drafts],
+        embeddings=[
+            Embedding(vector=[0.25] * CANONICAL_EMBEDDING_DIMENSIONS, model="fake") for _ in drafts
+        ],
         settings=settings,
     )
     assert count == len(drafts) > 0
@@ -533,8 +649,8 @@ async def test_simultaneous_media_deliveries_only_one_claimant_calls_stt(
             claimed_document_id, DocumentStatus.READY, chunk_count=0
         )
 
-    async def _no_sync(*_args: object, **_kwargs: object) -> None:
-        return None
+    async def _no_sync(*_args: object, **_kwargs: object) -> bool:
+        return True
 
     monkeypatch.setattr(ingest_module, "_ingest_media", _fake_ingest_media)
     monkeypatch.setattr(ingest_module, "_sync_index", _no_sync)
