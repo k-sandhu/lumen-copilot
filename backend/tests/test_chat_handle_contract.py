@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from app.domain.llm import StreamEvent, ToolCall
+from tests.test_chat_runtime import ctx as ctx
 
 pytest_plugins = ("tests.test_chat_runtime",)
 
