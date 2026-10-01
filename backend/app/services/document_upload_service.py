@@ -41,6 +41,7 @@ from app.domain.entities import (
     TranscriptSegment,
     TranscriptSpeaker,
 )
+from app.ingestion.contract import require_embedding_work_admission
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document
 from app.services.audit import AuditSink
@@ -146,11 +147,13 @@ class DocumentUploadService:
         sign_batch_size: int,
         session_ttl_seconds: int,
         presign_ttl_seconds: int,
+        embedding_space_fingerprint: str,
         audit_actor: AuditActor | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._embedding_space_fingerprint = embedding_space_fingerprint
         self._store = store
         self._audit = audit
         self._request_id = request_id
@@ -254,6 +257,7 @@ class DocumentUploadService:
                 code="too_many_upload_parts",
             )
 
+        require_embedding_work_admission(self._embedding_space_fingerprint)
         upload_id = uuid4()
         document_id = uuid4()
         multipart = await self._store.create_multipart_upload(

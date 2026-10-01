@@ -13,6 +13,7 @@ from app.api.v1.chat import _citation_to_response as chat_citation_to_response
 from app.api.v1.runs import _citation_to_response as run_citation_to_response
 from app.api.v1.search import _to_citation as search_citation_to_response
 from app.api.v1.search import _to_result as search_result_to_response
+from app.core.config import get_settings
 from app.domain.chat import GroundedCitation
 from app.domain.entities import DocumentKind
 from app.domain.retrieval import RetrievedPassage
@@ -159,6 +160,7 @@ def test_search_wire_projections_carry_media_provenance() -> None:
 def test_index_sync_projection_carries_media_fields() -> None:
     segment_id = uuid.uuid4()
     document = SimpleNamespace(
+        ingestion_attempts=1,
         owner_id=uuid.uuid4(),
         collection_id=uuid.uuid4(),
         acl_enforced=False,
@@ -172,7 +174,8 @@ def test_index_sync_projection_carries_media_fields() -> None:
         document_id=uuid.uuid4(),
         ord=0,
         text="Hello, my name is John.",
-        embedding=None,
+        embedding=[0.25] * get_settings().llm_embedding_dimensions,
+        embedding_fingerprint=get_settings().embedding_space_fingerprint,
         char_start=0,
         char_end=23,
         time_start_ms=1_000,
@@ -182,7 +185,9 @@ def test_index_sync_projection_carries_media_fields() -> None:
         speaker_name="John",
     )
 
-    indexed = _to_indexed(document, [chunk])[0]
+    indexed = _to_indexed(
+        document, [chunk], embedding_fingerprint=get_settings().embedding_space_fingerprint
+    )[0]
 
     assert indexed.time_start_ms == 1_000
     assert indexed.time_end_ms == 3_000
@@ -208,6 +213,8 @@ def test_retrieval_blocks_invalid_or_out_of_duration_media_provenance() -> None:
         "document_id": uuid.uuid4(),
         "document_name": "meeting.mp4",
         "document_kind": "video",
+        "ingestion_attempt": 1,
+        "embedding_fingerprint": get_settings().embedding_space_fingerprint,
         "duration_ms": 5_000,
         "ord": 0,
         "text": "hello",
@@ -287,7 +294,9 @@ def test_relational_schema_fences_segment_provenance_to_its_source_document() ->
 
 
 def test_opensearch_strict_mapping_declares_media_fields() -> None:
-    properties = _index_body(8)["mappings"]["properties"]
+    properties = _index_body(
+        get_settings().llm_embedding_dimensions, get_settings().embedding_space_fingerprint
+    )["mappings"]["properties"]
 
     assert properties["time_start_ms"] == {"type": "long"}
     assert properties["time_end_ms"] == {"type": "long"}
@@ -301,12 +310,27 @@ async def test_index_payload_carries_media_fields_and_omits_nulls() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.extend(json.loads(line) for line in request.content.decode().strip().splitlines())
-        return httpx.Response(200, json={"errors": False, "items": []})
+        return httpx.Response(
+            200,
+            json={
+                "errors": False,
+                "items": [
+                    {
+                        "index": {
+                            "status": 201,
+                            "_shards": {"total": 1, "successful": 1, "failed": 0},
+                        }
+                    }
+                    for _ in range(2)
+                ],
+            },
+        )
 
     store = OpenSearchStore(
         base_url="http://opensearch.test:9200",
         index="media-test",
-        dimensions=8,
+        dimensions=get_settings().llm_embedding_dimensions,
+        embedding_fingerprint=get_settings().embedding_space_fingerprint,
         client=httpx.AsyncClient(
             base_url="http://opensearch.test:9200", transport=httpx.MockTransport(handler)
         ),
@@ -318,7 +342,9 @@ async def test_index_payload_carries_media_fields_and_omits_nulls() -> None:
         "collection_id": uuid.uuid4(),
         "ord": 0,
         "text": "hello",
-        "embedding": None,
+        "embedding": [0.25] * get_settings().llm_embedding_dimensions,
+        "ingestion_attempt": 1,
+        "embedding_fingerprint": get_settings().embedding_space_fingerprint,
         "char_start": 0,
         "char_end": 5,
     }

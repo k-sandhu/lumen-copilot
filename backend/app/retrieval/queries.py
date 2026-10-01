@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
 from app.db.repositories import to_document
-from app.domain.entities import Document
+from app.domain.entities import Document, DocumentStatus
 from app.retrieval.permissions import AllowSet
 from app.search.filters import acl_freshness_floor
 
@@ -78,6 +78,8 @@ class PassageRow:
     transcript_segment_document_id: UUID | None
     speaker_id: str | None
     speaker_name: str | None
+    ingestion_attempt: int
+    embedding_fingerprint: str | None
 
 
 def _valid_passage_provenance(row: PassageRow) -> bool:
@@ -337,9 +339,14 @@ def valid_chunk_pairs(*, tenant_id: object, chunk_ids: list[UUID]) -> Select[tup
     chunk id must not smuggle that id into a prompt — only chunks that belong
     to the claimed document survive the join at the caller.
     """
-    return select(models.Chunk.id, models.Chunk.document_id).where(
-        models.Chunk.tenant_id == tenant_id,
-        models.Chunk.id.in_(chunk_ids),
+    return (
+        select(models.Chunk.id, models.Chunk.document_id)
+        .join(models.Document, models.Chunk.document_id == models.Document.id)
+        .where(
+            models.Chunk.tenant_id == tenant_id,
+            models.Chunk.id.in_(chunk_ids),
+            models.Document.status == DocumentStatus.READY.value,
+        )
     )
 
 
@@ -357,6 +364,7 @@ def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT
     """
     return stmt.where(
         models.Chunk.tenant_id == allow_set.tenant_id,
+        models.Document.status == DocumentStatus.READY.value,
         _document_permitted(allow_set),
     )
 
@@ -378,6 +386,8 @@ def _base_chunk_select() -> (
             UUID | None,
             UUID | None,
             str | None,
+            str | None,
+            int,
             str | None,
         ]
     ]
@@ -404,6 +414,8 @@ def _base_chunk_select() -> (
             models.TranscriptSegment.document_id.label("transcript_segment_document_id"),
             models.Chunk.speaker_id,
             models.Chunk.speaker_name,
+            models.Document.ingestion_attempts,
+            models.Chunk.embedding_fingerprint,
         )
         .join(models.Document, models.Chunk.document_id == models.Document.id)
         .outerjoin(
@@ -515,6 +527,8 @@ async def load_passages(
         transcript_segment_document_id,
         speaker_id,
         speaker_name,
+        ingestion_attempt,
+        embedding_fingerprint,
     ) in result.all():
         row = PassageRow(
             chunk_id=cid,
@@ -532,6 +546,8 @@ async def load_passages(
             transcript_segment_document_id=transcript_segment_document_id,
             speaker_id=speaker_id,
             speaker_name=speaker_name,
+            ingestion_attempt=ingestion_attempt,
+            embedding_fingerprint=embedding_fingerprint,
         )
         if _valid_passage_provenance(row):
             rows[cid] = row
@@ -560,6 +576,7 @@ async def document_search(
         .where(
             models.Document.tenant_id == allow_set.tenant_id,
             _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
             models.Document.filename.ilike(f"%{name_or_query}%"),
         )
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
@@ -592,6 +609,7 @@ async def list_documents(
         .where(
             models.Document.tenant_id == allow_set.tenant_id,
             _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
         )
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
         .limit(k)
@@ -620,6 +638,7 @@ async def load_document_text(
         models.Document.id == document_id,
         models.Document.tenant_id == allow_set.tenant_id,
         _document_permitted(allow_set),
+        models.Document.status == DocumentStatus.READY.value,
     )
     doc = (await session.execute(doc_stmt)).first()
     if doc is None:

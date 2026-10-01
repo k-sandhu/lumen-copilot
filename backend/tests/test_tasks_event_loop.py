@@ -222,6 +222,26 @@ class _FakeIndexStore:
     ) -> None:
         return None
 
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
     async def aclose(self) -> None:
         return None
 
@@ -300,6 +320,11 @@ def test_two_sequential_ingest_invocations_in_one_process_both_succeed(
     monkeypatch.setattr(ingest_module, "get_settings", lambda: settings)
     monkeypatch.setattr(ingest_module, "ObjectStore", lambda _s: store)
     monkeypatch.setattr(ingest_module, "LLMGateway", lambda _s: gateway)
+
+    async def _contract_ready(_settings: Settings) -> str:
+        return _settings.embedding_space_fingerprint
+
+    monkeypatch.setattr(ingest_module, "ensure_embedding_contract", _contract_ready)
 
     wrapper = ingest_document.__wrapped__.__func__  # the raw fn under the task
 
