@@ -234,6 +234,93 @@ async def initiate(
     )
 
 
+@pytest.mark.parametrize("failure", ["embedding_dimension_mismatch", "embedding_space_changed"])
+async def test_direct_upload_contract_admission_has_no_side_effects_and_recovers(
+    client: AsyncClient,
+    app: FastAPI,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeMultipartStore,
+    failure: str,
+) -> None:
+    from app.ingestion.contract import (
+        mark_embedding_contract_invalid,
+        mark_embedding_contract_valid,
+        reset_embedding_contract_gate,
+    )
+
+    seeded: Seeded = sessionmaker.seeded  # type: ignore[attr-defined]
+    settings = get_settings().model_copy(update={"llm_embedding_model": "openai/pr605-r8-space"})
+    app.dependency_overrides[get_settings_dep] = lambda: settings
+    token = await login(client, "alice@a.test")
+    if failure == "embedding_space_changed":
+        mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
+    else:
+        mark_embedding_contract_invalid(failure)
+    try:
+        blocked = await initiate(client, token, seeded.collection_a)
+        assert blocked.status_code == 503, blocked.text
+        assert blocked.json()["code"] == failure
+        assert not store.uploads and not store.objects
+        async with sessionmaker() as session:
+            assert (await session.execute(select(models.DocumentUpload))).scalars().all() == []
+            assert (await session.execute(select(models.Document))).scalars().all() == []
+            events = (await session.execute(select(models.AuditEvent))).scalars().all()
+            assert not [event for event in events if event.action == AuditAction.DOCUMENT_UPLOADED]
+            rejected = [
+                event for event in events if event.event_metadata.get("reason_code") == failure
+            ]
+            assert len(rejected) == 1 and rejected[0].outcome == "error"
+        mark_embedding_contract_valid(settings.embedding_space_fingerprint)
+        accepted = await initiate(client, token, seeded.collection_a)
+        assert accepted.status_code == 201, accepted.text
+        assert len(store.uploads) == 1
+    finally:
+        reset_embedding_contract_gate()
+
+
+@pytest.mark.parametrize(
+    "foreign,mime_type,size,expected",
+    [
+        (True, "audio/mpeg", 1, 404),
+        (False, "text/html", 1, 415),
+        (False, "audio/mpeg", 0, 422),
+        (False, "audio/mpeg", 6 * 1024**3, 413),
+    ],
+)
+async def test_direct_upload_contract_gate_preserves_ownership_and_input_checks(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    store: FakeMultipartStore,
+    foreign: bool,
+    mime_type: str,
+    size: int,
+    expected: int,
+) -> None:
+    from app.ingestion.contract import (
+        mark_embedding_contract_invalid,
+        reset_embedding_contract_gate,
+    )
+
+    seeded: Seeded = sessionmaker.seeded  # type: ignore[attr-defined]
+    token = await login(client, "alice@a.test")
+    mark_embedding_contract_invalid("embedding_dimension_mismatch")
+    try:
+        response = await client.post(
+            "/api/v2/document-uploads",
+            headers=auth(token),
+            json={
+                "collection_id": str(seeded.collection_b if foreign else seeded.collection_a),
+                "filename": "meeting.mp3" if mime_type == "audio/mpeg" else "file.html",
+                "mime_type": mime_type,
+                "size_bytes": size,
+            },
+        )
+        assert response.status_code == expected, response.text
+        assert not store.uploads
+    finally:
+        reset_embedding_contract_gate()
+
+
 async def upload_rejection_audits(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> list[models.AuditEvent]:

@@ -66,7 +66,7 @@ async def _poll_all(settings: Settings) -> int:
 
 
 async def _sweep_stranded(settings: Settings) -> int:
-    """Re-drive uploaded or connector documents stranded pre-ingestion.
+    """Re-drive ingestion for any document stranded pre-ingestion.
 
     The recovery for the post-commit publish window: the document is durable,
     then ingestion is enqueued. A crash/broker fault in between leaves a
@@ -81,20 +81,23 @@ async def _sweep_stranded(settings: Settings) -> int:
     cutoff = datetime.now(UTC) - timedelta(minutes=settings.connector_ingest_recovery_minutes)
     async with session_scope() as session:
         await bind_bypass(session)
-        stranded = await SourceReconcileRepository(session).list_stranded_documents(
+        stranded = await SourceReconcileRepository(session).reserve_stranded_ingestion_documents(
             older_than=cutoff, limit=settings.connector_ingest_recovery_batch
         )
 
-    for tenant_id, document_id, kind in stranded:
-        enqueue_ingestion(
-            tenant_id,
-            document_id,
-            media=kind in {DocumentKind.AUDIO, DocumentKind.VIDEO},
-        )
+    for tenant_id, document_id, _status, kind in stranded:
+        if kind in {DocumentKind.AUDIO, DocumentKind.VIDEO}:
+            enqueue_ingestion(tenant_id, document_id, media=True)
+        else:
+            enqueue_ingestion(tenant_id, document_id)
     if stranded:
+        pending = sum(1 for _tid, _did, state, _kind in stranded if state.value == "pending")
+        processing = len(stranded) - pending
         log.warning(
-            "connector_poll.stranded_documents_redriven",
+            "ingestion.stranded_documents_redriven",
             count=len(stranded),
+            pending_count=pending,
+            processing_count=processing,
             older_than_minutes=settings.connector_ingest_recovery_minutes,
         )
     return len(stranded)
