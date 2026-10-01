@@ -323,6 +323,102 @@ async def test_get_document_invalid_id_is_a_bad_args_rejection(
     assert "invalid" in result.content.lower()
 
 
+async def test_get_document_long_text_returns_bounded_range_and_truncation_metadata(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    """A roomy document read returns the 2400-char context prefix with explicit bounds."""
+    session, world = session_and_world
+    text = "x" * 3000
+    document_id = await _doc(session, world.tenant_a, world.alice, "long.txt", text)
+    await session.commit()
+
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(document_id)},
+    )
+
+    assert result.ok is True
+    assert result.payload["returned_range"] == [0, 2400]
+    assert result.payload["total_length"] == 3000
+    assert result.payload["truncated"] is True
+    assert "x" * 2400 in result.content
+    assert "truncated" in result.content.lower()
+    assert "search_text" in result.content
+
+
+async def test_get_document_long_text_obeys_tight_context_budget(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    text = "y" * 3000
+    document_id = await _doc(session, world.tenant_a, world.alice, "tight.txt", text)
+    await session.commit()
+    ctx = ToolContext(
+        principal=_principal(world.alice, world.tenant_a),
+        retrieval=RetrievalService(session, gateway=_FakeGateway()),  # type: ignore[arg-type]
+        collection_ids=None,
+        snippet_budget=300,
+    )
+
+    result = await get_tool("get_document").handler({"document_id": str(document_id)}, ctx)
+
+    assert result.ok is True
+    assert result.payload["returned_range"] == [0, 1200]
+    assert result.payload["total_length"] == 3000
+    assert result.payload["truncated"] is True
+    assert "y" * 1200 in result.content
+    assert "truncated" in result.content.lower()
+    assert "search_text" in result.content
+
+
+async def test_get_document_short_text_has_exact_range_and_no_truncation(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    document_id = await _doc(session, world.tenant_a, world.alice, "short.txt", "short body")
+    await session.commit()
+
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(document_id)},
+    )
+
+    assert result.ok is True
+    assert result.payload["returned_range"] == [0, len("short body")]
+    assert result.payload["total_length"] == len("short body")
+    assert result.payload["truncated"] is False
+    assert "truncated" not in result.content.lower()
+
+
+async def test_get_document_forbidden_response_discloses_no_length_or_range(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    private_text = "z" * 3000
+    private_document_id = await _doc(
+        session, world.tenant_a, world.bob, "private-long.txt", private_text
+    )
+    await session.commit()
+
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(private_document_id)},
+    )
+
+    assert result.ok is True
+    assert "not found" in result.content.lower()
+    assert "total_length" not in result.payload
+    assert "returned_range" not in result.payload
+    assert "3000" not in result.content
+    assert "range" not in result.content.lower()
+
+
 class _RecordingRetrieval:
     """A retrieval stand-in that records the ``k`` each tool passes through."""
 
