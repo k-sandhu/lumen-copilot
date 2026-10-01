@@ -97,6 +97,7 @@ def test_rest_citation_projections_redact_media_provenance_defensively() -> None
         "char_start": 120,
         "char_end": 143,
         "score": 0.91,
+        "handle": None,
         "time_start_ms": 61_250,
         "time_end_ms": 64_900,
         "transcript_segment_id": segment_id,
