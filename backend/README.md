@@ -13,7 +13,10 @@ docker compose up --build
 ```
 
 Brings up Postgres+pgvector, Redis, MinIO, the backend (web), and a Celery
-worker. On boot the backend runs `alembic upgrade head` (enables the `vector`
+worker. The worker image includes pinned FFmpeg/ffprobe for audio validation and
+video-audio extraction. Browser uploads use signed multipart URLs and browser
+media playback uses signed Range GETs, so large file bytes do not pass through
+FastAPI. On boot the backend runs `alembic upgrade head` (enables the `vector`
 extension) then serves. Verify:
 
 - Liveness: `GET http://localhost:47181/health` → `200 {"status":"ok",...}`

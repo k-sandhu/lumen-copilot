@@ -49,6 +49,25 @@ class DocumentStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class DocumentKind(str, enum.Enum):
+    """Processing/viewer family for an uploaded object (spec 0008)."""
+
+    DOCUMENT = "document"
+    AUDIO = "audio"
+    VIDEO = "video"
+
+
+class DocumentUploadState(str, enum.Enum):
+    """Durable direct-multipart state machine (spec 0008 §2)."""
+
+    INITIATED = "initiated"
+    COMPLETING = "completing"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+    EXPIRED = "expired"
+    FAILED = "failed"
+
+
 class SourceStatus(str, enum.Enum):
     """Connector sync lifecycle (contracts/openapi.yaml SourceStatus, ADR-0009 §4).
 
@@ -734,6 +753,87 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    kind: DocumentKind = DocumentKind.DOCUMENT
+    duration_ms: int | None = None
+    transcript_language: str | None = None
+    transcription_model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentUpload:
+    """Server-private direct-multipart session.
+
+    ``provider_upload_id`` and ``storage_key`` deliberately exist only on this
+    domain/persistence object; wire projections omit both (spec 0008 §2/§6).
+    """
+
+    id: UUID
+    tenant_id: UUID
+    document_id: UUID
+    owner_id: UUID
+    collection_id: UUID
+    filename: str
+    mime_type: str
+    size_bytes: int
+    storage_key: str
+    provider_upload_id: str
+    state: DocumentUploadState
+    part_size_bytes: int
+    part_count: int
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    last_modified_at: datetime | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSpeaker:
+    """One file-local diarizer identity and optional contextual name."""
+
+    id: UUID
+    tenant_id: UUID
+    document_id: UUID
+    speaker_id: str
+    display_name: str | None
+    name_status: str
+    name_confidence: float | None
+    name_method: str | None
+    evidence_segment_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSegment:
+    """One ordered diarized turn on the original media timeline."""
+
+    id: UUID
+    tenant_id: UUID
+    document_id: UUID
+    ordinal: int
+    speaker_id: str
+    start_ms: int
+    end_ms: int
+    char_start: int
+    char_end: int
+    text: str
+    confidence: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionCheckpoint:
+    """Paid, normalized provider-chunk output persisted before embedding."""
+
+    id: UUID
+    tenant_id: UUID
+    document_id: UUID
+    chunk_index: int
+    model: str
+    start_ms: int
+    end_ms: int
+    language: str | None
+    words: tuple[dict[str, object], ...]
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -954,6 +1054,11 @@ class Chunk:
     char_start: int
     char_end: int
     created_at: datetime
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,6 +1166,11 @@ class Citation:
     char_end: int
     score: float | None
     created_at: datetime
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

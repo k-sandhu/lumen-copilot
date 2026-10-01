@@ -19,6 +19,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Citation, Run } from '@/api';
 import { MarkdownView } from '@/lib/markdown';
+import { validMediaTimeSpan } from '@/lib/mediaTime';
 import { CitationChip, Icon, RetrievalTrace, SourceInspector, StatusDot } from '@/ui';
 import { useRun } from '../model/queries';
 import {
@@ -29,14 +30,10 @@ import {
   isFailureOrEscalation,
   isTerminal,
 } from '../model/presentation';
-import {
-  assembleAnswer,
-  citationToPassage,
-  toTranscript,
-  traceSummary,
-} from '../model/transcript';
+import { assembleAnswer, citationToPassage, toTranscript, traceSummary } from '../model/transcript';
 import { EscalationActions } from './EscalationActions';
 import { ErrorState, SkeletonRows } from './StateViews';
+import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
 
 export function RunDetail({ runId }: { runId: string }) {
   const query = useRun(runId);
@@ -71,6 +68,9 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
   const transcript = useMemo(() => toTranscript(run.steps), [run.steps]);
   const citations = run.citations ?? [];
   const flagged = isFailureOrEscalation(run.status);
+  const selectedMediaSpan = selected
+    ? validMediaTimeSpan(selected.time_start_ms, selected.time_end_ms)
+    : null;
 
   const outputsText = useMemo(() => {
     if (!run.outputs || Object.keys(run.outputs).length === 0) return null;
@@ -109,7 +109,10 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
                 {TRIGGER_LABEL[run.trigger]}
               </span>
               {live ? (
-                <span className="inline-flex items-center gap-1 text-xs text-foreground-muted" aria-live="polite">
+                <span
+                  className="inline-flex items-center gap-1 text-xs text-foreground-muted"
+                  aria-live="polite"
+                >
                   <StatusDot tone="sync" title="Live" />
                   Updating…
                 </span>
@@ -131,9 +134,13 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
                   : 'space-y-1 rounded-lg border border-warn/50 bg-warn/10 p-4'
               }
             >
-              <p className={`flex items-center gap-1.5 text-sm font-semibold ${run.status === 'failed' ? 'text-danger' : 'text-warn'}`}>
+              <p
+                className={`flex items-center gap-1.5 text-sm font-semibold ${run.status === 'failed' ? 'text-danger' : 'text-warn'}`}
+              >
                 <Icon name="alert-triangle" className="shrink-0" />
-                {run.status === 'failed' ? 'This run failed' : 'This run was escalated — it needs a human'}
+                {run.status === 'failed'
+                  ? 'This run failed'
+                  : 'This run was escalated — it needs a human'}
               </p>
               {run.error ? (
                 <>
@@ -141,7 +148,9 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
                   <p className="font-mono text-xs text-foreground-muted">code: {run.error.code}</p>
                 </>
               ) : (
-                <p className="text-sm text-foreground-muted">No reason was recorded for this run.</p>
+                <p className="text-sm text-foreground-muted">
+                  No reason was recorded for this run.
+                </p>
               )}
               {/* The human handoff (E7-5, #239) — resume / cancel / reroute the escalated run. */}
               {run.status === 'escalated' ? <EscalationActions run={run} /> : null}
@@ -182,15 +191,19 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
             {citations.length > 0 ? (
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <span className="text-xs text-foreground-muted">Citations:</span>
-                {citations.map((c, i) => (
-                  <CitationChip
-                    key={c.id}
-                    index={i + 1}
-                    sourceTitle={c.document_name}
-                    active={selected?.id === c.id}
-                    onClick={() => setSelected(c)}
-                  />
-                ))}
+                {citations.map((c, i) => {
+                  const span = validMediaTimeSpan(c.time_start_ms, c.time_end_ms);
+                  return (
+                    <CitationChip
+                      key={c.id}
+                      index={i + 1}
+                      sourceTitle={c.document_name}
+                      {...(span ? { timeStartMs: span.startMs } : {})}
+                      active={selected?.id === c.id}
+                      onClick={() => setSelected(c)}
+                    />
+                  );
+                })}
               </div>
             ) : null}
           </section>
@@ -221,11 +234,22 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
       <aside className="hidden min-h-0 overflow-y-auto border-l border-border bg-surface lg:block">
         <div className="p-4">
           {selected ? (
-            <SourceInspector
-              title={selected.document_name}
-              passage={citationToPassage(selected)}
-              onClose={() => setSelected(null)}
-            />
+            <>
+              <SourceInspector
+                title={selected.document_name}
+                passage={citationToPassage(selected)}
+                onClose={() => setSelected(null)}
+              />
+              {selectedMediaSpan ? (
+                <div className="mt-3 h-[28rem] overflow-hidden rounded-md border border-border">
+                  <DocumentPreviewBody
+                    documentId={selected.document_id}
+                    filename={selected.document_name}
+                    initialTimeMs={selectedMediaSpan.startMs}
+                  />
+                </div>
+              ) : null}
+            </>
           ) : (
             <div className="lc-state">
               <Icon name="file-text" />
@@ -243,6 +267,15 @@ function RunBody({ run, live }: { run: Run; live: boolean }) {
             passage={citationToPassage(selected)}
             onClose={() => setSelected(null)}
           />
+          {selectedMediaSpan ? (
+            <div className="mt-3 h-[28rem] overflow-hidden rounded-md border border-border">
+              <DocumentPreviewBody
+                documentId={selected.document_id}
+                filename={selected.document_name}
+                initialTimeMs={selectedMediaSpan.startMs}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

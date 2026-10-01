@@ -53,7 +53,9 @@ Feature (`features/search`):
   un-retrievable (un-verifiable) citation (spec 0004 INV-3).
 - `components/SearchResultRow.tsx` — one ranked result built from the kit: source
   glyph, `<mark>`-highlighted snippet, why-it-matched rationale, owner,
-  `FreshnessPill` (amber when stale), `PermissionPill`.
+  `FreshnessPill` (amber when stale), `PermissionPill`, and a media timestamp when
+  the result carries one. Result/citation activation opens the shared signed player
+  at that timestamp without autoplay.
 - `components/TrimNotice.tsx` — "N results hidden — you don't have access" from
   `hidden_count`; renders nothing when nothing was hidden.
 - `components/SearchScreen.tsx` — the feature root; composes a page head + the
@@ -99,7 +101,7 @@ coherent:
   would leave a **visible answer with dropped / literal citations** (an uncited
   answer — spec 0004 INV-3, #118). Routing `type` through the server keeps the
   answer's citations always resolvable to a present, visible row.
-- The type facet's *values* are still derived from the data (never a hardcoded list
+- The type facet's _values_ are still derived from the data (never a hardcoded list
   the backend can't serve), so a faceted type can never imply content the MVP
   doesn't index. As with the source facet, selecting a type collapses the facet to
   that type; the always-present "Any type" reset row clears it.
@@ -110,9 +112,8 @@ the `ResultSource` enum and the MVP backend can't serve them.
 
 ## Out of scope (#84 / #118)
 
-Pagination UI (the contract exposes `next_cursor`; an infinite/"load more" affordance
-lands when result volume warrants it), and click-through navigation into a result's
-source document (the `document_id` deep link lands with the documents-viewer wiring).
+Search-result pagination UI (the contract exposes `next_cursor`; an infinite/"load
+more" affordance lands when result volume warrants it).
 
 ## Wiring up with the live BE
 
