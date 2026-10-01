@@ -51,6 +51,8 @@ docker compose exec backend python -m app.auth.seed   # dev user: dev@acme.test 
 
 Then open the app at **http://localhost:47180** (API docs at http://localhost:47181/docs). LLM calls route through OpenRouter — export `OPENROUTER_API_KEY` in your shell or set it in `.env`; everything else runs with the shipped local-dev defaults.
 
+For faster day-to-day Docker use, run `docker compose -f docker-compose.yml -f docker-compose.fast.yml up -d --build`. This serves the built frontend, removes application source mounts and reload watchers, and caps Celery at two workers while retaining the existing data volumes. See the [fast local Docker runbook](docs/runbooks/fast-local-docker.md) for switching an existing stack, rebuilding after edits, and returning to development mode.
+
 Sandboxed code execution is off by default and gated behind a compose profile: `docker compose --profile sandbox up --build` builds and starts the in-repo `sandbox-runner`. Each chat gets one reusable, offline container; approved packages and workspace files persist until reset/close. Model code runs as root inside that container, but receives no host mounts, Docker socket, application secrets, or network route. The default stack runs fully without the runner.
 
 ## Evaluation & tests
