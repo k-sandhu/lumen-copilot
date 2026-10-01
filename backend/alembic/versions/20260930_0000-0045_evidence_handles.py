@@ -6,8 +6,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0044_evidence_handles"
-down_revision = "0043_code_run_resolved_packages"
+revision = "0045_evidence_handles"
+down_revision = "0044_direct_media_uploads"
 branch_labels = None
 depends_on = None
 

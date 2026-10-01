@@ -44,6 +44,17 @@ All slow or burst-y work — document parsing, chunking, embedding, connector sy
 ### 7. LLM access — LiteLLM gateway, OpenRouter first
 All model calls (chat, streaming, embeddings, tool-calling) go through **LiteLLM** as the provider gateway, configured with **OpenRouter** as the first provider. LiteLLM gives provider-agnosticism out of the box; OpenRouter gives breadth of models on day one. This is confined to **one backend module** (`app/llm/`, [ADR-0004](0004-architecture-boundaries-and-adapters.md)) — the only place in the system that speaks to a model — so swapping LiteLLM itself, or pointing it at direct providers / a self-hosted model, is a localized change. Detailed gateway design (routing, fallback, cost/limits, caching) is CC-9 [#25].
 
+**Amendment (2026-08-11, [ADR-0023](0023-direct-media-ingestion.md), #571):**
+the sponsor-required OpenRouter speech-to-text route needs provider word timestamps
+and speaker diarization that LiteLLM does not currently expose for OpenRouter.
+Only `app/llm/openrouter_stt.py` may therefore call that OpenRouter transcription
+endpoint with HTTP directly, behind the same provider-neutral `app/llm/`
+chokepoint and a live conformance gate. Chat, streaming, embeddings, tool calls,
+and contextual speaker-name reasoning remain on LiteLLM. The exception disappears
+when LiteLLM demonstrably round-trips those fields; it cannot expand without a new
+ADR. This records the explicit user directive to use a suitable OpenRouter audio
+model while preserving the one-module/provider-neutral invariant.
+
 ### 8. Realtime — WebSocket streaming
 Token streaming uses **WebSocket** (FastAPI native) on the request-serving async path for lowest latency, fanned via the Redis backplane (§4). Client disconnect cancels generation; per-tenant rate limits sit at the gateway. Request/response APIs stay REST (auto-emitted OpenAPI); only streaming uses WS.
 

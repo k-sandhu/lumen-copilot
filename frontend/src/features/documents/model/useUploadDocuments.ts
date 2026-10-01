@@ -1,67 +1,114 @@
-/**
- * Upload orchestration hook (#49 AC-2/AC-4). Bridges the `uploadDocument` api/
- * call to the ephemeral upload store: registers an entry per file, streams
- * progress into it, and on completion either marks success (and refreshes the
- * server document list so the new pending→…→ready row appears) or marks a
- * clear inline error for 413 / 415 / 422 / 404 / network (INV-8 / AC-4).
- *
- * Files are uploaded concurrently; each is independent so one failure never
- * stalls the rest.
- */
+/** React bridge for the bounded direct multipart manager (spec 0008 / #571). */
 import { useCallback } from 'react';
-import { ApiError, uploadDocument } from '@/api';
-import { useUploadStore } from './uploadStore';
+import { ApiError, DirectUploadError, documentUploadManager } from '@/api';
+import { isCancellableUpload, useUploadStore } from './uploadStore';
 import { useRefreshDocuments } from './queries';
 
-/** Map a failed upload to a clear, user-facing message (no leaking internals). */
+const controllers = new Map<string, AbortController>();
+
+/** Map a failed control/storage operation to a clear, non-provider-leaking message. */
 export function uploadErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    switch (error.status) {
+  const cause = error instanceof DirectUploadError ? error.causeValue : error;
+  if (cause instanceof ApiError) {
+    switch (cause.status) {
       case 413:
-        return error.problem?.detail ?? 'File is too large to upload.';
+        return cause.problem?.detail ?? 'File is too large to upload.';
       case 415:
-        return error.problem?.detail ?? 'This file type isn’t supported.';
+        return cause.problem?.detail ?? 'This file type isn’t supported.';
       case 422:
-        return error.problem?.detail ?? 'The file couldn’t be accepted.';
+        return cause.problem?.detail ?? 'The file couldn’t be accepted.';
       case 404:
-        return 'That collection no longer exists.';
+        return 'That collection or upload session is no longer available.';
+      case 409:
+        return cause.problem?.detail ?? 'This upload can’t continue in its current state.';
       case 401:
         return 'Your session expired — sign in again to upload.';
       case 0:
         return 'Upload failed — check your connection and try again.';
       default:
-        return error.displayMessage || 'Upload failed.';
+        return cause.displayMessage || 'Upload failed.';
     }
   }
-  return 'Upload failed.';
+  return 'Upload failed — check your connection and try again.';
 }
 
-export function useUploadDocuments(collectionId: string | undefined) {
-  const add = useUploadStore((s) => s.add);
-  const setProgress = useUploadStore((s) => s.setProgress);
-  const markSuccess = useUploadStore((s) => s.markSuccess);
-  const markError = useUploadStore((s) => s.markError);
+export interface UploadDocumentsActions {
+  start: (files: File[]) => void;
+  cancel: (uploadEntryId: string) => void;
+  retry: (uploadEntryId: string) => void;
+}
+
+export function useUploadDocuments(collectionId: string | undefined): UploadDocumentsActions {
+  const add = useUploadStore((state) => state.add);
+  const setProgress = useUploadStore((state) => state.setProgress);
+  const setSession = useUploadStore((state) => state.setSession);
+  const markSuccess = useUploadStore((state) => state.markSuccess);
+  const markError = useUploadStore((state) => state.markError);
+  const markCancelled = useUploadStore((state) => state.markCancelled);
+  const prepareRetry = useUploadStore((state) => state.prepareRetry);
   const refreshDocuments = useRefreshDocuments();
 
-  return useCallback(
+  const run = useCallback(
+    (entryId: string, file: File, targetCollectionId: string, resumeUploadId?: string) => {
+      const controller = new AbortController();
+      controllers.set(entryId, controller);
+      void documentUploadManager
+        .upload({
+          file,
+          collectionId: targetCollectionId,
+          ...(resumeUploadId ? { resumeUploadId } : {}),
+          signal: controller.signal,
+          onProgress: (progress) => setProgress(entryId, progress),
+          onSession: (session) => setSession(entryId, session.id),
+        })
+        .then((document) => {
+          markSuccess(entryId, document.id);
+          refreshDocuments();
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DirectUploadError && error.cancelled) {
+            markCancelled(entryId);
+            return;
+          }
+          markError(
+            entryId,
+            uploadErrorMessage(error),
+            error instanceof DirectUploadError ? error.uploadId : undefined,
+          );
+        })
+        .finally(() => {
+          if (controllers.get(entryId) === controller) controllers.delete(entryId);
+        });
+    },
+    [markCancelled, markError, markSuccess, refreshDocuments, setProgress, setSession],
+  );
+
+  const start = useCallback(
     (files: File[]) => {
       if (!collectionId) return;
       for (const file of files) {
-        const id = add(file.name, collectionId);
-        uploadDocument({
-          file,
-          collectionId,
-          onProgress: (fraction) => setProgress(id, fraction),
-        })
-          .then((doc) => {
-            markSuccess(id, doc.id);
-            refreshDocuments();
-          })
-          .catch((error: unknown) => {
-            markError(id, uploadErrorMessage(error));
-          });
+        const entryId = add(file, collectionId);
+        run(entryId, file, collectionId);
       }
     },
-    [collectionId, add, setProgress, markSuccess, markError, refreshDocuments],
+    [add, collectionId, run],
   );
+
+  const cancel = useCallback((entryId: string) => {
+    const entry = useUploadStore.getState().uploads[entryId];
+    if (!entry || !isCancellableUpload(entry.state)) return;
+    controllers.get(entryId)?.abort();
+  }, []);
+
+  const retry = useCallback(
+    (entryId: string) => {
+      const entry = useUploadStore.getState().uploads[entryId];
+      if (!entry?.file || (entry.state !== 'error' && entry.state !== 'cancelled')) return;
+      prepareRetry(entryId);
+      run(entryId, entry.file, entry.collectionId, entry.uploadId);
+    },
+    [prepareRetry, run],
+  );
+
+  return { start, cancel, retry };
 }

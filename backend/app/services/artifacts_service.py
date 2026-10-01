@@ -35,7 +35,7 @@ visibility to explicit grants is a deliberate follow-up; :meth:`_visible` is the
 single chokepoint that widening would extend.)
 
 **Validation (#208 AC-2).** The declared content-type and byte size are checked
-against the **artifact** allowlist/cap (broader than uploads; ``MAX_ARTIFACT_BYTES``
+against the **artifact** allowlist/cap (distinct from uploads; ``MAX_ARTIFACT_BYTES``
 / ``ARTIFACT_ALLOWED_CONTENT_TYPES``) via the storage ``validate_upload`` (the
 single owner of those rules) — a rejection is a typed ``ValidationError`` (422),
 raised **before** any bytes are stored or any row is written.
@@ -229,7 +229,7 @@ class ArtifactsService:
         Order matters for fail-closed correctness:
 
         1. **Validate** the declared content-type + size against the artifact
-           allowlist/cap (broader than uploads) — a rejection is a 422
+           allowlist/cap (distinct from uploads) — a rejection is a 422
            ``ValidationError`` raised **before** any bytes touch storage (AC-2).
         2. **Store** the bytes via the #22 ``ObjectStore.put_artifact``
            (tenant-prefixed, content-addressed under ``artifacts/``) — the only

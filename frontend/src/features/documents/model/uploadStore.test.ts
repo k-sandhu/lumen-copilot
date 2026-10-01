@@ -14,12 +14,12 @@ function reset() {
 beforeEach(reset);
 
 describe('uploadStore', () => {
-  it('adds an upload in the uploading state at 0 progress', () => {
+  it('adds an upload in the bounded queue at 0 progress', () => {
     const id = useUploadStore.getState().add('msa.pdf', 'col-1');
     const u = useUploadStore.getState().uploads[id];
     expect(u?.filename).toBe('msa.pdf');
     expect(u?.collectionId).toBe('col-1');
-    expect(u?.state).toBe('uploading');
+    expect(u?.state).toBe('queued');
     expect(u?.progress).toBe(0);
   });
 
@@ -46,6 +46,14 @@ describe('uploadStore', () => {
     expect(u?.error).toMatch(/25 MB/);
   });
 
+  it('clears a stale terminal session id when the error is not resumable', () => {
+    const id = useUploadStore.getState().add('meeting.mp3', 'col-1');
+    useUploadStore.getState().setSession(id, 'expired-upload');
+    useUploadStore.getState().markError(id, 'Upload expired.');
+
+    expect(useUploadStore.getState().uploads[id]?.uploadId).toBeUndefined();
+  });
+
   it('removes / dismisses an entry', () => {
     const id = useUploadStore.getState().add('a.pdf', 'col-1');
     useUploadStore.getState().remove(id);
@@ -63,7 +71,7 @@ describe('uploadStore', () => {
     const { uploads } = useUploadStore.getState();
     expect(uploads[a]).toBeUndefined();
     expect(uploads[b]).toBeUndefined();
-    expect(uploads[c]?.state).toBe('uploading');
+    expect(uploads[c]?.state).toBe('queued');
   });
 
   it('lists uploads for a given collection only', () => {

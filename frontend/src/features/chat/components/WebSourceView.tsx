@@ -1,8 +1,8 @@
 /**
  * Web-citation click-through target (#221, epic E3-12). A web citation resolves
  * to a PUBLIC web page — not a corpus document — so it never goes through the
- * document-bytes viewer (which fetches `GET /documents/{id}/content` and would
- * 404 for a web result that has no `document_id`, INV-3). Instead this pane shows
+ * uploaded-document viewer (which requires a permission-checked document id and
+ * would 404 for a web result with none, INV-3). Instead this pane shows
  * the cited snippet via the kit SourceInspector in its web variant (globe +
  * host), and an external-link affordance that opens the page in a new tab with
  * `rel="noopener noreferrer"` — the safe, distinct rendering AC-2 requires.

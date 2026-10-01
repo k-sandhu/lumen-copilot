@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from copy import deepcopy
 from uuid import UUID
@@ -49,17 +50,30 @@ class EvidenceHandles:
         return handle
 
     def passage(self, passage: RetrievedPassage) -> str:
-        return self._issue(
-            "S",
-            {
-                "kind": "passage",
-                "document_id": str(passage.document_id),
-                "chunk_id": str(passage.chunk_id),
-                "char_start": passage.char_start,
-                "char_end": passage.char_end,
-                "fingerprint": hashlib.sha256(passage.text.encode()).hexdigest(),
-            },
-        )
+        entry: dict[str, object] = {
+            "kind": "passage",
+            "document_id": str(passage.document_id),
+            "chunk_id": str(passage.chunk_id),
+            "char_start": passage.char_start,
+            "char_end": passage.char_end,
+            "fingerprint": hashlib.sha256(passage.text.encode()).hexdigest(),
+        }
+        provenance = {
+            "time_start_ms": passage.time_start_ms,
+            "time_end_ms": passage.time_end_ms,
+            "transcript_segment_id": (
+                str(passage.transcript_segment_id)
+                if passage.transcript_segment_id is not None
+                else None
+            ),
+            "speaker_id": passage.speaker_id,
+            "speaker_name": passage.speaker_name,
+        }
+        if any(value is not None for value in provenance.values()):
+            entry["provenance_fingerprint"] = hashlib.sha256(
+                json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        return self._issue("S", entry)
 
     def document(self, document_id: UUID) -> str:
         return self._issue("D", {"kind": "document", "document_id": str(document_id)})

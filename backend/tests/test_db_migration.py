@@ -87,9 +87,15 @@ _ALL_TABLES = _MVP_TABLES | {
     # was modelled wide from the start.
     "groups",
     "group_members",
-    # 0044, #436 — durable conversation evidence identities + web citations.
+    # 0045, #436 — durable conversation evidence identities + web citations.
     "source_handles",
     "web_citations",
+    # 0044, issue #571 — direct multipart control-plane state and durable,
+    # timestamped media transcription provenance.
+    "document_uploads",
+    "transcript_speakers",
+    "transcript_segments",
+    "transcription_checkpoints",
 }
 
 
@@ -130,7 +136,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0044_evidence_handles"]
+    assert list(script.get_heads()) == ["0045_evidence_handles"]
     mvp = script.get_revision("0002_mvp_schema")
     assert mvp is not None
     assert mvp.down_revision == "0001_enable_pgvector"
@@ -233,19 +239,22 @@ def test_migration_chain_is_linear_single_head() -> None:
     gdrive_acl = script.get_revision("0040_gdrive_acl")
     assert gdrive_acl is not None
     assert gdrive_acl.down_revision == "0039_connector_oauth"
-    evidence_handles = script.get_revision("0044_evidence_handles")
+    direct_media = script.get_revision("0044_direct_media_uploads")
+    assert direct_media is not None
+    assert direct_media.down_revision == "0043_code_run_resolved_packages"
+    evidence_handles = script.get_revision("0045_evidence_handles")
     assert evidence_handles is not None
-    assert evidence_handles.down_revision == "0043_code_run_resolved_packages"
+    assert evidence_handles.down_revision == "0044_direct_media_uploads"
 
 
 def test_offline_evidence_handles_migration_round_trips(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """0044 adds durable identity and selected citation storage with RLS."""
+    """0045 adds durable identity and selected citation storage with RLS."""
     from alembic import command
 
     cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
-    command.upgrade(cfg, "0043_code_run_resolved_packages:0044_evidence_handles", sql=True)
+    command.upgrade(cfg, "0044_direct_media_uploads:0045_evidence_handles", sql=True)
     up = capsys.readouterr().out.lower()
 
     assert "alter table chat_sessions add column handle_next integer default '1' not null" in up
@@ -262,7 +271,7 @@ def test_offline_evidence_handles_migration_round_trips(
         assert f"alter table {table} force row level security" in up
         assert f"create policy rls_{table}" in up
 
-    command.downgrade(cfg, "0044_evidence_handles:0043_code_run_resolved_packages", sql=True)
+    command.downgrade(cfg, "0045_evidence_handles:0044_direct_media_uploads", sql=True)
     down = capsys.readouterr().out.lower()
     assert "drop table web_citations" in down
     assert "drop table source_handles" in down
@@ -1445,3 +1454,58 @@ def test_offline_gdrive_acl_migration_drops_the_mode_default(
     assert "drop index uq_documents_source_external_id" in down
     assert "alter table documents drop column acl_enforced" in down
     assert "alter table sources drop column acl_resync_required" in down
+
+
+def test_offline_direct_media_upload_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0044 freezes direct-upload state and citable media provenance (#571)."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0043_code_run_resolved_packages:0044_direct_media_uploads", sql=True)
+    up = capsys.readouterr().out.lower()
+
+    for table in (
+        "document_uploads",
+        "transcript_speakers",
+        "transcript_segments",
+        "transcription_checkpoints",
+    ):
+        assert f"create table {table}" in up
+        assert f"alter table {table} enable row level security" in up
+        assert f"alter table {table} force row level security" in up
+        assert f"create policy rls_{table} on {table}" in up
+    assert "alter table documents alter column size_bytes type bigint" in up
+    assert "alter table documents add column kind" in up
+    assert "alter table documents add column duration_ms" in up
+    assert "alter table chunks add column time_start_ms" in up
+    assert "alter table chunks add column time_end_ms" in up
+    assert "alter table citations add column time_start_ms" in up
+    assert "alter table citations add column time_end_ms" in up
+    assert "ck_chunks_time_span" in up
+    assert "ck_citations_time_span" in up
+    assert "uq_transcript_segments_id_document" in up
+    assert "uq_chunks_id_transcript_segment" in up
+    assert "fk_chunks_transcript_segment_document" in up
+    assert "fk_citations_chunk_transcript_segment" in up
+
+    command.downgrade(
+        cfg,
+        "0044_direct_media_uploads:0043_code_run_resolved_packages",
+        sql=True,
+    )
+    down = capsys.readouterr().out.lower()
+    for table in (
+        "document_uploads",
+        "transcript_speakers",
+        "transcript_segments",
+        "transcription_checkpoints",
+    ):
+        assert f"drop policy if exists rls_{table} on {table}" in down
+        assert f"drop table {table}" in down
+    assert "alter table documents drop column kind" in down
+    assert "alter table chunks drop column time_start_ms" in down
+    assert "alter table citations drop column time_end_ms" in down
+    assert "drop constraint fk_chunks_transcript_segment_document" in down
+    assert "drop constraint fk_citations_chunk_transcript_segment" in down

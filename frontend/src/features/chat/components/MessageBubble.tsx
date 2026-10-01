@@ -30,6 +30,7 @@ import { AskUserOptions } from './AskUserOptions';
 import { StepTimeline } from './StepTimeline';
 import { CodeRunPanel } from '@/features/codeRuns';
 import { artifactHref } from '@/features/artifacts';
+import { formatMediaTimestamp } from '@/lib/mediaTime';
 import type { ToolActivity as ToolActivityItem, CodeRunActivity } from '../model/streamReducer';
 
 /** Per-source freshness, keyed by documentId, derived by the parent. */
@@ -283,22 +284,37 @@ function MessageBubbleComponent({
                               : `Cited passages from ${group.documentName}`
                           }
                         >
-                          {group.passages.map((p) => (
-                            <button
-                              key={p.citation.id}
-                              type="button"
-                              className="lc-source-row__num-btn"
-                              disabled={group.redacted}
-                              aria-label={
-                                group.redacted
-                                  ? `Citation ${p.number}: source no longer available`
-                                  : `Citation ${p.number}: ${group.documentName}`
-                              }
-                              onClick={() => onOpenCitation(p.citation, meta)}
-                            >
-                              {p.number}
-                            </button>
-                          ))}
+                          {group.passages.map((p) => {
+                            // Groups contain corpus citations. Keep this guard at
+                            // the display boundary so web evidence can never be
+                            // mistaken for a document/media source.
+                            if (p.citation.kind !== 'document') return null;
+                            return (
+                              <button
+                                key={p.citation.id}
+                                type="button"
+                                className="lc-source-row__num-btn"
+                                disabled={group.redacted}
+                                aria-label={
+                                  group.redacted
+                                    ? `Citation ${p.number}: source no longer available`
+                                    : `Citation ${p.number}: ${group.documentName}${
+                                        p.citation.timeStartMs !== undefined
+                                          ? ` at ${formatMediaTimestamp(p.citation.timeStartMs)}`
+                                          : ''
+                                      }`
+                                }
+                                onClick={() => onOpenCitation(p.citation, meta)}
+                              >
+                                {p.number}
+                                {p.citation.timeStartMs !== undefined ? (
+                                  <span className="ml-1 font-mono text-[0.65rem]">
+                                    · {formatMediaTimestamp(p.citation.timeStartMs)}
+                                  </span>
+                                ) : null}
+                              </button>
+                            );
+                          })}
                         </span>
                         {/* Honest by construction: the backend re-checks INV-2 on
                             every READ, not just when the citation was written

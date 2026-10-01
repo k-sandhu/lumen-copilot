@@ -122,6 +122,26 @@ describe('MessageBubble', () => {
     expect(screen.getByText('Web sources')).toBeInTheDocument();
   });
 
+  it('keeps timestamped corpus citations in the document strip beside separate web sources', async () => {
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    const media = { ...CITATION, handle: 'S1', timeStartMs: 12_500, timeEndMs: 18_000 };
+    render(
+      <MessageBubble
+        role="assistant"
+        content="Transcript [S1], public context [W1]."
+        citations={[media, WEB_CITATION]}
+        onOpenCitation={onOpen}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /citation 1: Q4 strategy\.pdf at 0:12/i }));
+    expect(onOpen).toHaveBeenCalledWith(media, undefined);
+    expect(screen.getByText('Web sources')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Web source: Latest AI regulations' }));
+    expect(onOpen).toHaveBeenCalledWith(WEB_CITATION);
+  });
+
   it('shows a FreshnessPill on a cited source when freshness is known (#89)', () => {
     render(
       <MessageBubble

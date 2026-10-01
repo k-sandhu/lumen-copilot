@@ -36,9 +36,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ValidationError
 from app.core.logging import get_logger
-from app.db.repositories import CollectionRepository, DocumentRepository
+from app.db.repositories import (
+    CollectionRepository,
+    DocumentRepository,
+    DocumentUploadRepository,
+)
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Collection
+from app.domain.entities import AuditOutcome, Collection, DocumentUploadState
 from app.services.audit import AuditSink
 from app.storage import ObjectStore
 
@@ -141,6 +145,7 @@ class CollectionsService:
         self._tenant_id = tenant_id
         self._repo = CollectionRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
+        self._uploads = DocumentUploadRepository(session, tenant_id)
         self._owner_id = owner_id
         self._object_store = object_store
         self._audit = audit
@@ -203,8 +208,7 @@ class CollectionsService:
         # and defaults to 0, exactly as the single-id count returns.
         document_counts = await self._repo.count_documents_for([c.id for c in page])
         items = [
-            CollectionView(collection=c, document_count=document_counts.get(c.id, 0))
-            for c in page
+            CollectionView(collection=c, document_count=document_counts.get(c.id, 0)) for c in page
         ]
         return CollectionPage(items=items, next_cursor=next_cursor)
 
@@ -265,15 +269,53 @@ class CollectionsService:
 
         The backing **object-store** bytes of the cascaded documents ARE removed
         here (#269) — the row+chunk cascade clears retrievable content, but the
-        content-addressed MinIO objects would otherwise be orphaned. Cleanup runs
-        after a ``flush`` and is guarded by ``count_by_storage_key``, so a
-        content-addressed object is deleted only once no surviving document (this
+        MinIO objects would otherwise be orphaned. Cleanup runs
+        after a ``flush`` and is guarded by ``count_by_storage_key``, so an
+        object is deleted only once no surviving document (this
         tenant) still references it; it is best-effort (a storage blip never fails
         the delete). Mirrors ``DocumentService.delete``.
         """
-        existing = await self._repo.get(collection_id)
+        # Serialize with direct-upload initiation, which holds this same row
+        # lock until its provider id and janitor row commit atomically.
+        existing = await self._repo.get(collection_id, lock=True)
         if existing is None or not self._owns(existing):
             return False
+        # The upload row cascades with the collection. Abort the provider-side
+        # resources under row locks first so that cascade can never silently
+        # erase the janitor's only handle to an incomplete multipart upload.
+        active_uploads = await self._uploads.list_active_for_collection(
+            collection_id, self._owner_id, lock=True
+        )
+        for upload in active_uploads:
+            await self._object_store.abort_multipart_upload(
+                tenant_id=str(self._tenant_id),
+                key=upload.storage_key,
+                provider_upload_id=upload.provider_upload_id,
+            )
+            # COMPLETING may already have crossed the irreversible provider
+            # boundary; DELETE is idempotent and prevents a completed orphan.
+            await self._object_store.delete(str(self._tenant_id), upload.storage_key)
+            await self._uploads.set_state(
+                upload.id,
+                self._owner_id,
+                DocumentUploadState.ABORTED,
+                error="collection_deleted",
+            )
+            await self._audit.emit(
+                action=AuditAction.DOCUMENT_UPLOAD_ABORTED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="document_upload",
+                resource_id=str(upload.id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "document_id": str(upload.document_id),
+                    "collection_id": str(collection_id),
+                    "reason": "collection_deleted",
+                },
+            )
+            await self._uploads.delete(upload.id, self._owner_id)
         # Enumerate the documents the cascade will remove *before* deleting, so
         # each can be individually audited (spec 0004 §2.4 ``document.deleted``).
         documents = await self._documents.list_in_collection(collection_id)
@@ -298,7 +340,7 @@ class CollectionsService:
 
         await self._session.flush()
         # Remove the backing objects of the cascaded documents — the row+chunk
-        # cascade above clears retrievable content but leaves the content-addressed
+        # cascade above clears retrievable content but leaves the stored
         # MinIO objects orphaned otherwise (#269). Best-effort + post-flush: a
         # storage blip must not fail the delete, and only an object no surviving
         # document (this tenant) still references is removed (shared-content guard).
