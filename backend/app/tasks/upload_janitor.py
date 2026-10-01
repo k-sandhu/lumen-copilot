@@ -68,6 +68,7 @@ def _recovery_service(
         sign_batch_size=settings.upload_sign_batch_size,
         session_ttl_seconds=settings.upload_session_ttl_seconds,
         presign_ttl_seconds=settings.s3_presign_ttl_seconds,
+        embedding_space_fingerprint=settings.embedding_space_fingerprint,
         audit_actor=AuditActor.system(),
     )
 

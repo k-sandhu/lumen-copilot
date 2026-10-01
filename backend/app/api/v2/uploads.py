@@ -136,6 +136,7 @@ def _service(
         sign_batch_size=settings.upload_sign_batch_size,
         session_ttl_seconds=settings.upload_session_ttl_seconds,
         presign_ttl_seconds=settings.s3_presign_ttl_seconds,
+        embedding_space_fingerprint=settings.embedding_space_fingerprint,
     )
 
 
@@ -220,6 +221,14 @@ async def initiate_upload(
     store: ObjectStoreDep,
     settings: SettingsDep,
 ) -> UploadSessionResponse:
+    """Initiate a tenant/owner-scoped metadata-only multipart upload.
+
+    After collection ownership and input validation, a known-invalid embedding
+    contract returns 503 before storage, upload-session, document, or enqueue
+    side effects. Rejections retain their durable audit evidence. Once the
+    request's configured embedding fingerprint is validated, admission resumes.
+    File bytes flow directly to storage through signed part URLs (spec 0008).
+    """
     service = _service(request, session, principal, tenant_id, make_audit_sink, store, settings)
     try:
         view = await service.initiate(

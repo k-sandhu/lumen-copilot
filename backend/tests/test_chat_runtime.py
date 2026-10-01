@@ -2514,6 +2514,7 @@ def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
     body = _hybrid_body(
         query_text="q",
         embedding=[0.1, 0.2],
+        embedding_fingerprint="f" * 64,
         allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
         k=5,
         document_ids=[doc],
@@ -2528,6 +2529,7 @@ def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
     unpinned = _hybrid_body(
         query_text="q",
         embedding=[0.1, 0.2],
+        embedding_fingerprint="f" * 64,
         allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
         k=5,
     )
@@ -5004,7 +5006,18 @@ async def test_rehydration_through_the_real_retrieval_service(ctx: _Ctx) -> None
     """#446 finding 8: the REAL RetrievalService (not a fake) enforces the
     owner-or-grant predicate on rehydration — the owner's own document
     hydrates; a document owned by NOBODY in the allow-set is stripped."""
+    from app.db.repositories import DocumentRepository
+    from app.domain.entities import DocumentStatus
     from app.retrieval import RetrievalService
+
+    # Real hydration is now intentionally Ready-only (R1-002). This fixture's
+    # default Pending document is not valid evidence until its ingestion state
+    # reflects a completed publication.
+    async with ctx.sessionmaker() as session:
+        await DocumentRepository(session, ctx.tenant_id).set_status(
+            ctx.document_id, DocumentStatus.READY
+        )
+        await session.commit()
 
     gateway = _RecordingScriptedGateway(
         [[StreamEvent(text="ok"), StreamEvent(finish_reason="stop")]]
