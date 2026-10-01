@@ -757,6 +757,8 @@ class Document:
     source_path: str | None = None
     source_modified_at: datetime | None = None
     discovery_metadata: dict[str, object] | None = None
+    ingestion_attempts: int = 0
+    ingestion_failure: dict[str, object] | None = None
     kind: DocumentKind = DocumentKind.DOCUMENT
     duration_ms: int | None = None
     transcript_language: str | None = None
@@ -1063,6 +1065,7 @@ class Chunk:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    embedding_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

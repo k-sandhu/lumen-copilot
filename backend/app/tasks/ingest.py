@@ -1,4 +1,4 @@
-"""Document/media Celery task — parse/transcribe → chunk → embed → persist.
+"""Document-ingestion Celery task — parse → chunk → embed → persist (CC-5 #21).
 
 The async ingestion pipeline that turns an uploaded document (left
 ``status=pending`` by #28) into retrievable, embedded chunks, and the thin
@@ -8,9 +8,8 @@ enqueues it at the seam (#28's ``TODO(#21)``).
 
 Pipeline (all slow/burst work — never the request path, backend/AGENTS.md):
 
-1. **Fetch** the stored object via the #22 ``ObjectStore`` (the only
-   object-store caller), tenant-prefix checked inside the adapter. Media streams
-   to worker disk; ordinary bounded documents keep the legacy byte path.
+1. **Fetch** the stored bytes via the #22 ``ObjectStore`` (the only object-store
+   caller), tenant-prefix checked inside the adapter.
 2. **Parse** by MIME type into plain text (:mod:`app.ingestion.parsers`), each
    parser library localized behind a helper.
 3. **Chunk** into overlapping passages carrying exact ``char_start``/``char_end``
@@ -52,6 +51,7 @@ from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, DependencyError
@@ -70,6 +70,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document
+from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
     VIDEO_MIME_TYPES,
@@ -104,25 +105,37 @@ class IngestionError(Exception):
     on a parse error (no point retrying corrupt input).
     """
 
-
-class IngestionLeaseLost(Exception):
-    """This delivery no longer owns the document's durable ingestion lease."""
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: str = "ingestion_error",
+        safe_message: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.safe_message = safe_message or detail
+        self.attempt = attempt
 
 
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
     """The outcome of one ingestion run — what the task returns / the test asserts.
 
-    ``status`` is the durable document status observed by this delivery. A
-    duplicate that loses the claim may report the winner's live ``processing``
-    state; owners report terminal ``ready``/``failed``. ``chunk_count`` is the
-    number of chunks persisted (0 on failure, processing, or an empty document).
+    ``status`` is the terminal document status (``ready`` or ``failed``);
+    ``chunk_count`` is the number of chunks persisted (0 on failure or an
+    empty/blank document); ``error`` carries the failure reason when failed.
     """
 
     document_id: UUID
     status: DocumentStatus
     chunk_count: int
     error: str | None = None
+
+
+class IngestionLeaseLost(Exception):
+    """The UUID checkpoint lease no longer belongs to this delivery."""
 
 
 async def _current_ingestion_result(
@@ -179,6 +192,7 @@ async def ingest_document_async(
     object_store: ObjectStore,
     gateway: LLMGateway,
     search_store: OpenSearchStore | None = None,
+    correlation_id: str | None = None,
     ingestion_run_id: UUID | None = None,
 ) -> IngestionResult:
     """Run the full ingestion pipeline for one document (the async core).
@@ -196,87 +210,178 @@ async def ingest_document_async(
 
     Raises:
         IngestionError / DependencyError: a *transient* fault (storage/model/db
-            unavailable) — the document is left ``failed`` only by the Celery
-            wrapper after retries are exhausted; this core re-raises so the
-            wrapper can retry. A *permanent* parse failure is caught here and
-            recorded as ``failed`` (returned, not raised) so it never retries.
+            unavailable) — this core records the attempt as ``failed`` in a fresh
+            transaction, then re-raises so the wrapper can retry. A *permanent*
+            parse failure is recorded as ``failed`` and returned, so it never
+            retries.
     """
-    # --- Phase 1: atomically claim pending/ready or stale processing work. ---
     run_id = ingestion_run_id or uuid4()
     stale_before = datetime.now(UTC) - timedelta(minutes=settings.connector_ingest_recovery_minutes)
-    async with tenant_session_scope(tenant_id) as session:
-        documents = DocumentRepository(session, tenant_id)
-        document = await documents.claim_ingestion(
-            document_id,
-            ingestion_run_id=run_id,
-            stale_before=stale_before,
-        )
-    if document is None:
-        # A fresh concurrent claimant (or terminal failed row) wins without this
-        # delivery touching storage/model providers. Re-read after the claim CAS
-        # so the task result reflects that durable state.
-        return await _current_ingestion_result(tenant_id, document_id)
-    storage_key = document.storage_key
-    mime_type = document.mime_type
-    size_bytes = document.size_bytes
+    # --- Phase 1: claim the document and move it to `processing`. ------------
+    try:
+        async with tenant_session_scope(tenant_id) as session:
+            documents = DocumentRepository(session, tenant_id)
+            document = await documents.begin_ingestion(
+                document_id, ingestion_run_id=run_id, stale_before=stale_before
+            )
+            if document is None:
+                # Nothing to do — the document was deleted (or never existed in this
+                # tenant). Idempotent no-op, not an error.
+                return await _current_ingestion_result(tenant_id, document_id)
+            storage_key = document.storage_key
+            mime_type = document.mime_type
+            attempt = document.ingestion_attempts
+    except SQLAlchemyError as exc:
+        raise IngestionError(
+            "Document ingestion could not claim the database row.",
+            code="ingestion_claim_database_error",
+        ) from exc
 
-    normalized_mime = mime_type.split(";", 1)[0].strip().lower()
-    if normalized_mime in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES:
-        try:
+    try:
+        normalized_mime = mime_type.split(";", 1)[0].strip().lower()
+        if normalized_mime in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES:
             result = await _ingest_media(
                 tenant_id,
                 document_id,
+                ingestion_run_id=run_id,
                 storage_key=storage_key,
                 mime_type=normalized_mime,
-                expected_size_bytes=size_bytes,
+                expected_size_bytes=document.size_bytes,
                 settings=settings,
                 object_store=object_store,
                 gateway=gateway,
-                ingestion_run_id=run_id,
             )
-        except IngestionLeaseLost:
-            return await _current_ingestion_result(tenant_id, document_id)
-        except (MediaProcessingError, InvalidTranscriptionResponse, ValueError) as exc:
-            # Invalid containers/provider evidence are permanent and citable
-            # content must never be fabricated. A re-upload is the repair.
-            return await _fail(
+            published = await _sync_index(
                 tenant_id,
                 document_id,
-                str(exc),
-                ingestion_run_id=run_id,
+                expected_attempt=attempt,
+                settings=settings,
+                store=search_store,
             )
-        try:
-            await _require_ingestion_lease(tenant_id, document_id, run_id)
-        except IngestionLeaseLost:
-            return await _current_ingestion_result(tenant_id, document_id)
-        await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
-        async with tenant_session_scope(tenant_id) as session:
-            finished = await DocumentRepository(session, tenant_id).finish_ingestion(
-                document_id,
-                ingestion_run_id=run_id,
-                status=DocumentStatus.READY,
-            )
-        if finished is None:
-            return await _current_ingestion_result(tenant_id, document_id)
-        return result
+            if not published:
+                return await _current_ingestion_result(tenant_id, document_id)
+            async with tenant_session_scope(tenant_id) as session:
+                ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
+                    document_id,
+                    expected_attempt=attempt,
+                )
+            if ready is None:
+                await _discard_generation(
+                    tenant_id,
+                    document_id,
+                    attempt=attempt,
+                    settings=settings,
+                    store=search_store,
+                )
+                return await _current_ingestion_result(tenant_id, document_id)
+            return result
+        return await _ingest_claimed_document(
+            tenant_id,
+            document_id,
+            storage_key=storage_key,
+            mime_type=mime_type,
+            attempt=attempt,
+            settings=settings,
+            object_store=object_store,
+            gateway=gateway,
+            search_store=search_store,
+            correlation_id=correlation_id,
+        )
+    except IngestionLeaseLost:
+        return await _current_ingestion_result(tenant_id, document_id)
+    except (MediaProcessingError, InvalidTranscriptionResponse, ValueError):
+        return await _finalize_failure(
+            tenant_id,
+            document_id,
+            "Media could not be validated or transcribed.",
+            expected_attempt=attempt,
+            code="media_ingestion_failed",
+            correlation_id=correlation_id,
+        )
+    except IngestionError as exc:
+        exc.attempt = attempt
+        await _finalize_failure(
+            tenant_id,
+            document_id,
+            exc.safe_message,
+            expected_attempt=attempt,
+            code=exc.code,
+            correlation_id=correlation_id,
+        )
+        structlog.get_logger(__name__).warning(
+            "ingestion.attempt_failed",
+            tenant_id=str(tenant_id),
+            document_id=str(document_id),
+            attempt=attempt,
+            failure_code=exc.code,
+            correlation_id=correlation_id,
+        )
+        raise
+    except SQLAlchemyError as exc:
+        failure = IngestionError(
+            "Document ingestion failed while saving chunks.",
+            code="ingestion_database_error",
+        )
+        failure.attempt = attempt
+        await _finalize_failure(
+            tenant_id,
+            document_id,
+            failure.safe_message,
+            expected_attempt=attempt,
+            code=failure.code,
+            correlation_id=correlation_id,
+        )
+        raise failure from exc
+    except Exception as exc:  # noqa: BLE001 — terminal-state backstop
+        failure = IngestionError(
+            "Document ingestion failed unexpectedly.",
+            code="ingestion_internal_error",
+        )
+        failure.attempt = attempt
+        await _finalize_failure(
+            tenant_id,
+            document_id,
+            failure.safe_message,
+            expected_attempt=attempt,
+            code=failure.code,
+            correlation_id=correlation_id,
+        )
+        raise failure from exc
 
-    # --- Phase 2: fetch + parse + chunk + embed (outside the DB txn). --------
-    # A parse failure is PERMANENT (corrupt/unsupported bytes) → fail the doc now
-    # without retrying. A transient storage/model fault is RETRYABLE → re-raise.
+
+async def _ingest_claimed_document(
+    tenant_id: UUID,
+    document_id: UUID,
+    *,
+    storage_key: str,
+    mime_type: str,
+    attempt: int,
+    settings: Settings,
+    object_store: ObjectStore,
+    gateway: LLMGateway,
+    search_store: OpenSearchStore | None,
+    correlation_id: str | None,
+) -> IngestionResult:
+    """Run phases after the durable claim; callers own terminal finalization."""
+
     try:
         data = await object_store.get(str(tenant_id), storage_key)
     except AppError as exc:
-        # Storage unavailable / object missing → retryable dependency fault.
-        raise IngestionError(f"could not fetch document bytes: {exc.code}") from exc
+        raise IngestionError(
+            "Document ingestion could not fetch the stored object.",
+            code="ingestion_storage_error",
+        ) from exc
 
     try:
         text = parse_document(data, mime_type=mime_type)
     except DocumentParseError as exc:
-        return await _fail(
+        return await _finalize_failure(
             tenant_id,
             document_id,
             str(exc),
-            ingestion_run_id=run_id,
+            expected_attempt=attempt,
+            code="document_parse_error",
+            correlation_id=correlation_id,
         )
 
     chunks = chunk_text(
@@ -284,80 +389,111 @@ async def ingest_document_async(
         chunk_size=settings.ingestion_chunk_size,
         overlap=settings.ingestion_chunk_overlap,
     )
-
     if not chunks:
-        # An empty/blank document parses to nothing — a valid, terminal outcome:
-        # ready with zero chunks (idempotently clears any prior chunks).
-        try:
-            async with tenant_session_scope(tenant_id) as session:
-                documents = DocumentRepository(session, tenant_id)
-                if await documents.get_claimed_for_update(document_id, run_id) is None:
-                    raise IngestionLeaseLost
-                await ChunkRepository(session, tenant_id).replace_for_document(document_id, [])
-        except IngestionLeaseLost:
-            return await _current_ingestion_result(tenant_id, document_id)
-        # Clear any prior chunks from the search index too (a re-ingest of a
-        # now-empty document must not leave stale index entries — ADR-0010 §5).
-        await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
         async with tenant_session_scope(tenant_id) as session:
-            finished = await DocumentRepository(session, tenant_id).finish_ingestion(
+            persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
                 document_id,
-                ingestion_run_id=run_id,
-                status=DocumentStatus.READY,
+                [],
+                expected_attempt=attempt,
+                embedding_fingerprint=settings.embedding_space_fingerprint,
             )
-        if finished is None:
-            return await _current_ingestion_result(tenant_id, document_id)
+        if persisted is None:
+            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
+        published = await _sync_index(
+            tenant_id,
+            document_id,
+            expected_attempt=attempt,
+            settings=settings,
+            store=search_store,
+        )
+        if not published:
+            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
+        async with tenant_session_scope(tenant_id) as session:
+            ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
+                document_id, expected_attempt=attempt
+            )
+        if ready is None:
+            await _discard_generation(
+                tenant_id,
+                document_id,
+                attempt=attempt,
+                settings=settings,
+                store=search_store,
+            )
+            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         return IngestionResult(document_id, DocumentStatus.READY, 0)
 
     try:
         embeddings = await _embed_in_batches(
             gateway,
-            [c.text for c in chunks],
+            [chunk.text for chunk in chunks],
             batch_size=settings.ingestion_embed_batch_size,
         )
     except DependencyError as exc:
-        # Model provider unavailable / unconfigured → retryable.
-        raise IngestionError(f"could not embed chunks: {exc.code}") from exc
+        code = (
+            exc.code
+            if exc.code in {"embedding_dimension_mismatch", "embedding_count_mismatch"}
+            else "ingestion_embedding_error"
+        )
+        raise IngestionError(
+            "Document ingestion failed while creating embeddings.",
+            code=code,
+        ) from exc
 
-    if len(embeddings) != len(chunks):  # pragma: no cover — gateway contract guard
-        raise IngestionError(f"embedding count {len(embeddings)} != chunk count {len(chunks)}")
+    if len(embeddings) != len(chunks):
+        raise IngestionError(
+            "Document ingestion received an unexpected embedding count.",
+            code="embedding_count_mismatch",
+        )
 
-    # --- Phase 3: persist chunks + mark ready (one transaction, idempotent). -
     chunk_inputs = [
         ChunkInput(
             text=chunk.text,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
             embedding=embedding.vector,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
         )
         for chunk, embedding in zip(chunks, embeddings, strict=True)
     ]
     try:
         async with tenant_session_scope(tenant_id) as session:
-            documents = DocumentRepository(session, tenant_id)
-            if await documents.get_claimed_for_update(document_id, run_id) is None:
-                raise IngestionLeaseLost
-            persisted = await ChunkRepository(session, tenant_id).replace_for_document(
-                document_id, chunk_inputs
+            persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
+                document_id,
+                chunk_inputs,
+                expected_attempt=attempt,
+                embedding_fingerprint=settings.embedding_space_fingerprint,
             )
-    except IngestionLeaseLost:
-        return await _current_ingestion_result(tenant_id, document_id)
+    except ValueError as exc:
+        raise IngestionError(
+            "Document re-embedding would change legacy chunk boundaries.",
+            code="legacy_chunk_shape_mismatch",
+        ) from exc
 
-    # --- Phase 4: sync the search index (dual-write, ADR-0010 §5). -----------
-    # Retrieval serves from the engine (single-store), so a document that
-    # reports `ready` must be retrievable there. The sync is in-band and a
-    # failure fails this (idempotent) run — the Celery wrapper retries the
-    # whole pipeline as a unit; Postgres state is already durable and a re-run
-    # replaces chunks + re-syncs, converging.
-    await _sync_index(tenant_id, document_id, settings=settings, store=search_store)
+    if persisted is None:
+        return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
+    published = await _sync_index(
+        tenant_id,
+        document_id,
+        expected_attempt=attempt,
+        settings=settings,
+        store=search_store,
+    )
+    if not published:
+        return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     async with tenant_session_scope(tenant_id) as session:
-        finished = await DocumentRepository(session, tenant_id).finish_ingestion(
-            document_id,
-            ingestion_run_id=run_id,
-            status=DocumentStatus.READY,
+        ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
+            document_id, expected_attempt=attempt
         )
-    if finished is None:
-        return await _current_ingestion_result(tenant_id, document_id)
+    if ready is None:
+        await _discard_generation(
+            tenant_id,
+            document_id,
+            attempt=attempt,
+            settings=settings,
+            store=search_store,
+        )
+        return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     return IngestionResult(document_id, DocumentStatus.READY, len(persisted))
 
 
@@ -548,6 +684,11 @@ async def _persist_media_result(
         raise IngestionError(
             f"embedding count {len(embeddings)} != media chunk count {len(chunk_drafts)}"
         )
+    if any(len(embedding.vector) != settings.llm_embedding_dimensions for embedding in embeddings):
+        raise IngestionError(
+            "Media ingestion received an unexpected embedding dimension.",
+            code="embedding_dimension_mismatch",
+        )
     segment_ids = {segment.id for segment in segments}
     if any(
         draft.transcript_segment_id is not None and draft.transcript_segment_id not in segment_ids
@@ -606,7 +747,7 @@ async def _persist_media_result(
         if len(persisted_segments) != len(segments) or len(speakers) != len(identities):
             raise MediaProcessingError("media transcript could not be persisted")
 
-        persisted_chunks = await ChunkRepository(session, tenant_id).replace_for_document(
+        persisted_chunks = await ChunkRepository(session, tenant_id).replace_for_ingestion(
             document_id,
             [
                 ChunkInput(
@@ -614,6 +755,7 @@ async def _persist_media_result(
                     char_start=draft.char_start,
                     char_end=draft.char_end,
                     embedding=embedding.vector,
+                    embedding_fingerprint=settings.embedding_space_fingerprint,
                     time_start_ms=draft.time_start_ms,
                     time_end_ms=draft.time_end_ms,
                     transcript_segment_id=draft.transcript_segment_id,
@@ -622,7 +764,12 @@ async def _persist_media_result(
                 )
                 for draft, embedding in zip(chunk_drafts, embeddings, strict=True)
             ],
+            expected_attempt=locked_document.ingestion_attempts,
+            embedding_fingerprint=settings.embedding_space_fingerprint,
         )
+        if persisted_chunks is None:
+            raise IngestionLeaseLost
+
         if not was_transcribed:
             await AuditSink(AuditEventRepository(session, tenant_id)).emit(
                 action=AuditAction.DOCUMENT_TRANSCRIBED,
@@ -716,7 +863,12 @@ async def _ingest_media(
                     batch_size=settings.ingestion_embed_batch_size,
                 )
             except DependencyError as exc:
-                raise IngestionError(f"could not embed media transcript: {exc.code}") from exc
+                raise IngestionError(
+                    "Media ingestion failed while creating embeddings.",
+                    code=exc.code
+                    if exc.code in {"embedding_dimension_mismatch", "embedding_count_mismatch"}
+                    else "ingestion_embedding_error",
+                ) from exc
             return await _persist_media_result(
                 tenant_id,
                 document_id,
@@ -766,9 +918,10 @@ async def _sync_index(
     tenant_id: UUID,
     document_id: UUID,
     *,
+    expected_attempt: int,
     settings: Settings,
     store: OpenSearchStore | None,
-) -> None:
+) -> bool:
     """Sync one document's index entries; translate engine faults to retryable.
 
     :class:`DependencyError` (engine unreachable / rejected) becomes
@@ -776,9 +929,25 @@ async def _sync_index(
     retry/backoff/dead-letter machinery applies unchanged.
     """
     try:
-        await sync_document_index_async(tenant_id, document_id, settings=settings, store=store)
+        result = await sync_document_index_async(
+            tenant_id,
+            document_id,
+            expected_attempt=expected_attempt,
+            settings=settings,
+            store=store,
+            require_search_visibility=True,
+        )
+        return not result.superseded
     except DependencyError as exc:
-        raise IngestionError(f"could not index chunks: {exc.code}") from exc
+        code = (
+            exc.code
+            if exc.code in {"embedding_dimension_mismatch", "embedding_space_mismatch"}
+            else "ingestion_index_error"
+        )
+        raise IngestionError(
+            "Document ingestion failed while updating the search index.",
+            code=code,
+        ) from exc
 
 
 async def _fail(
@@ -786,39 +955,37 @@ async def _fail(
     document_id: UUID,
     reason: str,
     *,
-    ingestion_run_id: UUID,
+    expected_attempt: int | None = None,
+    code: str = "ingestion_retries_exhausted",
+    correlation_id: str | None = None,
+    ingestion_run_id: UUID | None = None,
 ) -> IngestionResult:
     """Mark a document ``failed`` with ``reason`` (own transaction). AC-6.
 
     A permanent failure: the reason is stored on the document row so a parse/embed
     fault is a recorded terminal state, never a silent drop. Tenant-scoped.
     """
-    terminalized = False
     async with tenant_session_scope(tenant_id) as session:
         documents = DocumentRepository(session, tenant_id)
-        # Serialize terminalization and require the exact claimant token. A late
-        # old exception after stale takeover/READY is a no-op, including audit.
-        document = await documents.get_claimed_for_update(document_id, ingestion_run_id)
-        if document is None:
-            terminalized = False
-        else:
-            terminalized = (
-                await documents.finish_ingestion(
-                    document_id,
-                    ingestion_run_id=ingestion_run_id,
-                    status=DocumentStatus.FAILED,
-                    error=reason,
-                )
-                is not None
-            )
-        normalized_mime = (
-            document.mime_type.split(";", 1)[0].strip().lower() if document is not None else ""
+        if ingestion_run_id is not None:
+            claimed = await documents.get_claimed_for_update(document_id, ingestion_run_id)
+            if claimed is None:
+                return await _current_ingestion_result(tenant_id, document_id)
+            expected_attempt = claimed.ingestion_attempts
+        document = await documents.mark_ingestion_failed(
+            document_id,
+            expected_attempt=expected_attempt,
+            code=code,
+            message=reason,
+            correlation_id=correlation_id,
         )
         if (
             document is not None
-            and terminalized
-            and normalized_mime in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES
             and document.transcription_model is None
+            and (
+                document.mime_type.split(";", 1)[0].strip().lower()
+                in AUDIO_MIME_TYPES | VIDEO_MIME_TYPES
+            )
         ):
             await AuditSink(AuditEventRepository(session, tenant_id)).emit(
                 action=AuditAction.DOCUMENT_TRANSCRIBED,
@@ -828,30 +995,73 @@ async def _fail(
                 outcome=AuditOutcome.ERROR,
                 request_id="document-ingestion-task",
                 source_ip="system",
-                # Opaque and content-free: provider bodies, storage keys, and
-                # transcript text never enter product audit metadata.
                 metadata={"reason": "media_ingestion_failed"},
             )
-    if not terminalized:
+    if document is None:
         return await _current_ingestion_result(tenant_id, document_id)
     return IngestionResult(document_id, DocumentStatus.FAILED, 0, reason)
 
 
-async def _release_ingestion(tenant_id: UUID, document_id: UUID, ingestion_run_id: UUID) -> bool:
-    """Best-effort conditional lease release before a Celery retry attempt."""
-    try:
-        async with tenant_session_scope(tenant_id) as session:
-            return await DocumentRepository(session, tenant_id).release_ingestion(
-                document_id, ingestion_run_id
+async def _finalize_failure(
+    tenant_id: UUID,
+    document_id: UUID,
+    reason: str,
+    *,
+    expected_attempt: int,
+    code: str,
+    correlation_id: str | None = None,
+) -> IngestionResult:
+    """Boundedly recover a transient finalizer transaction failure (R1-003)."""
+
+    for finalizer_attempt in range(2):
+        try:
+            return await _fail(
+                tenant_id,
+                document_id,
+                reason,
+                expected_attempt=expected_attempt,
+                code=code,
+                correlation_id=correlation_id,
             )
-    except Exception as exc:  # noqa: BLE001 - preserve the original retry fault
+        except SQLAlchemyError as exc:
+            if finalizer_attempt == 1:
+                raise IngestionError(
+                    "Document ingestion could not finalize its terminal state.",
+                    code="ingestion_finalize_database_error",
+                    attempt=expected_attempt,
+                ) from exc
+    raise AssertionError("unreachable")
+
+
+async def _discard_generation(
+    tenant_id: UUID,
+    document_id: UUID,
+    *,
+    attempt: int,
+    settings: Settings,
+    store: OpenSearchStore | None,
+) -> None:
+    """Best-effort exact-generation cleanup; DB status remains the visibility gate."""
+
+    owns_store = store is None
+    active = store or OpenSearchStore.from_settings(settings)
+    try:
+        await active.delete_document_generation(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            ingestion_attempt=attempt,
+        )
+    except DependencyError as exc:
         structlog.get_logger(__name__).warning(
-            "ingestion.lease_release_failed",
+            "ingestion.generation_cleanup_deferred",
             tenant_id=str(tenant_id),
             document_id=str(document_id),
-            error=type(exc).__name__,
+            attempt=attempt,
+            failure_code=exc.code,
         )
-        return False
+    finally:
+        if owns_store:
+            await active.aclose()
 
 
 @celery_app.task(  # type: ignore[misc]  # celery's task decorator is untyped
@@ -886,35 +1096,79 @@ def ingest_document(self: object, tenant_id: str, document_id: str) -> dict[str,
     run_id = uuid4()
     object_store = ObjectStore(settings)
     gateway = LLMGateway(settings)
+    request = getattr(self, "request", None)
+    correlation_id = getattr(request, "id", None)
+
+    async def _run() -> IngestionResult:
+        await ensure_embedding_contract(settings)
+        return await ingest_document_async(
+            tid,
+            did,
+            settings=settings,
+            object_store=object_store,
+            gateway=gateway,
+            correlation_id=correlation_id,
+            ingestion_run_id=run_id,
+        )
 
     try:
-        result = run_task(
-            ingest_document_async(
-                tid,
-                did,
-                settings=settings,
-                object_store=object_store,
-                gateway=gateway,
-                ingestion_run_id=run_id,
-            )
-        )
+        result = run_task(_run())
     except (IngestionError, DependencyError) as exc:
         # ``bind=True`` → ``self.request.retries`` is the 0-based attempt count.
-        request = getattr(self, "request", None)
         retries: int = getattr(request, "retries", 0) or 0
         if retries >= settings.ingestion_max_retries:
             # Retries exhausted → dead-letter: record a permanent failed status
             # and acknowledge the message (return) rather than looping forever.
-            result = run_task(
-                _fail(
-                    tid,
-                    did,
-                    f"ingestion failed after {retries} retries: {exc}",
-                    ingestion_run_id=run_id,
-                )
-            )
+            reason = f"Document ingestion failed after {retries} retries."
+            failure_kwargs: dict[str, object] = {}
+            if correlation_id:
+                failure_kwargs["correlation_id"] = correlation_id
+            exhausted_attempt = getattr(exc, "attempt", None)
+            preclaim_failure = isinstance(exc, DependencyError) or getattr(exc, "code", None) in {
+                "ingestion_claim_database_error",
+                "embedding_contract_preflight_failed",
+                "embedding_contract_unvalidated",
+            }
+            if exhausted_attempt is None and preclaim_failure:
+                # Startup/worker compatibility failed before a DB claim. Keep
+                # the durable row pending for the stranded-work sweep instead
+                # of fabricating a terminal state owned by no generation.
+                return {
+                    "document_id": str(did),
+                    "status": DocumentStatus.PENDING.value,
+                    "chunk_count": 0,
+                    "error": "Embedding contract is not ready; ingestion deferred.",
+                }
+            if exhausted_attempt is not None:
+                failure_kwargs["expected_attempt"] = exhausted_attempt
+            else:
+                failure_kwargs["ingestion_run_id"] = run_id
+            failure = _fail(tid, did, reason, **failure_kwargs)  # type: ignore[arg-type]
+            try:
+                result = run_task(failure)
+            except SQLAlchemyError as finalize_exc:
+                # Two bounded broker redeliveries beyond the ordinary work
+                # budget are reserved for terminal DB publication. If the DB
+                # remains unavailable, acknowledge with an explicitly deferred
+                # state; the stranded-processing sweep owns recovery.
+                finalizer_retry_ceiling = settings.ingestion_max_retries + 2
+                if retries < finalizer_retry_ceiling:
+                    countdown = settings.ingestion_retry_backoff_seconds * (2**retries)
+                    raise self.retry(  # type: ignore[attr-defined]
+                        exc=IngestionError(
+                            "Document ingestion terminal state is awaiting the database.",
+                            code="ingestion_finalize_database_error",
+                            attempt=exhausted_attempt,
+                        ),
+                        countdown=countdown,
+                    ) from finalize_exc
+                return {
+                    "document_id": str(did),
+                    "status": DocumentStatus.PROCESSING.value,
+                    "chunk_count": 0,
+                    "error": "Terminal state deferred to stranded-work recovery.",
+                }
             return _as_dict(result)
-        run_task(_release_ingestion(tid, did, run_id))
         # Exponential backoff: base * 2**retries.
         countdown = settings.ingestion_retry_backoff_seconds * (2**retries)
         # ``self.retry`` raises Celery's ``Retry`` to reschedule; chain the cause.
@@ -933,25 +1187,22 @@ def _as_dict(result: IngestionResult) -> dict[str, object]:
     }
 
 
-def enqueue_ingestion(tenant_id: UUID, document_id: UUID, *, media: bool = False) -> None:
+def enqueue_ingestion(tenant_id: UUID, document_id: UUID, *, media: bool = False) -> bool:
     """Enqueue ingestion for an uploaded document (the seam #28 calls).
 
     The single enqueue point (ADR-0004: tasks are enqueued only from ``tasks/``).
-    Upload services call this after commit once the ``pending`` row is durable,
-    so a worker drives ``pending → processing → ready/failed`` off the request
-    path. ``media=True`` routes to the separately bounded ``media-ingestion``
-    queue; ordinary documents and connector content stay on the default
-    ``celery`` queue. Ids are strings because Celery's JSON serializer cannot
-    carry UUID objects.
+    ``DocumentService.upload`` calls this (after-commit) once the ``pending`` row
+    is durable so the worker drives ``pending → processing → ready/failed`` off
+    the request path. Ids are passed as strings (Celery's JSON serializer).
 
-    **Best-effort, bounded against the broker.** It runs after the upload has
-    already committed and responded, so a transient broker outage must neither
+    **Best-effort, bounded against the broker.** It runs after the upload/source
+    row has committed, so a transient broker outage must neither
     turn a successful upload into a 500 nor block the response indefinitely. The
     message is published on a connection whose reconnect is **bounded** (a couple
     of short attempts), so an unreachable broker raises
     ``kombu.exceptions.OperationalError`` in seconds rather than looping forever;
     that error is logged and swallowed — the document is left ``pending`` for
-    the bounded stale-ingestion sweep to re-drive. A *programming* error still
+    the bounded stranded-work sweep to re-drive. A *programming* error still
     propagates. This also keeps the upload API tests offline-safe: with no broker
     the publish fails fast and the document is created ``pending`` exactly as the
     tests assert.
@@ -959,6 +1210,14 @@ def enqueue_ingestion(tenant_id: UUID, document_id: UUID, *, media: bool = False
     from kombu.exceptions import OperationalError
 
     log = structlog.get_logger(__name__)
+    settings = get_settings()
+    if not ingestion_enqueue_allowed(settings.embedding_space_fingerprint):
+        log.warning(
+            "ingestion.enqueue_deferred_contract",
+            document_id=str(document_id),
+            tenant_id=str(tenant_id),
+        )
+        return False
     try:
         # A bounded-reconnect connection so the publish fails fast on an
         # unreachable broker instead of Celery's default unbounded retry loop.
@@ -970,6 +1229,7 @@ def enqueue_ingestion(tenant_id: UUID, document_id: UUID, *, media: bool = False
                 queue="media-ingestion" if media else "celery",
                 retry=False,
             )
+        return True
     except OperationalError as exc:
         log.warning(
             "ingestion.enqueue_failed",
@@ -977,3 +1237,4 @@ def enqueue_ingestion(tenant_id: UUID, document_id: UUID, *, media: bool = False
             tenant_id=str(tenant_id),
             error=type(exc).__name__,
         )
+        return False
