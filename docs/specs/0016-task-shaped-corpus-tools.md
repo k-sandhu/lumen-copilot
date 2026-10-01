@@ -1,7 +1,10 @@
 # Task-shaped corpus discovery and reading
 
 Tracking: [#627](https://github.com/k-sandhu/lumen-copilot/issues/627).
-Depends on conversation handles (#436) and complete passages (#611).
+Depends on conversation handles (#436), complete passages (#611), and the
+[tool-use policy](0018-tool-use-policy.md) (#635). The default provider prompt
+names the offered canonical tools; it must not direct a new conversation to
+unavailable legacy tools. Explicit saved legacy catalogs remain supported.
 
 New ad-hoc conversations offer `search_passages`, `find_documents` and
 `read_document`. Explicit saved tool lists retain their original names; legacy
@@ -46,4 +49,6 @@ independent read-back transactions verify those events and zero citations.
 Acceptance tests cover real metadata discovery, stable paging, literal wildcard
 characters, filter intersections, whole overlapping chunks, exact continuation,
 unknown/conversation handles, revoked permission, committed canonical-tool
-retrieval audits and legacy callable names.
+retrieval audits and legacy callable names. The canonical context-budget route
+also verifies that the actual provider prompt names the offered corpus tools,
+while refusing oversized evidence before a second provider request.

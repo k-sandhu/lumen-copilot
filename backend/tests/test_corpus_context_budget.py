@@ -54,6 +54,8 @@ async def test_canonical_search_stays_within_budget_and_refuses_unfit_evidence(
         def __init__(self) -> None:
             self.estimates: list[int] = []
             self.calls = 0
+            self.policy = ""
+            self.offered_names: set[str] = set()
 
         async def stream_tools(
             self,
@@ -65,6 +67,10 @@ async def test_canonical_search_stays_within_budget_and_refuses_unfit_evidence(
             self.calls += 1
             assert isinstance(messages, list)
             assert isinstance(tools, list)
+            self.policy = "\n".join(
+                message.content or "" for message in messages if message.role == Role.SYSTEM
+            )
+            self.offered_names = {tool.name for tool in tools}
             self.estimates.append(estimate_message_tokens(messages, tools, counter=bytecounter))
             if self.calls == 1:
                 yield StreamEvent(
@@ -117,6 +123,10 @@ async def test_canonical_search_stays_within_budget_and_refuses_unfit_evidence(
     )
     events = await asyncio.wait_for(consumer, timeout=5.0)
 
+    canonical = {"search_passages", "find_documents", "read_document"}
+    assert canonical <= gateway.offered_names
+    missing = {name for name in canonical if name not in gateway.policy}
+    assert not missing, f"System policy omits offered corpus tools: {sorted(missing)}"
     assert gateway.calls == 1
     assert gateway.estimates
     assert all(estimate <= budget for estimate in gateway.estimates), gateway.estimates
