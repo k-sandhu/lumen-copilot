@@ -4,9 +4,10 @@
  * reads the default model; a future settings surface edits it), mirroring how the
  * auth slice's queries are consumed by the shell.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getPreferences, hasAccessToken, updatePreferences } from '@/api';
 import type { UserPreferences, UserPreferencesUpdate } from '@/api';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 
 export const preferencesKey = ['preferences'] as const;
 
@@ -23,7 +24,7 @@ export function usePreferences() {
 /** Set / clear the caller's preferences; primes the cache from the response. */
 export function useUpdatePreferences() {
   const queryClient = useQueryClient();
-  return useMutation<UserPreferences, unknown, UserPreferencesUpdate>({
+  return usePrincipalMutation<UserPreferences, unknown, UserPreferencesUpdate>({
     mutationFn: (body) => updatePreferences(body),
     onSuccess: (data) => queryClient.setQueryData(preferencesKey, data),
   });

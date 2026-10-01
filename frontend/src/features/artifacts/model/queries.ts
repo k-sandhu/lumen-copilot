@@ -11,13 +11,13 @@
  */
 import {
   keepPreviousData,
-  useMutation,
   useQuery,
   useQueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query';
 import { deleteArtifact, listArtifacts } from '@/api';
 import type { ArtifactList, ArtifactListQuery, ArtifactProducedBy } from '@/api';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 
 /** Filters the panel exposes (session scope + write origin). */
 export interface ArtifactFilters {
@@ -53,7 +53,7 @@ export function useArtifacts(filters: ArtifactFilters = {}): UseQueryResult<Arti
 /** Delete an artifact (stored object + row); invalidates every artifact list (AC-3). */
 export function useDeleteArtifact() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteArtifact(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: artifactKeys.all }),
   });

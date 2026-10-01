@@ -29,5 +29,24 @@ module.exports = {
       { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
     ],
     'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
+    'no-restricted-imports': [
+      'error',
+      {
+        paths: [
+          {
+            name: '@tanstack/react-query',
+            importNames: ['useMutation'],
+            message:
+              'Use @/lib/usePrincipalMutation so old-principal callbacks cannot repopulate caches.',
+          },
+        ],
+      },
+    ],
   },
+  overrides: [
+    {
+      files: ['src/lib/usePrincipalMutation.ts'],
+      rules: { 'no-restricted-imports': 'off' },
+    },
+  ],
 };

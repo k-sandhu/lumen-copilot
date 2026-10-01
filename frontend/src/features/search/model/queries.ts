@@ -11,12 +11,12 @@
  */
 import {
   keepPreviousData,
-  useMutation,
   useQuery,
   useQueryClient,
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import {
   clearRecentSearches,
   createSavedSearch,
@@ -119,7 +119,7 @@ export function useRecentSearches(): UseQueryResult<RecentSearchList> {
 /** Clear the caller's recent history; refreshes the recent list. */
 export function useClearRecentSearches(): UseMutationResult<void, unknown, void> {
   const queryClient = useQueryClient();
-  return useMutation<void, unknown, void>({
+  return usePrincipalMutation<void, unknown, void>({
     mutationFn: () => clearRecentSearches(),
     onSuccess: () => {
       queryClient.setQueryData<RecentSearchList>(recentSearchesKey, { items: [] });
@@ -142,7 +142,7 @@ export function useSavedSearches(): UseQueryResult<SavedSearchList> {
 /** Save the current search (name + query + filters); refreshes the saved list. */
 export function useCreateSavedSearch(): UseMutationResult<SavedSearch, unknown, SavedSearchCreate> {
   const queryClient = useQueryClient();
-  return useMutation<SavedSearch, unknown, SavedSearchCreate>({
+  return usePrincipalMutation<SavedSearch, unknown, SavedSearchCreate>({
     mutationFn: (body) => createSavedSearch(body),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: savedSearchesKey }),
   });
@@ -151,7 +151,7 @@ export function useCreateSavedSearch(): UseMutationResult<SavedSearch, unknown, 
 /** Delete a saved search; refreshes the saved list. */
 export function useDeleteSavedSearch(): UseMutationResult<void, unknown, string> {
   const queryClient = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteSavedSearch(id),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: savedSearchesKey }),
   });

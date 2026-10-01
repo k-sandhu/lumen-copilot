@@ -4,6 +4,8 @@ import {
   setAccessToken,
   clearAccessToken,
   hasAccessToken,
+  getPrincipalGeneration,
+  setRefreshedAccessToken,
   subscribeToken,
 } from './token';
 
@@ -38,5 +40,15 @@ describe('access-token holder', () => {
     setAccessToken('b');
 
     expect(seen).toEqual(['a', null]);
+  });
+
+  it('rejects a refresh result after the principal generation changes', () => {
+    setAccessToken('persona-a');
+    const personaA = getPrincipalGeneration();
+    clearAccessToken();
+    setAccessToken('persona-b', 'login');
+
+    expect(setRefreshedAccessToken('late-persona-a', personaA)).toBe(false);
+    expect(getAccessToken()).toBe('persona-b');
   });
 });

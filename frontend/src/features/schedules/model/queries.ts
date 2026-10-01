@@ -16,11 +16,11 @@
  */
 import {
   keepPreviousData,
-  useMutation,
   useQuery,
   useQueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import {
   cancelRun,
   createSchedule,
@@ -96,7 +96,7 @@ export function useSchedule(id: string | null): UseQueryResult<Schedule> {
 /** Create a schedule. Invalidates the list so it appears immediately. */
 export function useCreateSchedule() {
   const qc = useQueryClient();
-  return useMutation<Schedule, unknown, ScheduleCreate>({
+  return usePrincipalMutation<Schedule, unknown, ScheduleCreate>({
     mutationFn: (body) => createSchedule(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: scheduleKeys.all }),
   });
@@ -105,7 +105,7 @@ export function useCreateSchedule() {
 /** Patch a schedule. Refreshes both the detail and the list. */
 export function useUpdateSchedule(id: string) {
   const qc = useQueryClient();
-  return useMutation<Schedule, unknown, ScheduleUpdate>({
+  return usePrincipalMutation<Schedule, unknown, ScheduleUpdate>({
     mutationFn: (body) => updateSchedule(id, body),
     onSuccess: (updated) => {
       qc.setQueryData(scheduleKeys.detail(id), updated);
@@ -117,7 +117,7 @@ export function useUpdateSchedule(id: string) {
 /** Delete a schedule (204). Refreshes the list. */
 export function useDeleteSchedule() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteSchedule(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: scheduleKeys.all }),
   });
@@ -130,7 +130,7 @@ export function useDeleteSchedule() {
  */
 export function usePauseSchedule() {
   const qc = useQueryClient();
-  return useMutation<Schedule, unknown, string>({
+  return usePrincipalMutation<Schedule, unknown, string>({
     mutationFn: (id) => pauseSchedule(id),
     onSuccess: (updated) => {
       qc.setQueryData(scheduleKeys.detail(updated.id), updated);
@@ -141,7 +141,7 @@ export function usePauseSchedule() {
 
 export function useResumeSchedule() {
   const qc = useQueryClient();
-  return useMutation<Schedule, unknown, string>({
+  return usePrincipalMutation<Schedule, unknown, string>({
     mutationFn: (id) => resumeSchedule(id),
     onSuccess: (updated) => {
       qc.setQueryData(scheduleKeys.detail(updated.id), updated);
@@ -156,7 +156,7 @@ export function useResumeSchedule() {
  */
 export function useRunScheduleNow() {
   const qc = useQueryClient();
-  return useMutation<RunEnqueued, unknown, string>({
+  return usePrincipalMutation<RunEnqueued, unknown, string>({
     mutationFn: (id) => runScheduleNow(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: runKeys.all });
@@ -211,7 +211,7 @@ function applyRunResult(qc: ReturnType<typeof useQueryClient>, updated: Run): vo
 
 export function useResumeRun() {
   const qc = useQueryClient();
-  return useMutation<Run, unknown, string>({
+  return usePrincipalMutation<Run, unknown, string>({
     mutationFn: (id) => resumeRun(id),
     onSuccess: (updated) => applyRunResult(qc, updated),
   });
@@ -219,7 +219,7 @@ export function useResumeRun() {
 
 export function useCancelRun() {
   const qc = useQueryClient();
-  return useMutation<Run, unknown, string>({
+  return usePrincipalMutation<Run, unknown, string>({
     mutationFn: (id) => cancelRun(id),
     onSuccess: (updated) => applyRunResult(qc, updated),
   });
@@ -227,7 +227,7 @@ export function useCancelRun() {
 
 export function useRerouteRun(id: string) {
   const qc = useQueryClient();
-  return useMutation<Run, unknown, RunReroute>({
+  return usePrincipalMutation<Run, unknown, RunReroute>({
     mutationFn: (body) => rerouteRun(id, body),
     onSuccess: (updated) => applyRunResult(qc, updated),
   });
@@ -254,9 +254,7 @@ export const deliveryKeys = {
  * A short stale time + refetch-on-focus keeps a completed run's delivery appearing
  * without a manual reload.
  */
-export function useRunDeliveries(
-  query: RunDeliveryPageQuery,
-): UseQueryResult<RunDeliveryList> {
+export function useRunDeliveries(query: RunDeliveryPageQuery): UseQueryResult<RunDeliveryList> {
   return useQuery<RunDeliveryList>({
     queryKey: deliveryKeys.list(query),
     queryFn: ({ signal }) => listRunDeliveries({ ...query, limit: PAGE_LIMIT }, signal),
@@ -271,7 +269,7 @@ export function useRunDeliveries(
  */
 export function useMarkDeliveryRead() {
   const qc = useQueryClient();
-  return useMutation<RunDelivery, unknown, string>({
+  return usePrincipalMutation<RunDelivery, unknown, string>({
     mutationFn: (id) => markRunDeliveryRead(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: deliveryKeys.all }),
   });

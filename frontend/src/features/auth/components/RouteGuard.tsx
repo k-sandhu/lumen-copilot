@@ -12,21 +12,27 @@
  */
 import type { ReactNode } from 'react';
 import { useAuthStore } from '../model/authStore';
-import { useBootstrapSession } from '../model/useBootstrapSession';
+import { useBootstrapSession, useSessionRecovery } from '../model/useBootstrapSession';
 import { LoginScreen } from './LoginScreen';
 
 export function RouteGuard({ children }: { children: ReactNode }) {
   useBootstrapSession();
+  const signInAgain = useSessionRecovery();
   const status = useAuthStore((s) => s.status);
 
   if (status === 'unknown') {
     return (
-      <div
-        role="status"
-        aria-live="polite"
-        className="flex min-h-screen items-center justify-center bg-surface text-sm text-foreground-muted"
-      >
-        Restoring your session…
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-surface text-sm text-foreground-muted">
+        <p role="status" aria-live="polite">
+          Restoring your session…
+        </p>
+        <button
+          type="button"
+          className="text-brand underline underline-offset-4"
+          onClick={signInAgain}
+        >
+          Sign in again
+        </button>
       </div>
     );
   }

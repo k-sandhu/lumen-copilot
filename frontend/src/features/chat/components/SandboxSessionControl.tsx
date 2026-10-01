@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   closeSandboxSession,
   getSandboxSession,
   resetSandboxSession,
   type SandboxSession,
 } from '@/api';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 
 const labels: Record<SandboxSession['status'], string> = {
   not_created: 'Python sandbox: on first use',
@@ -26,14 +27,14 @@ export function SandboxSessionControl({ sessionId }: { sessionId: string }) {
     // appears; active lifecycle mutations update/invalidate this cache directly.
     refetchInterval: (current) => (current.state.data?.status === 'active' ? false : 5_000),
   });
-  const reset = useMutation({
+  const reset = usePrincipalMutation({
     mutationFn: () => resetSandboxSession(sessionId),
     onSuccess: (value) => {
       queryClient.setQueryData(key, value);
       setPendingAction(null);
     },
   });
-  const close = useMutation({
+  const close = usePrincipalMutation({
     mutationFn: () => closeSandboxSession(sessionId),
     onSuccess: () => {
       queryClient.setQueryData<SandboxSession>(key, (current) => ({

@@ -13,11 +13,11 @@
  */
 import {
   keepPreviousData,
-  useMutation,
   useQuery,
   useQueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import {
   createCollection,
   deleteCollection,
@@ -64,7 +64,7 @@ export function useCollections(): UseQueryResult<CollectionList> {
 /** Create a collection (AC-1). Invalidates the collections list on success. */
 export function useCreateCollection() {
   const qc = useQueryClient();
-  return useMutation<Collection, unknown, CollectionCreate>({
+  return usePrincipalMutation<Collection, unknown, CollectionCreate>({
     mutationFn: (body) => createCollection(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: collectionsKey }),
   });
@@ -73,7 +73,7 @@ export function useCreateCollection() {
 /** Rename / re-describe a collection (AC-1). */
 export function useUpdateCollection() {
   const qc = useQueryClient();
-  return useMutation<Collection, unknown, { id: string; body: CollectionUpdate }>({
+  return usePrincipalMutation<Collection, unknown, { id: string; body: CollectionUpdate }>({
     mutationFn: ({ id, body }) => updateCollection(id, body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: collectionsKey }),
   });
@@ -82,7 +82,7 @@ export function useUpdateCollection() {
 /** Delete a collection and its documents (AC-1). Refreshes collections + docs. */
 export function useDeleteCollection() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteCollection(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: collectionsKey });
@@ -124,7 +124,7 @@ export function useDocuments(filters: DocumentFilters): UseQueryResult<DocumentL
 /** Delete a document and its chunks/embeddings (AC-3). Refreshes the doc lists. */
 export function useDeleteDocument() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteDocument(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['documents'] });

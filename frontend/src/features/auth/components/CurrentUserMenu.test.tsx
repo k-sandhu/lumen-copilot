@@ -4,7 +4,7 @@
  * the logout interaction.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { CurrentUserMenu } from './CurrentUserMenu';
@@ -46,23 +46,58 @@ describe('CurrentUserMenu', () => {
     expect(await screen.findByText('kw@acme.test')).toBeInTheDocument();
   });
 
-  it('logs out: calls POST /auth/logout and clears the token (AC-2)', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  it('tears down at logout intent while revocation is delayed and cannot clear a later login (R1-002)', async () => {
+    let resolveLogout!: (response: Response) => void;
+    let logoutInit: RequestInit | undefined;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = String(input);
-      if (url.includes('/auth/logout')) return noContent();
-      return meResponse();
+      if (url.includes('/auth/logout')) {
+        logoutInit = init;
+        return new Promise<Response>((resolve) => {
+          resolveLogout = resolve;
+        });
+      }
+      return Promise.resolve(meResponse());
     });
     const user = userEvent.setup();
-    renderWithQuery(<CurrentUserMenu />);
+    const { queryClient } = renderWithQuery(<CurrentUserMenu />);
 
     await screen.findByText('kw@acme.test');
+    queryClient.setQueryData(['tenant', 'persona-a-sentinel'], 'persona-a-data');
+    queryClient.getMutationCache().build(queryClient, {
+      mutationKey: ['persona-a-mutation'],
+      mutationFn: async () => undefined,
+    });
     await user.click(screen.getByRole('button', { name: /sign out/i }));
 
-    await waitFor(() => expect(getAccessToken()).toBeNull());
+    // The local boundary is synchronous with intent; it cannot wait for the
+    // best-effort revocation request, which is deliberately still unresolved.
+    expect(getAccessToken()).toBeNull();
     expect(useAuthStore.getState().status).toBe('unauthenticated');
+    expect(
+      queryClient
+        .getQueryCache()
+        .getAll()
+        .every((query) => query.state.data === undefined),
+    ).toBe(true);
+    expect(JSON.stringify(queryClient.getQueryCache().getAll())).not.toContain('persona-a-data');
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
 
     const logoutCall = fetchSpy.mock.calls.find((c) => String(c[0]).includes('/auth/logout'));
     expect(logoutCall).toBeDefined();
-    expect((logoutCall?.[1] as RequestInit).method).toBe('POST');
+    expect(logoutInit?.method).toBe('POST');
+    expect(new Headers(logoutInit?.headers).get('Authorization')).toBe('Bearer jwt');
+
+    // A second principal may sign in while A's revocation is still in flight.
+    // Its token/cache must survive A's late success.
+    act(() => setAccessToken('jwt-persona-b'));
+    queryClient.setQueryData(['tenant', 'persona-b-sentinel'], 'persona-b-data');
+    resolveLogout(noContent());
+
+    await waitFor(() =>
+      expect(queryClient.getQueryData(['tenant', 'persona-b-sentinel'])).toBe('persona-b-data'),
+    );
+    expect(getAccessToken()).toBe('jwt-persona-b');
+    expect(useAuthStore.getState().status).toBe('authenticated');
   });
 });

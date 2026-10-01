@@ -902,13 +902,44 @@ class UserLookupRepository:
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 
-    async def find_refresh_token_owner(self, token_hash: str) -> RefreshToken | None:
+    async def find_refresh_token_owner(
+        self, token_hash: str, *, lock: bool = False
+    ) -> RefreshToken | None:
         """Resolve a refresh-token row by hash, tenant-agnostically (refresh path).
 
         The refresh cookie carries no tenant; the hash is globally unique, so
         this finds the owning row, after which the caller scopes to its tenant.
+        Resolve without a lock first; only revalidate with ``lock=True`` after
+        acquiring the owning user lock, matching login/logout's global order.
         """
-        stmt = select(models.RefreshToken).where(models.RefreshToken.token_hash == token_hash)
+        stmt = (
+            select(models.RefreshToken)
+            .where(models.RefreshToken.token_hash == token_hash)
+            .execution_options(populate_existing=True)
+        )
+        if lock:
+            stmt = stmt.with_for_update()
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_refresh_token(row) if row is not None else None
+
+    async def find_refresh_token_session(
+        self, session_id: UUID, *, lock: bool = False
+    ) -> RefreshToken | None:
+        """Resolve a slot by routing id; optionally lock after its owning user.
+
+        PostgreSQL READ COMMITTED rechecks predicates after a blocked row lock.
+        Selecting by id first lets a losing concurrent refresh observe the
+        winner's new hash and fail non-destructively instead of mistaking the
+        current family for an unknown row. The service still constant-time
+        compares the independently random hash before granting authority.
+        """
+        stmt = (
+            select(models.RefreshToken)
+            .where(models.RefreshToken.id == session_id)
+            .execution_options(populate_existing=True)
+        )
+        if lock:
+            stmt = stmt.with_for_update()
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
 
@@ -938,6 +969,19 @@ class UserRepository(_TenantScopedRepository):
         )
         if refresh:
             stmt = stmt.execution_options(populate_existing=True)
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_user(row) if row is not None else None
+
+    async def lock_for_auth_session_admission(self, user_id: UUID) -> User | None:
+        """Serialize the per-user active refresh-session admission boundary."""
+        stmt = (
+            select(models.User)
+            .where(
+                models.User.tenant_id == self._tenant_id,
+                models.User.id == user_id,
+            )
+            .with_for_update()
+        )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 
@@ -1091,8 +1135,9 @@ class RefreshTokenRepository(_TenantScopedRepository):
     """Rotating, revocable refresh tokens within one tenant (spec 0004 §2.3).
 
     Only the token **hash** is ever passed in/out — the opaque token is hashed
-    in ``auth/`` before it reaches here. Lookups are tenant-scoped (INV-1) so a
-    token minted in tenant A can never be resolved by a tenant-B repository.
+    in ``auth/`` before it reaches here. Slot-aware operations keep the row id as
+    a stable session-family selector and serialize rotation/revocation with a row
+    lock. Lookups are tenant-scoped (INV-1), so tenant A cannot resolve tenant B.
     """
 
     async def create(
@@ -1101,12 +1146,20 @@ class RefreshTokenRepository(_TenantScopedRepository):
         user_id: UUID,
         token_hash: str,
         expires_at: datetime,
+        token_id: UUID | None = None,
+        cookie_admitted: bool = False,
     ) -> RefreshToken:
+        values: dict[str, object] = {
+            "tenant_id": self._tenant_id,
+            "user_id": user_id,
+            "token_hash": token_hash,
+            "expires_at": expires_at,
+            "cookie_admitted": cookie_admitted,
+        }
+        if token_id is not None:
+            values["id"] = token_id
         row = models.RefreshToken(
-            tenant_id=self._tenant_id,
-            user_id=user_id,
-            token_hash=token_hash,
-            expires_at=expires_at,
+            **values,
         )
         self._session.add(row)
         await self._session.flush()
@@ -1119,6 +1172,27 @@ class RefreshTokenRepository(_TenantScopedRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
+
+    async def count_unexpired_families(self, user_id: UUID) -> int:
+        """Count admitted names whose headers can still install a cookie.
+
+        Revocation and request-visible cleanup do not prove that older headers
+        cannot arrive later. Keep that family's budget until its absolute expiry.
+        The caller holds the owning user lock before admission or rotation.
+        Pre-upgrade legacy rotations shared one fixed name and were not admitted
+        under this scheme; retaining their history must not block valid login.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(models.RefreshToken)
+            .where(
+                models.RefreshToken.tenant_id == self._tenant_id,
+                models.RefreshToken.user_id == user_id,
+                models.RefreshToken.expires_at > datetime.now(UTC),
+                models.RefreshToken.cookie_admitted.is_(True),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
 
     async def revoke(self, token_hash: str) -> bool:
         """Mark a token revoked (idempotent). Returns False if not found here."""
@@ -1133,6 +1207,120 @@ class RefreshTokenRepository(_TenantScopedRepository):
             row.revoked_at = datetime.now(UTC)
             await self._session.flush()
         return True
+
+    async def rotate_session(
+        self,
+        session_id: UUID,
+        *,
+        user_id: UUID,
+        expected_hash: str,
+        new_hash: str,
+        expires_at: datetime,
+    ) -> bool:
+        """Rotate one locked session row in place, preserving its family id."""
+        stmt = (
+            select(models.RefreshToken)
+            .where(
+                models.RefreshToken.tenant_id == self._tenant_id,
+                models.RefreshToken.id == session_id,
+                models.RefreshToken.user_id == user_id,
+                models.RefreshToken.token_hash == expected_hash,
+                models.RefreshToken.revoked_at.is_(None),
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        row.token_hash = new_hash
+        row.expires_at = expires_at
+        await self._session.flush()
+        return True
+
+    async def revoke_session(self, session_id: UUID, *, user_id: UUID) -> bool:
+        """Revoke a session family by id, bound to the bearer principal."""
+        stmt = (
+            select(models.RefreshToken)
+            .where(
+                models.RefreshToken.tenant_id == self._tenant_id,
+                models.RefreshToken.id == session_id,
+                models.RefreshToken.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        if row.revoked_at is None:
+            row.revoked_at = datetime.now(UTC)
+            await self._session.flush()
+        return True
+
+    async def enforce_active_session_cap(
+        self,
+        *,
+        user_id: UUID,
+        max_active: int,
+        preserve_ids: set[UUID],
+        presented_cookie_ids: frozenset[UUID] = frozenset(),
+        cleanup_limit: int = 0,
+    ) -> tuple[UUID, ...]:
+        """Revoke expired/excess families and return a bounded cleanup batch.
+
+        The caller first locks the owning user row, which prevents concurrent
+        login inserts from observing a phantom below the cap. Victims are
+        deterministic (oldest ``created_at``, then UUID), and protected ids are
+        never revoked or returned for cookie deletion. Cookie names are only
+        untrusted hints: a deletion is returned when its canonical id appears
+        on this request *and* the locked row proves it is stale and owned by the
+        verified tenant/user. A small batch lets subsequent requests drain
+        residual HttpOnly names without creating an oversized response header.
+        """
+        now = datetime.now(UTC)
+        stmt = (
+            select(models.RefreshToken)
+            .where(
+                models.RefreshToken.tenant_id == self._tenant_id,
+                models.RefreshToken.user_id == user_id,
+            )
+            .order_by(models.RefreshToken.created_at.asc(), models.RefreshToken.id.asc())
+            .with_for_update()
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        for row in rows:
+            expired = (
+                row.expires_at <= now
+                if row.expires_at.tzinfo
+                else row.expires_at <= now.replace(tzinfo=None)
+            )
+            if expired and row.revoked_at is None:
+                row.revoked_at = now
+
+        active = [
+            row
+            for row in rows
+            if row.revoked_at is None
+            and (
+                row.expires_at > now
+                if row.expires_at.tzinfo
+                else row.expires_at > now.replace(tzinfo=None)
+            )
+        ]
+        excess = max(0, len(active) - max_active)
+        for row in (candidate for candidate in active if candidate.id not in preserve_ids):
+            if excess == 0:
+                break
+            row.revoked_at = now
+            excess -= 1
+
+        if excess:
+            raise RuntimeError("Auth-session cap cannot preserve the selected and new sessions")
+        await self._session.flush()
+        if cleanup_limit <= 0:
+            return ()
+        return tuple(
+            row.id for row in rows if row.revoked_at is not None and row.id in presented_cookie_ids
+        )[:cleanup_limit]
 
 
 class CollectionRepository(_TenantScopedRepository):

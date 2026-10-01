@@ -20,10 +20,19 @@ export default defineConfig({
   // When E2E_BASE_URL is provided (e.g. compose), reuse it; otherwise spin up dev.
   webServer: process.env.E2E_BASE_URL
     ? undefined
-    : {
-        command: 'pnpm dev --host 127.0.0.1 --port 5173',
-        url: baseURL,
-        reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
-      },
+    : [
+        {
+          command: 'node tests/e2e/auth-cookie-server.mjs',
+          url: 'http://127.0.0.1:4174/__control__/state',
+          reuseExistingServer: false,
+          timeout: 120_000,
+        },
+        {
+          command: 'pnpm dev --host 127.0.0.1 --port 5173',
+          url: baseURL,
+          env: { VITE_PROXY_TARGET: 'http://127.0.0.1:4174' },
+          reuseExistingServer: !process.env.CI,
+          timeout: 120_000,
+        },
+      ],
 });

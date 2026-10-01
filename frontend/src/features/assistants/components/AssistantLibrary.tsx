@@ -22,7 +22,7 @@ import type { Assistant, AssistantStatus } from '@/api';
 import { useChatStore } from '@/features/chat';
 import { ScrollArea } from '@/components/ScrollArea';
 import { Icon } from '@/ui';
-import { useMutation } from '@tanstack/react-query';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import { useAssistants, useMembers, useModels } from '../model/queries';
 import { STATUS_LABEL } from '../model/presentation';
 import { AssistantCard } from './AssistantCard';
@@ -49,7 +49,7 @@ export function AssistantLibrary() {
   const [startingId, setStartingId] = useState<string | null>(null);
   const [startError, setStartError] = useState<{ id: string; message: string } | null>(null);
 
-  const startChat = useMutation<{ id: string }, unknown, Assistant>({
+  const startChat = usePrincipalMutation<{ id: string }, unknown, Assistant>({
     mutationFn: (assistant) => createChatSession({ assistant_id: assistant.id }),
   });
 
@@ -176,11 +176,7 @@ function startChatErrorMessage(error: unknown): string {
   return base;
 }
 
-function filterAssistants(
-  items: Assistant[],
-  search: string,
-  status: StatusFilter,
-): Assistant[] {
+function filterAssistants(items: Assistant[], search: string, status: StatusFilter): Assistant[] {
   const q = search.trim().toLowerCase();
   return items.filter((a) => {
     if (status !== 'all' && a.status !== status) return false;
@@ -212,17 +208,18 @@ function Body({
   if (query.isPending) return <LoadingGrid />;
   if (query.isError) {
     return (
-      <ErrorState error={query.error} onRetry={() => void query.refetch()} busy={query.isFetching} />
+      <ErrorState
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        busy={query.isFetching}
+      />
     );
   }
   if (items.length === 0) return <EmptyState />;
   if (filtered.length === 0) return <NoMatches />;
 
   return (
-    <ul
-      aria-label="Assistants"
-      className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3"
-    >
+    <ul aria-label="Assistants" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {filtered.map((assistant) => (
         <li key={assistant.id} className="min-w-0">
           <AssistantCard

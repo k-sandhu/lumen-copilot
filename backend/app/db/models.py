@@ -156,11 +156,12 @@ class User(TenantScopedMixin, TimestampMixin, Base):
 class RefreshToken(TenantScopedMixin, Base):
     """A rotating, revocable refresh token (spec 0004 §2.3).
 
-    No ``TimestampMixin``/``updated_at``: a token row is created, optionally
-    revoked, then expires — it is never re-described. Only the **hash** of the
-    opaque token is stored (``token_hash``, unique) so a DB read yields no usable
-    token. ``revoked_at`` set ⇒ the token can no longer be used (logout or
-    rotation); ``expires_at`` is the hard lifetime cap.
+    No ``TimestampMixin``/``updated_at``: legacy rows are revoked and replaced
+    on rotation; slot-aware rows keep ``id`` as the stable session-family key and
+    rotate ``token_hash``/``expires_at`` in place under a row lock. Only the
+    **hash** of the opaque token is stored (``token_hash``, unique), so a DB read
+    yields no usable token. ``revoked_at`` set ⇒ the whole row/family is unusable;
+    ``expires_at`` is the hard lifetime cap.
     """
 
     __tablename__ = "refresh_tokens"
@@ -177,6 +178,9 @@ class RefreshToken(TenantScopedMixin, Base):
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Historical legacy rotations shared one fixed cookie. Only rows admitted
+    # under the bounded scheme reserve outstanding cookie-issuance capacity.
+    cookie_admitted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

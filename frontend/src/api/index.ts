@@ -2,10 +2,11 @@
  * Public surface of the api/ boundary. Import from here, not from deep paths.
  * This is the ONLY module the rest of the app uses to reach the backend.
  */
-export { ApiError, request, registerRefreshHandler } from './client';
+export { ApiError, request, registerRefreshHandler, cancelInFlightRefresh } from './client';
 export type { RequestOptions } from './client';
 export { getHealth, getReadiness } from './health';
 export { login, refresh, getCurrentUser, logout, installAuthRefresh } from './auth';
+export { getAuthIntentGeneration, getPrincipalGeneration, isAuthIntentCurrent } from './token';
 export {
   listCollections,
   createCollection,
@@ -132,6 +133,7 @@ export {
   clearAccessToken,
   subscribeToken,
 } from './token';
+export type { TokenChangeReason } from './token';
 export { WsClient, parseEnvelope, resolveWsUrl } from './ws';
 export type { WsClientOptions, WsConnectionState } from './ws';
 export { API_BASE_URL, WS_BASE_URL, DEV_PAGES_ENABLED, parseBoolFlag } from './env';

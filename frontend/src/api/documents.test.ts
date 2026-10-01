@@ -23,7 +23,7 @@ import {
   ApiError,
   registerRefreshHandler,
 } from './index';
-import { setAccessToken, clearAccessToken } from './token';
+import { setAccessToken, setRefreshedAccessToken, clearAccessToken } from './token';
 
 function jsonResponse(body: unknown, status = 200, contentType = 'application/json'): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': contentType } });
@@ -372,8 +372,8 @@ describe('fetchDocumentContent (bearer fetch → blob URL)', () => {
       .mockResolvedValueOnce(
         new Response(new Blob(['pdf-bytes'], { type: 'application/pdf' }), { status: 200 }),
       );
-    const handler = vi.fn(async () => {
-      setAccessToken('fresh');
+    const handler = vi.fn(async ({ principalGeneration }: { principalGeneration: number }) => {
+      setRefreshedAccessToken('fresh', principalGeneration);
     });
     registerRefreshHandler(handler);
 

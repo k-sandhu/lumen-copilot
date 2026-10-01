@@ -10,3 +10,5 @@ export { useAuthStore } from './model/authStore';
 export type { AuthStatus } from './model/authStore';
 export { useCurrentUser, useLogin, useLogout, currentUserQueryKey } from './model/queries';
 export { useBootstrapSession } from './model/useBootstrapSession';
+export { PrincipalLifecycle } from './model/PrincipalLifecycle';
+export { transitionPrincipal } from './model/principalTransition';

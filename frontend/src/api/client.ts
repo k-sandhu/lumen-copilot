@@ -16,32 +16,196 @@
  *     once. A failed refresh propagates the 401 so the caller routes to login.
  */
 import { API_BASE_URL } from './env';
-import { getAccessToken } from './token';
+import {
+  getAccessToken,
+  getAuthIntentGeneration,
+  getPrincipalGeneration,
+  getRefreshAuthSlot,
+} from './token';
 import type { Problem } from './types';
 
 /**
  * Refresh hook registered by `auth.ts` to break the client/auth import cycle.
- * It must mint+store a new access token (or throw). `null` disables refresh.
+ * It must mint+conditionally store a new access token (or throw). `null`
+ * disables refresh. The coordinator owns the AbortController and identity epoch.
  */
-type RefreshHandler = (() => Promise<void>) | null;
+interface RefreshContext {
+  signal: AbortSignal;
+  principalGeneration: number;
+  authIntentGeneration: number;
+  authSlot: string | null;
+}
+
+type RefreshHandler = ((context: RefreshContext) => Promise<unknown>) | null;
 let refreshHandler: RefreshHandler = null;
+
+interface InFlightRefresh {
+  controller: AbortController;
+  principalGeneration: number;
+  authIntentGeneration: number;
+  authSlot: string | null;
+  promise: Promise<unknown>;
+}
+
+let inFlightRefresh: InFlightRefresh | null = null;
+
+interface InFlightLogout {
+  controller: AbortController;
+  slotScoped: boolean;
+  promise: Promise<void>;
+}
+
+let inFlightLogout: InFlightLogout | null = null;
+const AUTH_TRANSITION_WAIT_MS = 1_500;
+
+async function settlesWithin(promise: Promise<unknown>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), AUTH_TRANSITION_WAIT_MS);
+  });
+  const settled = promise.then(
+    () => true as const,
+    () => true as const,
+  );
+  const result = await Promise.race([settled, timeout]);
+  if (timer !== undefined) clearTimeout(timer);
+  return result;
+}
 
 /** Wire the silent-refresh implementation (called once from auth.ts setup). */
 export function registerRefreshHandler(handler: RefreshHandler): void {
+  if (refreshHandler === handler) return;
+  inFlightRefresh?.controller.abort();
+  inFlightRefresh = null;
   refreshHandler = handler;
 }
 
 /** A single in-flight refresh shared across concurrent 401s (no thundering herd). */
-let inFlightRefresh: Promise<void> | null = null;
-
-async function runRefresh(): Promise<void> {
+async function runRefresh(
+  principalGeneration: number,
+  authIntentGeneration: number,
+  authSlot: string | null,
+): Promise<unknown> {
   if (!refreshHandler) throw new ApiError('No refresh handler registered', 401);
-  if (!inFlightRefresh) {
-    inFlightRefresh = refreshHandler().finally(() => {
-      inFlightRefresh = null;
-    });
+  if (
+    getPrincipalGeneration() !== principalGeneration ||
+    getAuthIntentGeneration() !== authIntentGeneration ||
+    getRefreshAuthSlot() !== authSlot
+  ) {
+    throw new ApiError('Principal changed before refresh', 401);
   }
-  return inFlightRefresh;
+
+  const existing = inFlightRefresh;
+  if (existing) {
+    if (
+      existing.principalGeneration === principalGeneration &&
+      existing.authIntentGeneration === authIntentGeneration &&
+      existing.authSlot === authSlot
+    ) {
+      return existing.promise;
+    }
+    existing.controller.abort();
+    await settlesWithin(existing.promise);
+    if (
+      getPrincipalGeneration() !== principalGeneration ||
+      getAuthIntentGeneration() !== authIntentGeneration ||
+      getRefreshAuthSlot() !== authSlot
+    ) {
+      throw new ApiError('Principal changed before refresh', 401);
+    }
+  }
+
+  const controller = new AbortController();
+  const handler = refreshHandler;
+  const promise = handler({
+    signal: controller.signal,
+    principalGeneration,
+    authIntentGeneration,
+    authSlot,
+  })
+    .then((result) => {
+      if (
+        getPrincipalGeneration() !== principalGeneration ||
+        getAuthIntentGeneration() !== authIntentGeneration ||
+        getRefreshAuthSlot() !== authSlot
+      ) {
+        throw new ApiError('Principal changed during refresh', 401);
+      }
+      return result;
+    })
+    .finally(() => {
+      if (inFlightRefresh?.promise === promise) inFlightRefresh = null;
+    });
+  inFlightRefresh = {
+    controller,
+    principalGeneration,
+    authIntentGeneration,
+    authSlot,
+    promise,
+  };
+  return promise;
+}
+
+/** The only public entry to a cookie-rotating refresh, including bootstrap. */
+export function runCoordinatedRefresh(): Promise<unknown> {
+  return runRefresh(getPrincipalGeneration(), getAuthIntentGeneration(), getRefreshAuthSlot());
+}
+
+/**
+ * Abort the browser fetch for the old principal and wait for its JS promise to
+ * settle before a login/logout request is issued. This is transport cleanup,
+ * not a claim that the server rolled back work or an already-accepted cookie.
+ */
+export function cancelInFlightRefresh(): Promise<void> | null {
+  const existing = inFlightRefresh;
+  if (!existing) return null;
+  return (async () => {
+    existing.controller.abort();
+    const settled = await settlesWithin(existing.promise);
+    if (!settled && inFlightRefresh === existing) {
+      // Detach the uncooperative old promise after bounding the wait. Its token
+      // commit/retry remains generation-gated even if it resolves much later.
+      inFlightRefresh = null;
+    }
+  })();
+}
+
+/** Run the cookie-clearing logout request as a coordinated transition. */
+export function runLogoutTransition(
+  run: (signal: AbortSignal) => Promise<void>,
+  options: { slotScoped?: boolean } = {},
+): Promise<void> {
+  const controller = new AbortController();
+  // Defer execution by one microtask so the transition record is observable
+  // synchronously at logout intent, before `run` reaches its first await.
+  const promise = Promise.resolve()
+    .then(() => run(controller.signal))
+    .finally(() => {
+      if (inFlightLogout?.promise === promise) inFlightLogout = null;
+    });
+  inFlightLogout = { controller, slotScoped: options.slotScoped === true, promise };
+  return promise;
+}
+
+/**
+ * Ensure an old logout response (which may expire the refresh cookie) lands
+ * before a later login response sets the next principal's cookie.
+ */
+export function awaitLogoutTransition(): Promise<void> | null {
+  const existing = inFlightLogout;
+  if (!existing) return null;
+  // A slot-scoped logout can only delete/revoke its own unique cookie/row. The
+  // server protocol, not response timing, makes it safe to dispatch a new login.
+  if (existing.slotScoped) return null;
+  return (async () => {
+    const settled = await settlesWithin(existing.promise);
+    if (settled) return;
+
+    // A hung response cannot wedge the next login forever. Slot-scoped server
+    // cookies make a late response incapable of mutating the incoming slot.
+    existing.controller.abort();
+    if (inFlightLogout === existing) inFlightLogout = null;
+  })();
 }
 
 /** Typed transport error. `problem` is present when the server returned one. */
@@ -97,8 +261,15 @@ export async function withRefreshRetry<T>(
   run: (isRetry: boolean) => Promise<T>,
   opts: { skipAuth?: boolean } = {},
 ): Promise<T> {
+  const principalGeneration = getPrincipalGeneration();
+  const authIntentGeneration = getAuthIntentGeneration();
+  const authSlot = getRefreshAuthSlot();
   try {
-    return await run(false);
+    const result = await run(false);
+    if (!opts.skipAuth && getPrincipalGeneration() !== principalGeneration) {
+      throw new ApiError('Principal changed while request was in flight', 401);
+    }
+    return result;
   } catch (error) {
     if (
       !(error instanceof ApiError) ||
@@ -109,13 +280,18 @@ export async function withRefreshRetry<T>(
       throw error;
     }
 
+    if (getPrincipalGeneration() !== principalGeneration) throw error;
+
     try {
-      await runRefresh();
+      await runRefresh(principalGeneration, authIntentGeneration, authSlot);
     } catch {
       throw error;
     }
 
-    return run(true);
+    if (getPrincipalGeneration() !== principalGeneration) throw error;
+    const result = await run(true);
+    if (getPrincipalGeneration() !== principalGeneration) throw error;
+    return result;
   }
 }
 

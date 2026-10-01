@@ -11,7 +11,7 @@
  * All reads can 404 when the resource is in another tenant or not permitted
  * (spec 0004 INV-1/INV-2); that surfaces as an ApiError the components branch on.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createChatSession,
   deleteChatSession,
@@ -22,6 +22,7 @@ import {
   updateChatSession,
 } from '@/api';
 import { suggestSearch } from '@/api/suggest';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import type {
   ChatSession,
   ChatSessionCreate,
@@ -93,7 +94,7 @@ export function useMessages(sessionId: string | null) {
 /** Create a new chat session (AC-4 new). Invalidates the sidebar list. */
 export function useCreateSession() {
   const qc = useQueryClient();
-  return useMutation<ChatSession, unknown, ChatSessionCreate>({
+  return usePrincipalMutation<ChatSession, unknown, ChatSessionCreate>({
     mutationFn: (body) => createChatSession(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: chatKeys.sessions() }),
   });
@@ -102,16 +103,18 @@ export function useCreateSession() {
 /** Rename a session / change its model (AC-4 rename, AC-3 per-session model). */
 export function useUpdateSession() {
   const qc = useQueryClient();
-  return useMutation<ChatSession, unknown, { sessionId: string; body: ChatSessionUpdate }>({
-    mutationFn: ({ sessionId, body }) => updateChatSession(sessionId, body),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: chatKeys.sessions() }),
-  });
+  return usePrincipalMutation<ChatSession, unknown, { sessionId: string; body: ChatSessionUpdate }>(
+    {
+      mutationFn: ({ sessionId, body }) => updateChatSession(sessionId, body),
+      onSuccess: () => void qc.invalidateQueries({ queryKey: chatKeys.sessions() }),
+    },
+  );
 }
 
 /** Delete a session and its messages (AC-4 delete). */
 export function useDeleteSession() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (sessionId) => deleteChatSession(sessionId),
     onSuccess: () => void qc.invalidateQueries({ queryKey: chatKeys.sessions() }),
   });
@@ -125,7 +128,7 @@ export function useDeleteSession() {
  */
 export function useSendMessage(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<SendMessageResponse, unknown, SendMessageRequest>({
+  return usePrincipalMutation<SendMessageResponse, unknown, SendMessageRequest>({
     mutationFn: (body) => sendMessage(sessionId, body),
     onSuccess: (res) => {
       qc.setQueryData<MessageList>(chatKeys.messages(sessionId), (prev) => {

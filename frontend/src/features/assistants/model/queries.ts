@@ -20,12 +20,12 @@
  */
 import {
   useInfiniteQuery,
-  useMutation,
   useQuery,
   useQueryClient,
   type UseInfiniteQueryResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { usePrincipalMutation } from '@/lib/usePrincipalMutation';
 import {
   createAssistant,
   deleteAssistant,
@@ -90,7 +90,7 @@ export function useAssistant(id: string | null): UseQueryResult<Assistant> {
 /** Create a draft assistant. Invalidates the library so it appears immediately. */
 export function useCreateAssistant() {
   const qc = useQueryClient();
-  return useMutation<Assistant, unknown, AssistantCreate>({
+  return usePrincipalMutation<Assistant, unknown, AssistantCreate>({
     mutationFn: (body) => createAssistant(body),
     onSuccess: () => void qc.invalidateQueries({ queryKey: assistantKeys.list() }),
   });
@@ -105,7 +105,7 @@ export function useCreateAssistant() {
  * propagates as an `ApiError` the caller renders inline — it is NOT swallowed here.
  */
 export function useDraftAssistant() {
-  return useMutation<AssistantDraft, unknown, AssistantDraftRequest>({
+  return usePrincipalMutation<AssistantDraft, unknown, AssistantDraftRequest>({
     mutationFn: (body) => draftAssistant(body),
   });
 }
@@ -113,7 +113,7 @@ export function useDraftAssistant() {
 /** Patch the working head. Refreshes both the detail and the library card. */
 export function useUpdateAssistant(id: string) {
   const qc = useQueryClient();
-  return useMutation<Assistant, unknown, AssistantUpdate>({
+  return usePrincipalMutation<Assistant, unknown, AssistantUpdate>({
     mutationFn: (body) => updateAssistant(id, body),
     onSuccess: (updated) => {
       qc.setQueryData(assistantKeys.detail(id), updated);
@@ -131,7 +131,7 @@ export function useUpdateAssistant(id: string) {
  */
 export function usePublishAssistant(id: string) {
   const qc = useQueryClient();
-  return useMutation<AssistantVersion, unknown, AssistantPublishRequest>({
+  return usePrincipalMutation<AssistantVersion, unknown, AssistantPublishRequest>({
     mutationFn: (body) => publishAssistant(id, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: assistantKeys.detail(id) });
@@ -170,7 +170,7 @@ export function useAssistantVersions(
  */
 export function useRollbackAssistant(id: string) {
   const qc = useQueryClient();
-  return useMutation<AssistantVersion, unknown, AssistantRollbackRequest>({
+  return usePrincipalMutation<AssistantVersion, unknown, AssistantRollbackRequest>({
     mutationFn: (body) => rollbackAssistant(id, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: assistantKeys.detail(id) });
@@ -189,7 +189,7 @@ export function useRollbackAssistant(id: string) {
  * library/detail caches are untouched.
  */
 export function useTestAssistant(id: string) {
-  return useMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
+  return usePrincipalMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
     mutationFn: (body) => testAssistant(id, body),
   });
 }
@@ -197,7 +197,7 @@ export function useTestAssistant(id: string) {
 /** Delete an assistant head (204). Refreshes the library. */
 export function useDeleteAssistant() {
   const qc = useQueryClient();
-  return useMutation<void, unknown, string>({
+  return usePrincipalMutation<void, unknown, string>({
     mutationFn: (id) => deleteAssistant(id),
     onSuccess: () => void qc.invalidateQueries({ queryKey: assistantKeys.all }),
   });
