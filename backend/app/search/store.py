@@ -398,11 +398,11 @@ class OpenSearchStore:
     async def upsert_chunks(self, chunks: Sequence[IndexedChunk], *, refresh: bool = False) -> None:
         """Bulk-index chunk docs (id = chunk_id, routed by tenant — ADR-0010 §5).
 
-        ``refresh=True`` makes the writes immediately searchable — for tests and
-        the backfill command only; the ingestion path leaves the engine's
-        refresh cadence alone. A partial bulk failure fails the call (the
-        ingestion task retries as a unit; the index must never silently hold a
-        subset).
+        ``refresh=True`` makes the writes immediately searchable. Ingestion
+        requests it before activating document readiness; other synchronization
+        and backfill callers choose their refresh cadence. A partial bulk failure
+        fails the call (the ingestion task retries as a unit; the index must never
+        silently hold a subset).
 
         The write is issued in bounded sub-batches of ``_BULK_BATCH_SIZE``
         chunks (#258): each chunk carries a ~20KB embedding, so one request per
