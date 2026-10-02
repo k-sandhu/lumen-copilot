@@ -14,7 +14,9 @@ Each probe permits at most two model turns, 256 output tokens per turn, bounded
 event/text/call counts and a configurable deadline no greater than 60 seconds.
 Only valid calls to the advertised synthetic tool receive unpredictable result
 markers, absent from the user prompt. The final answer must use those markers
-and make no further calls. This exercises provider tool-result round-trips,
+and make no further calls with tool selection still enabled (`auto`). Additional
+calls fail the probe without receiving results or opening another model turn.
+This exercises provider tool-result round-trips,
 including routes requiring additional opaque state; unsupported gateway routes
 fail honestly rather than gain provider-specific workarounds.
 
@@ -23,7 +25,23 @@ they contain no prompt, generated answer or provider exception text. Qualificati
 evidence expires after seven days and is invalid for a changed model/route/suite
 or future timestamp. A report is evidence, not an uptime or answer-quality claim.
 Provider probes require an explicit CLI opt-in; default tests use deterministic
-fakes. Cancellation and timeouts close active streams. The suite adds no native
+fakes. The cancellation probe cancels a consumer task after the first stream
+event. A close-capable iterator and per-stream gateway evidence of successful
+upstream cleanup are mandatory; a missing, failed or unconfirmed close fails
+qualification. Provider close details stay inside `app/llm/`; ordinary gateway
+callers retain best-effort cleanup.
+
+Cancellation and timeouts attempt to close active streams. After a probe deadline
+or caller cancellation, cancellation/close unwinding gets its own one-second
+deadline, enforced without waiting indefinitely for cancellation to finish.
+Stalled cleanup receives another cancellation request, the original timeout or
+caller cancellation is preserved, and remaining probes are marked failed with
+`cleanup_timeout` without opening new streams. No successful closure is claimed
+for a stalled or uncooperative stream. A provider that suppresses cancellation
+may remain active; this is failed evidence, never qualification.
+
+The corrected suite version is `tool-protocol-v2`; earlier v1 reports are invalid
+even when they previously passed. The suite adds no native
 provider features (T15) or general answer-quality benchmark (T01).
 
 Automatic picker/workload enforcement and production action-success detection

@@ -15,12 +15,128 @@ from typing import Any
 
 import pytest
 
-from app.domain.llm import ChatMessage, Role, StreamEvent, ToolCall, ToolSpec
+from app.domain.llm import ChatMessage, Role, StreamClosure, StreamEvent, ToolCall, ToolSpec
 
 _CASES = ("exact_once", "parallel", "round_trip", "cancellation")
 _MODEL = "vendor/small-test-model"
 _ROUTE = "route-revision-17"
 _LEAK = "provider-secret-should-not-escape"
+
+
+class _ManualDeadlines:
+    """Fire timer callbacks only after the tested stream reaches a barrier."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.pending: asyncio.Queue[tuple[float, asyncio.TimerHandle]] = asyncio.Queue()
+        self.loop = asyncio.get_running_loop()
+        clock = self.loop.time()
+        monkeypatch.setattr(self.loop, "time", lambda: clock)
+        monkeypatch.setattr(self.loop, "call_later", self.call_later)
+        monkeypatch.setattr(self.loop, "call_at", self.call_at)
+
+    def call_at(
+        self, when: float, callback: Any, *args: Any, context: Any = None
+    ) -> asyncio.TimerHandle:
+        return self.call_later(when - self.loop.time(), callback, *args, context=context)
+
+    def call_later(
+        self, delay: float, callback: Any, *args: Any, context: Any = None
+    ) -> asyncio.TimerHandle:
+        handle = asyncio.TimerHandle(self.loop.time() + delay, callback, args, self.loop, context)
+        self.pending.put_nowait((delay, handle))
+        return handle
+
+    def fire(self) -> float:
+        delay, handle = self.pending.get_nowait()
+        assert not handle.cancelled()
+        handle._run()
+        return delay
+
+
+class _BlockedStream:
+    def __init__(self, *, block_unwind: bool = False) -> None:
+        self.block_unwind = block_unwind
+        self.read_started = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+        self.read_finished = asyncio.Event()
+        self.close_finished = asyncio.Event()
+        self.read_task: asyncio.Task[Any] | None = None
+        self.close_task: asyncio.Task[Any] | None = None
+
+    def __aiter__(self) -> _BlockedStream:
+        return self
+
+    async def __anext__(self) -> StreamEvent:
+        self.read_task = asyncio.current_task()
+        self.read_started.set()
+        try:
+            await self.release.wait()
+        finally:
+            try:
+                if self.block_unwind:
+                    await self.aclose()
+            finally:
+                self.read_finished.set()
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        if self.close_finished.is_set():
+            return
+        self.close_task = asyncio.current_task()
+        self.close_started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.close_cancelled.set()
+            raise
+        finally:
+            self.close_finished.set()
+
+
+@pytest.mark.parametrize("block_unwind", [False, True], ids=["close", "iterator-unwind"])
+@pytest.mark.asyncio
+async def test_deadline_bounds_stalled_cleanup_without_waiting_for_release(
+    monkeypatch: pytest.MonkeyPatch, block_unwind: bool
+) -> None:
+    deadlines = _ManualDeadlines(monkeypatch)
+    stream = _BlockedStream(block_unwind=block_unwind)
+    gateway = _SyntheticGateway()
+    original = gateway.stream_tools
+
+    def stream_tools(messages: Sequence[ChatMessage], **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        if gateway._probe_name(messages) == "exact_once":
+            return stream
+        return original(messages, **kwargs)
+
+    monkeypatch.setattr(gateway, "stream_tools", stream_tools)
+    task = asyncio.create_task(
+        _service()(gateway, model=_MODEL, route_revision=_ROUTE, timeout_seconds=0.5)
+    )
+    try:
+        await stream.read_started.wait()
+        assert deadlines.fire() == 0.5
+        await stream.close_started.wait()
+        # A close barrier proves the old deadline has fired. There must now be
+        # a NEW independent cleanup deadline, before releasing any provider I/O.
+        assert not deadlines.pending.empty(), "cleanup has no independent deadline"
+        assert 0 < deadlines.fire() <= 1
+        await stream.close_cancelled.wait()
+        report = await task
+        assert not stream.release.is_set()
+        assert not report.qualified
+        assert _case(report, "exact_once").reason == "timeout"
+        assert all(case.reason == "cleanup_timeout" for case in report.cases[1:])
+        assert stream.read_finished.is_set()
+        assert stream.close_finished.is_set()
+        assert stream.read_task is not None and stream.read_task.done()
+        assert stream.close_task is not None and stream.close_task.done()
+    finally:
+        stream.release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def _service() -> Any:
@@ -43,6 +159,7 @@ class _SyntheticGateway:
         self.emitted: list[tuple[str, tuple[ToolCall, ...]]] = []
         self.early_closed: set[str] = set()
         self.user_prompts: list[str] = []
+        self.blocked = asyncio.Event()
 
     @staticmethod
     def _probe_name(messages: Sequence[ChatMessage]) -> str:
@@ -65,6 +182,7 @@ class _SyntheticGateway:
         api_base: str | None = None,
         cache_key: str | None = None,
         max_tokens: int | None = None,
+        closure: StreamClosure | None = None,
     ) -> AsyncIterator[StreamEvent]:
         case = self._probe_name(messages)
         self.calls.append(
@@ -90,6 +208,7 @@ class _SyntheticGateway:
 
             if self.mode == "timeout" and case == "exact_once":
                 yield StreamEvent(text="stream-open")
+                self.blocked.set()
                 await asyncio.Event().wait()
 
             if case == "cancellation":
@@ -110,6 +229,19 @@ class _SyntheticGateway:
 
             tool_messages = [message.content for message in messages if message.role is Role.TOOL]
             if tool_messages:
+                if self.mode == "repeat_when_enabled" and tool_choice != "none":
+                    yield StreamEvent(
+                        tool_calls=(
+                            ToolCall(
+                                id="repeat-alpha",
+                                name=tools[0].name,
+                                arguments={"label": "alpha", "comment": None},
+                            ),
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                    completed = True
+                    return
                 if self.mode == "ignore_result":
                     yield StreamEvent(text="Completed without using any tool output.")
                 else:
@@ -148,6 +280,8 @@ class _SyntheticGateway:
         finally:
             if not completed:
                 self.early_closed.add(case)
+            if closure is not None:
+                closure.closed = True
 
 
 @pytest.mark.asyncio
@@ -155,12 +289,13 @@ async def test_qualify_reports_the_required_protocol_cases_and_safe_tool_schema(
     gateway = _SyntheticGateway()
     report = await _service()(gateway, model=_MODEL, route_revision=_ROUTE)
 
-    assert report.suite_version == "tool-protocol-v1"
+    assert report.suite_version == "tool-protocol-v2"
     assert report.tested_at.tzinfo is UTC
     assert {case.name for case in report.cases} == set(_CASES)
     assert report.qualified
     for case in report.cases:
         assert case.passed, case.reason
+    assert all(call["max_tokens"] == 256 for call in gateway.calls)
 
     call = gateway.calls[0]
     assert call["model"] == _MODEL
@@ -172,6 +307,8 @@ async def test_qualify_reports_the_required_protocol_cases_and_safe_tool_schema(
     assert set(schema["required"]) >= {"label", "comment"}
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == {"label", "comment"}
+    assert schema["properties"]["label"]["enum"] == ["alpha", "beta"]
+    assert schema["properties"]["comment"]["type"] == ["string", "null"]
     exact_calls = [calls for case, calls in gateway.emitted if case == "exact_once"]
     assert len(exact_calls) == 1
     assert len(exact_calls[0]) == 1
@@ -223,15 +360,28 @@ async def test_parallel_is_reported_but_is_not_a_qualification_requirement() -> 
 @pytest.mark.asyncio
 async def test_third_tool_turn_is_bounded_and_fails_the_probe() -> None:
     gateway = _SyntheticGateway("third_turn_loop")
-    report = await asyncio.wait_for(
-        _service()(gateway, model=_MODEL, route_revision=_ROUTE, timeout_seconds=1),
-        timeout=2,
-    )
+    report = await _service()(gateway, model=_MODEL, route_revision=_ROUTE)
 
     assert not report.qualified
     call_counts = {case: sum(call["case"] == case for call in gateway.calls) for case in _CASES}
     assert call_counts["exact_once"] == 2
     assert all(count <= 2 for count in call_counts.values())
+
+
+@pytest.mark.asyncio
+async def test_result_turn_detects_repeat_calls_when_gateway_honors_forced_none() -> None:
+    gateway = _SyntheticGateway("repeat_when_enabled")
+    report = await _service()(gateway, model=_MODEL, route_revision=_ROUTE)
+
+    assert not report.qualified
+    for name in ("exact_once", "parallel", "round_trip"):
+        assert _case(report, name).reason == "turn_budget"
+        requests = [call for call in gateway.calls if call["case"] == name]
+        assert len(requests) == 2
+        assert requests[1]["tool_choice"] == "auto"
+        assert sum(message.role is Role.TOOL for message in requests[1]["messages"]) == (
+            2 if name == "parallel" else 1
+        )
 
 
 @pytest.mark.asyncio
@@ -241,6 +391,141 @@ async def test_cancellation_closes_the_synthetic_stream() -> None:
 
     assert _case(report, "cancellation").passed
     assert "cancellation" in gateway.early_closed
+
+
+@pytest.mark.asyncio
+async def test_cancellation_rejects_a_stream_without_a_close_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _SyntheticGateway()
+    original = gateway.stream_tools
+    active: list[AsyncIterator[StreamEvent]] = []
+
+    class Unclosable:
+        def __init__(self, inner: AsyncIterator[StreamEvent]) -> None:
+            self.inner = inner
+
+        def __aiter__(self) -> Unclosable:
+            return self
+
+        async def __anext__(self) -> StreamEvent:
+            return await anext(self.inner)
+
+    def stream_tools(messages: Sequence[ChatMessage], **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        stream = original(messages, **kwargs)
+        if gateway._probe_name(messages) == "cancellation":
+            active.append(stream)
+            return Unclosable(stream)
+        return stream
+
+    monkeypatch.setattr(gateway, "stream_tools", stream_tools)
+    try:
+        report = await _service()(gateway, model=_MODEL, route_revision=_ROUTE)
+        assert not report.qualified
+        assert _case(report, "cancellation").reason == "stream_close_unsupported"
+        assert "cancellation" not in gateway.early_closed
+    finally:
+        for stream in active:
+            await stream.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_probe_cancels_a_real_consumer_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _SyntheticGateway()
+    original = gateway.stream_tools
+    cancellation_counts: list[int] = []
+
+    class RecordingStream:
+        def __init__(self, closure: Any) -> None:
+            self.closure = closure
+
+        def __aiter__(self) -> RecordingStream:
+            return self
+
+        async def __anext__(self) -> StreamEvent:
+            return StreamEvent(text="stream-open")
+
+        async def aclose(self) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            cancellation_counts.append(task.cancelling())
+            if self.closure is not None:
+                self.closure.closed = True
+
+    def stream_tools(messages: Sequence[ChatMessage], **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        if gateway._probe_name(messages) == "cancellation":
+            return RecordingStream(kwargs.get("closure"))
+        return original(messages, **kwargs)
+
+    monkeypatch.setattr(gateway, "stream_tools", stream_tools)
+    report = await _service()(gateway, model=_MODEL, route_revision=_ROUTE)
+    assert report.qualified
+    assert cancellation_counts == [1]
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_preserves_cancelled_outcome_and_closes_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _BlockedStream()
+    gateway = _SyntheticGateway()
+    original = gateway.stream_tools
+
+    def stream_tools(messages: Sequence[ChatMessage], **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        if gateway._probe_name(messages) == "exact_once":
+            return stream
+        return original(messages, **kwargs)
+
+    monkeypatch.setattr(gateway, "stream_tools", stream_tools)
+    task = asyncio.create_task(_service()(gateway, model=_MODEL, route_revision=_ROUTE))
+    try:
+        await stream.read_started.wait()
+        task.cancel()
+        await stream.close_started.wait()
+        stream.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+        assert stream.read_finished.is_set()
+        assert stream.close_finished.is_set()
+        assert not gateway.calls
+    finally:
+        stream.release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_bounds_stalled_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadlines = _ManualDeadlines(monkeypatch)
+    stream = _BlockedStream()
+    gateway = _SyntheticGateway()
+    monkeypatch.setattr(gateway, "stream_tools", lambda *args, **kwargs: stream)
+    task = asyncio.create_task(_service()(gateway, model=_MODEL, route_revision=_ROUTE))
+    try:
+        await stream.read_started.wait()
+        task.cancel()
+        await stream.close_started.wait()
+        _, original_deadline = deadlines.pending.get_nowait()
+        assert original_deadline.cancelled()
+        assert deadlines.fire() == 1
+        await stream.close_cancelled.wait()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not stream.release.is_set()
+        assert stream.read_finished.is_set()
+        assert stream.close_finished.is_set()
+        assert task.cancelled()
+    finally:
+        stream.release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -254,12 +539,22 @@ async def test_provider_error_reason_does_not_leak_secret_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout_is_a_failed_report_and_closes_the_stream() -> None:
+async def test_timeout_is_a_failed_report_and_closes_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadlines = _ManualDeadlines(monkeypatch)
     gateway = _SyntheticGateway("timeout")
-    report = await asyncio.wait_for(
-        _service()(gateway, model=_MODEL, route_revision=_ROUTE, timeout_seconds=0.01),
-        timeout=1,
+    task = asyncio.create_task(
+        _service()(gateway, model=_MODEL, route_revision=_ROUTE, timeout_seconds=0.5)
     )
+    try:
+        await gateway.blocked.wait()
+        assert deadlines.fire() == 0.5
+        report = await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert not report.qualified
     assert "exact_once" in gateway.early_closed
@@ -283,6 +578,28 @@ async def test_is_current_checks_model_route_age_future_time_and_suite_version()
     )
     old_suite = replace(report, suite_version="tool-protocol-v0")
     assert not old_suite.is_current(model=_MODEL, route_revision=_ROUTE, now=now)
+
+
+@pytest.mark.parametrize("missing", ["exact_once", "round_trip", "cancellation"])
+@pytest.mark.asyncio
+async def test_report_requires_each_core_case_exactly_once(missing: str) -> None:
+    report = await _service()(_SyntheticGateway(), model=_MODEL, route_revision=_ROUTE)
+    incomplete = replace(report, cases=tuple(case for case in report.cases if case.name != missing))
+    assert not incomplete.qualified
+    assert not incomplete.is_current(_MODEL, _ROUTE, report.tested_at)
+    assert not replace(report, cases=report.cases + (report.cases[0],)).qualified
+    assert not replace(report, tested_at=report.tested_at.replace(tzinfo=None)).is_current(
+        _MODEL, _ROUTE, report.tested_at
+    )
+
+
+@pytest.mark.asyncio
+async def test_prior_suite_evidence_is_invalid_after_protocol_corrections() -> None:
+    report = await _service()(_SyntheticGateway(), model=_MODEL, route_revision=_ROUTE)
+    assert report.suite_version == "tool-protocol-v2"
+    assert not replace(report, suite_version="tool-protocol-v1").is_current(
+        _MODEL, _ROUTE, report.tested_at
+    )
 
 
 def test_cli_requires_provider_opt_in_before_constructing_gateway(tmp_path: Path) -> None:

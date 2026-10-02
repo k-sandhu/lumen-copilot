@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from app.domain.llm import ChatMessage, Role, StreamEvent, ToolCall, ToolSpec
+from app.domain.llm import ChatMessage, Role, StreamClosure, StreamEvent, ToolCall, ToolSpec
 
-SUITE_VERSION = "tool-protocol-v1"
+SUITE_VERSION = "tool-protocol-v2"
 _NAME = "lumen_conformance_" + "x" * (64 - len("lumen_conformance_"))
 _TOOL = ToolSpec(
     _NAME,
@@ -48,6 +48,7 @@ class ProbeGateway(Protocol):
         model: str | None = None,
         tool_choice: str | None = None,
         max_tokens: int | None = None,
+        closure: StreamClosure | None = None,
     ) -> AsyncIterator[StreamEvent]: ...
 
 
@@ -95,17 +96,62 @@ class _Failure(Exception):
     pass
 
 
-async def _close(stream: AsyncIterator[StreamEvent]) -> None:
+class _ProbeTimeout(TimeoutError):
+    def __init__(self, cleanup_stalled: bool) -> None:
+        self.cleanup_stalled = cleanup_stalled
+
+
+def _observe_task(task: asyncio.Task[None]) -> None:
+    # A provider may delay cancellation. Retain no vendor exception text, and
+    # retrieve the eventual outcome without awaiting an unbounded unwind.
+    if not task.cancelled():
+        task.exception()
+
+
+async def _cancel_probe(task: asyncio.Task[None]) -> bool:
+    task.add_done_callback(_observe_task)
+    task.cancel()
+    try:
+        done, _ = await asyncio.wait({task}, timeout=1)
+    finally:
+        if not task.done():
+            task.cancel()
+    return bool(done)
+
+
+async def _bounded_probe(
+    gateway: ProbeGateway, model: str, name: str, timeout_seconds: float
+) -> None:
+    task = asyncio.create_task(_probe(gateway, model, name))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        await _cancel_probe(task)
+        raise
+    if not done:
+        finished = await _cancel_probe(task)
+        raise _ProbeTimeout(cleanup_stalled=not finished)
+    await task
+
+
+async def _close(stream: AsyncIterator[StreamEvent], closure: StreamClosure) -> None:
     closer = getattr(stream, "aclose", None)
-    if closer is not None:
+    if not callable(closer):
+        raise _Failure("stream_close_unsupported")
+    try:
         await closer()
+    except Exception:
+        raise _Failure("stream_close_failed") from None
+    if not closure.closed:
+        raise _Failure("stream_close_failed")
 
 
 async def _turn(
     gateway: ProbeGateway, messages: list[ChatMessage], model: str, choice: str
 ) -> tuple[str, tuple[ToolCall, ...]]:
+    closure = StreamClosure()
     stream = gateway.stream_tools(
-        messages, tools=(_TOOL,), model=model, tool_choice=choice, max_tokens=256
+        messages, tools=(_TOOL,), model=model, tool_choice=choice, max_tokens=256, closure=closure
     )
     text = ""
     calls: list[ToolCall] = []
@@ -118,7 +164,7 @@ async def _turn(
             if events > 2048 or len(text) > 4096 or len(calls) > 4:
                 raise _Failure("output_budget")
     finally:
-        await _close(stream)
+        await _close(stream, closure)
     return text, tuple(calls)
 
 
@@ -138,15 +184,35 @@ async def _probe(gateway: ProbeGateway, model: str, name: str) -> None:
         ),
     ]
     if name == "cancellation":
+        closure = StreamClosure()
         stream = gateway.stream_tools(
-            messages, tools=(_TOOL,), model=model, tool_choice="auto", max_tokens=256
+            messages,
+            tools=(_TOOL,),
+            model=model,
+            tool_choice="auto",
+            max_tokens=256,
+            closure=closure,
         )
+
+        async def consume_and_cancel() -> None:
+            try:
+                await anext(stream)
+                consumer = asyncio.current_task()
+                assert consumer is not None
+                consumer.cancel()
+                await asyncio.Event().wait()
+            except StopAsyncIteration as exc:
+                raise _Failure("no_stream_signal") from exc
+            finally:
+                await _close(stream, closure)
+
+        consumer = asyncio.create_task(consume_and_cancel())
         try:
-            await anext(stream)
-        except StopAsyncIteration as exc:
-            raise _Failure("no_stream_signal") from exc
-        finally:
-            await _close(stream)
+            await consumer
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                raise
         return
     prose, calls = await _turn(gateway, messages, model, "auto")
     if len(calls) != len(labels) or len({call.id for call in calls}) != len(calls):
@@ -167,7 +233,7 @@ async def _probe(gateway: ProbeGateway, model: str, name: str) -> None:
         marker = f"PROBE_{call.arguments['label']}_{uuid4().hex}"
         markers.append(marker)
         messages.append(ChatMessage(Role.TOOL, marker, tool_call_id=call.id, name=call.name))
-    answer, more_calls = await _turn(gateway, messages, model, "none")
+    answer, more_calls = await _turn(gateway, messages, model, "auto")
     if more_calls:
         raise _Failure("turn_budget")
     if any(marker not in answer for marker in markers):
@@ -185,10 +251,16 @@ async def qualify(
     ):
         raise ValueError("Supply model, immutable route revision and timeout in (0, 60].")
     cases = []
+    cleanup_stalled = False
     for name in ("exact_once", "parallel", "round_trip", "cancellation"):
+        if cleanup_stalled:
+            cases.append(CaseResult(name, False, "cleanup_timeout"))
+            continue
         try:
-            async with asyncio.timeout(timeout_seconds):
-                await _probe(gateway, model, name)
+            await _bounded_probe(gateway, model, name, timeout_seconds)
+        except _ProbeTimeout as exc:
+            cleanup_stalled = exc.cleanup_stalled
+            cases.append(CaseResult(name, False, "timeout"))
         except TimeoutError:
             cases.append(CaseResult(name, False, "timeout"))
         except _Failure as exc:
