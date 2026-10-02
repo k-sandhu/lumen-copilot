@@ -33,6 +33,12 @@ receive no secrets. This implements OD-7's fast-gate parity for #655; the
 protected agent contracts' stale CI wording is proposed for owner approval in
 the PR rather than edited here.
 
+CI pins Python 3.12.5 to match the measured developer interpreter and retain the
+existing audit assertions. Python 3.12.14 changed IPv4-mapped IPv6 rendering;
+the runtime compatibility decision is tracked separately in
+[#657](https://github.com/k-sandhu/lumen-copilot/issues/657). Audit product
+behavior and the failing assertions are preserved in this optimization.
+
 Verification includes before/after node-id and JUnit outcome comparisons,
 single-process and parallel timings on the same shared machine, repeated full
 `-W error` runs (including shuffled module order), and temporary regressions of

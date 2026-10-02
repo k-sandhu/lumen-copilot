@@ -20,11 +20,12 @@ jobs:
         working-directory: backend
     env:
       RUN_LIVE: "0"
+      UV_PYTHON: "3.12.5"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.5"
       - name: Configure uv cache
         run: echo "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache" >> "$GITHUB_ENV"
       - name: Install uv
@@ -32,8 +33,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/uv-cache
-          key: uv-${{ runner.os }}-3.12-${{ hashFiles('backend/uv.lock') }}
-          restore-keys: uv-${{ runner.os }}-3.12-
+          key: uv-${{ runner.os }}-3.12.5-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-3.12.5-
       - name: Install locked dependencies
         run: uv sync --locked --extra dev
       - name: Lint
