@@ -15,6 +15,7 @@ contract the chat runtime depends on:
 
 from __future__ import annotations
 
+import json
 from contextlib import aclosing
 from typing import Any
 
@@ -161,6 +162,60 @@ async def test_stream_tools_yields_text_then_terminal(monkeypatch: pytest.Monkey
     assert terminal.usage.total_tokens == 14
 
 
+@pytest.mark.parametrize("close_mode", ["success", "failed", "missing"])
+async def test_qualification_observes_upstream_closure_not_just_wrapper_close(
+    monkeypatch: pytest.MonkeyPatch, close_mode: str
+) -> None:
+    from app.services.tools.conformance import qualify
+
+    streams: list[_FakeStream] = []
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        messages = kwargs["messages"]
+        is_cancel = "Probe cancellation:" in messages[1]["content"]
+        results = [message["content"] for message in messages if message["role"] == "tool"]
+        if is_cancel:
+            parts = [_Part(content="stream-open")]
+        elif results:
+            parts = [_Part(content="\n".join(results)), _Part(finish_reason="stop")]
+        else:
+            labels = ["alpha", "beta"] if "Probe parallel:" in messages[1]["content"] else ["alpha"]
+            parts = [
+                _Part(
+                    tool_calls=[
+                        _ToolCallFrag(
+                            index=index,
+                            id=f"call-{label}",
+                            name=kwargs["tools"][0]["function"]["name"],
+                            arguments=json.dumps({"label": label, "comment": None}),
+                        )
+                        for index, label in enumerate(labels)
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+        stream = _FakeStream(parts)
+        if is_cancel and close_mode == "failed":
+
+            async def fail_close() -> None:
+                raise RuntimeError("provider-secret-must-stay-private")
+
+            monkeypatch.setattr(stream, "aclose", fail_close)
+        elif is_cancel and close_mode == "missing":
+            monkeypatch.setattr(stream, "aclose", None)
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    report = await qualify(LLMGateway(_settings()), model="vendor/probe", route_revision="r17")
+
+    cancellation = next(case for case in report.cases if case.name == "cancellation")
+    assert cancellation.passed is (close_mode == "success")
+    assert report.qualified is (close_mode == "success")
+    assert sum(not stream.closed for stream in streams) == (0 if close_mode == "success" else 1)
+    assert all("provider-secret" not in case.reason for case in report.cases)
+
+
 async def test_stream_tools_accumulates_fragmented_tool_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -284,8 +339,7 @@ async def test_first_tool_fragment_emits_the_classification_signal(
         ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
     ]
     kinds = [
-        "signal" if e.tool_call_started else ("text" if e.text else "terminal")
-        for e in events
+        "signal" if e.tool_call_started else ("text" if e.text else "terminal") for e in events
     ]
     # Exactly one signal, after the first text and before the second.
     assert kinds == ["text", "signal", "text", "terminal"]
@@ -366,10 +420,7 @@ async def test_anthropic_single_message_gets_one_breakpoint(
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
     _ = [
-        ev
-        async for ev in gw.stream_tools(
-            [ChatMessage(role=Role.USER, content="q")], tools=_TOOLS
-        )
+        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
     ]
     wire = captured["messages"]
     assert len(wire) == 1 and _has_cache_control(wire[0])
@@ -637,13 +688,9 @@ async def test_no_base_route_needs_openrouter_prefix(
     ):
         _ = [
             ev
-            async for ev in gw.stream_tools(
-                _CONVO, tools=_TOOLS, model=model, cache_key="sess-3"
-            )
+            async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, model=model, cache_key="sess-3")
         ]
-        assert all(
-            isinstance(m.get("content"), str) for m in captured["messages"]
-        ), model
+        assert all(isinstance(m.get("content"), str) for m in captured["messages"]), model
         assert "extra_body" not in captured, model
 
     # The openrouter/-prefixed forms of the same upstreams: directives on.
