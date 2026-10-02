@@ -1,10 +1,10 @@
-"""Resolved Compose contract for the opt-in local fast runtime (issue #649)."""
+"""Compose and Nginx config contracts for the local fast runtime (issue #649)."""
 
 import json
-from pathlib import Path
+import shlex
 import subprocess
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,6 +18,52 @@ def resolve(*files: str) -> dict:
     if result.returncode:
         raise AssertionError(result.stderr)
     return json.loads(result.stdout)
+
+
+def nginx_directives(config: str) -> list[tuple[int, list[str]]]:
+    """Read directive arguments and scope depth, ignoring comments and quotes."""
+    lexer = shlex.shlex(config, posix=True, punctuation_chars="{};")
+    lexer.whitespace_split = True
+    directives = []
+    depth = 0
+    words: list[str] = []
+    for token in lexer:
+        # shlex groups adjacent punctuation, such as nested closing braces.
+        parts = list(token) if token and set(token) <= set("{};") else [token]
+        for part in parts:
+            if part in ("{", ";"):
+                assert words, "empty Nginx directive"
+                directives.append((depth, words))
+                words = []
+                if part == "{":
+                    depth += 1
+            elif part == "}":
+                assert not words and depth > 0, "unbalanced Nginx context"
+                depth -= 1
+            else:
+                words.append(part)
+    assert depth == 0 and not words, "unfinished Nginx directive or context"
+    return directives
+
+
+class NginxLoggingContract(unittest.TestCase):
+    def test_request_logs_are_suppressed_in_every_context(self) -> None:
+        configs = sorted((ROOT / "frontend").glob("nginx*.conf"))
+        self.assertTrue(configs, "no frontend Nginx configs checked")
+        for config in configs:
+            directives = nginx_directives(config.read_text(encoding="utf-8"))
+            for name, destination in (("access_log", "off"), ("error_log", "/dev/null")):
+                with self.subTest(config=config.name, logger=name):
+                    logs = [(depth, words[1:]) for depth, words in directives if words[0] == name]
+                    self.assertIn(
+                        (0, [destination]),
+                        logs,
+                        f"{name} must be suppressed at HTTP scope, before server selection",
+                    )
+                    for depth, args in logs:
+                        self.assertEqual(
+                            args[0], destination, f"{name} enabled at scope depth {depth}"
+                        )
 
 
 class FastDockerContract(unittest.TestCase):

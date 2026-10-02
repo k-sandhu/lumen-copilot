@@ -13,6 +13,14 @@ mounts. Datastores, trust networks, configured ports and named volumes retain
 the base Compose definitions. Unauthenticated product access remains denied;
 unknown API paths never return the SPA's index HTML.
 
+Nginx disables access logging and discards HTTP error logs at HTTP scope, before
+server selection, for every request path. Error context can include request and
+upstream URLs or referrers containing OAuth codes/state and WebSocket credentials.
+Neither logger may be re-enabled in a server or location. This also suppresses
+Nginx request-error diagnostics; use health checks and backend diagnostics instead.
+The config regressions check both log directives and every nested override without
+starting Nginx or a container.
+
 Verified on 2026-09-30 against the existing local `lumen-copilot` stack:
 
 | Measurement | Development mode | Fast mode |
@@ -33,7 +41,7 @@ zero mounts on all four application containers, two API workers, and two Celery
 child processes. The broader production gate and ingestion repair remain scoped
 to #496 and #346 respectively.
 
-Run the resolved-Compose regressions with:
+Run the resolved-Compose and parse-only Nginx config regressions with:
 
 ```powershell
 python -m unittest discover -s tests -p test_fast_docker.py -v
