@@ -18,9 +18,16 @@ security parameters. The issue's acceptance criteria authorize these changes.
   `false` retains production cost even in test. Outside test the existing
   Argon2id parameters remain time=3, memory=65536 KiB, parallelism=4, hash=32
   bytes, salt=16 bytes. The dummy hash uses the same selected hasher.
-- Track event-loop construction, holding loops until deterministic teardown.
+  Auth imports resolve only the hashing policy through `core/config.py`, without
+  requiring service URLs/credentials or populating the full Settings cache.
+  Seed CLI help therefore works before service configuration is supplied. The
+  small policy and full Settings share the same validation and dotenv semantics;
+  the hasher also independently refuses fast cost outside the test environment.
+- Track fully constructed standard asyncio event loops, holding loops until deterministic teardown.
   Close idle loops without scanning unrelated objects or forcing collection.
-  Running loops remain open. No warning suppression replaces #94's protection.
+  A constructor blocked before self-pipe creation is not published to teardown.
+  Running loops remain open, including a loop that starts between the idle check
+  and close; retain it for a later cleanup. No warning suppression replaces #94's protection.
 - Opt-in PostgreSQL fixtures use worker-qualified disposable database names.
   Offline execution continues to collect and skip live tests without secrets.
 
