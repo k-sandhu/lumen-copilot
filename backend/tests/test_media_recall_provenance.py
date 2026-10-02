@@ -36,6 +36,7 @@ from app.services.chat_runtime import ChatRuntime, _citation_event_data
 from app.services.tools.impls.recall import _read_conversation
 from app.services.tools.types import ToolContext
 from app.services.transcript_recall import SessionTranscriptReader
+from tests._live_helpers import isolated_live_url
 from tests.test_chat_runtime import _Ctx, _FakeRetrieval
 from tests.test_chat_runtime import ctx as media_ctx  # noqa: F401
 from tests.test_transcript_recall_postgres import factory_and_role  # noqa: F401
@@ -199,7 +200,9 @@ async def test_media_citation_recall_uses_stored_provenance(media_ctx: _Ctx) -> 
 @pytest.mark.skipif(
     os.environ.get("RUN_LIVE") != "1"
     or os.environ.get("DATABASE_URL")
-    != "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr570",
+    != isolated_live_url(
+        "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr570"
+    ),
     reason="requires RUN_LIVE=1 and the isolated lumentest_pr570 DATABASE_URL",
 )
 async def test_media_recall_obeys_postgres_grant_revocation(factory_and_role):  # noqa: F811

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+      RUN_LIVE: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: python -m pip install uv==0.11.18
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-3.12-
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Lint
+        run: uv run --extra dev ruff check app tests
+      - name: Check formatting
+        run: uv run --extra dev ruff format --check app tests
+      - name: Typecheck
+        run: uv run --extra dev mypy app
+      - name: Offline tests
+        run: uv run --extra dev pytest -n 2 --dist loadfile -p no:cacheprovider --basetemp "${{ runner.temp }}/pytest-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Trim uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pnpm
+        run: npm install --global pnpm@9.12.3
+      - name: Find pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Tests
+        run: pnpm test
+      - name: Build
+        run: pnpm build

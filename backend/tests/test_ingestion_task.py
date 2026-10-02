@@ -46,7 +46,6 @@ import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     ChunkInput,
     ChunkRepository,
@@ -65,6 +64,7 @@ from app.tasks.ingest import (
     ingest_document,
     ingest_document_async,
 )
+from tests._db_helpers import copy_sqlite_schema
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -209,7 +209,7 @@ async def sqlite_engine() -> AsyncIterator[None]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
 
     prev_engine = db_session._engine
     prev_maker = db_session._sessionmaker
