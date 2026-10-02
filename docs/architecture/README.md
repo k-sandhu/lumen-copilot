@@ -7,6 +7,8 @@ We record decisions that are **costly to reverse and not self-evident from the c
 **When to write one:** a technology or boundary choice, a licensing constraint, a deliberate scope cut.
 **When not to:** routine, reversible choices that are obvious from the code.
 
+For a dated visual walkthrough of the decisions, supersessions, and implementation status, see the [architecture evolution HTML presentation](../presentations/architecture-evolution.html) and its [usage and evidence notes](../presentations/README.md). The presentation is an October 2, 2026 snapshot; this ADR index remains the decision catalog.
+
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
