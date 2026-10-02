@@ -44,6 +44,7 @@ from uuid import UUID
 from app.core.errors import ValidationError
 from app.core.logging import get_logger
 from app.domain.llm import ChatMessage, Role, ToolSpec
+from app.llm.tool_names import ToolNameMap
 
 log = get_logger(__name__)
 
@@ -491,27 +492,34 @@ def _message_wire_text(message: ChatMessage) -> str:
     """Serialize one message to the EXACT wire shape the gateway sends, for counting.
 
     Mirrors :meth:`LLMGateway._to_wire_messages` field-for-field (role, content,
-    the OpenAI ``tool_calls`` array with each call's id/name/serialized arguments,
+    the OpenAI ``tool_calls`` array with each call's id/projected name/serialized arguments,
     ``tool_call_id``, and ``name``) so the estimate counts every byte the provider
     actually receives — tool-call metadata included (#424 re-review, new finding
     1). ``sort_keys`` for determinism.
     """
     import json
 
+    name_map = ToolNameMap(
+        [call.name for call in message.tool_calls]
+        + ([message.name] if message.name is not None else [])
+    )
     entry: dict[str, object] = {"role": message.role.value, "content": message.content}
     if message.tool_calls:
         entry["tool_calls"] = [
             {
                 "id": tc.id,
                 "type": "function",
-                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                "function": {
+                    "name": name_map.to_wire(tc.name),
+                    "arguments": json.dumps(tc.arguments),
+                },
             }
             for tc in message.tool_calls
         ]
     if message.tool_call_id is not None:
         entry["tool_call_id"] = message.tool_call_id
     if message.name is not None:
-        entry["name"] = message.name
+        entry["name"] = name_map.to_wire(message.name)
     try:
         return json.dumps(entry, sort_keys=True)
     except (TypeError, ValueError):  # pragma: no cover — args are JSON by construction
@@ -906,11 +914,12 @@ def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:
     """
     import json
 
+    name_map = ToolNameMap(t.name for t in tools)
     payload = [
         {
             "type": "function",
             "function": {
-                "name": t.name,
+                "name": name_map.to_wire(t.name),
                 "description": t.description,
                 "parameters": t.parameters,
             },
