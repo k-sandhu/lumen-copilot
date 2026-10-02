@@ -126,9 +126,18 @@ and faithful refusal separate so fabricated answers cannot improve the score.
 
 Hard gates: exact slice validation for every produced chunk; tenant/permission
 negatives remain denied; no forbidden citation, missing required audit or
-untyped parse failure. Owner-defined thresholds must assess native text and
-existing answers as well as the target table/spreadsheet/scanned cases. Publish
-paired results with format-level failures and costs before an adoption decision.
+untyped parse failure.
+
+Adoption or promotion also requires baseline-relative non-regression on the
+frozen held-out native document control arm: extraction fidelity, retrieval,
+grounded-answer/citation correctness and faithful abstention must each pass.
+Before candidate scoring, the owner must fix metric definitions, comparison
+rules and any approved non-regression margins for each metric and native format.
+Every required comparison must pass; aggregate gains in table/spreadsheet/scanned
+cases or absolute candidate thresholds cannot offset a failed native control
+comparison. Owner-defined target-quality thresholds additionally assess those
+table/spreadsheet/scanned cases. Publish paired results with metric- and
+format-level failures and costs before an adoption or promotion decision.
 
 ### Connector exports and inspection replay
 
@@ -150,8 +159,10 @@ and fingerprint; it does not overwrite active evidence or silently retarget
 citations. Record committed inspection/replay audit events and include foreign
 tenant and unauthorized-document negatives. Promotion requires the agreed
 evaluation gates; replay authorization, storage/retention and promotion UX need
-their own contract-first implementation issue. The current native diagnostic
-summary is a first inspection step, not this full comparison/replay surface.
+their own contract-first implementation issue. The native diagnostic summary
+proposed in [#628](https://github.com/k-sandhu/lumen-copilot/issues/628) remains
+open, unmerged work and would be a first inspection step toward this full
+comparison/replay surface.
 
 ## Future OCR options and placement
 
