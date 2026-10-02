@@ -66,6 +66,7 @@ from app.domain.llm import Embedding
 from app.retrieval import RetrievalService
 from app.services.audit import AuditSink
 from app.services.grants_service import GrantsService
+from tests._db_helpers import copy_sqlite_schema
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -110,7 +111,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
             yield sess

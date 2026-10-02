@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from structlog.testing import capture_logs
 
 import app.db.models as models
 import app.db.session as db_session
 import app.ingestion.reembed as reembed_module
 from app.core.config import get_settings
-from app.db.base import Base
 from app.db.repositories import (
     ChunkInput,
     ChunkRepository,
@@ -25,6 +25,15 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import DocumentKind, DocumentStatus, Role
+from tests._db_helpers import copy_sqlite_schema
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operator_logs() -> Iterator[None]:
+    # CLI feedback has its own stdout records. Capture operational logs so
+    # counts never depend on another module selecting JSON vs console logging.
+    with capture_logs():
+        yield
 
 
 @pytest_asyncio.fixture
@@ -35,7 +44,7 @@ async def operator_db() -> AsyncIterator[None]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(copy_sqlite_schema)
     previous_engine = db_session._engine
     previous_maker = db_session._sessionmaker
     db_session._engine = engine

@@ -249,6 +249,19 @@ class Settings(BaseSettings):
     # --- Environment / observability ---
     environment: str = Field(default="local", alias="ENVIRONMENT")
     log_level: str = Field(default="info", alias="LOG_LEVEL")
+    # None selects fast cost only in the explicit test environment. An explicit
+    # true outside test is a configuration error; false always keeps real cost.
+    test_fast_password_hashing: bool | None = Field(
+        default=None, alias="TEST_FAST_PASSWORD_HASHING"
+    )
+
+    @model_validator(mode="after")
+    def _gate_test_password_hashing(self) -> Settings:
+        if self.test_fast_password_hashing and self.environment != "test":
+            raise ValueError("TEST_FAST_PASSWORD_HASHING is allowed only in ENVIRONMENT=test")
+        if self.test_fast_password_hashing is None:
+            self.test_fast_password_hashing = self.environment == "test"
+        return self
 
     # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
     # Symmetric signing secret for the access JWT. A dev default is provided so

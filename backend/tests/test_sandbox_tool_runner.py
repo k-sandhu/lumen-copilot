@@ -30,7 +30,6 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     CodeRunRepository,
@@ -44,6 +43,7 @@ from app.realtime.backplane import InMemoryBackplane
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.sandbox.tool_runner import ChatSandboxToolRunner
 from app.storage.keys import build_artifact_key
+from tests._db_helpers import copy_sqlite_schema
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -181,7 +181,7 @@ async def world() -> AsyncIterator[_World]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as session:
             tenant = await TenantRepository(session).create(name="Acme")
