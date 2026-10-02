@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
+import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -69,6 +73,98 @@ def test_hasher_defends_against_bypassed_settings_validation() -> None:
     settings.environment = "production"
     assert settings.test_fast_password_hashing is True
     assert hashing._build_hasher(settings).memory_cost == 65536
+
+
+def _cold_auth_process(
+    tmp_path: Path, args: list[str], **policy: str
+) -> subprocess.CompletedProcess[str]:
+    # Keep the native process environment (SystemRoot/PATH on Windows), but
+    # remove every application setting and pytest's seeded test identity.
+    aliases = {str(field.alias or name).upper() for name, field in Settings.model_fields.items()}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in aliases and not key.upper().startswith("PYTEST_")
+    }
+    env.update(
+        {
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "ENVIRONMENT": "local",
+            **policy,
+        }
+    )
+    # The empty cwd prevents .env from supplying the missing service settings.
+    return subprocess.run(
+        [sys.executable, *args], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60
+    )
+
+
+def test_cold_auth_import_needs_no_service_settings(tmp_path: Path) -> None:
+    result = _cold_auth_process(
+        tmp_path,
+        [
+            "-c",
+            "from app.auth.principal import Principal; "
+            "from app.auth import generate_refresh_token; "
+            "from app.core.config import get_settings; "
+            "assert get_settings.cache_info().currsize == 0; "
+            "print(Principal.__name__, bool(generate_refresh_token()))",
+        ],
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "Principal True"
+
+
+def test_cold_seed_help_needs_no_service_settings(tmp_path: Path) -> None:
+    result = _cold_auth_process(tmp_path, ["-m", "app.auth.seed", "--help"])
+    assert result.returncode == 0, result.stderr
+    assert "--email" in result.stdout
+    assert "--password" in result.stdout
+
+
+@pytest.mark.parametrize("environment", ["local", "staging", "production"])
+def test_cold_auth_import_rejects_fast_hashing_outside_test(
+    tmp_path: Path, environment: str
+) -> None:
+    result = _cold_auth_process(
+        tmp_path,
+        ["-c", "import app.auth"],
+        ENVIRONMENT=environment,
+        TEST_FAST_PASSWORD_HASHING="true",
+    )
+    assert result.returncode != 0
+    assert "TEST_FAST_PASSWORD_HASHING is allowed only in ENVIRONMENT=test" in result.stderr
+    assert "Field required" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("policy", "cost"),
+    [
+        ({"ENVIRONMENT": "local"}, (3, 65536, 4)),
+        ({"ENVIRONMENT": "staging"}, (3, 65536, 4)),
+        ({"ENVIRONMENT": "production"}, (3, 65536, 4)),
+        ({"ENVIRONMENT": "test"}, (1, 8, 1)),
+        ({"ENVIRONMENT": "test", "TEST_FAST_PASSWORD_HASHING": "false"}, (3, 65536, 4)),
+    ],
+    ids=["local", "staging", "production", "test-default", "test-opt-out"],
+)
+def test_cold_auth_import_selects_only_hashing_policy(
+    tmp_path: Path, policy: dict[str, str], cost: tuple[int, int, int]
+) -> None:
+    result = _cold_auth_process(
+        tmp_path,
+        [
+            "-c",
+            "from app.auth import hashing; "
+            "from argon2 import extract_parameters; "
+            "p = extract_parameters(hashing._DUMMY_HASH); "
+            "print((p.time_cost, p.memory_cost, p.parallelism))",
+        ],
+        **policy,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(cost)
 
 
 @pytest.mark.parametrize("worker", ["", "gw0", "gw1"])
@@ -143,6 +239,96 @@ def test_loop_tracker_closes_idle_loops_without_heap_scan(monkeypatch: pytest.Mo
     tracker.close_idle()
     assert all(loop.is_closed() for loop in loops)
     assert not tracker.loops
+
+
+@pytest.mark.parametrize(
+    "loop_type",
+    [asyncio.SelectorEventLoop] + ([asyncio.ProactorEventLoop] if sys.platform == "win32" else []),
+)
+def test_loop_tracker_defers_concurrent_construction(
+    monkeypatch: pytest.MonkeyPatch, loop_type: type[asyncio.BaseEventLoop]
+) -> None:
+    """R1-001: teardown must not close a loop before its self-pipe exists."""
+    tracker = LoopTracker()
+    tracker.install(monkeypatch)
+    constructing = threading.Event()
+    finish_construction = threading.Event()
+    created: list[asyncio.BaseEventLoop] = []
+    original = loop_type._make_self_pipe
+
+    def blocked_self_pipe(loop: asyncio.BaseEventLoop) -> None:
+        constructing.set()
+        assert finish_construction.wait(60), "constructor handshake stalled"
+        original(loop)
+
+    monkeypatch.setattr(loop_type, "_make_self_pipe", blocked_self_pipe)
+    thread = threading.Thread(target=lambda: created.append(loop_type()))
+    thread.start()
+    try:
+        assert constructing.wait(60), "constructor never reached self-pipe handshake"
+        tracker.close_idle()
+    finally:
+        finish_construction.set()
+        thread.join(60)
+        assert not thread.is_alive(), "constructor did not finish"
+        tracker.close_idle()
+    assert len(created) == 1
+    assert created[0].is_closed()
+    assert not tracker.loops
+
+
+@pytest.mark.parametrize("stop_before_close_returns", [False, True])
+def test_loop_tracker_defers_loop_started_during_teardown(
+    monkeypatch: pytest.MonkeyPatch, stop_before_close_returns: bool
+) -> None:
+    """An idle check is only a snapshot; close may lose a race with run_forever."""
+    tracker = LoopTracker()
+    tracker.install(monkeypatch)
+    loop = asyncio.new_event_loop()
+    start_loop = threading.Event()
+    running = threading.Event()
+    original = loop.is_running
+
+    def stale_idle_check() -> bool:
+        was_running = original()
+        if not start_loop.is_set():
+            start_loop.set()
+            assert running.wait(60), "loop never started"
+        return was_running
+
+    def run() -> None:
+        assert start_loop.wait(60), "teardown never checked idle state"
+        loop.call_soon(running.set)
+        loop.run_forever()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    monkeypatch.setattr(loop, "is_running", stale_idle_check)
+    original_close = loop.close
+
+    def raced_close() -> None:
+        try:
+            original_close()
+        except RuntimeError:
+            if stop_before_close_returns:
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(60)
+                assert not thread.is_alive(), "loop did not stop before close returned"
+            raise
+
+    monkeypatch.setattr(loop, "close", raced_close)
+    try:
+        tracker.close_idle()
+        assert not loop.is_closed()
+        assert loop in tracker.loops
+    finally:
+        start_loop.set()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(60)
+        assert not thread.is_alive(), "loop thread did not stop"
+        monkeypatch.setattr(loop, "is_running", original)
+        tracker.close_idle()
+    assert loop.is_closed()
 
 
 async def test_loop_tracker_keeps_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
