@@ -32,6 +32,7 @@ import math
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import replace
 from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,7 @@ from app.domain.llm import (
     ToolSpec,
     Transcription,
 )
+from app.llm.tool_names import ToolNameMap
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -697,11 +699,27 @@ class LLMGateway:
         )
         if family == "openai" and cache_key:
             extra["extra_body"] = {"prompt_cache_key": cache_key}
+        name_map = ToolNameMap(
+            [t.name for t in tools]
+            + [call.name for message in messages for call in message.tool_calls]
+            + [message.name for message in messages if message.name is not None]
+        )
+        provider_messages = [
+            replace(
+                message,
+                tool_calls=tuple(
+                    replace(call, name=name_map.to_wire(call.name)) for call in message.tool_calls
+                ),
+                name=name_map.to_wire(message.name) if message.name is not None else None,
+            )
+            for message in messages
+        ]
+        provider_tools = [replace(tool, name=name_map.to_wire(tool.name)) for tool in tools]
         try:
             response = await litellm.acompletion(
                 model=model_id,
-                messages=_apply_cache_directives(self._to_wire_messages(messages), family),
-                tools=self._to_wire_tools(tools),
+                messages=_apply_cache_directives(self._to_wire_messages(provider_messages), family),
+                tools=self._to_wire_tools(provider_tools),
                 stream=True,
                 stream_options={"include_usage": True},
                 timeout=self._settings.llm_timeout_seconds,
@@ -749,7 +767,10 @@ class LLMGateway:
         finally:
             await _aclose(response)
 
-        tool_calls = tuple(acc.build() for _, acc in sorted(tool_acc.items()))
+        built_calls = (acc.build() for _, acc in sorted(tool_acc.items()))
+        tool_calls = tuple(
+            replace(call, name=name_map.from_wire(call.name)) for call in built_calls
+        )
         yield StreamEvent(
             tool_calls=tool_calls,
             finish_reason=finish_reason or ("tool_calls" if tool_calls else "stop"),
