@@ -14,8 +14,8 @@ library (``pypdf`` / ``python-docx`` / ``python-pptx`` / ``openpyxl``) is import
   swap/upgrade is localized.
 
 **Fail-closed (AC-6 / INV-8).** Every failure path is a typed
-:class:`DocumentParseError`: an unsupported MIME type, or a corrupt/unreadable
-file of a supported type. The Celery task maps that to ``status=failed`` with the
+:class:`DocumentParseError`: an unsupported MIME type, a corrupt/unreadable
+file, or a DOCX extraction limit. The Celery task maps that to ``status=failed`` with the
 reason — never a silent drop and never an unmapped crash. Parsing is pure CPU
 work with no network and no I/O beyond the in-memory bytes it is handed.
 """
@@ -36,9 +36,15 @@ _MD = "text/markdown"
 
 SUPPORTED_MIME_TYPES: frozenset[str] = frozenset({_PDF, _DOCX, _PPTX, _XLSX, _TXT, _MD})
 
+# Hard bounds on the DOCX representation/traversal (spec 0010), not provider or
+# deployment tuning. Check before expansion, and never return truncated success.
+_DOCX_MAX_OUTPUT_CHARS = 2_000_000
+_DOCX_MAX_WORK_UNITS = 100_000
+_DOCX_MAX_TABLE_DEPTH = 32
+
 
 class DocumentParseError(Exception):
-    """Parsing failed — unsupported type or a corrupt/unreadable file (AC-6).
+    """Parsing failed — unsupported, unreadable or over extraction limits (AC-6).
 
     Carried by the task into ``Document.status=failed`` with the reason. A domain
     error, not an HTTP one; the task records it on the document row.
@@ -80,15 +86,125 @@ def _parse_pdf(data: bytes) -> str:
 
 
 def _parse_docx(data: bytes) -> str:
-    """Extract paragraph text from a DOCX (``python-docx``, imported lazily)."""
+    """Extract paragraphs and labelled table rows in body order (spec 0010)."""
     import docx
+    from docx.document import Document as DocxDocument
+    from docx.table import Table, _Cell
+    from docx.text.paragraph import Paragraph
+
+    output: list[str] = []
+    output_chars = 0
+    work_units = 0
+
+    def charge_work(amount: int = 1) -> None:
+        nonlocal work_units
+        work_units += amount
+        if work_units > _DOCX_MAX_WORK_UNITS:
+            raise DocumentParseError("DOCX extraction work limit exceeded")
+
+    def check_size(size: int) -> None:
+        if size > _DOCX_MAX_OUTPUT_CHARS:
+            raise DocumentParseError("DOCX extraction output limit exceeded")
+
+    def emit(text: str) -> None:
+        nonlocal output_chars
+        check_size(output_chars + len(text))
+        output_chars += len(text)
+        output.append(text)
+
+    def scalar_join(parts: list[str]) -> str:
+        check_size(sum(map(len, parts)) + max(0, len(parts) - 1))
+        return "\n".join(parts)
+
+    def render_blocks(container: DocxDocument | _Cell, depth: int) -> None:
+        for index, block in enumerate(container.iter_inner_content()):
+            charge_work()
+            if index:
+                emit("\n")
+            if isinstance(block, Paragraph):
+                emit(block.text)
+            elif isinstance(block, Table):
+                render_table(block, depth + 1)
+
+    def render_table(table: Table, depth: int) -> None:
+        if depth > _DOCX_MAX_TABLE_DEPTH:
+            raise DocumentParseError("DOCX extraction depth limit exceeded")
+        emit("[Table]")
+        headers: list[str] = []
+        width = len(table.columns)
+        charge_work(width)
+        # Cache scalar rendering and origin metadata. Full nested content goes
+        # straight to the bounded output once; aliases never materialize it.
+        origins: dict[object, tuple[tuple[int, int], str, bool]] = {}
+        previous: dict[int, _Cell] = {}
+        for number, row in enumerate(table.rows, start=1):
+            charge_work()
+            # python-docx row.cells recursively follows every vertical merge.
+            # Keep the preceding grid instead, visiting each physical cell once.
+            grid_cells: dict[int, _Cell] = {}
+            column = row.grid_cols_before + 1
+            for tc in row._tr.tc_lst:
+                charge_work(1 + tc.grid_span)
+                grid_origin = previous[column] if tc.vMerge == "continue" else _Cell(tc, table)
+                for occupied in range(column, column + tc.grid_span):
+                    grid_cells[occupied] = grid_origin
+                column += tc.grid_span
+            previous = grid_cells
+            row_width = max(width, column - 1 + row.grid_cols_after)
+            charge_work(row_width)
+            emit(f"\nRow {number}: ")
+            for column in range(1, row_width + 1):
+                cell = grid_cells.get(column)
+                position = (number, column)
+                origin, scalar, has_nested = position, "", False
+                if cell is not None:
+                    if cell._tc not in origins:
+                        paragraphs: list[str] = []
+                        scalar_chars = 0
+                        for block in cell.iter_inner_content():
+                            charge_work()
+                            if isinstance(block, Paragraph):
+                                text = block.text
+                                scalar_chars += len(text) + bool(paragraphs)
+                                check_size(scalar_chars)
+                                paragraphs.append(text)
+                            elif isinstance(block, Table):
+                                has_nested = True
+                        scalar = scalar_join(paragraphs)
+                        if has_nested:
+                            scalar = scalar.strip("\n")
+                        origins[cell._tc] = (position, scalar, has_nested)
+                    origin, scalar, has_nested = origins[cell._tc]
+                nested_reference = (
+                    f" [nested tables at R{origin[0]}C{origin[1]}]" if has_nested else ""
+                )
+                if number == 1:
+                    check_size(len(scalar) + 2 * scalar.count("\n") + len(nested_reference))
+                    headers.append(scalar.replace("\n", " / ") + nested_reference)
+                label = (
+                    f" [{headers[column - 1]}]"
+                    if number > 1 and column <= len(headers) and headers[column - 1]
+                    else ""
+                )
+                if column > 1:
+                    emit(" | ")
+                emit(f"C{column}{label}=")
+                if origin != position:
+                    emit(scalar)
+                    emit(nested_reference)
+                    emit(f" [merged from R{origin[0]}C{origin[1]}]")
+                elif cell is not None:
+                    render_blocks(cell, depth)
+        emit("\n[/Table]")
 
     try:
         document = docx.Document(io.BytesIO(data))
-        paragraphs = [p.text for p in document.paragraphs]
+        render_blocks(document, 0)
+    except DocumentParseError:
+        raise
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse DOCX: {type(exc).__name__}") from exc
-    return "\n".join(paragraphs)
+    return "".join(output)
 
 
 def _parse_pptx(data: bytes) -> str:
@@ -156,7 +272,7 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
 
     Raises:
         UnsupportedMimeTypeError: ``mime_type`` is outside the allowlist (AC-6).
-        DocumentParseError: a supported type whose bytes are corrupt/unreadable.
+        DocumentParseError: corrupt/unreadable bytes or a DOCX extraction limit.
     """
     normalized = mime_type.split(";", 1)[0].strip().lower()
     parser = _PARSERS.get(normalized)
