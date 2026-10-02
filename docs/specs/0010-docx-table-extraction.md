@@ -22,15 +22,33 @@ origins repeat at the occupied grid positions. Each repeated position appends
 `[merged from R2C1]` (with its table-local origin row and column), distinguishing
 the merge from independent equal-valued cells. The original position has no
 repeat marker. Repeated merged values are context, not multiple measurements.
-Nested tables inside cells are
-walked recursively along with adjacent cell paragraphs. No generated facts or
+Nested tables inside cells are walked in order along with adjacent cell
+paragraphs. Each origin's nested content is rendered once: merged aliases retain
+the origin's scalar paragraph text and append `[nested tables at R2C1]` before
+the existing merge marker. First-row labels also use scalar paragraphs and this
+reference, never copies of nested table bodies. References are table-local and
+identify retained content, not an additional fact. No generated facts or
 units are added. Headers embedded in later rows remain ordinary source text.
 
 Acceptance: table-only text is retained, paragraph/table/paragraph order is
 preserved, headers and units remain associated, merged and blank cells retain
 positions and identify the shared origin; equal-valued unmerged cells carry no
-merge marker. Nested tables retain content. Corrupt bytes still raise the
+merge marker. A 1,000-row vertical merge retains its last independent value and
+origin without recursive merge lookup, including grid omissions and spans.
+Nested merged ancestors do not multiply descendant facts. Nested tables retain
+content. Corrupt bytes still raise the
 typed `DocumentParseError`; imports remain inside the DOCX helper.
+
+DOCX extraction has hard safety ceilings per document: 2,000,000 emitted
+characters (including labels, references and separators), 100,000 work units,
+and 32 nested table levels. Work charges every visited block, row, physical
+cell, declared grid column, occupied grid position and rendered column,
+including omitted columns.
+Charges precede grid expansion and output accumulation; scalar joins and header
+construction also check the character ceiling before allocating. Exceeding any
+ceiling raises `DocumentParseError` with a named extraction limit. No truncated
+success is returned: ingestion records the permanent failure before chunking or
+embedding. These ceilings bound this traversal, not OOXML archive decompression.
 
 New rendering applies only on ingestion. Existing chunks and citation offsets
 are unchanged by deployment or search reindex. Operators may re-run ingestion

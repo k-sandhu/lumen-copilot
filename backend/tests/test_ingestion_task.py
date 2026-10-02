@@ -26,9 +26,11 @@ real broker, no datastore).
 
 from __future__ import annotations
 
+import io
 import uuid
 from collections.abc import AsyncIterator, Sequence
 
+import docx
 import pytest
 import pytest_asyncio
 from celery.exceptions import Retry
@@ -39,6 +41,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.db.session as db_session
+import app.ingestion.parsers as parser_module
 import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError
@@ -790,6 +793,49 @@ async def test_corrupt_pdf_marks_failed_not_crash(sqlite_engine: None) -> None:
     )
     assert result.status is DocumentStatus.FAILED
     assert "PDF" in (result.error or "")
+
+
+async def test_docx_extraction_limit_fails_before_chunking_or_embedding(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-002: a limit is a permanent failure, with no downstream work."""
+    monkeypatch.setattr(parser_module, "_DOCX_MAX_OUTPUT_CHARS", 80, raising=False)
+    chunk_inputs: list[str] = []
+    original_chunk_text = ingest_module.chunk_text
+
+    def record_chunk_text(text: str, **kwargs: int) -> object:
+        chunk_inputs.append(text)
+        return original_chunk_text(text, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "chunk_text", record_chunk_text)
+    document = docx.Document()
+    document.add_paragraph("x" * 81)
+    data = io.BytesIO()
+    document.save(data)
+    mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    tenant_id, document_id = await _seed_document(mime_type=mime_type, key="limit")
+    store = _FakeObjectStore()
+    gateway = _FakeGateway()
+    store.put(str(tenant_id), "limit", data.getvalue())
+
+    result = await ingest_document_async(
+        tenant_id,
+        document_id,
+        settings=_settings(),
+        object_store=store,
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+
+    assert result.status is DocumentStatus.FAILED
+    assert "DOCX extraction output limit" in (result.error or "")
+    assert chunk_inputs == []
+    assert gateway.calls == []
+    async with db_session.session_scope() as session:
+        persisted = await DocumentRepository(session, tenant_id).get(document_id)
+        assert persisted is not None
+        assert persisted.status is DocumentStatus.FAILED
+        assert persisted.error == result.error
+        assert await ChunkRepository(session, tenant_id).list_for_document(document_id) == []
 
 
 async def test_empty_document_is_ready_with_zero_chunks(sqlite_engine: None) -> None:
