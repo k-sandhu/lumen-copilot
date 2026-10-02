@@ -62,6 +62,71 @@ def test_boundary_aware_cut_prefers_sentence_end() -> None:
     assert text[first.char_start : first.char_end] == first.text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a" * 800 + ". " + "b" * 1500,
+        "a" * 800 + " " + "b" * 1500,
+    ],
+    ids=["sentence", "whitespace"],
+)
+def test_early_boundary_preserves_configured_overlap(text: str) -> None:
+    """A boundary cut must not shorten the overlap on the following window."""
+    chunks = chunk_text(text, chunk_size=1200, overlap=200)
+
+    assert [(c.char_start, c.char_end) for c in chunks] == [
+        (0, 801),
+        (601, 1801),
+        (1601, len(text)),
+    ]
+    assert [c.ord for c in chunks] == list(range(len(chunks)))
+    assert all(text[c.char_start : c.char_end] == c.text for c in chunks)
+    assert chunks[0].char_start == 0
+    assert chunks[-1].char_end == len(text)
+    assert all(c.char_end - c.char_start <= 1200 for c in chunks)
+    assert all(a.char_end - b.char_start == 200 for a, b in zip(chunks, chunks[1:], strict=False))
+
+
+def test_extreme_overlap_with_boundaries_makes_strict_progress() -> None:
+    """Natural boundaries cannot cause a repeated chunk end at maximum overlap."""
+    text = "a" * 99 + ". " + "b" * 400 + ". " + "c" * 400
+    chunks = chunk_text(text, chunk_size=100, overlap=99)
+
+    assert len(chunks) > 1
+    assert all(a.char_start < b.char_start for a, b in zip(chunks, chunks[1:], strict=False))
+    assert all(a.char_end < b.char_end for a, b in zip(chunks, chunks[1:], strict=False))
+    assert all(a.char_end - b.char_start == 99 for a, b in zip(chunks, chunks[1:], strict=False))
+    assert [c.ord for c in chunks] == list(range(len(chunks)))
+    assert all(text[c.char_start : c.char_end] == c.text for c in chunks)
+    assert chunks[0].char_start == 0
+    assert chunks[-1].char_end == len(text)
+    assert all(c.char_end - c.char_start <= 100 for c in chunks)
+
+
+def test_boundary_shorter_than_overlap_plus_one_uses_hard_edge() -> None:
+    text = "a" * 60 + ". " + "b" * 200
+    chunks = chunk_text(text, chunk_size=100, overlap=99)
+
+    assert chunks[0].char_end == 100
+
+
+def test_zero_overlap_boundary_cut() -> None:
+    text = "a" * 60 + ". " + "b" * 150
+    chunks = chunk_text(text, chunk_size=100, overlap=0)
+
+    assert [(c.char_start, c.char_end) for c in chunks] == [
+        (0, 61),
+        (61, 161),
+        (161, len(text)),
+    ]
+    assert all(a.char_end == b.char_start for a, b in zip(chunks, chunks[1:], strict=False))
+    assert [c.ord for c in chunks] == list(range(len(chunks)))
+    assert all(text[c.char_start : c.char_end] == c.text for c in chunks)
+    assert chunks[0].char_start == 0
+    assert chunks[-1].char_end == len(text)
+    assert all(c.char_end - c.char_start <= 100 for c in chunks)
+
+
 def test_empty_text_yields_no_chunks() -> None:
     assert chunk_text("", chunk_size=100, overlap=10) == []
 
