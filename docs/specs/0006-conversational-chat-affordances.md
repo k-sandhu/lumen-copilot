@@ -257,7 +257,17 @@ question; no new INV-2 surface.
   dependency exception. Stored mentions are computed from the original stored
   body and summary mention map, never clipped/rendered text. The bounded candidate
   window, two-call budget and repeat refusal remain in force. Existing summary
-  sanitisation is preserved. See ADR-0016 §3.3 (owner decision 2026-10-01).
+  sanitisation is preserved. Each recall evaluates the caller's permitted document
+  IDs and names once, before candidate selection, and uses that same immutable
+  snapshot for the SQL pre-filter, matching/K-selection and final withholding.
+  A revocation committed after that snapshot is an ordinary concurrent race:
+  the entire result is consistent with permissions at the snapshot instant.
+  It never combines selection under earlier permissions with withholding under
+  later permissions; excluded turns affect neither selection nor any result
+  metadata. Event-handshake PostgreSQL regressions commit revocation between the
+  permission snapshot and candidate read, and between the candidate read and
+  rendering, and compare every result byte against before/after controls.
+  See ADR-0016 §3.3 (owner decision 2026-10-01; PR #570 R11).
 - `event:narration` (#414), sub-agent progress envelopes (ADR-0018 §5), and any
   workflow *engine* (ADR-0011 §6) remain their own work.
 

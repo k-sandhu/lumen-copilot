@@ -143,8 +143,9 @@ class RecalledTurn:
     documents inline, so replaying one verbatim re-serves text whose grant may
     since have been revoked (epic #533 design rule 1; the same class of leak as
     #536, reached from a third direction). The seam filters the union of stored
-    source and mention dependencies BEFORE matching. The handler re-checks those ids
-    before rendering; excluded turns contribute no marker or count.
+    source and mention dependencies BEFORE matching. The handler checks those ids
+    against the same permission snapshot before rendering; excluded turns contribute
+    no marker or count.
     """
 
     role: str
@@ -176,6 +177,8 @@ class RecallOutcome:
     compaction_started: bool = True
     refusal: str | None = None
     mentioned_documents: tuple[tuple[UUID, str], ...] = ()
+    #: IDs/names authorized ONCE before selection, also used for final withholding.
+    permitted_document_names: tuple[tuple[UUID, str], ...] = ()
 
 
 @runtime_checkable

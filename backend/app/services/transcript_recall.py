@@ -23,8 +23,8 @@ chose:
 It delegates to the retrieval permission chokepoint before keyword matching:
 SQL excludes UNKNOWN/forbidden assistant turns before the candidate cap. The
 repository captures stored dependencies, then simply clips and matches
-in Python. Returned dependency IDs accompany permitted prose; the handler
-re-checks them before rendering (epic #533 design rule 1).
+in Python. Returned dependency IDs and permitted names accompany permitted prose;
+the handler checks them against the SAME snapshot before rendering (R10-001).
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ class SessionTranscriptReader:
         # candidate cap. Withheld bodies never reach keyword matching (R4-001).
         summary = await self._summaries.get_for_session(self._session_id)
         mentions = summary.mentioned_documents if summary else ()
-        rows = await retrieval.search_conversation(
+        rows, permitted = await retrieval.search_conversation(
             principal=self._principal,
             messages=self._messages,
             session_id=self._session_id,
@@ -201,9 +201,20 @@ class SessionTranscriptReader:
             # "as we discussed earlier" means); reading order is oldest-first.
             for row in reversed(rows)
         )
-        # Names still use current stored mentions and permissions; only the
-        # coverage boundary is pinned, never authorization.
-        return RecallOutcome(turns=turns, mentioned_documents=mentions)
+        # Carry only contributing metadata, but preserve the permission decision
+        # used before selection. A later revocation cannot turn top-K into an oracle.
+        dependencies = {
+            doc
+            for turn in turns
+            for doc in (*turn.cited_document_ids, *turn.mentioned_document_ids)
+        }
+        return RecallOutcome(
+            turns=turns,
+            mentioned_documents=mentions,
+            permitted_document_names=tuple(
+                (doc, permitted[doc]) for doc in sorted(dependencies, key=str) if doc in permitted
+            ),
+        )
 
 
 __all__ = ["SessionTranscriptReader"]

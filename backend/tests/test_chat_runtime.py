@@ -188,7 +188,7 @@ class _FakeRetrieval:
         # revoked/deleted shape); hydrating fakes override.
         return {}
 
-    async def search_conversation(self, **kwargs: Any) -> list[Any]:
+    async def search_conversation(self, **kwargs: Any) -> tuple[list[Any], dict[uuid.UUID, str]]:
         from tests.test_transcript_recall import search_with_fake_permissions
 
         return await search_with_fake_permissions(self, **kwargs)

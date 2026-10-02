@@ -34,12 +34,14 @@ test), not the in-memory SQLite used for the pure unit tests.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, String, and_, cast, false, func, or_, select
+from sqlalchemy import ColumnElement, Select, String, and_, case, cast, false, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -331,15 +333,47 @@ def permitted_document_names(
     return stmt
 
 
-def permitted_document_id_query(*, allow_set: AllowSet) -> Select[tuple[str]]:
-    """Permission subquery for durable transcript sources; no content or ranking.
+def permitted_conversation_documents(
+    *,
+    allow_set: AllowSet,
+    session_id: UUID,
+    mentioned_documents: Sequence[tuple[UUID, str]],
+    dialect: str,
+) -> Select[tuple[UUID, str]]:
+    """One permission snapshot for session dependencies, without transcript text.
 
-    Normalize UUID text for PostgreSQL and SQLite's UUID storage. Missing/deleted,
-    foreign-tenant and revoked sources remain absent under the SAME predicate as
-    passage and document reads, including connector ACLs and group grants.
+    Restrict metadata to immutable assistant sources and the stored mention map,
+    rather than enumerating the caller's entire accessible corpus. The SAME
+    retrieval predicate admits IDs and current names together in one SELECT.
+    Later recall selection and rendering use these materialized values only.
     """
-    return select(func.replace(cast(models.Document.id, String), "-", "")).where(
+    ids = models.Message.source_document_ids
+    mention_ids = [doc.hex for doc, name in mentioned_documents if name]
+    if dialect == "postgresql":
+        known = func.jsonb_typeof(ids) == "array"
+        sources = func.jsonb_array_elements_text(
+            case((known, ids), else_=cast([], JSONB))
+        ).table_valued("value", joins_implicitly=True)
+        mentions = func.jsonb_array_elements_text(cast(mention_ids, JSONB)).table_valued("value")
+    else:
+        known = func.json_type(ids) == "array"
+        sources = func.json_each(case((known, ids), else_="[]")).table_valued(
+            "value", joins_implicitly=True
+        )
+        mentions = func.json_each(json.dumps(mention_ids)).table_valued("value")
+    source_ids = (
+        select(func.replace(sources.c.value, "-", ""))
+        .select_from(models.Message, sources)
+        .where(
+            models.Message.tenant_id == allow_set.tenant_id,
+            models.Message.session_id == session_id,
+            models.Message.role == "assistant",
+        )
+    )
+    document_id = func.replace(cast(models.Document.id, String), "-", "")
+    return select(models.Document.id, models.Document.filename).where(
         models.Document.tenant_id == allow_set.tenant_id,
+        or_(document_id.in_(source_ids), document_id.in_(select(mentions.c.value))),
         _document_permitted(allow_set),
     )
 

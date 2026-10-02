@@ -17,7 +17,7 @@ returning them would spend context to say what the context already says.
 Like the retrieval tools this handler is a **thin adapter**: the
 :class:`~app.services.tools.types.TranscriptReader` seam owns reaching the
 messages table (ownership predicate, compacted-range bound, call budget); this
-module owns the permission re-check on recalled evidence and the rendering.
+module owns the final check against the reader's permission snapshot and rendering.
 
 **T0, read-only, no approval.** It reads one conversation the caller owns and
 nothing else. The runner still audits it (``tool.invoked``/``tool.result``) and
@@ -193,22 +193,14 @@ async def _read_conversation(args: dict[str, Any], ctx: ToolContext) -> ToolHand
     if not outcome.turns:
         return _empty_result(queried=bool(terms))
 
-    # --- the permission re-check ------------------------------------------------
+    # --- final check against the selection permission snapshot ------------------
     # A recalled assistant turn quotes documents inline, so replaying it verbatim
     # would re-serve text whose grant may since have been revoked (#533 design
-    # rule 1; the #536 class of leak from a third direction). ONE bounded,
-    # permission-filtered metadata query — the same ``retrieval/`` chokepoint the
-    # evidence carry-forward uses, so it inherits connector-ACL mode and the
-    # ADR-0022 group principals — decides what survives.
-    assistant_turns = [turn for turn in outcome.turns if turn.role == "assistant"]
-    cited_ids = {doc_id for turn in assistant_turns for doc_id in turn.cited_document_ids}
-    mentioned_ids = {doc_id for turn in assistant_turns for doc_id in turn.mentioned_document_ids}
-    checked_ids = cited_ids | mentioned_ids
-    permitted: dict[UUID, str] = {}
-    if checked_ids:
-        permitted = await ctx.retrieval.permitted_document_names(
-            principal=ctx.principal, document_ids=sorted(checked_ids, key=str)
-        )
+    # rule 1; the #536 class of leak from a third direction). The retrieval
+    # chokepoint already evaluated permission once, BEFORE candidate selection.
+    # Reuse it: a later live re-check could withhold a top-K match that displaced
+    # an authorized fallback, leaking a keyword/count signal (R10-001).
+    permitted = dict(outcome.permitted_document_names)
 
     budget = max(1, min(ctx.snippet_budget, _TURN_BUDGET))
     blocks: list[str] = []
@@ -217,8 +209,8 @@ async def _read_conversation(args: dict[str, Any], ctx: ToolContext) -> ToolHand
         dependencies = set(turn.cited_document_ids) | set(turn.mentioned_document_ids)
         revoked = dependencies.difference(permitted)
         if turn.role == "assistant" and (revoked or not turn.provenance_known):
-            # Normally excluded before matching. A second permission check is
-            # defense in depth; no marker, count or timestamp may reveal a match.
+            # Normally excluded before matching. Check the seam's projection
+            # against its snapshot; no marker, count or timestamp reveals a match.
             continue
         text = turn.content
         if turn.role == "assistant":
@@ -238,7 +230,7 @@ async def _read_conversation(args: dict[str, Any], ctx: ToolContext) -> ToolHand
         "quote or cite any document mentioned above, retrieve it now with "
         "search_text or get_document so it is checked against current permissions."
     )
-    # Surviving evidence is reported as IDS + CURRENT names, never as recalled
+    # Surviving evidence is reported as IDS + snapshot-current names, never as recalled
     # text: the ids are what the model re-retrieves through, and the names are
     # the ones permission says are live now — not the ones stored at write time.
     referenced = {doc_id: permitted[doc_id] for doc_id in released_sources if doc_id in permitted}

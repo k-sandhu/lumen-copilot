@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, event, literal, select, union_all, update
+from sqlalchemy import delete, event, select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -601,7 +601,7 @@ async def assert_many_mentions_keep_recall_queries_and_scan_bounded(
         # this stress control actually checks all 200 stored mention dependencies.
         shapes.clear()
         converted.clear()
-        direct = await context.retrieval.search_conversation(
+        direct, _ = await context.retrieval.search_conversation(
             principal=principal,
             messages=MessageRepository(session, principal.tenant_id),
             session_id=session_id,
@@ -679,7 +679,7 @@ async def assert_recall_withholds_forbidden_names(
     )
     session.add(turn)
     await session.flush()
-    rows = await RetrievalService(session, gateway=object()).search_conversation(
+    rows, _ = await RetrievalService(session, gateway=object()).search_conversation(
         principal=principal,
         messages=MessageRepository(session, principal.tenant_id),
         session_id=session_id,
@@ -1132,15 +1132,19 @@ class _FakeRetrieval:
         self.asked.append(list(document_ids))
         return {d: n for d, n in self.permits.items() if d in document_ids}
 
-    async def search_conversation(self, **kwargs: object) -> list[object]:
+    async def search_conversation(
+        self, **kwargs: object
+    ) -> tuple[list[object], dict[uuid.UUID, str]]:
         return await search_with_fake_permissions(self, **kwargs)
 
 
-async def search_with_fake_permissions(retrieval: object, **kwargs: object) -> list[object]:
+async def search_with_fake_permissions(
+    retrieval: object, **kwargs: object
+) -> tuple[list[object], dict[uuid.UUID, str]]:
     """Use the real SQL guard, with a fake's current permission decisions.
 
-    Only fixture metadata is enumerated here; production uses the retrieval
-    permission subquery directly and never materializes the whole transcript.
+    Only fixture metadata is enumerated here; production snapshots the session's
+    permitted source/mention IDs without materializing the transcript.
     """
     messages = kwargs.pop("messages")
     principal = kwargs.pop("principal")
@@ -1156,19 +1160,15 @@ async def search_with_fake_permissions(retrieval: object, **kwargs: object) -> l
         else {}
     )
     # Fake permissions may include non-persisted IDs (generic tool metadata
-    # fixtures); production's subquery also checks document existence.
-    permitted = (
-        union_all(*(select(literal(doc.hex)) for doc in permits))
-        if permits
-        else select(literal("")).where(literal(False))
-    )
+    # fixtures); production's snapshot also checks document existence.
     session_id = kwargs.pop("session_id")
-    return await messages.search_for_session_before(
+    rows = await messages.search_for_session_before(
         session_id,
         **kwargs,
-        permitted_document_ids=permitted,
+        permitted_document_ids=tuple(permits),
         mentioned_documents=mentions,
     )
+    return rows, permits
 
 
 class _FakeTranscript:
@@ -1178,7 +1178,23 @@ class _FakeTranscript:
 
     async def recall(self, *, query: str | None, limit: int, retrieval: object) -> RecallOutcome:
         self.calls.append((query, limit))
-        return self.outcome
+        # A reader supplies the single permission decision with its selected
+        # turns. Handler-only fixtures model that seam rather than asking the
+        # handler to make a second live authorization decision.
+        ids = {
+            doc
+            for turn in self.outcome.turns
+            if turn.role == "assistant"
+            for doc in (*turn.cited_document_ids, *turn.mentioned_document_ids)
+        }
+        permits = (
+            await retrieval.permitted_document_names(
+                principal=None, document_ids=sorted(ids, key=str)
+            )
+            if ids
+            else {}
+        )
+        return replace(self.outcome, permitted_document_names=tuple(permits.items()))
 
 
 def _ctx_for(

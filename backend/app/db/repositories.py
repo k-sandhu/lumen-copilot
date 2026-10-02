@@ -33,7 +33,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Select,
     and_,
     case,
     cast,
@@ -4063,7 +4062,7 @@ class MessageRepository(_TenantScopedRepository):
         before_message_id: UUID,
         terms: Sequence[str] = (),
         roles: Sequence[MessageRole] = (MessageRole.USER, MessageRole.ASSISTANT),
-        permitted_document_ids: Select[tuple[str]] | None = None,
+        permitted_document_ids: Sequence[UUID] | None = None,
         mentioned_documents: Sequence[tuple[UUID, str]] = (),
         limit: int,
     ) -> list[Message]:
@@ -4089,13 +4088,13 @@ class MessageRepository(_TenantScopedRepository):
         ``system`` row is prompt scaffolding, not something the user said or was
         told, and recall must not hand the model its own scaffolding back.
 
-        Recall supplies the retrieval chokepoint's permission subquery. Only
+        Recall supplies the retrieval chokepoint's materialized permission snapshot. Only
         user turns and assistant turns with complete, currently permitted source
         snapshots and stored mentions enter the newest 200 candidates. A forbidden
         stored-name mention withholds the whole assistant turn before that cap or
         matching. Python clips and matches literal terms over the permitted set.
         SQL binds name collections once; it never expands names into expressions.
-        The raw mode (no permission subquery) exists for structural range/partition
+        The raw mode (no permission snapshot) exists for structural range/partition
         checks.
         """
         window_start = before_created_at - timedelta(seconds=1)
@@ -4114,19 +4113,24 @@ class MessageRepository(_TenantScopedRepository):
         if permitted_document_ids is not None:
             ids = models.Message.source_document_ids
             dialect = self._session.get_bind().dialect.name
+            permitted_ids = [doc.hex for doc in permitted_document_ids]
             # CASE keeps JSON null/SQL NULL away from array expansion, regardless
             # of the database's predicate evaluation order. UNKNOWN fails closed.
             if dialect == "postgresql":
+                permitted = func.jsonb_array_elements_text(cast(permitted_ids, JSONB)).table_valued(
+                    "value"
+                )
                 known = func.jsonb_typeof(ids) == "array"
                 source_ids = func.jsonb_array_elements_text(
                     case((known, ids), else_=cast("[]", JSONB))
                 ).table_valued("value")
             else:
+                permitted = func.json_each(json.dumps(permitted_ids)).table_valued("value")
                 known = func.json_type(ids) == "array"
                 source_ids = func.json_each(case((known, ids), else_="[]")).table_valued("value")
             forbidden_source = (
                 select(source_ids.c.value)
-                .where(func.replace(source_ids.c.value, "-", "").not_in(permitted_document_ids))
+                .where(func.replace(source_ids.c.value, "-", "").not_in(select(permitted.c.value)))
                 .correlate(models.Message)
                 .exists()
             )
@@ -4138,28 +4142,11 @@ class MessageRepository(_TenantScopedRepository):
             )
         revoked_names: list[str] = []
         if permitted_document_ids is not None and mentioned_documents:
-            # One JSON collection bind, not an IN-list or one SQL expression
-            # per name. The same retrieval predicate authorizes stored mentions.
-            mention_ids = [doc.hex for doc, name in mentioned_documents if name]
-            if self._session.get_bind().dialect.name == "postgresql":
-                mentions = func.jsonb_array_elements_text(cast(mention_ids, JSONB)).table_valued(
-                    "value"
-                )
-            else:
-                mentions = func.json_each(json.dumps(mention_ids)).table_valued("value")
-            permitted_mentions = set(
-                (
-                    await self._session.execute(
-                        select(mentions.c.value).where(mentions.c.value.in_(permitted_document_ids))
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            # Stored mentions and source IDs use the SAME frozen set. Never
+            # re-evaluate live permissions between either filter and top-K.
+            permitted_mentions = set(permitted_document_ids)
             revoked_names = [
-                name
-                for doc, name in mentioned_documents
-                if name and doc.hex not in permitted_mentions
+                name for doc, name in mentioned_documents if name and doc not in permitted_mentions
             ]
 
         if permitted_document_ids is not None and mentioned_documents:
