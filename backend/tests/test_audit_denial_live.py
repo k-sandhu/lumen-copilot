@@ -62,9 +62,13 @@ from app.services.run_delivery_service import RunDeliveryService
 from app.services.runs_service import RunsReadService
 from app.services.saved_searches_service import SavedSearchService
 from app.services.sources_service import SourcesService
+from tests._live_helpers import isolated_live_url, worker_database_name
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 _BASE_URL = os.environ.get("AUDIT_DENIAL_LIVE_DATABASE_URL")
+if _BASE_URL is not None:
+    _BASE_URL = isolated_live_url(_BASE_URL, "AUDIT_DENIAL_LIVE_DATABASE_URL")
+_LIVE_DB = worker_database_name((_BASE_URL or "lumentest_pr604").rsplit("/", 1)[-1])
 
 
 def _swap_db(url: str, dbname: str) -> str:
@@ -84,8 +88,8 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
 
     from app.core.config import get_settings
 
-    assert urlparse(_BASE_URL).path == "/lumentest_pr604"
-    database_name = "lumentest_pr604"
+    assert urlparse(_BASE_URL).path == f"/{_LIVE_DB}"
+    database_name = _LIVE_DB
     app_role = f"lumen_audit579_app_{uuid.uuid4().hex[:8]}"
     app_password = "audit_579_test_pw"  # noqa: S105 — throwaway role/database
     admin_url = _swap_db(_BASE_URL, "postgres")
@@ -97,8 +101,8 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
     admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
         async with admin.connect() as connection:
-            await connection.execute(text("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)"))
-            await connection.execute(text("CREATE DATABASE lumentest_pr604"))
+            await connection.execute(text(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)"))
+            await connection.execute(text(f"CREATE DATABASE {_LIVE_DB}"))
             await connection.execute(
                 text(
                     f'CREATE ROLE "{app_role}" LOGIN PASSWORD '
