@@ -249,10 +249,18 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
         f"{body}"
     )
     if truncated:
+        recovery = (
+            "use search_text with a targeted query to retrieve evidence from the remaining text."
+            if "search_text" in ctx.allowed_tools
+            else (
+                "This assistant cannot inspect the omitted text with its available tools. "
+                "Ask the user to supply the relevant excerpt or switch to an authorized "
+                "search-capable assistant."
+            )
+        )
         content += (
             f"\n\n[Truncated: characters {len(body)}-{total_length} are not shown. "
-            "This legacy tool reads only a prefix; use search_text with a targeted "
-            "query to retrieve evidence from the remaining text.]"
+            f"This legacy tool reads only a prefix; {recovery}]"
         )
     return ToolHandlerResult(
         content=content,
@@ -354,7 +362,9 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "unseen text contains no answer. Returns up to 2,400 characters, "
             "less under a tight context budget, with the returned range and total "
             "length. A truncated read explicitly marks omitted text; use "
-            "search_text with a targeted query for evidence beyond the prefix. "
+            "search_text when available with a targeted query for evidence beyond "
+            "the prefix. Otherwise ask the user to supply the relevant excerpt "
+            "or switch to an authorized search-capable assistant. "
             "Missing and inaccessible documents both return not found."
         ),
         json_schema={

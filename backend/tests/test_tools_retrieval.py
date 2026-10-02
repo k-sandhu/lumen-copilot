@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -24,18 +26,26 @@ from app.auth.principal import Principal
 from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.repositories import (
+    AuditEventRepository,
     ChunkInput,
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
     TenantRepository,
+    ToolInvocationRepository,
     UserRepository,
 )
+from app.domain.audit import AuditActor
 from app.domain.entities import DocumentStatus, Role
-from app.domain.llm import Embedding
-from app.domain.tools import ERROR_BAD_ARGS, RiskTier
+from app.domain.llm import Embedding, ToolCall
+from app.domain.retrieval import RetrievedPassage
+from app.domain.tools import ERROR_BAD_ARGS, ERROR_NOT_PERMITTED, RiskTier
 from app.retrieval import RetrievalService
+from app.services.assistant_runtime import assemble_run_config
+from app.services.assistants_service import AssistantsService
+from app.services.audit import AuditSink
 from app.services.tools.registry import default_allowlist, get_tool, registered_names, tool_specs
+from app.services.tools.runner import ToolRunner
 from app.services.tools.types import ToolContext
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -148,7 +158,13 @@ async def _doc(
 
 def _ctx(session: AsyncSession, principal: Principal) -> ToolContext:
     service = RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
-    return ToolContext(principal=principal, retrieval=service, collection_ids=None, default_k=6)
+    return ToolContext(
+        principal=principal,
+        retrieval=service,
+        collection_ids=None,
+        default_k=6,
+        allowed_tools=default_allowlist(),
+    )
 
 
 async def _call(session: AsyncSession, principal: Principal, name: str, args: dict[str, object]):
@@ -343,6 +359,7 @@ async def test_get_document_long_text_returns_bounded_range_and_truncation_metad
     assert result.payload["returned_range"] == [0, 2400]
     assert result.payload["total_length"] == 3000
     assert result.payload["truncated"] is True
+    assert "Returned range: 0-2400 of 3000 characters (end-exclusive)." in result.content
     assert "x" * 2400 in result.content
     assert "truncated" in result.content.lower()
     assert "search_text" in result.content
@@ -360,6 +377,7 @@ async def test_get_document_long_text_obeys_tight_context_budget(
         retrieval=RetrievalService(session, gateway=_FakeGateway()),  # type: ignore[arg-type]
         collection_ids=None,
         snippet_budget=300,
+        allowed_tools=default_allowlist(),
     )
 
     result = await get_tool("get_document").handler({"document_id": str(document_id)}, ctx)
@@ -368,6 +386,7 @@ async def test_get_document_long_text_obeys_tight_context_budget(
     assert result.payload["returned_range"] == [0, 1200]
     assert result.payload["total_length"] == 3000
     assert result.payload["truncated"] is True
+    assert "Returned range: 0-1200 of 3000 characters (end-exclusive)." in result.content
     assert "y" * 1200 in result.content
     assert "truncated" in result.content.lower()
     assert "search_text" in result.content
@@ -391,7 +410,142 @@ async def test_get_document_short_text_has_exact_range_and_no_truncation(
     assert result.payload["returned_range"] == [0, len("short body")]
     assert result.payload["total_length"] == len("short body")
     assert result.payload["truncated"] is False
+    assert "Returned range: 0-10 of 10 characters (end-exclusive)." in result.content
     assert "truncated" not in result.content.lower()
+
+
+@pytest.mark.parametrize("search_allowed", [False, True], ids=["prefix-only", "search-capable"])
+@pytest.mark.parametrize("isolated_scope", [False, True], ids=["serial", "isolated"])
+async def test_get_document_recovery_matches_published_assistant_catalog(
+    session_and_world: tuple[AsyncSession, _World],
+    monkeypatch: pytest.MonkeyPatch,
+    search_allowed: bool,
+    isolated_scope: bool,
+) -> None:
+    """#610 / R1-001: follow the offered recovery without widening a frozen allowlist."""
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    excerpt = "APPROVAL CODE: 42"
+    text = "x" * 2400 + excerpt
+    document_id = await _doc(session, world.tenant_a, world.alice, "approval.txt", text)
+    await session.commit()
+    audit = AuditSink(AuditEventRepository(session, world.tenant_a))
+    assistants = AssistantsService(
+        session,
+        tenant_id=world.tenant_a,
+        owner_id=world.alice,
+        roles=principal.roles,
+        audit=audit,
+        request_id="pr616-r2",
+        source_ip="127.0.0.1",
+    )
+    names = ("get_document", "search_text") if search_allowed else ("get_document",)
+    assistant = await assistants.create(
+        name="Approval reader", tool_allowlist=names, backup_owner_id=world.bob
+    )
+    version = await assistants.publish(assistant.id)
+    config = assemble_run_config(version.config)
+    assert config.allowed == frozenset(names)
+    assert {spec.name for spec in tool_specs(config.allowed)} == set(names)
+
+    def runner(allowed: frozenset[str]) -> ToolRunner:
+        return ToolRunner(
+            allowed=allowed,
+            invocations=ToolInvocationRepository(session, world.tenant_a),
+            audit=audit,
+            actor=AuditActor.user(world.alice),
+            request_id="pr616-r2",
+            source_ip="127.0.0.1",
+        )
+
+    search_queries: list[str] = []
+
+    async def search_text(self: RetrievalService, **kwargs: object) -> list[RetrievedPassage]:
+        assert kwargs["principal"] == principal
+        assert kwargs["query"] == "approval code"
+        search_queries.append(str(kwargs["query"]))
+        return [
+            RetrievedPassage(
+                chunk_id=uuid.uuid4(),
+                document_id=document_id,
+                document_name="approval.txt",
+                ord=1,
+                text=excerpt,
+                char_start=2400,
+                char_end=len(text),
+                score=1.0,
+            )
+        ]
+
+    monkeypatch.setattr(RetrievalService, "search_text", search_text)
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[ToolContext]:
+        # A separate context must receive the same authoritative catalog.
+        yield _ctx(session, principal)
+
+    governed = runner(config.allowed)
+    result = await governed.run(
+        call=ToolCall(
+            id="prefix", name="get_document", arguments={"document_id": str(document_id)}
+        ),
+        context=_ctx(session, principal),
+        scope=scope if isolated_scope else None,
+    )
+    assert result.ok is True
+    assert excerpt not in result.content
+    assert "Returned range: 0-2400 of 2417 characters (end-exclusive)." in result.content
+    assert result.payload["truncated"] is True
+    assert "characters 2400-2417 are not shown" in result.content
+
+    if search_allowed:
+        assert "use search_text with a targeted query" in result.content
+    else:
+        assert "This assistant cannot inspect the omitted text" in result.content
+        assert "supply the relevant excerpt" in result.content
+        assert "switch to an authorized search-capable assistant" in result.content
+        assert "use search_text" not in result.content
+        denied = await governed.run(
+            call=ToolCall(id="denied", name="search_text", arguments={"query": "approval code"}),
+            context=_ctx(session, principal),
+        )
+        assert denied.ok is False
+        assert denied.error == ERROR_NOT_PERMITTED
+        assert search_queries == []
+        repeated = await governed.run(
+            call=ToolCall(
+                id="repeat", name="get_document", arguments={"document_id": str(document_id)}
+            ),
+            context=_ctx(session, principal),
+        )
+        assert repeated.content == result.content
+        # Follow the suggested switch through a separately published, authorized catalog.
+        recovery_assistant = await assistants.create(
+            name="Search recovery",
+            tool_allowlist=("get_document", "search_text"),
+            backup_owner_id=world.bob,
+        )
+        recovery_version = await assistants.publish(recovery_assistant.id)
+        governed = runner(assemble_run_config(recovery_version.config).allowed)
+
+    recovered = await governed.run(
+        call=ToolCall(id="recovery", name="search_text", arguments={"query": "approval code"}),
+        context=_ctx(session, principal),
+    )
+    assert recovered.ok is True
+    assert excerpt in recovered.content
+    assert recovered.passages[0].document_id == document_id
+    assert recovered.passages[0].char_start == 2400
+    assert search_queries == ["approval code"]
+    versions = await assistants.list_versions(assistant.id, cursor=None, limit=10)
+    assert len(versions.items) == 1
+    assert versions.items[0].config["toolAllowlist"] == list(names)
+
+
+def test_get_document_description_conditions_search_recovery_on_availability() -> None:
+    description = get_tool("get_document").description
+    assert "search_text when available" in description
+    assert "supply the relevant excerpt" in description
 
 
 async def test_get_document_forbidden_response_discloses_no_length_or_range(

@@ -49,6 +49,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from itertools import count
 from uuid import UUID
 
@@ -552,6 +553,9 @@ class ToolRunner:
         started: float,
     ) -> ToolResult:
         """Run the handler under its timeout, mapping any failure to an ok=False result."""
+        # Advice must match the same allow-list enforced above, including when an
+        # isolated call scope supplied a fresh or stale context (R1-001 / #610).
+        context = replace(context, allowed_tools=self._allowed)
         try:
             if definition.timeout_seconds is None:
                 body = await definition.handler(call.arguments, context)
