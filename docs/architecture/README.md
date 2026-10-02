@@ -31,6 +31,7 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | [0020](0020-reusable-root-sandbox-sessions.md) | Reusable root-capable Python sandbox sessions | Accepted |
 | [0021](0021-data-pack-connector.md) | Data packs as a connector — curated document sets as a managed source | Accepted |
 | [0022](0022-group-access-model.md) | Group access model — group principals, and who a source is visible to (supersedes 0021 §5) | Accepted |
+| [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2 and claim-linked answers | Proposed |
 | [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
 
 > The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.
