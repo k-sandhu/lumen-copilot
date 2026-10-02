@@ -49,6 +49,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from itertools import count
 from uuid import UUID
 
@@ -57,11 +58,13 @@ from app.db.repositories import ToolInvocationRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, AutonomyLevel
 from app.domain.llm import ToolCall
+from app.domain.tool_schema import legacy_arguments, validate_arguments
 from app.domain.tools import (
     APPROVAL_REASON_RECORD_INVALID,
     APPROVAL_SCOPE_TENANT_PREAPPROVAL,
     ERROR_APPROVAL_DENIED,
     ERROR_AUTONOMY_DENIED,
+    ERROR_BAD_ARGS,
     ERROR_NOT_FOUND,
     ERROR_NOT_PERMITTED,
     ERROR_TOOL_ERROR,
@@ -346,6 +349,33 @@ class ToolRunner:
                 ),
                 outcome=AuditOutcome.DENIED,
             )
+
+        # Validate after identity/governance visibility and before approval or I/O.
+        # Optional provider nulls preserve the legacy documented omission default.
+        arguments = legacy_arguments(call.arguments, definition.json_schema)
+        argument_error = validate_arguments(arguments, definition.json_schema)
+        if argument_error is not None:
+            return await self._finalise(
+                call=call,
+                args_hash=args_hash,
+                message_id=message_id,
+                ordinal=ordinal,
+                result=ToolResult.failure(
+                    call_id=call.id,
+                    name=call.name,
+                    error=ERROR_BAD_ARGS,
+                    content=argument_error,
+                    summary="invalid arguments; correct the advertised fields",
+                    duration_ms=_elapsed_ms(started),
+                ),
+                outcome=AuditOutcome.DENIED,
+            )
+
+        call = replace(call, arguments=arguments)
+        # Approval, execution and audit must identify the same normalized call.
+        # Provider nulls omitted for legacy defaults cannot leave a raw-wire hash
+        # on the approval record for different handler arguments.
+        args_hash = hash_args(arguments)
 
         # (3) Autonomy gate (issue #218 / ADR-0011 §3). A side-effecting **T1** tool
         # (write_file, run_python's file effects) is gated by the run's EFFECTIVE

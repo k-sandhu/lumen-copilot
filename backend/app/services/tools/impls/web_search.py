@@ -195,15 +195,21 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "properties": {
                 "query": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The natural-language web search query.",
                 },
                 "k": {
                     "type": "integer",
-                    "description": "How many results to return (bounded by config).",
+                    "description": (
+                        "How many results to return (defaults to 5; capped by "
+                        "workspace configuration)."
+                    ),
                     "minimum": 1,
+                    "default": 5,
                 },
             },
             "required": ["query"],
+            "additionalProperties": False,
         },
         handler=_web_search,
         risk_tier=RiskTier.T0,

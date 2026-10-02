@@ -142,7 +142,17 @@ def _ok_tool(name: str = "probe") -> ToolDefinition:
         return ToolHandlerResult(content="ok", summary="did it", payload={"echo": args})
 
     return ToolDefinition(
-        name=name, description="d", json_schema={"type": "object"}, handler=handler
+        name=name,
+        description="d",
+        json_schema={
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer"},
+                "call": {"type": "integer"},
+                "q": {"type": "string"},
+            },
+        },
+        handler=handler,
     )
 
 
@@ -178,7 +188,17 @@ def _gated_tool(name: str = "send_email") -> ToolDefinition:
     return ToolDefinition(
         name=name,
         description="d",
-        json_schema={"type": "object"},
+        json_schema={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "z": {"type": "string"},
+                "a": {
+                    "type": "object",
+                    "properties": {"to": {"type": "string"}},
+                },
+            },
+        },
         handler=handler,
         risk_tier=RiskTier.T2,
         requires_approval=True,
@@ -201,7 +221,7 @@ def _t1_tool(name: str = "write_note") -> ToolDefinition:
     return ToolDefinition(
         name=name,
         description="d",
-        json_schema={"type": "object"},
+        json_schema={"type": "object", "properties": {"text": {"type": "string"}}},
         handler=handler,
         risk_tier=RiskTier.T1,
         requires_approval=False,
@@ -651,7 +671,10 @@ async def test_preassigned_dispatch_ordinals_survive_out_of_order_completion(
     _patch_tool(
         monkeypatch,
         ToolDefinition(
-            name="probe", description="d", json_schema={"type": "object"}, handler=handler
+            name="probe",
+            description="d",
+            json_schema={"type": "object", "properties": {"call": {"type": "integer"}}},
+            handler=handler,
         ),
     )
     r, audit_repo, _ = _make_runner(world, allowed=frozenset({"probe"}))

@@ -253,19 +253,30 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "properties": {
                 "code": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The Python source to execute in the sandbox.",
                 },
                 "packages": {
                     "type": "array",
                     "description": (
                         "Optional PEP-508 package requirements to install as root in "
-                        "the reusable session, subject to the tenant package policy."
+                        "the reusable session, subject to tenant policy (up to 50; "
+                        "defaults to no extra packages)."
                     ),
+                    "default": [],
                     "maxItems": 50,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300,
+                        "description": (
+                            "One non-empty PEP-508 package requirement (up to 300 characters)."
+                        ),
+                    },
                 },
             },
             "required": ["code"],
+            "additionalProperties": False,
         },
         handler=_run_python,
         # The HIGHEST tier the tool platform uses (spec 0004 §2.5): executing

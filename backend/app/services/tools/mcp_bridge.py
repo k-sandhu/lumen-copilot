@@ -37,6 +37,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.domain.entities import McpServer
+from app.domain.tool_schema import validate_arguments
 from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
 from app.mcp import McpServerConfig, McpToolResult, McpTransport
 from app.services.tools.types import ToolContext, ToolDefinition
@@ -92,73 +93,8 @@ def _config_for(server: McpServer) -> McpServerConfig:
 
 
 def _validate_args(args: dict[str, Any], input_schema: dict[str, Any]) -> str | None:
-    """A minimal JSON-Schema pre-check of ``args``; a reason string on failure, else ``None``.
-
-    The malformed-input boundary (ADR-0012 §6 / INV-8): a call whose args do not fit
-    the tool's **advertised** ``input_schema`` is rejected *before* any outbound hop,
-    so a bad call never reaches the server (and never spends the egress budget). This
-    is a deliberately small, dependency-free check — the common failure shapes the
-    model actually produces — not a full validator:
-
-    * the top level must be an object when the schema says ``type: object``;
-    * every ``required`` property must be present and non-null;
-    * a present property whose schema names a primitive ``type`` must match it.
-
-    Anything the check does not understand is permitted through (the server still
-    validates authoritatively and any rejection there is a contained ``ok=False``
-    result). An empty/absent schema imposes no constraint.
-    """
-    if not input_schema:
-        return None
-    schema_type = input_schema.get("type")
-    if schema_type == "object" and not isinstance(args, dict):
-        return "arguments must be a JSON object"
-
-    required = input_schema.get("required")
-    if isinstance(required, list):
-        for key in required:
-            if not isinstance(key, str):
-                continue
-            if key not in args or args[key] is None:
-                return f"missing required argument {key!r}"
-
-    properties = input_schema.get("properties")
-    if isinstance(properties, dict):
-        for key, prop_schema in properties.items():
-            if key not in args or args[key] is None:
-                continue
-            if not isinstance(prop_schema, dict):
-                continue
-            reason = _check_primitive_type(key, args[key], prop_schema.get("type"))
-            if reason is not None:
-                return reason
-    return None
-
-
-def _check_primitive_type(key: str, value: object, declared: object) -> str | None:
-    """Reject ``value`` when the schema names a primitive ``type`` it does not match.
-
-    Only the JSON-Schema primitives with an unambiguous Python mapping are checked;
-    an unknown / composite / list-of-types declaration is left to the server. Note
-    ``bool`` is intentionally NOT an ``integer`` (a common trap), and an ``integer``
-    schema accepts an int but not a float.
-    """
-    checks: dict[str, Callable[[object], bool]] = {
-        "string": lambda v: isinstance(v, str),
-        "boolean": lambda v: isinstance(v, bool),
-        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-        "number": lambda v: isinstance(v, int | float) and not isinstance(v, bool),
-        "array": lambda v: isinstance(v, list),
-        "object": lambda v: isinstance(v, dict),
-    }
-    if not isinstance(declared, str):
-        return None
-    predicate = checks.get(declared)
-    if predicate is None:
-        return None
-    if not predicate(value):
-        return f"argument {key!r} must be of type {declared}"
-    return None
+    """Validate declared nested constraints before any MCP outbound request."""
+    return validate_arguments(args, input_schema)
 
 
 def _map_result(result: McpToolResult) -> ToolHandlerResult:

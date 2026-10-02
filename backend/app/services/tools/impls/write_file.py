@@ -193,6 +193,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "properties": {
                 "filename": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The file name for the artifact, e.g. 'summary.md'.",
                 },
                 "content_type": {
@@ -219,6 +220,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
                 },
             },
             "required": ["filename", "content_type", "content"],
+            "additionalProperties": False,
         },
         handler=_write_file,
         risk_tier=RiskTier.T1,

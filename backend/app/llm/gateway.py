@@ -51,6 +51,7 @@ from app.domain.llm import (
     ToolSpec,
     Transcription,
 )
+from app.domain.tool_schema import strict_schema
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -532,7 +533,7 @@ class LLMGateway:
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.parameters,
+                    "parameters": strict_schema(t.parameters),
                 },
             }
             for t in tools

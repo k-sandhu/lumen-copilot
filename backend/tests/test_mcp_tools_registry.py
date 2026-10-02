@@ -543,11 +543,11 @@ async def test_extra_tools_do_not_shadow_the_static_registry(world: _World) -> N
 # --- arg-validation unit coverage -------------------------------------------
 
 
-def test_validate_args_allows_unknown_schema_shapes() -> None:
-    # An empty schema imposes no constraint; a schema the check does not understand
-    # is permitted through (the server validates authoritatively).
+def test_validate_args_closes_object_schemas_and_allows_empty_schema() -> None:
+    # An empty schema imposes no constraint; object schemas reject undeclared fields.
     assert mcp_bridge._validate_args({"anything": 1}, {}) is None
-    assert mcp_bridge._validate_args({"x": 1}, {"type": "object"}) is None
+    assert mcp_bridge._validate_args({}, {"type": "object"}) is None
+    assert mcp_bridge._validate_args({"x": 1}, {"type": "object"}) is not None
     # bool is NOT an integer (a common JSON-Schema trap).
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     assert mcp_bridge._validate_args({"n": True}, schema) is not None

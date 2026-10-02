@@ -38,6 +38,8 @@ dependencies = [
     # chokepoint); nothing else touches it.
     "cryptography==44.0.0",
     "packaging==24.2",  # PEP-508 parsing/canonicalisation for governed sandbox packages (#457)
+    "jsonschema==4.26.0",  # recursive tool argument validation, without remote schema retrieval
+    "referencing==0.37.0",  # explicit offline reference registry for tool validation
     # Ingestion parsers (CC-5 #21), pinned. Each is imported lazily inside its
     # helper in app/ingestion/parsers.py so the dependency stays localized.
     "pypdf==5.1.0",  # PDF text extraction
@@ -62,6 +64,7 @@ dev = [
     "ruff==0.8.4",
     "mypy==1.14.0",
     "aiosqlite==0.21.0",  # async SQLite for offline repository unit tests (#44)
+    "types-jsonschema==4.26.0.20260518",
 ]
 
 [build-system]
