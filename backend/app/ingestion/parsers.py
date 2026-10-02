@@ -208,19 +208,61 @@ def _parse_docx(data: bytes) -> str:
 
 
 def _parse_pptx(data: bytes) -> str:
-    """Extract text-frame text from a PPTX (``python-pptx``, imported lazily)."""
+    """Extract numbered slides, grouped text, tables and existing notes."""
     from pptx import Presentation
+    from pptx.shapes.autoshape import Shape
+    from pptx.shapes.graphfrm import GraphicFrame
+    from pptx.shapes.group import GroupShape
+    from pptx.shapes.shapetree import GroupShapes, SlideShapes
+
+    def render_shapes(shapes: SlideShapes | GroupShapes) -> tuple[list[str], bool]:
+        lines: list[str] = []
+        has_content = False
+        for shape in shapes:
+            if isinstance(shape, GroupShape):
+                group_lines, group_has_content = render_shapes(shape.shapes)
+                lines.extend(group_lines)
+                has_content = has_content or group_has_content
+            elif isinstance(shape, GraphicFrame) and shape.has_table:
+                lines.append("[Table]")
+                headers: list[str] = []
+                for number, row in enumerate(shape.table.rows, start=1):
+                    values = ["" if cell.is_spanned else cell.text for cell in row.cells]
+                    has_content = has_content or any(value.strip() for value in values)
+                    if number == 1:
+                        headers = [value.replace("\n", " / ") for value in values]
+                    cells = []
+                    for column, value in enumerate(values, start=1):
+                        label = (
+                            f" [{headers[column - 1]}]"
+                            if number > 1 and headers[column - 1]
+                            else ""
+                        )
+                        cells.append(f"C{column}{label}={value}")
+                    lines.append(f"Row {number}: " + " | ".join(cells))
+                lines.append("[/Table]")
+            elif isinstance(shape, Shape) and shape.has_text_frame:
+                text = shape.text_frame.text
+                if text.strip():
+                    lines.append(text)
+                    has_content = True
+        return lines, has_content
 
     try:
         presentation = Presentation(io.BytesIO(data))
         lines: list[str] = []
-        for slide in presentation.slides:
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for paragraph in shape.text_frame.paragraphs:
-                        text = "".join(run.text for run in paragraph.runs)
-                        if text:
-                            lines.append(text)
+        for number, slide in enumerate(presentation.slides, start=1):
+            content, has_content = render_shapes(slide.shapes)
+            if slide.has_notes_slide:
+                frame = slide.notes_slide.notes_text_frame
+                if frame is not None and frame.text.strip():
+                    content.extend([f"Notes (Slide {number}):", frame.text])
+                    has_content = True
+            if has_content:
+                title_shape = slide.shapes.title
+                title = title_shape.text if title_shape is not None else ""
+                heading = f"Slide {number}" + (f": {title}" if title.strip() else "")
+                lines.extend([heading, *content])
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PPTX: {type(exc).__name__}") from exc
     return "\n".join(lines)
