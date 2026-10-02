@@ -28,7 +28,14 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.db.tenant_context import bind_tenant
-from app.domain.entities import GrantPrincipalType, GrantResourceType, GrantRole, MessageRole, Role
+from app.domain.entities import (
+    DocumentStatus,
+    GrantPrincipalType,
+    GrantResourceType,
+    GrantRole,
+    MessageRole,
+    Role,
+)
 from app.domain.llm import Role as LlmRole
 from app.domain.llm import StreamEvent, ToolCall
 from app.llm.context import ContextConfig
@@ -71,6 +78,7 @@ async def test_revoked_search_cannot_inform_a_persisted_answer(factory_and_role,
             size_bytes=30,
             storage_key=f"{tenant.id}/private",
             acl_enforced=False,
+            status=DocumentStatus.READY,
         )
         await ChunkRepository(seed, tenant.id).replace_for_document(
             doc.id, [ChunkInput(text="The confidential code is ORION.", char_start=0, char_end=30)]
