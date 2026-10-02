@@ -127,7 +127,9 @@ def _render_passages(
 async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     query = str(args.get("query") or "").strip()
     if not query:
-        return ToolHandlerResult(content="No query provided.", summary="no query")
+        return ToolHandlerResult(
+            source_document_ids=(), content="No query provided.", summary="no query"
+        )
     # Clamp to the budget-derived ceiling, not just the tool's absolute _MAX_K
     # (#424 review, finding 3): under a tight context window ``ctx.max_k`` is
     # lowered by the assembler, so even an explicit large ``k`` cannot pull in
@@ -143,11 +145,13 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
     )
     if not passages:
         return ToolHandlerResult(
+            source_document_ids=(),
             content="No matching passages were found in your documents.",
             summary="0 passages",
         )
     document_ids = tuple({p.document_id for p in passages})
     return ToolHandlerResult(
+        source_document_ids=(),
         content=_render_passages(passages, ctx.snippet_budget),
         summary=f"{len(passages)} passage(s)",
         hit_count=len(passages),
@@ -160,7 +164,9 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
 async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     name_or_query = str(args.get("name_or_query") or "").strip()
     if not name_or_query:
-        return ToolHandlerResult(content="No document query provided.", summary="no query")
+        return ToolHandlerResult(
+            source_document_ids=(), content="No document query provided.", summary="no query"
+        )
     # Clamp to the budget-derived ceiling like search_text (#424 review, finding
     # 2): a tight window lowers ``ctx.max_k`` so even an explicit large ``k`` is
     # bounded. Defaults to _MAX_K, so a roomy run is unchanged.
@@ -169,10 +175,13 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
         principal=ctx.principal, name_or_query=name_or_query, k=k
     )
     if not matches:
-        return ToolHandlerResult(content="No matching documents.", summary="0 documents")
+        return ToolHandlerResult(
+            source_document_ids=(), content="No matching documents.", summary="0 documents"
+        )
     lines = [f"- {m.document_name} (id: {m.document_id})" for m in matches]
     document_ids = tuple(m.document_id for m in matches)
     return ToolHandlerResult(
+        source_document_ids=(),
         content="Documents:\n" + "\n".join(lines),
         summary=f"{len(matches)} document(s)",
         hit_count=len(matches),
@@ -193,6 +202,7 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
         # A clean "nothing here" is an ok result, not an error — the user simply
         # has no documents of their own and none shared with them yet.
         return ToolHandlerResult(
+            source_document_ids=(),
             content=(
                 "You don't have access to any documents yet — nothing has been "
                 "uploaded to your account or shared with you."
@@ -213,6 +223,7 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
             "search_documents using a filename or keyword.)"
         )
     return ToolHandlerResult(
+        source_document_ids=(),
         content=content,
         summary=f"{len(matches)} document(s)",
         hit_count=len(matches),
@@ -229,12 +240,18 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
         # A malformed id is a tool-specific rejection, not a crash — the runner
         # passes the ``ok=False`` through and the run continues (issue #207 §7).
         return ToolHandlerResult(
-            content="Invalid document id.", ok=False, error=ERROR_BAD_ARGS, summary="invalid id"
+            source_document_ids=(),
+            content="Invalid document id.",
+            ok=False,
+            error=ERROR_BAD_ARGS,
+            summary="invalid id",
         )
     doc = await ctx.retrieval.get_document(principal=ctx.principal, document_id=document_id)
     if doc is None:
         # Existence non-disclosure (INV-2): a foreign/missing doc is "not found".
-        return ToolHandlerResult(content="Document not found.", summary="not found")
+        return ToolHandlerResult(
+            source_document_ids=(), content="Document not found.", summary="not found"
+        )
     # Bound the returned body to the budget-derived snippet allowance (#424 third
     # re-review): a document read is ~4× a passage snippet, and a tight context
     # window lowers ``ctx.snippet_budget`` so ``get_document`` doesn't blow the
@@ -242,6 +259,7 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
     body_budget = max(1, min(ctx.snippet_budget, _SNIPPET_BUDGET)) * 4
     body = doc.text[:body_budget]
     return ToolHandlerResult(
+        source_document_ids=(),
         content=f"Document: {doc.document_name}\n\n{body}",
         summary=doc.document_name,
         hit_count=1,

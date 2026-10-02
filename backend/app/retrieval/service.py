@@ -45,12 +45,15 @@ known handle (text/name/id).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
-from app.db.repositories import GrantRepository, GroupRepository
+from app.db.repositories import GrantRepository, GroupRepository, MessageRepository
+from app.domain.entities import Message
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
 from app.retrieval import queries
@@ -364,6 +367,46 @@ class RetrievalService:
             )
             for position, row in enumerate(rows)
         ]
+
+    async def search_conversation(
+        self,
+        *,
+        principal: Principal,
+        messages: MessageRepository,
+        session_id: UUID,
+        before_created_at: datetime,
+        before_message_id: UUID,
+        terms: Sequence[str],
+        limit: int,
+        mentioned_documents: tuple[tuple[UUID, str], ...],
+    ) -> tuple[list[Message], dict[UUID, str]]:
+        """Authorize transcript sources and stored mentions BEFORE matching (#569).
+
+        The bound reader owns session ownership and the fixed compaction cursor.
+        This chokepoint snapshots source permissions ONCE; SQL filters candidates before
+        its hard scan cap. The repository simply clips permitted prose and matches
+        literal terms in Python over that bounded set. No unknown or forbidden
+        assistant body can produce even a match/no-match signal. The returned
+        names are that same snapshot, for the handler's final withholding check.
+        """
+        allow_set = await self._resolve_allow_set(principal)
+        stmt = queries.permitted_conversation_documents(
+            allow_set=allow_set,
+            session_id=session_id,
+            mentioned_documents=mentioned_documents,
+            dialect=self._session.get_bind().dialect.name,
+        )
+        permitted = {row[0]: row[1] for row in (await self._session.execute(stmt)).all()}
+        rows = await messages.search_for_session_before(
+            session_id,
+            before_created_at=before_created_at,
+            before_message_id=before_message_id,
+            terms=terms,
+            limit=limit,
+            permitted_document_ids=tuple(permitted),
+            mentioned_documents=mentioned_documents,
+        )
+        return rows, permitted
 
     async def permitted_document_names(
         self, *, principal: Principal, document_ids: list[UUID]

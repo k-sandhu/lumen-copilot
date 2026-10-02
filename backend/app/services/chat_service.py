@@ -32,6 +32,7 @@ import base64
 import binascii
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -176,6 +177,8 @@ class SendResult:
     #: {document_id: name} the summary text mentions — the runtime redacts the
     #: names of no-longer-permitted documents before the text reaches a prompt.
     mentioned_documents: tuple[tuple[UUID, str], ...] = ()
+    #: Exact cursor used to select history; None means no compaction this answer.
+    compaction_cursor: tuple[datetime, UUID] | None = None
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -676,6 +679,7 @@ class ChatService:
         summary_text: str | None = None
         evidence: tuple[tuple[UUID, UUID], ...] = ()
         mentioned: tuple[tuple[UUID, str], ...] = ()
+        compaction_cursor: tuple[datetime, UUID] | None = None
         if summary_row is not None:
             summary_text = summary_row.summary
             evidence = summary_row.evidence
@@ -686,6 +690,10 @@ class ChatService:
             and summary_row.covers_through_created_at is not None
             and summary_row.covers_through_message_id is not None
         ):
+            compaction_cursor = (
+                summary_row.covers_through_created_at,
+                summary_row.covers_through_message_id,
+            )
             prior = await self._messages.list_for_session_after(
                 session_id,
                 after_created_at=summary_row.covers_through_created_at,
@@ -715,6 +723,7 @@ class ChatService:
             summary=summary_text,
             evidence=evidence,
             mentioned_documents=mentioned,
+            compaction_cursor=compaction_cursor,
         )
 
     async def _resolve_custom_instructions(self) -> str | None:

@@ -160,6 +160,10 @@ class ToolResult:
     passages: tuple[RetrievedPassage, ...] = ()
     document_ids: tuple[UUID, ...] = ()
     denied_reason: str | None = None
+    #: Additional/transitive document dependencies beyond document_ids/passages.
+    #: None means the output's provenance is incomplete; () explicitly declares
+    #: those standard fields exhaustive. Unknown is the safe default for tools.
+    source_document_ids: tuple[UUID, ...] | None = None
 
     def __post_init__(self) -> None:
         # Structural guard for the ok XOR error invariant (issue #207 §4): a
@@ -222,6 +226,8 @@ class ToolHandlerResult:
     passages: tuple[RetrievedPassage, ...] = ()
     document_ids: tuple[UUID, ...] = ()
     denied_reason: str | None = None
+    #: Same completeness contract as ToolResult; unknown unless declared.
+    source_document_ids: tuple[UUID, ...] | None = None
 
 
 __all__ = [

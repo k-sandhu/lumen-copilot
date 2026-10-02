@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from uuid import UUID
 
 from app.core.errors import ValidationError
 from app.core.logging import get_logger
@@ -302,6 +303,7 @@ def assemble_context(
     max_input_resolver: MaxInputResolver | None = None,
     summary: str | None = None,
     evidence_lines: Sequence[str] = (),
+    evidence_document_ids: Sequence[UUID] | None = None,
 ) -> ContextBudget:
     """Assemble the prompt under the model's input budget; return a :class:`ContextBudget`.
 
@@ -343,7 +345,19 @@ def assemble_context(
                 "fetch by id with get_document / search for details.]\n"
                 + "\n".join(f"- {line}" for line in evidence_lines)
             )
-        segments.summary.append(ChatMessage(role=Role.USER, content="\n\n".join(parts)))
+        segments.summary.append(
+            ChatMessage(
+                role=Role.USER,
+                content="\n\n".join(parts),
+                # Summary text has no complete durable provenance. Name
+                # sanitisation alone cannot prove all prose source-free.
+                source_document_ids=(
+                    None
+                    if summary or evidence_document_ids is None
+                    else tuple(evidence_document_ids)
+                ),
+            )
+        )
 
     max_input = resolve(model) or cfg.fallback_max_input_tokens
     # A degenerate window (tiny model / oversized headroom) still yields a
@@ -356,8 +370,8 @@ def assemble_context(
     # initial assembly and the per-turn refit never disagree about a message's
     # size, #424 re-review). Tools ride the ``tools`` param but spend the window.
     reserved = [*segments.memory, *segments.summary]
-    system_message = ChatMessage(role=Role.SYSTEM, content=system_prompt)
-    question_message = ChatMessage(role=Role.USER, content=question)
+    system_message = ChatMessage(role=Role.SYSTEM, content=system_prompt, source_document_ids=())
+    question_message = ChatMessage(role=Role.USER, content=question, source_document_ids=())
     tools_text = _tools_wire_text(tools)
 
     def _msg_cost(m: ChatMessage) -> int:

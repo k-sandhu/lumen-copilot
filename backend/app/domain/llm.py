@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from uuid import UUID
 
 
 class Role(str, Enum):
@@ -53,6 +54,9 @@ class ChatMessage:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
+    #: Internal, never provider wire data. None means incomplete/UNKNOWN;
+    #: () means provably free of document dependencies.
+    source_document_ids: tuple[UUID, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

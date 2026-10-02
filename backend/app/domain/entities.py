@@ -1150,6 +1150,10 @@ class Message:
     # The clarifying question this assistant turn ended with, if any
     # (spec 0006 #429); None for every other turn.
     question: AskUserQuestion | None = None
+    #: Immutable prompt dependencies, independent of deletable citations.
+    source_document_ids: tuple[UUID, ...] | None = None
+    #: Recall-only projection of stored name mentions, captured before text processing.
+    mentioned_document_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

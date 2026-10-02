@@ -142,6 +142,7 @@ def test_new_non_route_seams_are_explicitly_classified() -> None:
         "app.tasks.upload_janitor.sweep_expired_uploads_async",
         "app.services.tools.gate.PolicyApprovalGate",
         "app.services.tools.runner.ToolRunner",
+        "app.services.transcript_recall.SessionTranscriptReader.recall",
     }
     assert all(NON_RESOURCE_DENIAL_SEAMS.values())
 
