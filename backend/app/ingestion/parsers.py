@@ -232,7 +232,20 @@ def _parse_xlsx(data: bytes) -> str:
     from xml.etree import ElementTree
 
     from openpyxl import load_workbook
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import coordinate_to_tuple, get_column_letter
+    from openpyxl.worksheet.cell_range import CellRange
+    from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+
+    def render_formula(expression: object) -> str:
+        if isinstance(expression, str):
+            return expression
+        if isinstance(expression, ArrayFormula):
+            return f"{expression.text or ''}; array range={expression.ref}"
+        if isinstance(expression, DataTableFormula):
+            # The pinned adapter yields source attributes in a fixed order.
+            attributes = "; ".join(f"{key}={value}" for key, value in expression if key != "t")
+            return f"dataTable; {attributes}"
+        raise ValueError("unsupported XLSX formula type")
 
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
@@ -244,25 +257,88 @@ def _parse_xlsx(data: bytes) -> str:
                     for worksheet, formula_sheet in zip(
                         workbook.worksheets, formulas.worksheets, strict=True
                     ):
+                        merges: list[str] = []
+                        merged_bounds: list[tuple[int, int, int, int]] = []
+                        supplied_caches: set[str] = set()
+                        # ReadOnlyWorksheet omits merged ranges. Validate them
+                        # before either projection can expose covered values.
+                        # It also decodes empty string caches as None, so retain
+                        # cache presence/type directly from the source XML.
+                        source_row = source_column = 0
+                        source_coordinate = source_type = ""
+                        has_formula = has_cache = False
+                        with archive.open(worksheet._worksheet_path) as content:
+                            for event, element in ElementTree.iterparse(
+                                content, events=("start", "end")
+                            ):
+                                tag = element.tag.rpartition("}")[2]
+                                if event == "start":
+                                    if tag == "row":
+                                        source_row = int(element.get("r", str(source_row + 1)))
+                                        source_column = 0
+                                    elif tag == "c":
+                                        source_coordinate = element.get("r", "")
+                                        if source_coordinate:
+                                            _, source_column = coordinate_to_tuple(
+                                                source_coordinate
+                                            )
+                                        else:
+                                            source_column += 1
+                                            source_coordinate = (
+                                                f"{get_column_letter(source_column)}{source_row}"
+                                            )
+                                        source_type = element.get("t", "n")
+                                        has_formula = has_cache = False
+                                    continue
+                                if tag == "f":
+                                    has_formula = True
+                                elif tag == "v":
+                                    has_cache = element.text is not None or source_type == "str"
+                                elif tag == "c" and has_formula and has_cache:
+                                    supplied_caches.add(source_coordinate)
+                                elif tag == "mergeCell":
+                                    reference = element.attrib["ref"]
+                                    merged_bounds.append(CellRange(reference).bounds)
+                                    merges.append(reference)
+                                element.clear()
                         rows: list[str] = []
                         headers: list[str] = []
                         for number, (row, formula_row) in enumerate(
                             zip(worksheet.iter_rows(), formula_sheet.iter_rows(), strict=True),
                             start=1,
                         ):
-                            if not any(cell.value is not None for cell in formula_row):
+                            # Keep rectangles rather than expanding potentially
+                            # large merges into a set of individual coordinates.
+                            covered = [
+                                any(
+                                    min_row <= number <= max_row
+                                    and min_col <= column <= max_col
+                                    and (number, column) != (min_row, min_col)
+                                    for min_col, min_row, max_col, max_row in merged_bounds
+                                )
+                                for column in range(1, len(formula_row) + 1)
+                            ]
+                            if not any(
+                                cell.value is not None and not covered[column]
+                                for column, cell in enumerate(formula_row)
+                            ):
                                 continue
                             first = not headers
                             if first:
                                 headers = [
-                                    str(cell.value) if cell.value is not None else ""
-                                    for cell in row
+                                    str(cell.value)
+                                    if cell.value is not None and not covered[column]
+                                    else ""
+                                    for column, cell in enumerate(row)
                                 ]
                             cells: list[str] = []
                             for column, (cell, formula) in enumerate(
                                 zip(row, formula_row, strict=True), start=1
                             ):
                                 coordinate = f"{get_column_letter(column)}{number}"
+                                if covered[column - 1]:
+                                    cells.append(f"{coordinate}=")
+                                    continue
                                 label = (
                                     f" [{headers[column - 1]}]"
                                     if not first and headers[column - 1]
@@ -274,24 +350,15 @@ def _parse_xlsx(data: bytes) -> str:
                                 if formula.data_type == "f":
                                     cache = (
                                         "cached value unavailable"
-                                        if cell.value is None
+                                        if coordinate not in supplied_caches
                                         else "cached value supplied; freshness unknown"
                                     )
-                                    value += f" [formula={formula.value}; {cache}]"
+                                    value += f" [formula={render_formula(formula.value)}; {cache}]"
                                 cells.append(f"{coordinate}{label}={value}")
                             rows.append(
                                 f"Row {number} (Sheet {worksheet.title}): " + " | ".join(cells)
                             )
                         if rows:
-                            merges: list[str] = []
-                            # ReadOnlyWorksheet omits merged ranges. Stream the same
-                            # archive member for source metadata without loading a
-                            # second full worksheet or extracting files to disk.
-                            with archive.open(worksheet._worksheet_path) as content:
-                                for _, element in ElementTree.iterparse(content, events=("end",)):
-                                    if element.tag.endswith("}mergeCell"):
-                                        merges.append(element.attrib["ref"])
-                                    element.clear()
                             heading = [f"Sheet: {worksheet.title}"]
                             if merges:
                                 heading.append("Merged cells: " + ", ".join(merges))
