@@ -49,6 +49,8 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from itertools import count
 from uuid import UUID
 
@@ -83,6 +85,13 @@ from app.services.tools.types import (
 )
 
 log = get_logger(__name__)
+
+
+@dataclass
+class _WebExecution:
+    task: asyncio.Task[ToolResult]
+    origin: str
+    waiters: int = 0
 
 
 # The isolated call-scope factory a concurrent dispatcher passes into
@@ -207,6 +216,8 @@ class ToolRunner:
         # answer terminates) — an abandoned ordinal never leaves a live waiter.
         self._persist_gate = asyncio.Condition()
         self._next_persist_ordinal = 0
+        self._web_executions: dict[str, _WebExecution] = {}
+        self._web_origins: dict[str, str] = {}
 
     def claim_ordinal(self) -> int:
         """Preassign the next dispatch ordinal (ADR-0016 §5, #412).
@@ -492,11 +503,29 @@ class ToolRunner:
         # ok=False result — the stream never crashes. A concurrent call enters
         # its isolated scope ONLY here — after every governance gate passed —
         # and leaves it before the finalise drain (#412).
-        if scope is None:
-            result = await self._execute(definition, call, context, started)
-        else:
-            async with scope() as scoped_context:
-                result = await self._execute(definition, call, scoped_context, started)
+        try:
+            if scope is None:
+                result = await self._execute_shared(definition, call, context, started)
+            else:
+                async with scope() as scoped_context:
+                    result = await self._execute_shared(definition, call, scoped_context, started)
+        except asyncio.CancelledError:
+            await self._finalise(
+                call=call,
+                args_hash=args_hash,
+                message_id=message_id,
+                ordinal=ordinal,
+                result=ToolResult.failure(
+                    call_id=call.id,
+                    name=call.name,
+                    error="tool_cancelled",
+                    content="The tool call was cancelled.",
+                    summary="cancelled",
+                    duration_ms=_elapsed_ms(started),
+                ),
+                outcome=AuditOutcome.ERROR,
+            )
+            raise
         outcome = AuditOutcome.ALLOWED if result.ok else AuditOutcome.ERROR
         return await self._finalise(
             call=call,
@@ -583,6 +612,77 @@ class ToolRunner:
             )
         return _complete(call, body, _elapsed_ms(started))
 
+    async def _execute_shared(
+        self,
+        definition: ToolDefinition,
+        call: ToolCall,
+        context: ToolContext,
+        started: float,
+    ) -> ToolResult:
+        if (
+            call.name != "web_search"
+            or call.name in self._extra_tools
+            or not definition.read_only
+            or definition.requires_approval
+        ):
+            return await self._execute(definition, call, context, started)
+        arguments = deepcopy(call.arguments)
+        if isinstance(arguments.get("query"), str):
+            arguments["query"] = arguments["query"].strip()
+        key = hash_args(
+            {
+                "tenant": str(context.principal.tenant_id),
+                "user": str(context.principal.user_id),
+                "args": arguments,
+            }
+        )
+        execution = self._web_executions.get(key)
+        if (
+            execution is not None
+            and execution.task.done()
+            and (execution.task.cancelled() or not execution.task.result().ok)
+        ):
+            self._web_executions.pop(key)
+            execution = None
+        if execution is None:
+            execution = _WebExecution(
+                asyncio.create_task(
+                    self._execute(definition, replace(call, arguments=arguments), context, started)
+                ),
+                call.id,
+            )
+            self._web_executions[key] = execution
+        self._web_origins[call.id] = execution.origin
+        execution.waiters += 1
+        try:
+            result = await asyncio.shield(execution.task)
+            return replace(
+                result,
+                call_id=call.id,
+                name=call.name,
+                payload=deepcopy(result.payload),
+                duration_ms=_elapsed_ms(started),
+                summary=(
+                    result.summary
+                    if execution.origin == call.id
+                    else f"Reused identical web search: {result.summary}"
+                ),
+            )
+        finally:
+            execution.waiters -= 1
+            if execution.waiters == 0 and not execution.task.done():
+                execution.task.cancel()
+                try:
+                    await execution.task
+                except asyncio.CancelledError:
+                    pass
+            if (
+                execution.task.done()
+                and (execution.task.cancelled() or not execution.task.result().ok)
+                and self._web_executions.get(key) is execution
+            ):
+                self._web_executions.pop(key)
+
     async def _finalise(
         self,
         *,
@@ -646,6 +746,14 @@ class ToolRunner:
             **({"invoked_event_id": str(invoked_event_id)} if invoked_event_id else {}),
             **({"error": result.error} if result.error else {}),
             **({"denied_reason": reason} if reason else {}),
+            **(
+                {
+                    "execution_call_id": self._web_origins[call.id],
+                    "deduplicated": self._web_origins[call.id] != call.id,
+                }
+                if call.id in self._web_origins
+                else {}
+            ),
         }
         async with self._persist_gate:
             await self._persist_gate.wait_for(lambda: self._next_persist_ordinal == ordinal)

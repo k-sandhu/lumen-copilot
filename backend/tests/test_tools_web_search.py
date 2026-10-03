@@ -200,7 +200,8 @@ async def test_enabled_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_service(monkeypatch, _StubService(results=()))
     result = await web_search_impl._web_search({"query": "python"}, _ctx())
     assert result.ok is True
-    assert result.summary == "0 results"
+    assert result.summary == "provider empty: 0 results"
+    assert result.payload is not None and result.payload["reason"] == "provider_empty"
 
 
 async def test_enabled_missing_query(monkeypatch: pytest.MonkeyPatch) -> None:
