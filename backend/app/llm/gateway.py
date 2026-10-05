@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from numbers import Real
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 from urllib.parse import urlparse
 
 from app.core.config import Settings
@@ -46,6 +46,7 @@ from app.domain.llm import (
     Completion,
     CompletionChunk,
     Embedding,
+    StreamClosure,
     StreamEvent,
     TokenUsage,
     ToolCall,
@@ -633,6 +634,35 @@ class LLMGateway:
             # the upstream HTTP connection is released and no task lingers.
             await _aclose(response)
 
+    @overload
+    def stream_tools(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        model: str | None = None,
+        tool_choice: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        cache_key: str | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamEvent]: ...
+
+    @overload
+    def stream_tools(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        model: str | None = None,
+        tool_choice: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        cache_key: str | None = None,
+        max_tokens: int | None = None,
+        closure: StreamClosure | None = None,
+    ) -> AsyncIterator[StreamEvent]: ...
+
     async def stream_tools(
         self,
         messages: Sequence[ChatMessage],
@@ -644,6 +674,7 @@ class LLMGateway:
         api_base: str | None = None,
         cache_key: str | None = None,
         max_tokens: int | None = None,
+        closure: StreamClosure | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -673,6 +704,10 @@ class LLMGateway:
         ``api_key`` / ``api_base`` OVERRIDE the process defaults when given (a
         per-tenant provider route, PR 2a); ``None`` ⇒ the default credentials,
         unchanged.
+
+        ``closure`` optionally records successful upstream cleanup for protocol
+        qualification. A missing/failed hook stays false; ordinary callers keep
+        the existing best-effort cleanup and error behaviour.
         """
         self._require_enabled()
         import litellm  # lazy
@@ -765,7 +800,9 @@ class LLMGateway:
                 raise
             raise _map_vendor_error(exc) from None
         finally:
-            await _aclose(response)
+            closed = await _aclose(response)
+            if closure is not None:
+                closure.closed = closed
 
         built_calls = (acc.build() for _, acc in sorted(tool_acc.items()))
         tool_calls = tuple(
@@ -997,12 +1034,13 @@ def _extract_usage(response: Any) -> TokenUsage:
     )
 
 
-async def _aclose(stream: Any) -> None:
+async def _aclose(stream: Any) -> bool:
     """Close a LiteLLM async stream if it exposes a close hook.
 
     LiteLLM's streaming wrapper may expose ``aclose`` (async) or ``close``
     (sync); either releases the upstream connection. Best-effort: a missing or
-    failing close must not mask the original control flow.
+    failing close must not mask the original control flow. Return true only
+    after a supported hook succeeds, for callers requesting closure evidence.
     """
     aclose: Any = getattr(stream, "aclose", None)
     if callable(aclose):
@@ -1011,14 +1049,16 @@ async def _aclose(stream: Any) -> None:
             if result is not None:
                 await result
         except Exception:  # noqa: BLE001 — teardown is best-effort
-            return
-        return
+            return False
+        return True
     close: Any = getattr(stream, "close", None)
     if callable(close):
         try:
             close()
         except Exception:  # noqa: BLE001 — teardown is best-effort
-            return
+            return False
+        return True
+    return False
 
 
 async def aclose_litellm_clients() -> None:
