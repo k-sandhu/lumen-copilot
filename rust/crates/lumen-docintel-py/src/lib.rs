@@ -1,5 +1,5 @@
 //! The sole Python/native conversion boundary.
-use ::lumen_docintel::CoreError;
+use lumen_docintel_core::CoreError;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -39,7 +39,7 @@ fn compute<T: Send>(
 
 #[pyfunction]
 fn core_version() -> &'static str {
-    ::lumen_docintel::VERSION
+    lumen_docintel_core::VERSION
 }
 
 #[pyfunction]
