@@ -413,7 +413,7 @@ pub fn detect(data: &[u8], declared: Option<&str>) -> Result<Detection, CoreErro
         return Err(CoreError::Budget);
     }
     let mut decoded = None;
-    let (format, mut mime, evidence) = if data.starts_with(b"%PDF-") {
+    let (format, mut mime, evidence): (Format, String, &str) = if data.starts_with(b"%PDF-") {
         if zip_tail(data).is_some() {
             return Err(CoreError::Unsupported);
         }
