@@ -71,6 +71,9 @@ class CancellationHandle:
         self._token.cancel()
 
 
+_DEFAULT_BUDGET = RuntimeBudget()
+
+
 class NativeExecutor:
     """Create lazily AFTER Celery forks; reuse one executor per worker child."""
 
@@ -84,7 +87,7 @@ class NativeExecutor:
         self,
         units: tuple[str, ...],
         *,
-        budget: RuntimeBudget = RuntimeBudget(),
+        budget: RuntimeBudget = _DEFAULT_BUDGET,
         cancellation: CancellationHandle | None = None,
     ) -> ComputedUnits:
         token = cancellation or CancellationHandle()
@@ -98,7 +101,7 @@ class NativeExecutor:
         self,
         windows: Iterable[tuple[str, ...]],
         *,
-        budget: RuntimeBudget = RuntimeBudget(),
+        budget: RuntimeBudget = _DEFAULT_BUDGET,
         cancellation: CancellationHandle | None = None,
     ) -> Iterator[ComputedUnits]:
         """Python reads input/persists output; a shared native context bounds the document."""

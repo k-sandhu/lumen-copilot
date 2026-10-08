@@ -21,6 +21,7 @@ class ComputedUnits:
     peak_accounted_bytes: int
     work_units: int
     output_chars: int
+    source_input_bytes: int
 
     @classmethod
     def from_json(cls, value: str) -> ComputedUnits:

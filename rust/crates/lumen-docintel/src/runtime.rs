@@ -47,6 +47,7 @@ struct Counters {
     peak: AtomicUsize,
     work: AtomicUsize,
     output: AtomicUsize,
+    input: AtomicUsize,
 }
 #[derive(Debug)]
 pub struct Reservation {
@@ -88,6 +89,7 @@ pub struct Stats {
     pub peak_accounted_bytes: usize,
     pub work_units: usize,
     pub output_chars: usize,
+    pub source_input_bytes: usize,
 }
 
 fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<usize, CoreError> {
@@ -151,6 +153,10 @@ impl Context {
         charge(&self.counters.work, units, self.budget.max_work_units)?;
         Ok(())
     }
+    pub fn input(&self, bytes: usize) -> Result<(), CoreError> {
+        charge(&self.counters.input, bytes, self.budget.max_input_bytes)?;
+        Ok(())
+    }
     pub fn output(&self, chars: usize) -> Result<(), CoreError> {
         charge(&self.counters.output, chars, self.budget.max_output_chars)?;
         Ok(())
@@ -160,6 +166,7 @@ impl Context {
             peak_accounted_bytes: self.counters.peak.load(Ordering::Acquire),
             work_units: self.counters.work.load(Ordering::Acquire),
             output_chars: self.counters.output.load(Ordering::Acquire),
+            source_input_bytes: self.counters.input.load(Ordering::Acquire),
         }
     }
 }
@@ -282,9 +289,7 @@ impl Runtime {
         let input_bytes = units.iter().try_fold(0usize, |n, s| {
             n.checked_add(s.len()).ok_or(CoreError::Budget)
         })?;
-        if input_bytes > ctx.budget.max_input_bytes {
-            return Err(CoreError::Budget);
-        }
+        ctx.input(input_bytes)?;
         let _input = ctx.reserve(input_bytes)?;
         self.execute(ctx, units, |text, ctx| {
             let mut chars = 0;
@@ -335,14 +340,10 @@ impl Runtime {
         self.run_context_json(input, &Context::new(budget, token)?)
     }
     pub fn run_context_json(&self, input: &str, ctx: &Context) -> Result<String, CoreError> {
-        let budget = ctx.budget;
         if input.len() > 32 * 1024 * 1024 {
             return Err(CoreError::Budget);
         }
 
-        if input.len() > budget.max_input_bytes {
-            return Err(CoreError::Budget);
-        }
         let _raw = ctx.reserve(input.len().checked_mul(2).ok_or(CoreError::Budget)?)?;
         // Bound array capacity before serde allocates it (including empty strings).
         let capacity = (input.len() / 2 + 1).min(100_000).next_power_of_two();

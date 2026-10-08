@@ -34,3 +34,12 @@ whose candidate arms remain unavailable until parsers land.
 Python feeds large documents as bounded units through the executor; the core
 also accepts bounded iterators in sequential windows without retaining the
 whole input. Python performs all underlying stream/network/storage reads.
+
+Config lives in `core/config.py`: NATIVE_INGESTION_THREADS,
+NATIVE_INGESTION_MAX_DOCUMENTS, NATIVE_INGESTION_MAX_MEMORY_BYTES,
+NATIVE_INGESTION_MAX_INPUT_BYTES, NATIVE_INGESTION_MAX_OUTPUT_CHARS,
+NATIVE_INGESTION_MAX_WORK_UNITS and NATIVE_INGESTION_TIMEOUT_MS. Pass these
+through RuntimeBudget and NativeExecutor; no configuration enables a parser.
+The optional compose override caps process concurrency without changing the
+general-worker default. Streaming sessions retain source input/work/output
+counters and the same deadline across windows.
