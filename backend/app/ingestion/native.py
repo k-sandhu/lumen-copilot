@@ -7,6 +7,10 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict
 from importlib import import_module
 from types import ModuleType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
@@ -111,3 +115,19 @@ class NativeExecutor:
             yield ComputedUnits.from_json(
                 self._runtime.run_window(json.dumps(units, ensure_ascii=False), session)
             )
+
+
+def configured_native_executor(settings: Settings) -> tuple[NativeExecutor, RuntimeBudget]:
+    """Worker wiring seam; call after fork and only on an approved native arm."""
+    executor = NativeExecutor(
+        threads=settings.native_ingestion_threads,
+        max_documents=settings.native_ingestion_max_documents,
+    )
+    budget = RuntimeBudget(
+        max_input_bytes=settings.native_ingestion_max_input_bytes,
+        max_memory_bytes=settings.native_ingestion_max_memory_bytes,
+        max_output_chars=settings.native_ingestion_max_output_chars,
+        max_work_units=settings.native_ingestion_max_work_units,
+        timeout_ms=settings.native_ingestion_timeout_ms,
+    )
+    return executor, budget

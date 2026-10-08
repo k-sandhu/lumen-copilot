@@ -65,6 +65,9 @@ pub struct Accounted<T> {
     pub value: T,
     _reservation: Reservation,
 }
+pub type UnitBatch<T> = Accounted<Vec<Accounted<T>>>;
+pub type DocumentResult<T> = Result<UnitBatch<T>, CoreError>;
+
 impl<T> std::ops::Deref for Accounted<T> {
     type Target = T;
     fn deref(&self) -> &T {
@@ -203,12 +206,7 @@ impl Runtime {
         charge(&self.active, 1, self.max_documents)?;
         Ok(Admission(&self.active))
     }
-    fn map<T: Sync, U: Send, F>(
-        &self,
-        ctx: &Context,
-        items: &[T],
-        f: &F,
-    ) -> Result<Accounted<Vec<Accounted<U>>>, CoreError>
+    fn map<T: Sync, U: Send, F>(&self, ctx: &Context, items: &[T], f: &F) -> DocumentResult<U>
     where
         F: Fn(&T, &Context) -> Result<Accounted<U>, CoreError> + Sync,
     {
@@ -242,7 +240,7 @@ impl Runtime {
         ctx: &Context,
         items: &[T],
         f: F,
-    ) -> Result<Accounted<Vec<Accounted<U>>>, CoreError>
+    ) -> DocumentResult<U>
     where
         F: Fn(&T, &Context) -> Result<Accounted<U>, CoreError> + Sync,
     {
@@ -281,21 +279,17 @@ impl Runtime {
             drop(reservation);
         }
     }
-    fn copy(
-        &self,
-        ctx: &Context,
-        units: &[String],
-    ) -> Result<Accounted<Vec<Accounted<String>>>, CoreError> {
+    fn copy(&self, ctx: &Context, units: &[String]) -> DocumentResult<String> {
         let input_bytes = units.iter().try_fold(0usize, |n, s| {
             n.checked_add(s.len()).ok_or(CoreError::Budget)
         })?;
         ctx.input(input_bytes)?;
         let _input = ctx.reserve(input_bytes)?;
         self.execute(ctx, units, |text, ctx| {
-            let mut chars = 0;
+            let mut chars: usize = 0;
             for _ in text.chars() {
                 chars += 1;
-                if chars % 1024 == 0 {
+                if chars.is_multiple_of(1024) {
                     ctx.work(1)?;
                 }
             }
@@ -308,14 +302,10 @@ impl Runtime {
         units: &[String],
         budget: Budget,
         token: Cancellation,
-    ) -> Result<Accounted<Vec<Accounted<String>>>, CoreError> {
+    ) -> DocumentResult<String> {
         self.copy(&Context::new(budget, token)?, units)
     }
-    pub fn copy_batch(
-        &self,
-        docs: &[Vec<String>],
-        budget: Budget,
-    ) -> Vec<Result<Accounted<Vec<Accounted<String>>>, CoreError>> {
+    pub fn copy_batch(&self, docs: &[Vec<String>], budget: Budget) -> Vec<DocumentResult<String>> {
         docs.chunks(self.max_documents)
             .flat_map(|wave| {
                 self.pool.install(|| {
