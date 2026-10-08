@@ -55,3 +55,8 @@ The PyO3 build dependency `target-lexicon` uses Apache-2.0 WITH LLVM-exception.
 The exception permits linking compiled portions without additional attribution
 conditions; it adds permission, not copyleft. It is explicitly allowlisted.
 Reference: https://spdx.org/licenses/LLVM-exception.html.
+
+Canonical schema v1: `docs/ingestion/canonical-schema-v1.md`. Native rendering
+releases the GIL and returns immutable domain views through the Python facade.
+Model parity does not imply native format-parser parity. New dependencies:
+serde/serde_json (MIT OR Apache-2.0), proptest (MIT OR Apache-2.0, tests only).

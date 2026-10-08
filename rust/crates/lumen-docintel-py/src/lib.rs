@@ -113,6 +113,13 @@ fn _test_wait(py: Python<'_>, gate: &Handshake) -> PyResult<()> {
     })
 }
 
+#[pyfunction]
+fn render_document(py: Python<'_>, document_json: String) -> PyResult<String> {
+    compute(py, || {
+        lumen_docintel_core::canonical::render_json(&document_json)
+    })
+}
+
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
@@ -144,6 +151,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "DocIntelPanicError",
         m.py().get_type::<DocIntelPanicError>(),
     )?;
+    m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;

@@ -26,3 +26,5 @@ impl std::fmt::Display for CoreError {
 impl std::error::Error for CoreError {}
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod canonical;
