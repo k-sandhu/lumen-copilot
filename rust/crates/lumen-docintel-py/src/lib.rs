@@ -1,5 +1,5 @@
 //! The sole Python/native conversion boundary.
-use lumen_docintel::CoreError;
+use ::lumen_docintel::CoreError;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -39,7 +39,7 @@ fn compute<T: Send>(
 
 #[pyfunction]
 fn core_version() -> &'static str {
-    lumen_docintel::VERSION
+    ::lumen_docintel::VERSION
 }
 
 #[pyfunction]
@@ -59,7 +59,7 @@ struct HandshakeState {
     finished: bool,
 }
 
-#[pyclass(name = "_Handshake")]
+#[pyclass(name = "_Handshake", skip_from_py_object)]
 #[derive(Clone, Default)]
 struct Handshake {
     shared: Arc<(Mutex<HandshakeState>, Condvar)>,
