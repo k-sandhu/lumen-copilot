@@ -72,6 +72,7 @@ def test_native_model_typed_provenance_roundtrip() -> None:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ),
     ],
+    ids=["txt", "markdown", "pdf", "docx", "pptx", "xlsx"],
 )
 def test_current_parser_exact_text_model_parity(data: bytes, mime: str) -> None:
     pytest.importorskip("lumen_docintel")
