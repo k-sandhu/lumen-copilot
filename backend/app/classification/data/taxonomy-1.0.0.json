@@ -1,0 +1,3873 @@
+{
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "legal",
+      "label": "Legal",
+      "description": "Documents defining enforceable rights, obligations or legal proceedings.",
+      "examples": [
+        "Synthetic legal with primary purpose: Documents defining enforceable rights, obligations or legal proceedings."
+      ],
+      "signals": [
+        "primary purpose: Documents defining enforceable rights, obligations or legal proceedings."
+      ],
+      "children": [
+        {
+          "id": "legal/agreements",
+          "label": "Agreements",
+          "description": "Mutual obligations between identified parties.",
+          "examples": [
+            "Synthetic agreements with content purpose: Mutual obligations between identified parties."
+          ],
+          "signals": [
+            "content purpose: Mutual obligations between identified parties."
+          ],
+          "children": [
+            {
+              "id": "legal/agreements/contract",
+              "label": "Contract",
+              "description": "Binding terms for goods, services or rights between parties.",
+              "examples": [
+                "Synthetic contract with parties"
+              ],
+              "signals": [
+                "parties",
+                "consideration",
+                "effective date",
+                "obligations"
+              ]
+            },
+            {
+              "id": "legal/agreements/nda",
+              "label": "Non-disclosure agreement",
+              "description": "Limits disclosure and use of confidential information.",
+              "examples": [
+                "Synthetic non-disclosure agreement with confidential information"
+              ],
+              "signals": [
+                "confidential information",
+                "disclosing party",
+                "exclusions",
+                "survival"
+              ],
+              "children": [
+                {
+                  "id": "legal/agreements/nda/mutual",
+                  "label": "Mutual NDA",
+                  "description": "Both identified parties disclose confidential information and owe reciprocal confidentiality duties.",
+                  "examples": [
+                    "Synthetic mutual nda with reciprocal disclosure; each party is a discloser"
+                  ],
+                  "signals": [
+                    "reciprocal disclosure; each party is a discloser"
+                  ]
+                },
+                {
+                  "id": "legal/agreements/nda/unilateral",
+                  "label": "Unilateral NDA",
+                  "description": "One identified party discloses and the other alone owes confidentiality duties.",
+                  "examples": [
+                    "Synthetic unilateral nda with disclosing party; receiving party has confidentiality duty"
+                  ],
+                  "signals": [
+                    "disclosing party; receiving party has confidentiality duty"
+                  ]
+                },
+                {
+                  "id": "legal/agreements/nda/other",
+                  "label": "Other",
+                  "description": "Evidence belongs under legal/agreements/nda but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+                  "examples": [
+                    "Synthetic other with primary purpose outside the named sibling definitions"
+                  ],
+                  "signals": [
+                    "primary purpose outside the named sibling definitions"
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "legal/agreements/lease",
+              "label": "Lease",
+              "description": "Grants possession or use of property for rent and a term.",
+              "examples": [
+                "Synthetic lease with lessor"
+              ],
+              "signals": [
+                "lessor",
+                "lessee",
+                "rent",
+                "premises"
+              ]
+            },
+            {
+              "id": "legal/agreements/other",
+              "label": "Other",
+              "description": "Evidence belongs under legal/agreements but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "legal/litigation",
+          "label": "Litigation",
+          "description": "Materials filed or exchanged in a legal dispute.",
+          "examples": [
+            "Synthetic litigation with content purpose: Materials filed or exchanged in a legal dispute."
+          ],
+          "signals": [
+            "content purpose: Materials filed or exchanged in a legal dispute."
+          ],
+          "children": [
+            {
+              "id": "legal/litigation/pleading",
+              "label": "Pleading",
+              "description": "Formal claim or defense filed with a court.",
+              "examples": [
+                "Synthetic pleading with court caption"
+              ],
+              "signals": [
+                "court caption",
+                "plaintiff",
+                "relief sought",
+                "case number"
+              ]
+            },
+            {
+              "id": "legal/litigation/judgment",
+              "label": "Judgment",
+              "description": "Court determination of rights or liability.",
+              "examples": [
+                "Synthetic judgment with ordered adjudged"
+              ],
+              "signals": [
+                "ordered adjudged",
+                "judge",
+                "disposition",
+                "docket"
+              ]
+            },
+            {
+              "id": "legal/litigation/legal_opinion",
+              "label": "Legal opinion",
+              "description": "Counsel analysis of a legal question for a client.",
+              "examples": [
+                "Synthetic legal opinion with legal question"
+              ],
+              "signals": [
+                "legal question",
+                "counsel",
+                "cited authority",
+                "conclusion"
+              ]
+            },
+            {
+              "id": "legal/litigation/other",
+              "label": "Other",
+              "description": "Evidence belongs under legal/litigation but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "legal/corporate",
+          "label": "Corporate governance",
+          "description": "Legal records of corporate authority and ownership.",
+          "examples": [
+            "Synthetic corporate governance with content purpose: Legal records of corporate authority and ownership."
+          ],
+          "signals": [
+            "content purpose: Legal records of corporate authority and ownership."
+          ],
+          "children": [
+            {
+              "id": "legal/corporate/board_resolution",
+              "label": "Board resolution",
+              "description": "Records a board's formal authorization or decision.",
+              "examples": [
+                "Synthetic board resolution with resolved"
+              ],
+              "signals": [
+                "resolved",
+                "directors",
+                "authorization",
+                "meeting date"
+              ]
+            },
+            {
+              "id": "legal/corporate/articles",
+              "label": "Articles of incorporation",
+              "description": "Constitutes a legal entity and its organizational powers.",
+              "examples": [
+                "Synthetic articles of incorporation with incorporator"
+              ],
+              "signals": [
+                "incorporator",
+                "registered office",
+                "share classes"
+              ]
+            },
+            {
+              "id": "legal/corporate/power_of_attorney",
+              "label": "Power of attorney",
+              "description": "Authorizes another person to act legally for a principal.",
+              "examples": [
+                "Synthetic power of attorney with principal"
+              ],
+              "signals": [
+                "principal",
+                "attorney-in-fact",
+                "delegated powers"
+              ]
+            },
+            {
+              "id": "legal/corporate/other",
+              "label": "Other",
+              "description": "Evidence belongs under legal/corporate but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "legal/other",
+          "label": "Other",
+          "description": "Evidence belongs under legal but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "legal/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under legal/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "financial",
+      "label": "Financial and accounting",
+      "description": "Records of money, accounting balances and financial planning excluding tax filings.",
+      "examples": [
+        "Synthetic financial and accounting with primary purpose: Records of money, accounting balances and financial planning excluding tax filings."
+      ],
+      "signals": [
+        "primary purpose: Records of money, accounting balances and financial planning excluding tax filings."
+      ],
+      "children": [
+        {
+          "id": "financial/transactions",
+          "label": "Transaction records",
+          "description": "Evidence of individual purchases, payments or adjustments.",
+          "examples": [
+            "Synthetic transaction records with content purpose: Evidence of individual purchases, payments or adjustments."
+          ],
+          "signals": [
+            "content purpose: Evidence of individual purchases, payments or adjustments."
+          ],
+          "children": [
+            {
+              "id": "financial/transactions/invoice",
+              "label": "Invoice",
+              "description": "Seller request for payment for supplied goods or services.",
+              "examples": [
+                "Synthetic invoice with invoice number"
+              ],
+              "signals": [
+                "invoice number",
+                "amount due",
+                "line items",
+                "payment terms"
+              ]
+            },
+            {
+              "id": "financial/transactions/receipt",
+              "label": "Receipt",
+              "description": "Acknowledges completed payment rather than requesting it.",
+              "examples": [
+                "Synthetic receipt with paid"
+              ],
+              "signals": [
+                "paid",
+                "tender",
+                "transaction date",
+                "receipt number"
+              ]
+            },
+            {
+              "id": "financial/transactions/purchase_order",
+              "label": "Purchase order",
+              "description": "Buyer authorization to acquire specified goods or services.",
+              "examples": [
+                "Synthetic purchase order with PO number"
+              ],
+              "signals": [
+                "PO number",
+                "buyer",
+                "quantity",
+                "delivery terms"
+              ]
+            },
+            {
+              "id": "financial/transactions/other",
+              "label": "Other",
+              "description": "Evidence belongs under financial/transactions but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "financial/statements",
+          "label": "Financial statements",
+          "description": "Accounting reports of position, performance or cash flows.",
+          "examples": [
+            "Synthetic financial statements with content purpose: Accounting reports of position, performance or cash flows."
+          ],
+          "signals": [
+            "content purpose: Accounting reports of position, performance or cash flows."
+          ],
+          "children": [
+            {
+              "id": "financial/statements/balance_sheet",
+              "label": "Balance sheet",
+              "description": "Balances assets against liabilities and equity at a date.",
+              "examples": [
+                "Synthetic balance sheet with assets"
+              ],
+              "signals": [
+                "assets",
+                "liabilities",
+                "shareholders equity",
+                "as of"
+              ]
+            },
+            {
+              "id": "financial/statements/income_statement",
+              "label": "Income statement",
+              "description": "Reports revenue, expenses and profit over a period.",
+              "examples": [
+                "Synthetic income statement with revenue"
+              ],
+              "signals": [
+                "revenue",
+                "cost of sales",
+                "net income",
+                "period ended"
+              ]
+            },
+            {
+              "id": "financial/statements/cash_flow",
+              "label": "Cash flow statement",
+              "description": "Reconciles cash changes across operating, investing and financing activities.",
+              "examples": [
+                "Synthetic cash flow statement with operating activities"
+              ],
+              "signals": [
+                "operating activities",
+                "investing activities",
+                "financing activities"
+              ]
+            },
+            {
+              "id": "financial/statements/other",
+              "label": "Other",
+              "description": "Evidence belongs under financial/statements but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "financial/planning",
+          "label": "Financial planning and assurance",
+          "description": "Prospective budgets and financial verification records.",
+          "examples": [
+            "Synthetic financial planning and assurance with content purpose: Prospective budgets and financial verification records."
+          ],
+          "signals": [
+            "content purpose: Prospective budgets and financial verification records."
+          ],
+          "children": [
+            {
+              "id": "financial/planning/budget",
+              "label": "Budget",
+              "description": "Planned income or expenditure against allocations.",
+              "examples": [
+                "Synthetic budget with budget period"
+              ],
+              "signals": [
+                "budget period",
+                "allocation",
+                "planned amount",
+                "variance"
+              ]
+            },
+            {
+              "id": "financial/planning/forecast",
+              "label": "Financial forecast",
+              "description": "Projected financial performance based on assumptions.",
+              "examples": [
+                "Synthetic financial forecast with forecast horizon"
+              ],
+              "signals": [
+                "forecast horizon",
+                "assumptions",
+                "projected revenue",
+                "scenarios"
+              ]
+            },
+            {
+              "id": "financial/planning/audit_report",
+              "label": "Financial audit report",
+              "description": "Independent assurance opinion on financial statements.",
+              "examples": [
+                "Synthetic financial audit report with independent auditor"
+              ],
+              "signals": [
+                "independent auditor",
+                "opinion",
+                "material misstatement",
+                "financial statements"
+              ]
+            },
+            {
+              "id": "financial/planning/other",
+              "label": "Other",
+              "description": "Evidence belongs under financial/planning but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "financial/other",
+          "label": "Other",
+          "description": "Evidence belongs under financial but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "financial/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under financial/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tax",
+      "label": "Tax",
+      "description": "Documents computing, reporting or contesting statutory tax obligations.",
+      "examples": [
+        "Synthetic tax with primary purpose: Documents computing, reporting or contesting statutory tax obligations."
+      ],
+      "signals": [
+        "primary purpose: Documents computing, reporting or contesting statutory tax obligations."
+      ],
+      "children": [
+        {
+          "id": "tax/filings",
+          "label": "Tax filings",
+          "description": "Submissions declaring taxable amounts to a tax authority.",
+          "examples": [
+            "Synthetic tax filings with content purpose: Submissions declaring taxable amounts to a tax authority."
+          ],
+          "signals": [
+            "content purpose: Submissions declaring taxable amounts to a tax authority."
+          ],
+          "children": [
+            {
+              "id": "tax/filings/income_return",
+              "label": "Income tax return",
+              "description": "Declares income, deductions and tax payable for a tax year.",
+              "examples": [
+                "Synthetic income tax return with tax year"
+              ],
+              "signals": [
+                "tax year",
+                "taxable income",
+                "deductions",
+                "tax payable"
+              ]
+            },
+            {
+              "id": "tax/filings/sales_return",
+              "label": "Sales tax return",
+              "description": "Reports collected sales or value-added taxes.",
+              "examples": [
+                "Synthetic sales tax return with tax collected"
+              ],
+              "signals": [
+                "tax collected",
+                "input credits",
+                "reporting period",
+                "remittance"
+              ]
+            },
+            {
+              "id": "tax/filings/payroll_return",
+              "label": "Payroll tax return",
+              "description": "Reports employer withholdings and payroll contributions.",
+              "examples": [
+                "Synthetic payroll tax return with withholding"
+              ],
+              "signals": [
+                "withholding",
+                "payroll period",
+                "employer contribution"
+              ]
+            },
+            {
+              "id": "tax/filings/other",
+              "label": "Other",
+              "description": "Evidence belongs under tax/filings but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tax/notices",
+          "label": "Tax authority notices",
+          "description": "Tax authority assessments or compliance correspondence.",
+          "examples": [
+            "Synthetic tax authority notices with content purpose: Tax authority assessments or compliance correspondence."
+          ],
+          "signals": [
+            "content purpose: Tax authority assessments or compliance correspondence."
+          ],
+          "children": [
+            {
+              "id": "tax/notices/assessment",
+              "label": "Tax assessment",
+              "description": "Authority determination of assessed liability.",
+              "examples": [
+                "Synthetic tax assessment with notice of assessment"
+              ],
+              "signals": [
+                "notice of assessment",
+                "assessed tax",
+                "balance owing"
+              ]
+            },
+            {
+              "id": "tax/notices/reassessment",
+              "label": "Tax reassessment",
+              "description": "Revises a previously assessed tax liability.",
+              "examples": [
+                "Synthetic tax reassessment with notice of reassessment"
+              ],
+              "signals": [
+                "notice of reassessment",
+                "adjustment",
+                "prior assessment"
+              ]
+            },
+            {
+              "id": "tax/notices/tax_clearance",
+              "label": "Tax clearance",
+              "description": "Authority confirmation of tax compliance for a defined purpose.",
+              "examples": [
+                "Synthetic tax clearance with clearance certificate"
+              ],
+              "signals": [
+                "clearance certificate",
+                "taxpayer",
+                "tax authority"
+              ]
+            },
+            {
+              "id": "tax/notices/other",
+              "label": "Other",
+              "description": "Evidence belongs under tax/notices but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tax/support",
+          "label": "Tax supporting schedules",
+          "description": "Calculations and evidence supporting tax filings.",
+          "examples": [
+            "Synthetic tax supporting schedules with content purpose: Calculations and evidence supporting tax filings."
+          ],
+          "signals": [
+            "content purpose: Calculations and evidence supporting tax filings."
+          ],
+          "children": [
+            {
+              "id": "tax/support/deduction_schedule",
+              "label": "Deduction schedule",
+              "description": "Itemizes claimed deductions and eligibility calculations.",
+              "examples": [
+                "Synthetic deduction schedule with deduction category"
+              ],
+              "signals": [
+                "deduction category",
+                "eligible expense",
+                "claimed amount"
+              ]
+            },
+            {
+              "id": "tax/support/tax_reconciliation",
+              "label": "Tax reconciliation",
+              "description": "Reconciles accounting profit to taxable income.",
+              "examples": [
+                "Synthetic tax reconciliation with book income"
+              ],
+              "signals": [
+                "book income",
+                "temporary differences",
+                "taxable income"
+              ]
+            },
+            {
+              "id": "tax/support/transfer_pricing",
+              "label": "Transfer pricing report",
+              "description": "Documents arm's-length pricing of related-party transactions.",
+              "examples": [
+                "Synthetic transfer pricing report with related parties"
+              ],
+              "signals": [
+                "related parties",
+                "comparable transactions",
+                "arm's length"
+              ]
+            },
+            {
+              "id": "tax/support/other",
+              "label": "Other",
+              "description": "Evidence belongs under tax/support but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tax/other",
+          "label": "Other",
+          "description": "Evidence belongs under tax but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "tax/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under tax/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "regulatory",
+      "label": "Regulatory and permitting",
+      "description": "Applications, authorizations and compliance records for regulated activities.",
+      "examples": [
+        "Synthetic regulatory and permitting with primary purpose: Applications, authorizations and compliance records for regulated activities."
+      ],
+      "signals": [
+        "primary purpose: Applications, authorizations and compliance records for regulated activities."
+      ],
+      "children": [
+        {
+          "id": "regulatory/permits",
+          "label": "Permits and licenses",
+          "description": "Applications and issued authorizations for a specific activity.",
+          "examples": [
+            "Synthetic permits and licenses with content purpose: Applications and issued authorizations for a specific activity."
+          ],
+          "signals": [
+            "content purpose: Applications and issued authorizations for a specific activity."
+          ],
+          "children": [
+            {
+              "id": "regulatory/permits/permit_application",
+              "label": "Permit application",
+              "description": "Requests an authority's permission with proposed activity details.",
+              "examples": [
+                "Synthetic permit application with applicant"
+              ],
+              "signals": [
+                "applicant",
+                "proposed activity",
+                "permit category",
+                "application fee"
+              ]
+            },
+            {
+              "id": "regulatory/permits/issued_permit",
+              "label": "Issued permit",
+              "description": "Grants conditional authorization for a bounded activity.",
+              "examples": [
+                "Synthetic issued permit with permit number"
+              ],
+              "signals": [
+                "permit number",
+                "issuing authority",
+                "conditions",
+                "expiry"
+              ]
+            },
+            {
+              "id": "regulatory/permits/license",
+              "label": "Operating license",
+              "description": "Authorizes regulated professional or business practice.",
+              "examples": [
+                "Synthetic operating license with licensee"
+              ],
+              "signals": [
+                "licensee",
+                "licensed activity",
+                "license number",
+                "renewal"
+              ]
+            },
+            {
+              "id": "regulatory/permits/other",
+              "label": "Other",
+              "description": "Evidence belongs under regulatory/permits but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "regulatory/compliance",
+          "label": "Regulatory compliance",
+          "description": "Evidence and findings against regulatory requirements.",
+          "examples": [
+            "Synthetic regulatory compliance with content purpose: Evidence and findings against regulatory requirements."
+          ],
+          "signals": [
+            "content purpose: Evidence and findings against regulatory requirements."
+          ],
+          "children": [
+            {
+              "id": "regulatory/compliance/inspection_report",
+              "label": "Regulatory inspection report",
+              "description": "Authority records observed compliance and deficiencies.",
+              "examples": [
+                "Synthetic regulatory inspection report with inspector"
+              ],
+              "signals": [
+                "inspector",
+                "inspection date",
+                "deficiencies",
+                "regulation reference"
+              ]
+            },
+            {
+              "id": "regulatory/compliance/compliance_filing",
+              "label": "Compliance filing",
+              "description": "Required periodic disclosure to a regulator.",
+              "examples": [
+                "Synthetic compliance filing with reporting entity"
+              ],
+              "signals": [
+                "reporting entity",
+                "prescribed reporting period",
+                "regulator"
+              ]
+            },
+            {
+              "id": "regulatory/compliance/violation_notice",
+              "label": "Violation notice",
+              "description": "Authority identifies breach and required corrective action.",
+              "examples": [
+                "Synthetic violation notice with violation"
+              ],
+              "signals": [
+                "violation",
+                "enforcement authority",
+                "corrective deadline"
+              ]
+            },
+            {
+              "id": "regulatory/compliance/other",
+              "label": "Other",
+              "description": "Evidence belongs under regulatory/compliance but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "regulatory/submissions",
+          "label": "Regulatory submissions",
+          "description": "Formal arguments or technical evidence sent to a regulator.",
+          "examples": [
+            "Synthetic regulatory submissions with content purpose: Formal arguments or technical evidence sent to a regulator."
+          ],
+          "signals": [
+            "content purpose: Formal arguments or technical evidence sent to a regulator."
+          ],
+          "children": [
+            {
+              "id": "regulatory/submissions/impact_submission",
+              "label": "Regulatory impact submission",
+              "description": "Evaluates expected consequences of a regulated proposal.",
+              "examples": [
+                "Synthetic regulatory impact submission with proposed measure"
+              ],
+              "signals": [
+                "proposed measure",
+                "impacts",
+                "consultation",
+                "regulator"
+              ]
+            },
+            {
+              "id": "regulatory/submissions/approval_letter",
+              "label": "Approval letter",
+              "description": "Authority communicates approval of a specified submission.",
+              "examples": [
+                "Synthetic approval letter with approved"
+              ],
+              "signals": [
+                "approved",
+                "authority",
+                "submission reference",
+                "conditions"
+              ]
+            },
+            {
+              "id": "regulatory/submissions/public_consultation",
+              "label": "Consultation response",
+              "description": "Provides comments in a formal regulatory consultation.",
+              "examples": [
+                "Synthetic consultation response with consultation docket"
+              ],
+              "signals": [
+                "consultation docket",
+                "respondent",
+                "proposed rule",
+                "comments"
+              ]
+            },
+            {
+              "id": "regulatory/submissions/other",
+              "label": "Other",
+              "description": "Evidence belongs under regulatory/submissions but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "regulatory/other",
+          "label": "Other",
+          "description": "Evidence belongs under regulatory but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "regulatory/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under regulatory/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "environmental",
+      "label": "Environmental",
+      "description": "Assessment, monitoring and management of environmental conditions and impacts.",
+      "examples": [
+        "Synthetic environmental with primary purpose: Assessment, monitoring and management of environmental conditions and impacts."
+      ],
+      "signals": [
+        "primary purpose: Assessment, monitoring and management of environmental conditions and impacts."
+      ],
+      "children": [
+        {
+          "id": "environmental/assessment",
+          "label": "Environmental assessment",
+          "description": "Investigations of sites, impacts and contamination.",
+          "examples": [
+            "Synthetic environmental assessment with content purpose: Investigations of sites, impacts and contamination."
+          ],
+          "signals": [
+            "content purpose: Investigations of sites, impacts and contamination."
+          ],
+          "children": [
+            {
+              "id": "environmental/assessment/site_assessment",
+              "label": "Environmental site assessment",
+              "description": "Investigates historical/current site contamination risks.",
+              "examples": [
+                "Synthetic environmental site assessment with site history"
+              ],
+              "signals": [
+                "site history",
+                "contaminants",
+                "sampling locations",
+                "recognized conditions"
+              ]
+            },
+            {
+              "id": "environmental/assessment/impact_assessment",
+              "label": "Environmental impact assessment",
+              "description": "Predicts environmental effects of a proposed project.",
+              "examples": [
+                "Synthetic environmental impact assessment with baseline environment"
+              ],
+              "signals": [
+                "baseline environment",
+                "alternatives",
+                "mitigation",
+                "project impacts"
+              ]
+            },
+            {
+              "id": "environmental/assessment/remediation_plan",
+              "label": "Remediation plan",
+              "description": "Defines cleanup actions and verification for contaminated media.",
+              "examples": [
+                "Synthetic remediation plan with cleanup objectives"
+              ],
+              "signals": [
+                "cleanup objectives",
+                "contaminated soil",
+                "remediation method"
+              ]
+            },
+            {
+              "id": "environmental/assessment/other",
+              "label": "Other",
+              "description": "Evidence belongs under environmental/assessment but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "environmental/monitoring",
+          "label": "Environmental monitoring",
+          "description": "Measured conditions in air, water, soil or ecosystems.",
+          "examples": [
+            "Synthetic environmental monitoring with content purpose: Measured conditions in air, water, soil or ecosystems."
+          ],
+          "signals": [
+            "content purpose: Measured conditions in air, water, soil or ecosystems."
+          ],
+          "children": [
+            {
+              "id": "environmental/monitoring/water_quality",
+              "label": "Water quality report",
+              "description": "Reports chemical or biological measures of water samples.",
+              "examples": [
+                "Synthetic water quality report with sampling station"
+              ],
+              "signals": [
+                "sampling station",
+                "analyte",
+                "concentration",
+                "detection limit"
+              ]
+            },
+            {
+              "id": "environmental/monitoring/emissions_report",
+              "label": "Emissions report",
+              "description": "Quantifies released pollutants over a reporting period.",
+              "examples": [
+                "Synthetic emissions report with emission source"
+              ],
+              "signals": [
+                "emission source",
+                "pollutant",
+                "mass released",
+                "period"
+              ]
+            },
+            {
+              "id": "environmental/monitoring/biodiversity_survey",
+              "label": "Biodiversity survey",
+              "description": "Records species and habitats from an ecological survey.",
+              "examples": [
+                "Synthetic biodiversity survey with species inventory"
+              ],
+              "signals": [
+                "species inventory",
+                "habitat",
+                "survey transect"
+              ]
+            },
+            {
+              "id": "environmental/monitoring/other",
+              "label": "Other",
+              "description": "Evidence belongs under environmental/monitoring but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "environmental/management",
+          "label": "Environmental management",
+          "description": "Plans and inventories for controlling environmental effects.",
+          "examples": [
+            "Synthetic environmental management with content purpose: Plans and inventories for controlling environmental effects."
+          ],
+          "signals": [
+            "content purpose: Plans and inventories for controlling environmental effects."
+          ],
+          "children": [
+            {
+              "id": "environmental/management/waste_manifest",
+              "label": "Waste manifest",
+              "description": "Tracks custody and disposition of waste shipments.",
+              "examples": [
+                "Synthetic waste manifest with generator"
+              ],
+              "signals": [
+                "generator",
+                "transporter",
+                "waste code",
+                "receiving facility"
+              ]
+            },
+            {
+              "id": "environmental/management/management_plan",
+              "label": "Environmental management plan",
+              "description": "Assigns controls and monitoring for environmental risks.",
+              "examples": [
+                "Synthetic environmental management plan with environmental objectives"
+              ],
+              "signals": [
+                "environmental objectives",
+                "mitigation controls",
+                "monitoring responsibility"
+              ]
+            },
+            {
+              "id": "environmental/management/sustainability_report",
+              "label": "Sustainability report",
+              "description": "Discloses organizational environmental performance.",
+              "examples": [
+                "Synthetic sustainability report with reporting boundary"
+              ],
+              "signals": [
+                "reporting boundary",
+                "sustainability indicators",
+                "emissions inventory"
+              ]
+            },
+            {
+              "id": "environmental/management/other",
+              "label": "Other",
+              "description": "Evidence belongs under environmental/management but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "environmental/other",
+          "label": "Other",
+          "description": "Evidence belongs under environmental but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "environmental/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under environmental/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "safety",
+      "label": "Health and safety",
+      "description": "Workplace hazard, incident and safety-control records, excluding patient clinical care.",
+      "examples": [
+        "Synthetic health and safety with primary purpose: Workplace hazard, incident and safety-control records, excluding patient clinical care."
+      ],
+      "signals": [
+        "primary purpose: Workplace hazard, incident and safety-control records, excluding patient clinical care."
+      ],
+      "children": [
+        {
+          "id": "safety/hazards",
+          "label": "Hazard documentation",
+          "description": "Identification and communication of work-related hazards.",
+          "examples": [
+            "Synthetic hazard documentation with content purpose: Identification and communication of work-related hazards."
+          ],
+          "signals": [
+            "content purpose: Identification and communication of work-related hazards."
+          ],
+          "children": [
+            {
+              "id": "safety/hazards/safety_data_sheet",
+              "label": "Safety data sheet",
+              "description": "Structured chemical hazards, handling and emergency information.",
+              "examples": [
+                "Synthetic safety data sheet with hazard identification"
+              ],
+              "signals": [
+                "hazard identification",
+                "first-aid measures",
+                "CAS number"
+              ]
+            },
+            {
+              "id": "safety/hazards/risk_assessment",
+              "label": "Workplace risk assessment",
+              "description": "Evaluates task hazards and likelihood/severity with controls.",
+              "examples": [
+                "Synthetic workplace risk assessment with task hazard"
+              ],
+              "signals": [
+                "task hazard",
+                "likelihood",
+                "severity",
+                "control measures"
+              ]
+            },
+            {
+              "id": "safety/hazards/job_safety_analysis",
+              "label": "Job safety analysis",
+              "description": "Breaks a work task into steps, hazards and safe procedures.",
+              "examples": [
+                "Synthetic job safety analysis with job steps"
+              ],
+              "signals": [
+                "job steps",
+                "associated hazards",
+                "recommended controls"
+              ]
+            },
+            {
+              "id": "safety/hazards/other",
+              "label": "Other",
+              "description": "Evidence belongs under safety/hazards but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "safety/incidents",
+          "label": "Safety incidents",
+          "description": "Reports and investigations of workplace injury or near misses.",
+          "examples": [
+            "Synthetic safety incidents with content purpose: Reports and investigations of workplace injury or near misses."
+          ],
+          "signals": [
+            "content purpose: Reports and investigations of workplace injury or near misses."
+          ],
+          "children": [
+            {
+              "id": "safety/incidents/incident_report",
+              "label": "Safety incident report",
+              "description": "Records a workplace safety event and immediate response.",
+              "examples": [
+                "Synthetic safety incident report with incident time"
+              ],
+              "signals": [
+                "incident time",
+                "injured worker",
+                "event description"
+              ]
+            },
+            {
+              "id": "safety/incidents/investigation",
+              "label": "Safety investigation",
+              "description": "Determines causes and corrective measures after an incident.",
+              "examples": [
+                "Synthetic safety investigation with root cause"
+              ],
+              "signals": [
+                "root cause",
+                "witness account",
+                "corrective action"
+              ]
+            },
+            {
+              "id": "safety/incidents/near_miss",
+              "label": "Near-miss report",
+              "description": "Records a hazardous event without actual injury.",
+              "examples": [
+                "Synthetic near-miss report with potential injury"
+              ],
+              "signals": [
+                "potential injury",
+                "near miss",
+                "unsafe condition"
+              ]
+            },
+            {
+              "id": "safety/incidents/other",
+              "label": "Other",
+              "description": "Evidence belongs under safety/incidents but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "safety/procedures",
+          "label": "Safety procedures",
+          "description": "Prescribed safe work and emergency practices.",
+          "examples": [
+            "Synthetic safety procedures with content purpose: Prescribed safe work and emergency practices."
+          ],
+          "signals": [
+            "content purpose: Prescribed safe work and emergency practices."
+          ],
+          "children": [
+            {
+              "id": "safety/procedures/work_procedure",
+              "label": "Safe work procedure",
+              "description": "Instructions for performing a task with safety controls.",
+              "examples": [
+                "Synthetic safe work procedure with PPE"
+              ],
+              "signals": [
+                "PPE",
+                "safe work steps",
+                "isolation procedure"
+              ]
+            },
+            {
+              "id": "safety/procedures/emergency_plan",
+              "label": "Emergency response plan",
+              "description": "Roles and actions for foreseeable emergencies.",
+              "examples": [
+                "Synthetic emergency response plan with evacuation"
+              ],
+              "signals": [
+                "evacuation",
+                "emergency contacts",
+                "assembly point"
+              ]
+            },
+            {
+              "id": "safety/procedures/training_record",
+              "label": "Safety training record",
+              "description": "Documents completed safety instruction and competency.",
+              "examples": [
+                "Synthetic safety training record with trainee"
+              ],
+              "signals": [
+                "trainee",
+                "training module",
+                "completion date",
+                "competency"
+              ]
+            },
+            {
+              "id": "safety/procedures/other",
+              "label": "Other",
+              "description": "Evidence belongs under safety/procedures but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "safety/other",
+          "label": "Other",
+          "description": "Evidence belongs under safety but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "safety/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under safety/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "engineering",
+      "label": "Technical and engineering",
+      "description": "Design, construction, operation and maintenance of systems and assets.",
+      "examples": [
+        "Synthetic technical and engineering with primary purpose: Design, construction, operation and maintenance of systems and assets."
+      ],
+      "signals": [
+        "primary purpose: Design, construction, operation and maintenance of systems and assets."
+      ],
+      "children": [
+        {
+          "id": "engineering/design",
+          "label": "Engineering design",
+          "description": "Specifications and representations of intended technical systems.",
+          "examples": [
+            "Synthetic engineering design with content purpose: Specifications and representations of intended technical systems."
+          ],
+          "signals": [
+            "content purpose: Specifications and representations of intended technical systems."
+          ],
+          "children": [
+            {
+              "id": "engineering/design/technical_specification",
+              "label": "Technical specification",
+              "description": "Defines measurable technical requirements and acceptance criteria.",
+              "examples": [
+                "Synthetic technical specification with design requirements"
+              ],
+              "signals": [
+                "design requirements",
+                "tolerances",
+                "acceptance tests"
+              ]
+            },
+            {
+              "id": "engineering/design/engineering_drawing",
+              "label": "Engineering drawing",
+              "description": "Dimensioned graphical definition of an engineered object.",
+              "examples": [
+                "Synthetic engineering drawing with drawing number"
+              ],
+              "signals": [
+                "drawing number",
+                "scale",
+                "dimensions",
+                "revision block"
+              ]
+            },
+            {
+              "id": "engineering/design/calculation_report",
+              "label": "Engineering calculation",
+              "description": "Derives design adequacy from technical calculations.",
+              "examples": [
+                "Synthetic engineering calculation with load case"
+              ],
+              "signals": [
+                "load case",
+                "equations",
+                "design basis",
+                "safety factor"
+              ]
+            },
+            {
+              "id": "engineering/design/other",
+              "label": "Other",
+              "description": "Evidence belongs under engineering/design but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "engineering/operations",
+          "label": "Technical operations",
+          "description": "Instructions and records for operating or maintaining equipment.",
+          "examples": [
+            "Synthetic technical operations with content purpose: Instructions and records for operating or maintaining equipment."
+          ],
+          "signals": [
+            "content purpose: Instructions and records for operating or maintaining equipment."
+          ],
+          "children": [
+            {
+              "id": "engineering/operations/manual",
+              "label": "Operating manual",
+              "description": "Explains installation, operation and troubleshooting of a system.",
+              "examples": [
+                "Synthetic operating manual with operating instructions"
+              ],
+              "signals": [
+                "operating instructions",
+                "troubleshooting",
+                "equipment model"
+              ]
+            },
+            {
+              "id": "engineering/operations/maintenance_log",
+              "label": "Maintenance log",
+              "description": "Chronological service and repair events for an asset.",
+              "examples": [
+                "Synthetic maintenance log with asset ID"
+              ],
+              "signals": [
+                "asset ID",
+                "work order",
+                "service date",
+                "repair performed"
+              ]
+            },
+            {
+              "id": "engineering/operations/commissioning",
+              "label": "Commissioning report",
+              "description": "Records functional verification before operational handover.",
+              "examples": [
+                "Synthetic commissioning report with commissioning checklist"
+              ],
+              "signals": [
+                "commissioning checklist",
+                "test result",
+                "handover"
+              ]
+            },
+            {
+              "id": "engineering/operations/other",
+              "label": "Other",
+              "description": "Evidence belongs under engineering/operations but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "engineering/software",
+          "label": "Software engineering",
+          "description": "Specifications and technical documentation for software systems.",
+          "examples": [
+            "Synthetic software engineering with content purpose: Specifications and technical documentation for software systems."
+          ],
+          "signals": [
+            "content purpose: Specifications and technical documentation for software systems."
+          ],
+          "children": [
+            {
+              "id": "engineering/software/architecture_design",
+              "label": "Software architecture design",
+              "description": "Documents components, interfaces and design rationale.",
+              "examples": [
+                "Synthetic software architecture design with component diagram"
+              ],
+              "signals": [
+                "component diagram",
+                "interface",
+                "design trade-off"
+              ]
+            },
+            {
+              "id": "engineering/software/api_specification",
+              "label": "API specification",
+              "description": "Defines machine interface operations and request/response shapes.",
+              "examples": [
+                "Synthetic api specification with endpoint"
+              ],
+              "signals": [
+                "endpoint",
+                "request schema",
+                "response codes"
+              ]
+            },
+            {
+              "id": "engineering/software/release_notes",
+              "label": "Release notes",
+              "description": "Lists changes and known issues in a software release.",
+              "examples": [
+                "Synthetic release notes with version"
+              ],
+              "signals": [
+                "version",
+                "changes",
+                "fixes",
+                "known issues"
+              ]
+            },
+            {
+              "id": "engineering/software/other",
+              "label": "Other",
+              "description": "Evidence belongs under engineering/software but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "engineering/other",
+          "label": "Other",
+          "description": "Evidence belongs under engineering but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "engineering/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under engineering/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "academic",
+      "label": "Scientific and academic",
+      "description": "Research, teaching and scholarly assessment documents.",
+      "examples": [
+        "Synthetic scientific and academic with primary purpose: Research, teaching and scholarly assessment documents."
+      ],
+      "signals": [
+        "primary purpose: Research, teaching and scholarly assessment documents."
+      ],
+      "children": [
+        {
+          "id": "academic/research",
+          "label": "Research publications",
+          "description": "Scholarly reports of methods, results and interpretation.",
+          "examples": [
+            "Synthetic research publications with content purpose: Scholarly reports of methods, results and interpretation."
+          ],
+          "signals": [
+            "content purpose: Scholarly reports of methods, results and interpretation."
+          ],
+          "children": [
+            {
+              "id": "academic/research/research_article",
+              "label": "Research article",
+              "description": "Reports an original study with methods and results.",
+              "examples": [
+                "Synthetic research article with abstract"
+              ],
+              "signals": [
+                "abstract",
+                "methods",
+                "results",
+                "references"
+              ]
+            },
+            {
+              "id": "academic/research/review_article",
+              "label": "Review article",
+              "description": "Synthesizes published literature rather than reporting a new experiment.",
+              "examples": [
+                "Synthetic review article with literature search"
+              ],
+              "signals": [
+                "literature search",
+                "included studies",
+                "synthesis"
+              ]
+            },
+            {
+              "id": "academic/research/thesis",
+              "label": "Thesis or dissertation",
+              "description": "Extended degree research submitted to an academic institution.",
+              "examples": [
+                "Synthetic thesis or dissertation with degree requirement"
+              ],
+              "signals": [
+                "degree requirement",
+                "supervisor",
+                "dissertation",
+                "chapters"
+              ]
+            },
+            {
+              "id": "academic/research/other",
+              "label": "Other",
+              "description": "Evidence belongs under academic/research but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "academic/study_design",
+          "label": "Study planning and evidence",
+          "description": "Prospective research plans and primary experimental records.",
+          "examples": [
+            "Synthetic study planning and evidence with content purpose: Prospective research plans and primary experimental records."
+          ],
+          "signals": [
+            "content purpose: Prospective research plans and primary experimental records."
+          ],
+          "children": [
+            {
+              "id": "academic/study_design/protocol",
+              "label": "Research protocol",
+              "description": "Defines objectives, methods and analysis before a study.",
+              "examples": [
+                "Synthetic research protocol with study objectives"
+              ],
+              "signals": [
+                "study objectives",
+                "inclusion criteria",
+                "analysis plan"
+              ]
+            },
+            {
+              "id": "academic/study_design/lab_notebook",
+              "label": "Laboratory notebook",
+              "description": "Dated primary record of experimental work.",
+              "examples": [
+                "Synthetic laboratory notebook with experiment date"
+              ],
+              "signals": [
+                "experiment date",
+                "procedure",
+                "observations",
+                "reagent"
+              ]
+            },
+            {
+              "id": "academic/study_design/research_proposal",
+              "label": "Research proposal",
+              "description": "Requests approval or funding for planned research.",
+              "examples": [
+                "Synthetic research proposal with research aims"
+              ],
+              "signals": [
+                "research aims",
+                "methodology",
+                "funding request"
+              ]
+            },
+            {
+              "id": "academic/study_design/other",
+              "label": "Other",
+              "description": "Evidence belongs under academic/study_design but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "academic/teaching",
+          "label": "Teaching and assessment",
+          "description": "Materials defining learning and academic assessment.",
+          "examples": [
+            "Synthetic teaching and assessment with content purpose: Materials defining learning and academic assessment."
+          ],
+          "signals": [
+            "content purpose: Materials defining learning and academic assessment."
+          ],
+          "children": [
+            {
+              "id": "academic/teaching/syllabus",
+              "label": "Course syllabus",
+              "description": "Defines course content, schedule and assessment expectations.",
+              "examples": [
+                "Synthetic course syllabus with course code"
+              ],
+              "signals": [
+                "course code",
+                "learning outcomes",
+                "grading"
+              ]
+            },
+            {
+              "id": "academic/teaching/lesson_plan",
+              "label": "Lesson plan",
+              "description": "Plans learning activities for a teaching session.",
+              "examples": [
+                "Synthetic lesson plan with lesson objectives"
+              ],
+              "signals": [
+                "lesson objectives",
+                "activities",
+                "duration"
+              ]
+            },
+            {
+              "id": "academic/teaching/exam",
+              "label": "Academic examination",
+              "description": "Questions and instructions for assessing student learning.",
+              "examples": [
+                "Synthetic academic examination with exam duration"
+              ],
+              "signals": [
+                "exam duration",
+                "marks",
+                "candidate instructions"
+              ]
+            },
+            {
+              "id": "academic/teaching/other",
+              "label": "Other",
+              "description": "Evidence belongs under academic/teaching but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "academic/other",
+          "label": "Other",
+          "description": "Evidence belongs under academic but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "academic/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under academic/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "medical",
+      "label": "Medical",
+      "description": "Clinical patient care, diagnostic evidence and health administration documents.",
+      "examples": [
+        "Synthetic medical with primary purpose: Clinical patient care, diagnostic evidence and health administration documents."
+      ],
+      "signals": [
+        "primary purpose: Clinical patient care, diagnostic evidence and health administration documents."
+      ],
+      "children": [
+        {
+          "id": "medical/clinical",
+          "label": "Clinical care",
+          "description": "Patient-specific assessment, treatment and care coordination.",
+          "examples": [
+            "Synthetic clinical care with content purpose: Patient-specific assessment, treatment and care coordination."
+          ],
+          "signals": [
+            "content purpose: Patient-specific assessment, treatment and care coordination."
+          ],
+          "children": [
+            {
+              "id": "medical/clinical/clinical_note",
+              "label": "Clinical note",
+              "description": "Records an encounter's history, assessment and plan.",
+              "examples": [
+                "Synthetic clinical note with chief complaint"
+              ],
+              "signals": [
+                "chief complaint",
+                "assessment",
+                "treatment plan"
+              ]
+            },
+            {
+              "id": "medical/clinical/discharge_summary",
+              "label": "Discharge summary",
+              "description": "Summarizes hospital course and care after discharge.",
+              "examples": [
+                "Synthetic discharge summary with admission date"
+              ],
+              "signals": [
+                "admission date",
+                "discharge diagnosis",
+                "follow-up"
+              ]
+            },
+            {
+              "id": "medical/clinical/referral",
+              "label": "Clinical referral",
+              "description": "Requests evaluation or treatment by another clinician.",
+              "examples": [
+                "Synthetic clinical referral with referring clinician"
+              ],
+              "signals": [
+                "referring clinician",
+                "reason for referral",
+                "clinical history"
+              ]
+            },
+            {
+              "id": "medical/clinical/other",
+              "label": "Other",
+              "description": "Evidence belongs under medical/clinical but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "medical/diagnostics",
+          "label": "Diagnostic reports",
+          "description": "Findings from patient testing and imaging.",
+          "examples": [
+            "Synthetic diagnostic reports with content purpose: Findings from patient testing and imaging."
+          ],
+          "signals": [
+            "content purpose: Findings from patient testing and imaging."
+          ],
+          "children": [
+            {
+              "id": "medical/diagnostics/lab_report",
+              "label": "Clinical laboratory report",
+              "description": "Patient test results with ranges and units.",
+              "examples": [
+                "Synthetic clinical laboratory report with specimen"
+              ],
+              "signals": [
+                "specimen",
+                "analyte",
+                "reference range",
+                "patient ID"
+              ]
+            },
+            {
+              "id": "medical/diagnostics/imaging_report",
+              "label": "Medical imaging report",
+              "description": "Radiologist interpretation of patient imaging.",
+              "examples": [
+                "Synthetic medical imaging report with modality"
+              ],
+              "signals": [
+                "modality",
+                "findings",
+                "impression",
+                "examination date"
+              ]
+            },
+            {
+              "id": "medical/diagnostics/pathology_report",
+              "label": "Pathology report",
+              "description": "Diagnostic examination of tissue or cells.",
+              "examples": [
+                "Synthetic pathology report with specimen site"
+              ],
+              "signals": [
+                "specimen site",
+                "microscopic description",
+                "diagnosis"
+              ]
+            },
+            {
+              "id": "medical/diagnostics/other",
+              "label": "Other",
+              "description": "Evidence belongs under medical/diagnostics but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "medical/administration",
+          "label": "Health administration",
+          "description": "Patient-care authorization and administrative records.",
+          "examples": [
+            "Synthetic health administration with content purpose: Patient-care authorization and administrative records."
+          ],
+          "signals": [
+            "content purpose: Patient-care authorization and administrative records."
+          ],
+          "children": [
+            {
+              "id": "medical/administration/consent",
+              "label": "Medical consent",
+              "description": "Records informed authorization for a clinical procedure.",
+              "examples": [
+                "Synthetic medical consent with procedure"
+              ],
+              "signals": [
+                "procedure",
+                "risks",
+                "patient signature",
+                "informed consent"
+              ]
+            },
+            {
+              "id": "medical/administration/prescription",
+              "label": "Prescription",
+              "description": "Clinician order for medication and dosing.",
+              "examples": [
+                "Synthetic prescription with medication"
+              ],
+              "signals": [
+                "medication",
+                "dose",
+                "route",
+                "prescriber"
+              ]
+            },
+            {
+              "id": "medical/administration/care_plan",
+              "label": "Care plan",
+              "description": "Coordinates patient treatment goals and interventions.",
+              "examples": [
+                "Synthetic care plan with care goals"
+              ],
+              "signals": [
+                "care goals",
+                "interventions",
+                "responsible clinician"
+              ]
+            },
+            {
+              "id": "medical/administration/other",
+              "label": "Other",
+              "description": "Evidence belongs under medical/administration but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "medical/other",
+          "label": "Other",
+          "description": "Evidence belongs under medical but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "medical/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under medical/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "government",
+      "label": "Government and legislative",
+      "description": "Public-law instruments, official proceedings and public administration.",
+      "examples": [
+        "Synthetic government and legislative with primary purpose: Public-law instruments, official proceedings and public administration."
+      ],
+      "signals": [
+        "primary purpose: Public-law instruments, official proceedings and public administration."
+      ],
+      "children": [
+        {
+          "id": "government/legislation",
+          "label": "Legislative instruments",
+          "description": "Enacted or proposed public law and delegated rules.",
+          "examples": [
+            "Synthetic legislative instruments with content purpose: Enacted or proposed public law and delegated rules."
+          ],
+          "signals": [
+            "content purpose: Enacted or proposed public law and delegated rules."
+          ],
+          "children": [
+            {
+              "id": "government/legislation/statute",
+              "label": "Statute",
+              "description": "Enacted primary law organized into legal provisions.",
+              "examples": [
+                "Synthetic statute with enacted"
+              ],
+              "signals": [
+                "enacted",
+                "legislature",
+                "sections",
+                "commencement"
+              ]
+            },
+            {
+              "id": "government/legislation/bill",
+              "label": "Legislative bill",
+              "description": "Proposed legislation awaiting legislative passage.",
+              "examples": [
+                "Synthetic legislative bill with bill number"
+              ],
+              "signals": [
+                "bill number",
+                "first reading",
+                "proposed act"
+              ]
+            },
+            {
+              "id": "government/legislation/regulation",
+              "label": "Regulation",
+              "description": "Binding delegated rules issued under enabling legislation.",
+              "examples": [
+                "Synthetic regulation with enabling act"
+              ],
+              "signals": [
+                "enabling act",
+                "regulatory sections",
+                "gazette"
+              ]
+            },
+            {
+              "id": "government/legislation/other",
+              "label": "Other",
+              "description": "Evidence belongs under government/legislation but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "government/proceedings",
+          "label": "Public proceedings",
+          "description": "Records of legislative deliberation and official inquiries.",
+          "examples": [
+            "Synthetic public proceedings with content purpose: Records of legislative deliberation and official inquiries."
+          ],
+          "signals": [
+            "content purpose: Records of legislative deliberation and official inquiries."
+          ],
+          "children": [
+            {
+              "id": "government/proceedings/debate",
+              "label": "Legislative debate",
+              "description": "Transcript of speeches in a legislative chamber.",
+              "examples": [
+                "Synthetic legislative debate with speaker"
+              ],
+              "signals": [
+                "speaker",
+                "chamber",
+                "sitting date",
+                "debate"
+              ]
+            },
+            {
+              "id": "government/proceedings/committee_report",
+              "label": "Committee report",
+              "description": "Findings and recommendations of a legislative committee.",
+              "examples": [
+                "Synthetic committee report with committee mandate"
+              ],
+              "signals": [
+                "committee mandate",
+                "witnesses",
+                "recommendations"
+              ]
+            },
+            {
+              "id": "government/proceedings/public_inquiry",
+              "label": "Public inquiry report",
+              "description": "Findings of a government-commissioned inquiry.",
+              "examples": [
+                "Synthetic public inquiry report with commissioner"
+              ],
+              "signals": [
+                "commissioner",
+                "terms of reference",
+                "public evidence"
+              ]
+            },
+            {
+              "id": "government/proceedings/other",
+              "label": "Other",
+              "description": "Evidence belongs under government/proceedings but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "government/administration",
+          "label": "Public administration",
+          "description": "Official administrative communications and public decisions.",
+          "examples": [
+            "Synthetic public administration with content purpose: Official administrative communications and public decisions."
+          ],
+          "signals": [
+            "content purpose: Official administrative communications and public decisions."
+          ],
+          "children": [
+            {
+              "id": "government/administration/policy_paper",
+              "label": "Public policy paper",
+              "description": "Analyzes options for government policy.",
+              "examples": [
+                "Synthetic public policy paper with policy objective"
+              ],
+              "signals": [
+                "policy objective",
+                "options",
+                "public impact"
+              ]
+            },
+            {
+              "id": "government/administration/official_notice",
+              "label": "Official notice",
+              "description": "Formal public notification by a government body.",
+              "examples": [
+                "Synthetic official notice with issuing department"
+              ],
+              "signals": [
+                "issuing department",
+                "notice date",
+                "public notice"
+              ]
+            },
+            {
+              "id": "government/administration/procurement_notice",
+              "label": "Public procurement notice",
+              "description": "Government invitation to compete for goods or services.",
+              "examples": [
+                "Synthetic public procurement notice with tender reference"
+              ],
+              "signals": [
+                "tender reference",
+                "procuring authority",
+                "closing date"
+              ]
+            },
+            {
+              "id": "government/administration/other",
+              "label": "Other",
+              "description": "Evidence belongs under government/administration but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "government/other",
+          "label": "Other",
+          "description": "Evidence belongs under government but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "government/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under government/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hr",
+      "label": "Human resources and policy",
+      "description": "Employment administration and internal organizational policies.",
+      "examples": [
+        "Synthetic human resources and policy with primary purpose: Employment administration and internal organizational policies."
+      ],
+      "signals": [
+        "primary purpose: Employment administration and internal organizational policies."
+      ],
+      "children": [
+        {
+          "id": "hr/employment",
+          "label": "Employment records",
+          "description": "Records of employment terms, compensation and performance.",
+          "examples": [
+            "Synthetic employment records with content purpose: Records of employment terms, compensation and performance."
+          ],
+          "signals": [
+            "content purpose: Records of employment terms, compensation and performance."
+          ],
+          "children": [
+            {
+              "id": "hr/employment/offer_letter",
+              "label": "Employment offer",
+              "description": "Proposes role and compensation to a candidate.",
+              "examples": [
+                "Synthetic employment offer with position"
+              ],
+              "signals": [
+                "position",
+                "starting salary",
+                "start date",
+                "offer"
+              ]
+            },
+            {
+              "id": "hr/employment/pay_stub",
+              "label": "Pay stub",
+              "description": "Employee earnings and deductions for a pay period.",
+              "examples": [
+                "Synthetic pay stub with gross pay"
+              ],
+              "signals": [
+                "gross pay",
+                "deductions",
+                "net pay",
+                "employee"
+              ]
+            },
+            {
+              "id": "hr/employment/performance_review",
+              "label": "Performance review",
+              "description": "Evaluates employee goals, results and development.",
+              "examples": [
+                "Synthetic performance review with review period"
+              ],
+              "signals": [
+                "review period",
+                "employee goals",
+                "rating",
+                "development"
+              ]
+            },
+            {
+              "id": "hr/employment/other",
+              "label": "Other",
+              "description": "Evidence belongs under hr/employment but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "hr/policy",
+          "label": "Internal policy",
+          "description": "Organization-wide rules and expectations for personnel or operations.",
+          "examples": [
+            "Synthetic internal policy with content purpose: Organization-wide rules and expectations for personnel or operations."
+          ],
+          "signals": [
+            "content purpose: Organization-wide rules and expectations for personnel or operations."
+          ],
+          "children": [
+            {
+              "id": "hr/policy/employee_handbook",
+              "label": "Employee handbook",
+              "description": "Collected employment policies and workforce guidance.",
+              "examples": [
+                "Synthetic employee handbook with employment policies"
+              ],
+              "signals": [
+                "employment policies",
+                "conduct",
+                "benefits"
+              ]
+            },
+            {
+              "id": "hr/policy/internal_policy",
+              "label": "Internal policy document",
+              "description": "Defines a specific internal rule and responsibilities.",
+              "examples": [
+                "Synthetic internal policy document with policy owner"
+              ],
+              "signals": [
+                "policy owner",
+                "scope",
+                "responsibilities",
+                "effective date"
+              ]
+            },
+            {
+              "id": "hr/policy/code_of_conduct",
+              "label": "Code of conduct",
+              "description": "Sets ethical and behavioral expectations.",
+              "examples": [
+                "Synthetic code of conduct with conflicts of interest"
+              ],
+              "signals": [
+                "conflicts of interest",
+                "ethical conduct",
+                "reporting concern"
+              ]
+            },
+            {
+              "id": "hr/policy/other",
+              "label": "Other",
+              "description": "Evidence belongs under hr/policy but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "hr/staffing",
+          "label": "Staffing and development",
+          "description": "Recruitment and workforce development materials.",
+          "examples": [
+            "Synthetic staffing and development with content purpose: Recruitment and workforce development materials."
+          ],
+          "signals": [
+            "content purpose: Recruitment and workforce development materials."
+          ],
+          "children": [
+            {
+              "id": "hr/staffing/resume",
+              "label": "Resume or CV",
+              "description": "Candidate summary of qualifications and work history.",
+              "examples": [
+                "Synthetic resume or cv with experience"
+              ],
+              "signals": [
+                "experience",
+                "education",
+                "skills",
+                "candidate"
+              ]
+            },
+            {
+              "id": "hr/staffing/job_description",
+              "label": "Job description",
+              "description": "Defines a role's duties and required qualifications.",
+              "examples": [
+                "Synthetic job description with responsibilities"
+              ],
+              "signals": [
+                "responsibilities",
+                "qualifications",
+                "reporting to"
+              ]
+            },
+            {
+              "id": "hr/staffing/training_plan",
+              "label": "Employee training plan",
+              "description": "Schedules development activities and objectives.",
+              "examples": [
+                "Synthetic employee training plan with development objective"
+              ],
+              "signals": [
+                "development objective",
+                "training schedule",
+                "employee"
+              ]
+            },
+            {
+              "id": "hr/staffing/other",
+              "label": "Other",
+              "description": "Evidence belongs under hr/staffing but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "hr/other",
+          "label": "Other",
+          "description": "Evidence belongs under hr but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "hr/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under hr/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "marketing",
+      "label": "Sales and marketing",
+      "description": "Commercial offers, campaigns and market-facing communication.",
+      "examples": [
+        "Synthetic sales and marketing with primary purpose: Commercial offers, campaigns and market-facing communication."
+      ],
+      "signals": [
+        "primary purpose: Commercial offers, campaigns and market-facing communication."
+      ],
+      "children": [
+        {
+          "id": "marketing/sales",
+          "label": "Sales materials",
+          "description": "Documents proposing and tracking commercial engagements.",
+          "examples": [
+            "Synthetic sales materials with content purpose: Documents proposing and tracking commercial engagements."
+          ],
+          "signals": [
+            "content purpose: Documents proposing and tracking commercial engagements."
+          ],
+          "children": [
+            {
+              "id": "marketing/sales/proposal",
+              "label": "Sales proposal",
+              "description": "Offers a solution and commercial terms to a prospect.",
+              "examples": [
+                "Synthetic sales proposal with proposed solution"
+              ],
+              "signals": [
+                "proposed solution",
+                "pricing",
+                "customer need"
+              ]
+            },
+            {
+              "id": "marketing/sales/quotation",
+              "label": "Sales quotation",
+              "description": "States seller prices and validity for requested items.",
+              "examples": [
+                "Synthetic sales quotation with quote number"
+              ],
+              "signals": [
+                "quote number",
+                "unit price",
+                "validity"
+              ]
+            },
+            {
+              "id": "marketing/sales/sales_report",
+              "label": "Sales report",
+              "description": "Summarizes pipeline or achieved sales performance.",
+              "examples": [
+                "Synthetic sales report with sales pipeline"
+              ],
+              "signals": [
+                "sales pipeline",
+                "won deals",
+                "revenue target"
+              ]
+            },
+            {
+              "id": "marketing/sales/other",
+              "label": "Other",
+              "description": "Evidence belongs under marketing/sales but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "marketing/campaigns",
+          "label": "Marketing campaigns",
+          "description": "Plans and creative materials for promotion.",
+          "examples": [
+            "Synthetic marketing campaigns with content purpose: Plans and creative materials for promotion."
+          ],
+          "signals": [
+            "content purpose: Plans and creative materials for promotion."
+          ],
+          "children": [
+            {
+              "id": "marketing/campaigns/campaign_plan",
+              "label": "Campaign plan",
+              "description": "Defines audience, channels and promotional objectives.",
+              "examples": [
+                "Synthetic campaign plan with target audience"
+              ],
+              "signals": [
+                "target audience",
+                "campaign budget",
+                "channel mix"
+              ]
+            },
+            {
+              "id": "marketing/campaigns/brochure",
+              "label": "Marketing brochure",
+              "description": "Promotional overview of a product or service.",
+              "examples": [
+                "Synthetic marketing brochure with product benefits"
+              ],
+              "signals": [
+                "product benefits",
+                "features",
+                "call to action"
+              ]
+            },
+            {
+              "id": "marketing/campaigns/press_release",
+              "label": "Press release",
+              "description": "Public announcement intended for news distribution.",
+              "examples": [
+                "Synthetic press release with for immediate release"
+              ],
+              "signals": [
+                "for immediate release",
+                "media contact",
+                "announcement"
+              ]
+            },
+            {
+              "id": "marketing/campaigns/other",
+              "label": "Other",
+              "description": "Evidence belongs under marketing/campaigns but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "marketing/market_research",
+          "label": "Market research",
+          "description": "Analysis of customers, markets and competitive positioning.",
+          "examples": [
+            "Synthetic market research with content purpose: Analysis of customers, markets and competitive positioning."
+          ],
+          "signals": [
+            "content purpose: Analysis of customers, markets and competitive positioning."
+          ],
+          "children": [
+            {
+              "id": "marketing/market_research/market_report",
+              "label": "Market analysis",
+              "description": "Estimates market size, trends and segments.",
+              "examples": [
+                "Synthetic market analysis with market size"
+              ],
+              "signals": [
+                "market size",
+                "segmentation",
+                "demand trends"
+              ]
+            },
+            {
+              "id": "marketing/market_research/customer_survey",
+              "label": "Customer survey analysis",
+              "description": "Analyzes customer questionnaire responses.",
+              "examples": [
+                "Synthetic customer survey analysis with respondents"
+              ],
+              "signals": [
+                "respondents",
+                "survey questions",
+                "satisfaction scores"
+              ]
+            },
+            {
+              "id": "marketing/market_research/case_study",
+              "label": "Customer case study",
+              "description": "Describes a customer's use and outcomes of a solution.",
+              "examples": [
+                "Synthetic customer case study with customer challenge"
+              ],
+              "signals": [
+                "customer challenge",
+                "solution",
+                "outcomes"
+              ]
+            },
+            {
+              "id": "marketing/market_research/other",
+              "label": "Other",
+              "description": "Evidence belongs under marketing/market_research but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "marketing/other",
+          "label": "Other",
+          "description": "Evidence belongs under marketing but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "marketing/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under marketing/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "correspondence",
+      "label": "Correspondence",
+      "description": "Communications whose primary purpose is exchanging a message.",
+      "examples": [
+        "Synthetic correspondence with primary purpose: Communications whose primary purpose is exchanging a message."
+      ],
+      "signals": [
+        "primary purpose: Communications whose primary purpose is exchanging a message."
+      ],
+      "children": [
+        {
+          "id": "correspondence/messages",
+          "label": "Written messages",
+          "description": "Direct informal or formal person-to-person communications.",
+          "examples": [
+            "Synthetic written messages with content purpose: Direct informal or formal person-to-person communications."
+          ],
+          "signals": [
+            "content purpose: Direct informal or formal person-to-person communications."
+          ],
+          "children": [
+            {
+              "id": "correspondence/messages/email",
+              "label": "Email message",
+              "description": "Message with email addressing and subject metadata.",
+              "examples": [
+                "Synthetic email message with from"
+              ],
+              "signals": [
+                "from",
+                "to",
+                "subject",
+                "sent date"
+              ]
+            },
+            {
+              "id": "correspondence/messages/letter",
+              "label": "Letter",
+              "description": "Addressed written communication in letter form.",
+              "examples": [
+                "Synthetic letter with salutation"
+              ],
+              "signals": [
+                "salutation",
+                "recipient address",
+                "sign-off"
+              ]
+            },
+            {
+              "id": "correspondence/messages/memo",
+              "label": "Memorandum",
+              "description": "Internal communication announcing information or requesting action.",
+              "examples": [
+                "Synthetic memorandum with to"
+              ],
+              "signals": [
+                "to",
+                "from",
+                "subject",
+                "memorandum"
+              ]
+            },
+            {
+              "id": "correspondence/messages/other",
+              "label": "Other",
+              "description": "Evidence belongs under correspondence/messages but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "correspondence/meetings",
+          "label": "Meeting communications",
+          "description": "Records and preparations for collaborative meetings.",
+          "examples": [
+            "Synthetic meeting communications with content purpose: Records and preparations for collaborative meetings."
+          ],
+          "signals": [
+            "content purpose: Records and preparations for collaborative meetings."
+          ],
+          "children": [
+            {
+              "id": "correspondence/meetings/minutes",
+              "label": "Meeting minutes",
+              "description": "Records discussions, decisions and action items of a meeting.",
+              "examples": [
+                "Synthetic meeting minutes with attendees"
+              ],
+              "signals": [
+                "attendees",
+                "decisions",
+                "action items",
+                "meeting date"
+              ]
+            },
+            {
+              "id": "correspondence/meetings/agenda",
+              "label": "Meeting agenda",
+              "description": "Planned sequence of discussion topics for a meeting.",
+              "examples": [
+                "Synthetic meeting agenda with agenda items"
+              ],
+              "signals": [
+                "agenda items",
+                "time slots",
+                "meeting objective"
+              ]
+            },
+            {
+              "id": "correspondence/meetings/invitation",
+              "label": "Meeting invitation",
+              "description": "Requests attendance with event logistics.",
+              "examples": [
+                "Synthetic meeting invitation with invited"
+              ],
+              "signals": [
+                "invited",
+                "location",
+                "meeting time",
+                "RSVP"
+              ]
+            },
+            {
+              "id": "correspondence/meetings/other",
+              "label": "Other",
+              "description": "Evidence belongs under correspondence/meetings but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "correspondence/notices",
+          "label": "Correspondence notices",
+          "description": "Directed updates and acknowledgments without specialized legal purpose.",
+          "examples": [
+            "Synthetic correspondence notices with content purpose: Directed updates and acknowledgments without specialized legal purpose."
+          ],
+          "signals": [
+            "content purpose: Directed updates and acknowledgments without specialized legal purpose."
+          ],
+          "children": [
+            {
+              "id": "correspondence/notices/notification",
+              "label": "Notification",
+              "description": "Communicates a status change or event to a recipient.",
+              "examples": [
+                "Synthetic notification with recipient"
+              ],
+              "signals": [
+                "recipient",
+                "status update",
+                "notification date"
+              ]
+            },
+            {
+              "id": "correspondence/notices/acknowledgment",
+              "label": "Acknowledgment",
+              "description": "Confirms receipt of a message, request or item.",
+              "examples": [
+                "Synthetic acknowledgment with received"
+              ],
+              "signals": [
+                "received",
+                "reference number",
+                "acknowledgment"
+              ]
+            },
+            {
+              "id": "correspondence/notices/cover_letter",
+              "label": "Cover letter",
+              "description": "Introduces an accompanying document or application.",
+              "examples": [
+                "Synthetic cover letter with enclosed"
+              ],
+              "signals": [
+                "enclosed",
+                "accompanying",
+                "recipient",
+                "introductory purpose"
+              ]
+            },
+            {
+              "id": "correspondence/notices/other",
+              "label": "Other",
+              "description": "Evidence belongs under correspondence/notices but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "correspondence/other",
+          "label": "Other",
+          "description": "Evidence belongs under correspondence but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "correspondence/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under correspondence/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "forms",
+      "label": "Forms",
+      "description": "Reusable structured fields for collecting declarations or requests when no more specific domain applies.",
+      "examples": [
+        "Synthetic forms with primary purpose: Reusable structured fields for collecting declarations or requests when no more specific domain applies."
+      ],
+      "signals": [
+        "primary purpose: Reusable structured fields for collecting declarations or requests when no more specific domain applies."
+      ],
+      "children": [
+        {
+          "id": "forms/applications",
+          "label": "Application forms",
+          "description": "Structured requests for enrollment, access or services.",
+          "examples": [
+            "Synthetic application forms with content purpose: Structured requests for enrollment, access or services."
+          ],
+          "signals": [
+            "content purpose: Structured requests for enrollment, access or services."
+          ],
+          "children": [
+            {
+              "id": "forms/applications/application",
+              "label": "General application form",
+              "description": "Collects applicant details and requested service.",
+              "examples": [
+                "Synthetic general application form with applicant fields"
+              ],
+              "signals": [
+                "applicant fields",
+                "requested service",
+                "submission instructions"
+              ]
+            },
+            {
+              "id": "forms/applications/registration",
+              "label": "Registration form",
+              "description": "Collects details to enroll an entity in an event or service.",
+              "examples": [
+                "Synthetic registration form with registrant"
+              ],
+              "signals": [
+                "registrant",
+                "registration fields",
+                "enrollment"
+              ]
+            },
+            {
+              "id": "forms/applications/request",
+              "label": "Request form",
+              "description": "Collects a structured request and authorization details.",
+              "examples": [
+                "Synthetic request form with requestor"
+              ],
+              "signals": [
+                "requestor",
+                "requested action",
+                "approval field"
+              ]
+            },
+            {
+              "id": "forms/applications/other",
+              "label": "Other",
+              "description": "Evidence belongs under forms/applications but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "forms/declarations",
+          "label": "Declarations and checklists",
+          "description": "Structured attestations or verification of completed requirements.",
+          "examples": [
+            "Synthetic declarations and checklists with content purpose: Structured attestations or verification of completed requirements."
+          ],
+          "signals": [
+            "content purpose: Structured attestations or verification of completed requirements."
+          ],
+          "children": [
+            {
+              "id": "forms/declarations/declaration",
+              "label": "Declaration form",
+              "description": "Collects a signer's attestation to listed facts.",
+              "examples": [
+                "Synthetic declaration form with I declare"
+              ],
+              "signals": [
+                "I declare",
+                "attest",
+                "declarant",
+                "signature field"
+              ]
+            },
+            {
+              "id": "forms/declarations/checklist",
+              "label": "Checklist",
+              "description": "Lists items to verify or complete with checkable states.",
+              "examples": [
+                "Synthetic checklist with checkboxes"
+              ],
+              "signals": [
+                "checkboxes",
+                "inspection items",
+                "completed"
+              ]
+            },
+            {
+              "id": "forms/declarations/consent",
+              "label": "General consent form",
+              "description": "Collects permission for a non-specialized activity.",
+              "examples": [
+                "Synthetic general consent form with consent statement"
+              ],
+              "signals": [
+                "consent statement",
+                "participant",
+                "signature field"
+              ]
+            },
+            {
+              "id": "forms/declarations/other",
+              "label": "Other",
+              "description": "Evidence belongs under forms/declarations but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "forms/records",
+          "label": "Structured record forms",
+          "description": "Reusable fields capturing observations or transactions.",
+          "examples": [
+            "Synthetic structured record forms with content purpose: Reusable fields capturing observations or transactions."
+          ],
+          "signals": [
+            "content purpose: Reusable fields capturing observations or transactions."
+          ],
+          "children": [
+            {
+              "id": "forms/records/log_sheet",
+              "label": "Log sheet",
+              "description": "Tabular form for recurring observations or activity entries.",
+              "examples": [
+                "Synthetic log sheet with date field"
+              ],
+              "signals": [
+                "date field",
+                "activity field",
+                "repeated blank rows"
+              ]
+            },
+            {
+              "id": "forms/records/intake",
+              "label": "Intake form",
+              "description": "Collects initial details for a service process.",
+              "examples": [
+                "Synthetic intake form with intake date"
+              ],
+              "signals": [
+                "intake date",
+                "respondent details",
+                "initial needs"
+              ]
+            },
+            {
+              "id": "forms/records/feedback",
+              "label": "Feedback form",
+              "description": "Collects respondent ratings and comments.",
+              "examples": [
+                "Synthetic feedback form with rating fields"
+              ],
+              "signals": [
+                "rating fields",
+                "comments box",
+                "respondent"
+              ]
+            },
+            {
+              "id": "forms/records/other",
+              "label": "Other",
+              "description": "Evidence belongs under forms/records but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "forms/other",
+          "label": "Other",
+          "description": "Evidence belongs under forms but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "forms/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under forms/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data",
+      "label": "Data exports",
+      "description": "Machine-oriented extracts and data dictionaries whose primary purpose is data transfer.",
+      "examples": [
+        "Synthetic data exports with primary purpose: Machine-oriented extracts and data dictionaries whose primary purpose is data transfer."
+      ],
+      "signals": [
+        "primary purpose: Machine-oriented extracts and data dictionaries whose primary purpose is data transfer."
+      ],
+      "children": [
+        {
+          "id": "data/structured",
+          "label": "Structured exports",
+          "description": "Serialized records with consistent fields rather than narrative reports.",
+          "examples": [
+            "Synthetic structured exports with content purpose: Serialized records with consistent fields rather than narrative reports."
+          ],
+          "signals": [
+            "content purpose: Serialized records with consistent fields rather than narrative reports."
+          ],
+          "children": [
+            {
+              "id": "data/structured/tabular_export",
+              "label": "Tabular data export",
+              "description": "Delimited or sheet-like records intended for data interchange.",
+              "examples": [
+                "Synthetic tabular data export with field names"
+              ],
+              "signals": [
+                "field names",
+                "repeated records",
+                "delimiter"
+              ]
+            },
+            {
+              "id": "data/structured/json_export",
+              "label": "JSON data export",
+              "description": "Object or array records serialized for machine consumption.",
+              "examples": [
+                "Synthetic json data export with JSON keys"
+              ],
+              "signals": [
+                "JSON keys",
+                "arrays",
+                "record objects"
+              ]
+            },
+            {
+              "id": "data/structured/xml_export",
+              "label": "XML data export",
+              "description": "Tagged structured records for system interchange.",
+              "examples": [
+                "Synthetic xml data export with XML declaration"
+              ],
+              "signals": [
+                "XML declaration",
+                "schema tags",
+                "repeated elements"
+              ]
+            },
+            {
+              "id": "data/structured/other",
+              "label": "Other",
+              "description": "Evidence belongs under data/structured but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "data/system_records",
+          "label": "System record exports",
+          "description": "Bulk logs or database extracts from operational systems.",
+          "examples": [
+            "Synthetic system record exports with content purpose: Bulk logs or database extracts from operational systems."
+          ],
+          "signals": [
+            "content purpose: Bulk logs or database extracts from operational systems."
+          ],
+          "children": [
+            {
+              "id": "data/system_records/log_export",
+              "label": "System log export",
+              "description": "Timestamped system events and diagnostic entries.",
+              "examples": [
+                "Synthetic system log export with timestamp"
+              ],
+              "signals": [
+                "timestamp",
+                "severity",
+                "event code"
+              ]
+            },
+            {
+              "id": "data/system_records/sql_dump",
+              "label": "Database dump",
+              "description": "Serialized database definitions and rows for transfer or restoration.",
+              "examples": [
+                "Synthetic database dump with CREATE TABLE"
+              ],
+              "signals": [
+                "CREATE TABLE",
+                "INSERT INTO",
+                "dump header"
+              ]
+            },
+            {
+              "id": "data/system_records/transaction_export",
+              "label": "Transaction export",
+              "description": "Bulk operational transaction records for interchange.",
+              "examples": [
+                "Synthetic transaction export with transaction ID"
+              ],
+              "signals": [
+                "transaction ID",
+                "account field",
+                "timestamp column"
+              ]
+            },
+            {
+              "id": "data/system_records/other",
+              "label": "Other",
+              "description": "Evidence belongs under data/system_records but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "data/descriptors",
+          "label": "Data descriptors",
+          "description": "Definitions of fields and dataset structure.",
+          "examples": [
+            "Synthetic data descriptors with content purpose: Definitions of fields and dataset structure."
+          ],
+          "signals": [
+            "content purpose: Definitions of fields and dataset structure."
+          ],
+          "children": [
+            {
+              "id": "data/descriptors/data_dictionary",
+              "label": "Data dictionary",
+              "description": "Defines dataset fields, meanings and constraints.",
+              "examples": [
+                "Synthetic data dictionary with field name"
+              ],
+              "signals": [
+                "field name",
+                "data type",
+                "allowed values"
+              ]
+            },
+            {
+              "id": "data/descriptors/schema",
+              "label": "Data schema",
+              "description": "Formal machine-readable definition of data structure.",
+              "examples": [
+                "Synthetic data schema with schema version"
+              ],
+              "signals": [
+                "schema version",
+                "properties",
+                "types",
+                "required fields"
+              ]
+            },
+            {
+              "id": "data/descriptors/metadata_manifest",
+              "label": "Metadata manifest",
+              "description": "Lists dataset artifacts, checksums and provenance.",
+              "examples": [
+                "Synthetic metadata manifest with file inventory"
+              ],
+              "signals": [
+                "file inventory",
+                "checksum",
+                "dataset version"
+              ]
+            },
+            {
+              "id": "data/descriptors/other",
+              "label": "Other",
+              "description": "Evidence belongs under data/descriptors but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "data/other",
+          "label": "Other",
+          "description": "Evidence belongs under data but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "data/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under data/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "presentations",
+      "label": "Presentations",
+      "description": "Slide-oriented communication whose purpose cannot be assigned to a more specific business domain.",
+      "examples": [
+        "Synthetic presentations with primary purpose: Slide-oriented communication whose purpose cannot be assigned to a more specific business domain."
+      ],
+      "signals": [
+        "primary purpose: Slide-oriented communication whose purpose cannot be assigned to a more specific business domain."
+      ],
+      "children": [
+        {
+          "id": "presentations/business",
+          "label": "Business presentations",
+          "description": "Slide decks reporting business status or proposals.",
+          "examples": [
+            "Synthetic business presentations with content purpose: Slide decks reporting business status or proposals."
+          ],
+          "signals": [
+            "content purpose: Slide decks reporting business status or proposals."
+          ],
+          "children": [
+            {
+              "id": "presentations/business/status_deck",
+              "label": "Status presentation",
+              "description": "Summarizes project or organizational progress in slides.",
+              "examples": [
+                "Synthetic status presentation with status slides"
+              ],
+              "signals": [
+                "status slides",
+                "milestones",
+                "risks",
+                "next steps"
+              ]
+            },
+            {
+              "id": "presentations/business/pitch_deck",
+              "label": "Pitch presentation",
+              "description": "Persuades an audience to support a proposal or venture.",
+              "examples": [
+                "Synthetic pitch presentation with problem slide"
+              ],
+              "signals": [
+                "problem slide",
+                "solution slide",
+                "funding ask"
+              ]
+            },
+            {
+              "id": "presentations/business/strategy_deck",
+              "label": "Strategy presentation",
+              "description": "Explains organizational direction and planned initiatives.",
+              "examples": [
+                "Synthetic strategy presentation with strategic pillars"
+              ],
+              "signals": [
+                "strategic pillars",
+                "roadmap",
+                "priorities"
+              ]
+            },
+            {
+              "id": "presentations/business/other",
+              "label": "Other",
+              "description": "Evidence belongs under presentations/business but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "presentations/educational",
+          "label": "Educational presentations",
+          "description": "Slides designed to teach or demonstrate a subject.",
+          "examples": [
+            "Synthetic educational presentations with content purpose: Slides designed to teach or demonstrate a subject."
+          ],
+          "signals": [
+            "content purpose: Slides designed to teach or demonstrate a subject."
+          ],
+          "children": [
+            {
+              "id": "presentations/educational/training_deck",
+              "label": "Training presentation",
+              "description": "Guides practical learning and exercises in slides.",
+              "examples": [
+                "Synthetic training presentation with learning objectives"
+              ],
+              "signals": [
+                "learning objectives",
+                "exercise slides",
+                "training steps"
+              ]
+            },
+            {
+              "id": "presentations/educational/lecture_deck",
+              "label": "Lecture presentation",
+              "description": "Slide sequence supporting academic or general instruction.",
+              "examples": [
+                "Synthetic lecture presentation with lecture topic"
+              ],
+              "signals": [
+                "lecture topic",
+                "concept slides",
+                "references"
+              ]
+            },
+            {
+              "id": "presentations/educational/demonstration_deck",
+              "label": "Demonstration presentation",
+              "description": "Illustrates the use of a system or process.",
+              "examples": [
+                "Synthetic demonstration presentation with demo steps"
+              ],
+              "signals": [
+                "demo steps",
+                "screenshots",
+                "walkthrough"
+              ]
+            },
+            {
+              "id": "presentations/educational/other",
+              "label": "Other",
+              "description": "Evidence belongs under presentations/educational but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "presentations/conference",
+          "label": "Conference presentations",
+          "description": "Slide sequences for talks and public briefings.",
+          "examples": [
+            "Synthetic conference presentations with content purpose: Slide sequences for talks and public briefings."
+          ],
+          "signals": [
+            "content purpose: Slide sequences for talks and public briefings."
+          ],
+          "children": [
+            {
+              "id": "presentations/conference/conference_talk",
+              "label": "Conference talk slides",
+              "description": "Supports a scheduled conference presentation.",
+              "examples": [
+                "Synthetic conference talk slides with speaker"
+              ],
+              "signals": [
+                "speaker",
+                "conference title",
+                "session",
+                "slides"
+              ]
+            },
+            {
+              "id": "presentations/conference/poster",
+              "label": "Presentation poster",
+              "description": "Single visual panel summarizing a project for presentation.",
+              "examples": [
+                "Synthetic presentation poster with poster sections"
+              ],
+              "signals": [
+                "poster sections",
+                "figures",
+                "project summary"
+              ]
+            },
+            {
+              "id": "presentations/conference/keynote",
+              "label": "Keynote presentation",
+              "description": "Slide narrative for a plenary or featured address.",
+              "examples": [
+                "Synthetic keynote presentation with keynote"
+              ],
+              "signals": [
+                "keynote",
+                "featured speaker",
+                "broad themes"
+              ]
+            },
+            {
+              "id": "presentations/conference/other",
+              "label": "Other",
+              "description": "Evidence belongs under presentations/conference but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "presentations/other",
+          "label": "Other",
+          "description": "Evidence belongs under presentations but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "presentations/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under presentations/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "label": "Other",
+      "description": "Evidence belongs under no listed domain but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+      "examples": [
+        "Synthetic other with primary purpose outside the named sibling definitions"
+      ],
+      "signals": [
+        "primary purpose outside the named sibling definitions"
+      ],
+      "children": [
+        {
+          "id": "other/other",
+          "label": "Other",
+          "description": "Evidence belongs under other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+          "examples": [
+            "Synthetic other with primary purpose outside the named sibling definitions"
+          ],
+          "signals": [
+            "primary purpose outside the named sibling definitions"
+          ],
+          "children": [
+            {
+              "id": "other/other/other",
+              "label": "Other",
+              "description": "Evidence belongs under other/other but no named sibling accurately describes its primary purpose; select only after considering named alternatives.",
+              "examples": [
+                "Synthetic other with primary purpose outside the named sibling definitions"
+              ],
+              "signals": [
+                "primary purpose outside the named sibling definitions"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "facets": [
+    {
+      "id": "scanned",
+      "label": "Scanned content",
+      "description": "Evidence includes rasterized text requiring machine reading; a PDF extension alone is insufficient.",
+      "examples": [
+        "Synthetic scanned content with image-only text regions"
+      ],
+      "signals": [
+        "image-only text regions",
+        "OCR provenance"
+      ]
+    },
+    {
+      "id": "contains_tables",
+      "label": "Contains tables",
+      "description": "Evidence includes a row/column structure associating cells with headers or axes.",
+      "examples": [
+        "Synthetic contains tables with table grid"
+      ],
+      "signals": [
+        "table grid",
+        "row and column headers"
+      ]
+    },
+    {
+      "id": "contains_personal_data",
+      "label": "Contains personal data",
+      "description": "Evidence includes information identifying or relating to a natural person; absence in excerpts is unknown.",
+      "examples": [
+        "Synthetic contains personal data with named individual with contact details"
+      ],
+      "signals": [
+        "named individual with contact details",
+        "personal identifier"
+      ]
+    },
+    {
+      "id": "draft",
+      "label": "Draft",
+      "description": "Document explicitly indicates provisional rather than finalized status.",
+      "examples": [
+        "Synthetic draft with draft watermark"
+      ],
+      "signals": [
+        "draft watermark",
+        "not for issue"
+      ]
+    },
+    {
+      "id": "signed",
+      "label": "Signed",
+      "description": "Evidence contains a completed signature or verified signature metadata, not merely an empty signature line.",
+      "examples": [
+        "Synthetic signed with completed signature block"
+      ],
+      "signals": [
+        "completed signature block",
+        "digital signature metadata"
+      ]
+    },
+    {
+      "id": "multi_document_bundle",
+      "label": "Multi-document bundle",
+      "description": "One source contains multiple distinct documents with separate titles or identifiers.",
+      "examples": [
+        "Synthetic multi-document bundle with multiple independent title pages"
+      ],
+      "signals": [
+        "multiple independent title pages",
+        "separate document identifiers"
+      ]
+    },
+    {
+      "id": "contains_images",
+      "label": "Contains images",
+      "description": "Evidence includes non-text figures or photographs.",
+      "examples": [
+        "Synthetic contains images with figure blocks"
+      ],
+      "signals": [
+        "figure blocks",
+        "embedded photograph"
+      ]
+    },
+    {
+      "id": "redacted",
+      "label": "Redacted",
+      "description": "Evidence explicitly marks removed or obscured content.",
+      "examples": [
+        "Synthetic redacted with redaction marks"
+      ],
+      "signals": [
+        "redaction marks",
+        "withheld text label"
+      ]
+    },
+    {
+      "id": "handwritten",
+      "label": "Handwritten content",
+      "description": "Evidence includes handwriting distinct from printed text.",
+      "examples": [
+        "Synthetic handwritten content with handwritten annotations"
+      ],
+      "signals": [
+        "handwritten annotations",
+        "handwriting provenance"
+      ]
+    },
+    {
+      "id": "multilingual",
+      "label": "Multilingual",
+      "description": "Evidence contains substantive passages in more than one language.",
+      "examples": [
+        "Synthetic multilingual with multiple language-tagged passages"
+      ],
+      "signals": [
+        "multiple language-tagged passages"
+      ]
+    }
+  ],
+  "migrations": []
+}
