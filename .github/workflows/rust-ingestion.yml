@@ -4,6 +4,9 @@ on:
     paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
   push:
     paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+concurrency:
+  group: rust-ingestion-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -51,10 +54,32 @@ jobs:
         run: |
           uv sync --project backend --extra dev --extra native
           uv run --project backend --extra dev --extra native python -c "import lumen_docintel; assert lumen_docintel.core_version() == '0.1.0'"
-          uv run --project backend --extra dev --extra native pytest backend/tests/test_native_bridge.py -m "not live"
+          uv run --project backend --extra dev --extra native python -c "import glob,pytest; raise SystemExit(pytest.main(glob.glob('backend/tests/test_native_*.py') + ['-m', 'not live']))"
       - name: Release wheel
         run: maturin build --release --locked --manifest-path rust/crates/lumen-docintel-py/Cargo.toml --interpreter python --out wheelhouse
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-${{ runner.os }}
           path: wheelhouse/*.whl
+
+  backend-offline:
+    needs: native
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.11.18
+      - name: Full Python fallback suite (offline)
+        working-directory: backend
+        env:
+          RUN_LIVE: '0'
+          OPENROUTER_API_KEY: ''
+        run: uv run --extra dev pytest -m "not live" --junitxml=offline-results.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: backend-offline-results
+          path: backend/offline-results.xml
