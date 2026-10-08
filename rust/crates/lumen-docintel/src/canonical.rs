@@ -205,14 +205,13 @@ fn valid_region(region: &SourceRegion) -> bool {
     if region.kind.is_some() != region.number.is_some() || region.number == Some(0) {
         return false;
     }
-    if let Some(r) = &region.cell_range {
-        if r.row_start == 0
+    if let Some(r) = &region.cell_range
+        && (r.row_start == 0
             || r.column_start == 0
             || r.row_end < r.row_start
-            || r.column_end < r.column_start
-        {
-            return false;
-        }
+            || r.column_end < r.column_start)
+    {
+        return false;
     }
     if let Some(b) = &region.bbox {
         let values = [b.x0, b.y0, b.x1, b.y1];
@@ -337,10 +336,10 @@ pub fn render(document: Document) -> Result<RenderedDocument, CoreError> {
         }
         prior_end = part.char_end;
     }
-    if let Some(hash) = &document.generation.source_sha256 {
-        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(CoreError::InvalidInput);
-        }
+    if let Some(hash) = &document.generation.source_sha256
+        && (hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(CoreError::InvalidInput);
     }
     let mut rendered_text = String::with_capacity(bytes);
     let mut spans = Vec::with_capacity(document.blocks.len());
