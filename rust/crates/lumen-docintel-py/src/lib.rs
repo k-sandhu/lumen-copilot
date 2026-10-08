@@ -33,10 +33,22 @@ fn compute<T: Send>(
     py: Python<'_>,
     f: impl FnOnce() -> Result<T, CoreError> + Send,
 ) -> PyResult<T> {
-    py.detach(|| match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result.map_err(map_error),
-        Err(_) => Err(DocIntelPanicError::new_err("native computation panicked")),
-    })
+    let result = py.detach(|| catch_unwind(AssertUnwindSafe(f)));
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            let exception = map_error(error.clone());
+            exception
+                .value(py)
+                .setattr("code", format!("docintel_{error:?}").to_ascii_lowercase())?;
+            Err(exception)
+        }
+        Err(_) => {
+            let exception = DocIntelPanicError::new_err("native computation panicked");
+            exception.value(py).setattr("code", "docintel_panic")?;
+            Err(exception)
+        }
+    }
 }
 
 #[pyfunction]
@@ -177,7 +189,14 @@ impl NativeRuntime {
         units_json: String,
         session: &DocumentSession,
     ) -> PyResult<String> {
-        compute(py, || self.0.run_context_json(&units_json, &session.0))
+        let result = compute(py, || self.0.run_context_json(&units_json, &session.0));
+        if let Err(error) = &result {
+            error.value(py).setattr(
+                "diagnostics_json",
+                session.0.stats_json().map_err(map_error)?,
+            )?;
+        }
+        result
     }
     fn run_units(
         &self,
@@ -187,9 +206,16 @@ impl NativeRuntime {
         token: &CancellationToken,
     ) -> PyResult<String> {
         let cancellation = token.0.clone();
-        compute(py, || {
-            self.0.run_json(&units_json, &budget_json, cancellation)
-        })
+        let context = compute(py, || {
+            lumen_docintel_core::runtime::context_json(&budget_json, cancellation)
+        })?;
+        let result = compute(py, || self.0.run_context_json(&units_json, &context));
+        if let Err(error) = &result {
+            error
+                .value(py)
+                .setattr("diagnostics_json", context.stats_json().map_err(map_error)?)?;
+        }
+        result
     }
 }
 

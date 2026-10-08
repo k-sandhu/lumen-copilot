@@ -22,6 +22,7 @@ class ComputedUnits:
     work_units: int
     output_chars: int
     source_input_bytes: int
+    limit: str | None
 
     @classmethod
     def from_json(cls, value: str) -> ComputedUnits:

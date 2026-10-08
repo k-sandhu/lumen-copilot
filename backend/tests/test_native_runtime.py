@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 
@@ -11,8 +13,10 @@ def test_runtime_budget_cancellation_and_reuse() -> None:
     from app.ingestion.native import CancellationHandle, NativeExecutor
 
     executor = NativeExecutor(threads=2, max_documents=1)
-    with pytest.raises(native.DocIntelBudgetError):
+    with pytest.raises(native.DocIntelBudgetError) as failure:
         executor.run_units(("too large",), budget=RuntimeBudget(max_memory_bytes=4))
+    assert json.loads(failure.value.diagnostics_json)["limit"] == "memory"
+    assert failure.value.code == "docintel_budget"
     token = CancellationHandle()
     token.cancel()
     with pytest.raises(native.DocIntelCancelledError):

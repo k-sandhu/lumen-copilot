@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,7 @@ struct Counters {
     work: AtomicUsize,
     output: AtomicUsize,
     input: AtomicUsize,
+    reason: AtomicU8,
 }
 #[derive(Debug)]
 pub struct Reservation {
@@ -93,6 +94,7 @@ pub struct Stats {
     pub work_units: usize,
     pub output_chars: usize,
     pub source_input_bytes: usize,
+    pub limit: Option<&'static str>,
 }
 
 fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<usize, CoreError> {
@@ -115,18 +117,29 @@ impl Context {
             counters: Arc::new(Counters::default()),
         })
     }
+    fn failure(&self, code: u8, error: CoreError) -> CoreError {
+        let _ = self
+            .counters
+            .reason
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+        error
+    }
+    pub fn stats_json(&self) -> Result<String, CoreError> {
+        serde_json::to_string(&self.stats()).map_err(|_| CoreError::Internal)
+    }
     pub fn checkpoint(&self) -> Result<(), CoreError> {
         if self.token.is_cancelled() {
-            Err(CoreError::Cancelled)
+            Err(self.failure(7, CoreError::Cancelled))
         } else if Instant::now() >= self.deadline {
-            Err(CoreError::Budget)
+            Err(self.failure(2, CoreError::Budget))
         } else {
             Ok(())
         }
     }
     pub fn reserve(&self, bytes: usize) -> Result<Reservation, CoreError> {
         self.checkpoint()?;
-        let current = charge(&self.counters.memory, bytes, self.budget.max_memory_bytes)?;
+        let current = charge(&self.counters.memory, bytes, self.budget.max_memory_bytes)
+            .map_err(|e| self.failure(1, e))?;
         self.counters.peak.fetch_max(current, Ordering::AcqRel);
         Ok(Reservation {
             bytes,
@@ -153,15 +166,18 @@ impl Context {
     }
     pub fn work(&self, units: usize) -> Result<(), CoreError> {
         self.checkpoint()?;
-        charge(&self.counters.work, units, self.budget.max_work_units)?;
+        charge(&self.counters.work, units, self.budget.max_work_units)
+            .map_err(|e| self.failure(3, e))?;
         Ok(())
     }
     pub fn input(&self, bytes: usize) -> Result<(), CoreError> {
-        charge(&self.counters.input, bytes, self.budget.max_input_bytes)?;
+        charge(&self.counters.input, bytes, self.budget.max_input_bytes)
+            .map_err(|e| self.failure(4, e))?;
         Ok(())
     }
     pub fn output(&self, chars: usize) -> Result<(), CoreError> {
-        charge(&self.counters.output, chars, self.budget.max_output_chars)?;
+        charge(&self.counters.output, chars, self.budget.max_output_chars)
+            .map_err(|e| self.failure(5, e))?;
         Ok(())
     }
     pub fn stats(&self) -> Stats {
@@ -170,6 +186,17 @@ impl Context {
             work_units: self.counters.work.load(Ordering::Acquire),
             output_chars: self.counters.output.load(Ordering::Acquire),
             source_input_bytes: self.counters.input.load(Ordering::Acquire),
+            limit: match self.counters.reason.load(Ordering::Acquire) {
+                1 => Some("memory"),
+                2 => Some("time"),
+                3 => Some("work"),
+                4 => Some("input"),
+                5 => Some("output"),
+                6 => Some("admission"),
+                7 => Some("cancelled"),
+                8 => Some("panic"),
+                _ => None,
+            },
         }
     }
 }
@@ -226,7 +253,7 @@ impl Runtime {
                         ctx.checkpoint()?;
                         Ok(value)
                     }))
-                    .unwrap_or(Err(CoreError::Panic))
+                    .unwrap_or_else(|_| Err(ctx.failure(8, CoreError::Panic)))
                 })
                 .collect::<Result<Vec<_>, CoreError>>()
         })?;
@@ -244,7 +271,7 @@ impl Runtime {
     where
         F: Fn(&T, &Context) -> Result<Accounted<U>, CoreError> + Sync,
     {
-        let _admission = self.admit()?;
+        let _admission = self.admit().map_err(|e| ctx.failure(6, e))?;
         self.map(ctx, items, &f)
     }
     pub fn execute_stream<T: Sync, U: Send, F, C>(
@@ -262,7 +289,7 @@ impl Runtime {
         if !(1..=10_000).contains(&window) {
             return Err(CoreError::InvalidInput);
         }
-        let _admission = self.admit()?;
+        let _admission = self.admit().map_err(|e| ctx.failure(6, e))?;
         let mut input = input;
         loop {
             ctx.checkpoint()?;
