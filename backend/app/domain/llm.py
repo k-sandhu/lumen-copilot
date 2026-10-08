@@ -9,6 +9,7 @@ changes, the gateway maps to/from these and nothing upstream moves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -90,6 +91,8 @@ class Completion:
     model: str
     finish_reason: str | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Optional provider-reported cost; absent is unknown, never zero (#690).
+    cost_usd: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
