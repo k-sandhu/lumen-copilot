@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[project]
+name = "lumen-docintel"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.maturin]
+module-name = "lumen_docintel"
+features = ["pyo3/extension-module"]
+
+[tool.uv]
+cache-keys = [{ file = "../../Cargo.toml" }, { file = "../../Cargo.lock" }, { file = "Cargo.toml" }, { file = "src/**/*.rs" }, { file = "../lumen-docintel/src/**/*.rs" }]

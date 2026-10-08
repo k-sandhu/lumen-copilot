@@ -1,0 +1,59 @@
+name: Rust ingestion foundation
+on:
+  pull_request:
+    paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+  push:
+    paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned tools
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          python -m pip install uv==0.11.18 maturin==1.15.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cargo-target
+            ~/.cache/uv
+            ~/AppData/Local/uv/cache
+          key: rust-${{ runner.os }}-1.99-py312-${{ hashFiles('rust/Cargo.lock', 'backend/pyproject.toml') }}
+      - name: Rust fast gates
+        working-directory: rust
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+      - name: License and advisory gate
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo deny --config deny.toml check licenses advisories
+      - name: Build and exercise wheel
+        run: |
+          uv sync --project backend --extra dev --extra native
+          uv run --project backend --extra dev --extra native python -c "import lumen_docintel; assert lumen_docintel.core_version() == '0.1.0'"
+          uv run --project backend --extra dev --extra native pytest backend/tests/test_native_bridge.py -m "not live"
+      - name: Release wheel
+        run: maturin build --release --locked --manifest-path rust/crates/lumen-docintel-py/Cargo.toml --interpreter python --out wheelhouse
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ runner.os }}
+          path: wheelhouse/*.whl
