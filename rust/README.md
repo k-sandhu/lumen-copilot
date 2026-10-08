@@ -50,3 +50,8 @@ network/storage client or OCR engine is introduced in this foundation.
 
 References: [PyO3](https://pyo3.rs/), [maturin configuration](https://www.maturin.rs/config),
 [uv optional path dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/).
+
+The PyO3 build dependency `target-lexicon` uses Apache-2.0 WITH LLVM-exception.
+The exception permits linking compiled portions without additional attribution
+conditions; it adds permission, not copyleft. It is explicitly allowlisted.
+Reference: https://spdx.org/licenses/LLVM-exception.html.
