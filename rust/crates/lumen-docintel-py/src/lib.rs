@@ -2,6 +2,7 @@
 use lumen_docintel_core::CoreError;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -120,6 +121,19 @@ fn render_document(py: Python<'_>, document_json: String) -> PyResult<String> {
     })
 }
 
+#[pyfunction]
+#[pyo3(signature = (data, declared_mime=None))]
+fn detect_format(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    declared_mime: Option<String>,
+) -> PyResult<String> {
+    let bytes = data.as_bytes();
+    compute(py, || {
+        lumen_docintel_core::detection::detect_json(bytes, declared_mime.as_deref())
+    })
+}
+
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
@@ -152,6 +166,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<DocIntelPanicError>(),
     )?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
+    m.add_function(wrap_pyfunction!(detect_format, m)?)?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;

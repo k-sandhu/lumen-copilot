@@ -28,3 +28,5 @@ impl std::error::Error for CoreError {}
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod canonical;
+
+pub mod detection;

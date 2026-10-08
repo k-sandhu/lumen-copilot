@@ -60,3 +60,8 @@ Canonical schema v1: `docs/ingestion/canonical-schema-v1.md`. Native rendering
 releases the GIL and returns immutable domain views through the Python facade.
 Model parity does not imply native format-parser parity. New dependencies:
 serde/serde_json (MIT OR Apache-2.0), proptest (MIT OR Apache-2.0, tests only).
+
+Detection v1 is inert until a format parser lands and is enabled. It never
+changes the upload allowlist. See `docs/ingestion/detection-v1.md`. Dependencies:
+zip/infer/cfb (MIT), chardetng (Apache-2.0 OR MIT), encoding_rs
+((Apache-2.0 OR MIT) AND BSD-3-Clause). All operations use in-memory bytes.
