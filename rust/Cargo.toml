@@ -21,5 +21,7 @@ infer = { version = "=0.22.0", default-features = false }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 cfb = "=0.15.0"
 
+rayon = "=1.12.0"
+
 [profile.release]
 panic = "unwind"
