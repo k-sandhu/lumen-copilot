@@ -29,9 +29,13 @@ fn budgets_cancellation_and_panic_leave_pool_usable() {
         Err(CoreError::Budget)
     ));
     let context = Context::new(Budget::default(), Cancellation::default()).unwrap();
-    let panicked = runtime.execute(&context, &[1], |_, _| -> Result<_, CoreError> {
-        panic!("controlled unit panic")
-    });
+    let panicked = runtime.execute(
+        &context,
+        &[1],
+        |_, _| -> Result<lumen_docintel_core::runtime::Accounted<usize>, CoreError> {
+            panic!("controlled unit panic")
+        },
+    );
     assert!(matches!(panicked, Err(CoreError::Panic)));
     let result = runtime
         .copy_units(&units, Budget::default(), Cancellation::default())

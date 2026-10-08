@@ -972,6 +972,15 @@ class Settings(BaseSettings):
     # target chunk window and the overlap adjacent chunks share, both in
     # characters. Defaults are a reasonable passage size for retrieval; tune per
     # corpus without a code change. Invariant: 0 <= overlap < size (validated).
+    # Native computation knobs; no parser is promoted by these settings (#666).
+    native_ingestion_threads: int = Field(default=2, ge=1, le=64)
+    native_ingestion_max_documents: int = Field(default=1, ge=1, le=128)
+    native_ingestion_max_memory_bytes: int = Field(default=128 * 1024 * 1024, ge=1)
+    native_ingestion_max_input_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
+    native_ingestion_max_output_chars: int = Field(default=2_000_000, ge=1)
+    native_ingestion_max_work_units: int = Field(default=100_000, ge=1)
+    native_ingestion_timeout_ms: int = Field(default=30_000, ge=1)
+
     ingestion_chunk_size: int = Field(default=1200, alias="INGESTION_CHUNK_SIZE")
     ingestion_chunk_overlap: int = Field(default=200, alias="INGESTION_CHUNK_OVERLAP")
     # How many chunks are embedded per gateway ``embed()`` call. Batching keeps

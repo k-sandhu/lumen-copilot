@@ -25,6 +25,7 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::Budget => DocIntelBudgetError::new_err(message),
         CoreError::Cancelled => DocIntelCancelledError::new_err(message),
         CoreError::Internal => DocIntelInternalError::new_err(message),
+        CoreError::Panic => DocIntelPanicError::new_err(message),
     }
 }
 
@@ -134,6 +135,67 @@ fn detect_format(
     })
 }
 
+#[pyclass(name = "CancellationToken", skip_from_py_object)]
+#[derive(Clone, Default)]
+struct CancellationToken(lumen_docintel_core::runtime::Cancellation);
+#[pymethods]
+impl CancellationToken {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+#[pyclass(name = "Runtime", frozen)]
+struct NativeRuntime(lumen_docintel_core::runtime::Runtime);
+#[pymethods]
+impl NativeRuntime {
+    #[new]
+    fn new(py: Python<'_>, threads: usize, max_documents: usize) -> PyResult<Self> {
+        compute(py, || {
+            lumen_docintel_core::runtime::Runtime::new(threads, max_documents).map(Self)
+        })
+    }
+    fn open_document(
+        &self,
+        py: Python<'_>,
+        budget_json: String,
+        token: &CancellationToken,
+    ) -> PyResult<DocumentSession> {
+        let cancellation = token.0.clone();
+        compute(py, || {
+            lumen_docintel_core::runtime::context_json(&budget_json, cancellation)
+                .map(DocumentSession)
+        })
+    }
+    fn run_window(
+        &self,
+        py: Python<'_>,
+        units_json: String,
+        session: &DocumentSession,
+    ) -> PyResult<String> {
+        compute(py, || self.0.run_context_json(&units_json, &session.0))
+    }
+    fn run_units(
+        &self,
+        py: Python<'_>,
+        units_json: String,
+        budget_json: String,
+        token: &CancellationToken,
+    ) -> PyResult<String> {
+        let cancellation = token.0.clone();
+        compute(py, || {
+            self.0.run_json(&units_json, &budget_json, cancellation)
+        })
+    }
+}
+
+#[pyclass(frozen)]
+struct DocumentSession(lumen_docintel_core::runtime::Context);
+
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
@@ -167,6 +229,9 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_function(wrap_pyfunction!(detect_format, m)?)?;
+    m.add_class::<CancellationToken>()?;
+    m.add_class::<NativeRuntime>()?;
+    m.add_class::<DocumentSession>()?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;

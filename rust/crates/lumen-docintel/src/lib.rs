@@ -8,6 +8,7 @@ pub enum CoreError {
     Budget,
     Cancelled,
     Internal,
+    Panic,
 }
 
 impl std::fmt::Display for CoreError {
@@ -19,6 +20,7 @@ impl std::fmt::Display for CoreError {
             Self::Budget => "document budget exceeded",
             Self::Cancelled => "document computation cancelled",
             Self::Internal => "native computation failed",
+            Self::Panic => "native computation panicked",
         })
     }
 }
@@ -30,3 +32,5 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod canonical;
 
 pub mod detection;
+
+pub mod runtime;

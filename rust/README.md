@@ -65,3 +65,9 @@ Detection v1 is inert until a format parser lands and is enabled. It never
 changes the upload allowlist. See `docs/ingestion/detection-v1.md`. Dependencies:
 zip/infer/cfb (MIT), chardetng (Apache-2.0 OR MIT), encoding_rs
 ((Apache-2.0 OR MIT) AND BSD-3-Clause). All operations use in-memory bytes.
+
+Runtime v1 (`docs/ingestion/runtime-v1.md`) uses rayon 1.12.0 (MIT OR Apache-2.0).
+Instantiate one executor per worker child after fork. The optional
+`docker-compose.ingestion-native.yml` bounds worker processes; it enables no
+parser. Memory diagnostics count tracked Rust allocations, not process RSS.
+Streaming windows retain the document deadline and output/work counters.
