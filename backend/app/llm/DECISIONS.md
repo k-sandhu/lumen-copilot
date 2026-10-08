@@ -3,7 +3,7 @@
 Design: [ADR-0027](../../../docs/architecture/0027-hierarchical-document-classification.md).
 `DecisionsGateway.decide` accepts bounded text and vendor-free choice, predicate
 and score questions; it returns typed answers or `DecisionError`. It does not
-classify documents or schedule work. Reuse one gateway instance per worker to
+classify documents or schedule work. Reuse one gateway instance per tenant/worker to
 enforce its concurrency semaphore. Provider-specific JSON stays in `llm/`.
 
 Deployment settings use the `DECISIONS_*` environment aliases in `core/config.py`:
@@ -64,3 +64,19 @@ configured candidate model remain unverified by inference. Baseline evaluation,
 calibration, provider privacy approval, budgets and retention remain owner gates.
 
 Merge gate: hold until measured against the baseline evaluation; a human merges.
+
+## Verification record — 2026-10-08
+
+- 46 capability tests passed, including negative cases, the real gateway's
+  strict-schema arguments with a stubbed LiteLLM module, and shuffled schema order.
+- Scoped gateway/tool/audit/capability regression: 222 passed, 4 live tests excluded.
+- Changed-file Ruff checks/format and strict mypy on the four capability files passed.
+- API regeneration, the frontend audit-taxonomy test (1 test) and TypeScript check passed.
+- [~] 2026-10-08: full backend suite skipped because the final RAM check was
+  2785 MiB, below the required 4000 MiB; residual risk: unrelated regressions remain untested.
+- [~] 2026-10-08: explicitly checking `core/config.py` reports eight existing
+  missing environment-alias arguments at the unchanged `get_settings()` constructor;
+  residual risk: repository-wide strict typing remains incomplete.
+- [~] 2026-10-08: live inference/datastore checks not run under this task's limits;
+  residual risk: alpha endpoint behavior and durable stage integration need #692/#694
+  verification. No containers were started/stopped; inference spend was zero.
