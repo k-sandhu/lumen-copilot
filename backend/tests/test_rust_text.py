@@ -24,6 +24,7 @@ def test_text_shadow_failure_preserves_python(monkeypatch: pytest.MonkeyPatch) -
 
 def test_text_cutover_and_binary_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(native, "native_available", lambda: True)
+    monkeypatch.setattr(native, "candidate_available", lambda family: True)
     monkeypatch.setattr(native, "detect_content", lambda *a, **k: SimpleNamespace(format="pdf"))
     with pytest.raises(DocumentParseError):
         parse_document(

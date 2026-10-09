@@ -27,7 +27,7 @@ def candidates() -> tuple[Candidate, ...]:
 
 
 def upload_types(settings: Settings) -> frozenset[str]:
-    from app.ingestion.native import native_available
+    from app.ingestion.native import candidate_available, native_available
 
     registered = candidates()
     gated = frozenset(mime for c in registered for mime in c.mimes) - {
@@ -37,7 +37,9 @@ def upload_types(settings: Settings) -> frozenset[str]:
     enabled = frozenset(
         mime
         for c in registered
-        if getattr(settings, f"native_{c.family}_enabled", False) and native_available()
+        if getattr(settings, f"native_{c.family}_enabled", False)
+        and native_available()
+        and candidate_available(c.family)
         for mime in c.mimes
     )
     return (settings.upload_allowed_content_types - gated) | enabled
@@ -59,7 +61,7 @@ def configured_parse(data: bytes, mime: str, settings: Settings, baseline: str |
         if not enabled and not shadow:
             break
         try:
-            if not native.native_available():
+            if not native.native_available() or not native.candidate_available(candidate.family):
                 raise native.NativeUnavailableError("native ingestion extension is unavailable")
             detected = native.detect_content(data, declared_mime=mime)
             if detected.format not in candidate.formats:
