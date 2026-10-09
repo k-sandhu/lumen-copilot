@@ -58,4 +58,35 @@ is insufficient. Neither network isolation nor hang termination is verified by
 the current refusal path. Original issue extraction acceptance remains deferred
 under the explicit scope exception in the task.
 
+## Verification and fidelity (2026-10-09)
+
+- [x] `cargo test --locked --workspace`: 28 passed, including three legacy
+  container/refusal tests and generated Unicode cases. The two generated Rust
+  containers were each 20480 bytes. The Python bridge independently constructs
+  CFB bytes in test code; no external fixture is copied.
+- [x] Native wheel rebuilt; offline bridge/detection/canonical/runtime/connector
+  conformance gate: 400 passed, 9 expected capability skips. The specific legacy
+  subclass, safe code/message, default-OFF per-format settings and unchanged
+  Python shadow evidence were verified. Initial missing-module/error/facade
+  failures preceded implementation.
+- [x] Rust fmt/Clippy (warnings denied), cargo-deny licences/advisories, Python
+  Ruff/format, strict mypy on the facade/configuration, and whitespace checks
+  passed. No crate or lockfile changes; cfb remains inherited MIT-licensed.
+- [~] 2026-10-09: complete backend offline fallback suite left to CI after this
+  session's earlier full run exhausted the 2500 MiB floor. Targeted suites used
+  `PYTEST_ADDOPTS=-n 2`; memory was checked before every heavy invocation.
+  Residual risk: full fallback gate is not established by the targeted evidence.
+- [~] 2026-10-09: conversion, network/tenant isolation, hard deadline kill,
+  cross-platform packaging, RSS/image-size and baseline fidelity unmeasured.
+  No live datastore tests or Docker actions. Residual risk: no production
+  extraction path or conversion isolation assurance exists.
+
+| Fidelity dimension | Result |
+|---|---|
+| Generated DOC/PPT container recognition | Passed |
+| Content-safe typed refusal and budgets | Passed |
+| Text, layout, table, note or native-location extraction | Unavailable |
+| Isolated conversion and original-source mapping | Unavailable |
+| Throughput/RSS/image size against baseline | Unmeasured |
+
 Merge gate: hold until measured against the baseline evaluation; a human merges.
