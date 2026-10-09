@@ -51,6 +51,9 @@ def _stable_office(data: bytes) -> bytes:
             rb"\g<1>1980-01-01T00:00:00Z\g<2>",
             files["docProps/core.xml"],
         )
+    for name, value in list(files.items()):
+        if name.startswith("ppt/embeddings/") and value.startswith(b"PK"):
+            files[name] = _stable_office(value)
     return _zip(files)
 
 
@@ -327,6 +330,7 @@ def corpus() -> list[Fixture]:
                 facts=gold.facts + ("Merged", "Nested", "مرحبا", "世界"),
                 associations=gold.associations,
                 order=gold.order,
+                headers=(("Region", "North"), ("Mass", "-120")),
             ),
             language="mixed",
         ),

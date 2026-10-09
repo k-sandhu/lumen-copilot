@@ -14,6 +14,7 @@ class Gold:
     associations: tuple[tuple[str, ...], ...] = ()
     order: tuple[str, ...] = ()
     native_regions: int = 0
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class Score:
     table_association: float
     reading_order: float
     exact_offsets: float
+    cell_header_association: float
     native_provenance: float
     outcome: str
 
@@ -49,6 +51,7 @@ def evaluate(
     *,
     spans: tuple[tuple[int, int, str], ...] = (),
     matched_regions: int = 0,
+    cell_headers: tuple[tuple[str, str], ...] = (),
     outcome: str = "indexed",
 ) -> Score:
     tokens = _tokens(text)
@@ -70,6 +73,9 @@ def evaluate(
         groups / len(gold.associations) if gold.associations else float(successful),
         order if successful else 0.0,
         float(valid and successful),
+        sum(pair in cell_headers for pair in gold.headers) / len(gold.headers)
+        if gold.headers
+        else 1.0,
         min(matched_regions / gold.native_regions, 1.0) if gold.native_regions else 1.0,
         outcome,
     )
@@ -81,6 +87,7 @@ def require_fidelity(score: Score, *, format_name: str, require_provenance: bool
         score.table_association,
         score.reading_order,
         score.exact_offsets,
+        score.cell_header_association,
     )
     if (
         score.outcome not in {"indexed", "empty"}

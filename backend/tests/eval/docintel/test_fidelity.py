@@ -93,3 +93,17 @@ def test_baseline_arm_extracts_text_and_keeps_failed_rows() -> None:
     result = _child(payload)
     assert result["outcome"] == "unsupported"
     assert result["score"]["fact_coverage"] == 0.0
+
+
+def test_cell_header_associations_need_the_correct_header() -> None:
+    gold = Gold(facts=("North", "-120"), headers=(("Region", "North"), ("Mass", "-120")))
+    from tests.eval.docintel.metrics import require_fidelity
+
+    with pytest.raises(ValueError):
+        require_fidelity(
+            evaluate("North -120", gold, cell_headers=(("Mass", "North"),)), format_name="xlsx"
+        )
+    require_fidelity(
+        evaluate("North -120", gold, cell_headers=(("Region", "North"), ("Mass", "-120"))),
+        format_name="xlsx",
+    )
