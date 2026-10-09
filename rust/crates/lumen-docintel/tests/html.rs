@@ -5,6 +5,20 @@ use lumen_docintel_core::{
 };
 use proptest::prelude::*;
 #[test]
+fn ordinary_zip_letters_are_not_container_magic() {
+    let doc = parse(b"PK<p>source</p>", Limits::default()).unwrap();
+    assert!(render(doc).unwrap().rendered_text.contains("source"));
+}
+#[test]
+fn binary_html_and_mhtml_roots_are_rejected() {
+    assert_eq!(
+        parse(b"%PDF-1.7\n", Limits::default()),
+        Err(CoreError::Unsupported)
+    );
+    let bytes=b"MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n%PDF-1.7\n\r\n--x--\r\n";
+    assert_eq!(parse(bytes, Limits::default()), Err(CoreError::Unsupported));
+}
+#[test]
 fn main_tables_links_metadata_and_inert_scripts() {
     let bytes=br#"<!doctype html><html><head><title>Report</title><meta name="date" content="2026-10-08"></head><body><nav>drop navigation</nav><main><h1>Intro</h1><p>Read <a href="https://example.invalid">evidence</a></p><div class="cookie-banner"><table><tr><th>Mass</th><th>Unit</th></tr><tr><td>-120</td><td>kg</td></tr></table></div><script>panic('never')</script><p>PageTwo</p></main><footer>drop footer</footer></body></html>"#;
     let doc = parse(bytes, Limits::default()).unwrap();
