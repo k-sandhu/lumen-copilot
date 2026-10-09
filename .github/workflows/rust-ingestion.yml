@@ -86,3 +86,17 @@ jobs:
         with:
           name: backend-offline-results
           path: backend/offline-results.xml
+
+  docker-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build on isolated runner with sufficient RAM
+        run: |
+          available_mib=$(awk '/MemAvailable/ {print int($2 / 1024)}' /proc/meminfo)
+          echo "Available MiB: ${available_mib}"
+          if [ "${available_mib}" -lt 6000 ]; then
+            echo 'Docker packaging not verified: below 6000 MiB available RAM.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          docker build --file backend/Dockerfile --tag lumen-docintel-ci:local .
