@@ -55,12 +55,11 @@ pub(super) fn lines(text: &PageText, ctx: &Context) -> Result<Vec<Line>, CoreErr
         for glyph in row {
             ctx.work(1)?;
             let gap = line.as_ref().map_or(0., |l| glyph.bbox.x0 - l.bbox.x1);
-            if gap > glyph.size * 2.5 {
-                if let Some(l) = line.take() {
-                    if !l.text.trim().is_empty() {
-                        out.push(l);
-                    }
-                }
+            if gap > glyph.size * 2.5
+                && let Some(l) = line.take()
+                && !l.text.trim().is_empty()
+            {
+                out.push(l);
             }
             if let Some(l) = &mut line {
                 if gap > glyph.size * 0.22
@@ -83,10 +82,10 @@ pub(super) fn lines(text: &PageText, ctx: &Context) -> Result<Vec<Line>, CoreErr
                 });
             }
         }
-        if let Some(l) = line {
-            if !l.text.trim().is_empty() {
-                out.push(l);
-            }
+        if let Some(l) = line
+            && !l.text.trim().is_empty()
+        {
+            out.push(l);
         }
     }
     Ok(out)
@@ -172,20 +171,20 @@ pub(super) fn blocks(page: &Page, text: &PageText, ctx: &Context) -> Result<Vec<
             headings.push(line.text.clone());
         }
         let mut merged = false;
-        if kind == BlockKind::Paragraph {
-            if let Some(previous) = out.last_mut() {
-                let bbox = previous.regions[0].bbox.as_ref().unwrap();
-                let gap = bbox.y0 - line.bbox.y1;
-                if previous.kind == kind
-                    && (bbox.x0 - line.bbox.x0).abs() < body
-                    && (0.0..body * 1.4).contains(&gap)
-                {
-                    ctx.output(1)?;
-                    previous.text.push('\n');
-                    previous.text.push_str(line.text.trim());
-                    previous.regions[0].bbox = Some(union(bbox, &line.bbox));
-                    merged = true;
-                }
+        if kind == BlockKind::Paragraph
+            && let Some(previous) = out.last_mut()
+        {
+            let bbox = previous.regions[0].bbox.as_ref().unwrap();
+            let gap = bbox.y0 - line.bbox.y1;
+            if previous.kind == kind
+                && (bbox.x0 - line.bbox.x0).abs() < body
+                && (0.0..body * 1.4).contains(&gap)
+            {
+                ctx.output(1)?;
+                previous.text.push('\n');
+                previous.text.push_str(line.text.trim());
+                previous.regions[0].bbox = Some(union(bbox, &line.bbox));
+                merged = true;
             }
         }
         if !merged {
@@ -246,5 +245,7 @@ pub(super) fn furniture(
             derived.push(serde_json::json!({"block_id":block.id,"text":block.text.replace("\u{ad}\n",""),"origin":"derived","policy":"soft_hyphen_only"}));
         }
     }
-    Ok(serde_json::json!({"excluded_block_ids":furniture_ids,"normalized_blocks":derived,"hard_hyphen_policy":"retain_ambiguous_identifiers"}))
+    Ok(
+        serde_json::json!({"excluded_block_ids":furniture_ids,"normalized_blocks":derived,"hard_hyphen_policy":"retain_ambiguous_identifiers"}),
+    )
 }

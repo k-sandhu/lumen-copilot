@@ -53,12 +53,21 @@ pub fn pdf_bytes(streams: &[&[u8]], rotation: i32) -> Vec<u8> {
     objects(&objs, "")
 }
 
-pub fn unicode_pdf(value:&str)->Vec<u8> {
-    let mut map=String::from("/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def 1 begincodespacerange <0000> <ffff> endcodespacerange\n");
-    let mut encoded=String::new();
-    let chars:Vec<_>=value.chars().collect();map.push_str(&format!("{} beginbfchar\n",chars.len()));
-    for (i,c) in chars.iter().enumerate(){let mut units=[0u16;2];let units=c.encode_utf16(&mut units);let target=units.iter().map(|u|format!("{u:04x}")).collect::<String>();map.push_str(&format!("<{:04x}> <{target}>\n",i+1));encoded.push_str(&format!("{:04x}",i+1));}
+pub fn unicode_pdf(value: &str) -> Vec<u8> {
+    let mut map = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def 1 begincodespacerange <0000> <ffff> endcodespacerange\n",
+    );
+    let mut encoded = String::new();
+    let chars: Vec<_> = value.chars().collect();
+    map.push_str(&format!("{} beginbfchar\n", chars.len()));
+    for (i, c) in chars.iter().enumerate() {
+        let mut units = [0u16; 2];
+        let units = c.encode_utf16(&mut units);
+        let target = units.iter().map(|u| format!("{u:04x}")).collect::<String>();
+        map.push_str(&format!("<{:04x}> <{target}>\n", i + 1));
+        encoded.push_str(&format!("{:04x}", i + 1));
+    }
     map.push_str("endbfchar endcmap end end");
-    let content=format!("BT /F1 10 Tf 1 0 0 1 40 700 Tm <{encoded}> Tj ET");
+    let content = format!("BT /F1 10 Tf 1 0 0 1 40 700 Tm <{encoded}> Tj ET");
     objects(&[b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),b"<< /Type /Font /Subtype /Type0 /BaseFont /Synthetic /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>".to_vec(),b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec(),format!("<< /Length {} >>\nstream\n{content}\nendstream",content.len()).into_bytes(),b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Synthetic /DW 600 >>".to_vec(),format!("<< /Length {} >>\nstream\n{map}\nendstream",map.len()).into_bytes()],"")
 }

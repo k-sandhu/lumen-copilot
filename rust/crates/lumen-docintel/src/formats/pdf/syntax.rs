@@ -305,10 +305,11 @@ impl Reader<'_, '_> {
                 }
                 if refs && n >= 0.0 && n.fract() == 0.0 && n <= u32::MAX as f64 {
                     let saved = self.at;
-                    if let Ok(g) = self.uint() {
-                        if g <= u16::MAX as usize && self.word().is_ok_and(|w| w == b"R") {
-                            return Ok(Value::Ref((n as u32, g as u16)));
-                        }
+                    if let Ok(g) = self.uint()
+                        && g <= u16::MAX as usize
+                        && self.word().is_ok_and(|w| w == b"R")
+                    {
+                        return Ok(Value::Ref((n as u32, g as u16)));
                     }
                     self.at = saved;
                 }

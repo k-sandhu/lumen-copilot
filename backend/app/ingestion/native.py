@@ -183,7 +183,7 @@ def parse_pdf_candidate(
     try:
         document = (executor or NativeExecutor()).extract_pdf(data, budget=budget)
         if mode == "native":
-            if document.generation.outcome != "indexed":
+            if json.loads(document.generation_json)["outcome"] != "indexed":
                 raise PdfNeedsOcrError("PDF pages need OCR")
             return PdfCandidateResult(document.rendered_text, "native", document)
         return PdfCandidateResult(
@@ -192,5 +192,7 @@ def parse_pdf_candidate(
     except Exception as error:
         if mode == "native":
             raise
-        code = "native_unavailable" if isinstance(error, NativeUnavailableError) else "native_failed"
+        code = (
+            "native_unavailable" if isinstance(error, NativeUnavailableError) else "native_failed"
+        )
         return PdfCandidateResult(baseline, "python", native_error=code)

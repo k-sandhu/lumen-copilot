@@ -151,6 +151,36 @@ proptest::proptest! {
     }
 }
 
+#[test]
+fn metadata_outline_and_soft_hyphen_normalization_retain_source_evidence() {
+    let content = text(40, 700, 12, "Body");
+    let input=pdf_support::objects(&[
+        b"<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream",content.len()).into_bytes(),
+        b"<< /Type /Outlines /First 7 0 R /Last 7 0 R >>".to_vec(),
+        b"<< /Title (Section) /Parent 6 0 R /Dest [4 0 R /Fit] >>".to_vec(),
+        b"<< /Title (Synthetic) /Author (Fixture) >>".to_vec(),
+    ],"/Info 8 0 R");
+    let doc = pdf::extract(&input, Budget::default()).unwrap();
+    let diagnostics = doc.generation.diagnostics.as_ref().unwrap();
+    assert_eq!(diagnostics["metadata"]["Title"], "Synthetic");
+    assert_eq!(diagnostics["outline"][0]["title"], "Section");
+    let doc = pdf::extract(
+        &pdf_support::unicode_pdf("co\u{ad}\noperation"),
+        Budget::default(),
+    )
+    .unwrap();
+    assert!(doc.blocks[0].text.contains('\u{ad}'));
+    assert_eq!(
+        doc.generation.diagnostics.as_ref().unwrap()["normalization_hooks"]["normalized_blocks"][0]
+            ["text"],
+        "cooperation"
+    );
+}
+
 proptest::proptest! {
     #[test]
     fn unicode_codepoint_offsets_survive_font_maps(value in "[a-z世界مرحبا😀é]{1,40}") {

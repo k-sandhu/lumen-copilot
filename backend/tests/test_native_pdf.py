@@ -1,20 +1,25 @@
 """Offline PDF bridge and per-format shadow behavior (#671)."""
+
 from __future__ import annotations
 
+import json
+
 import pytest
+
 from tests.eval.docintel.fixtures import _pdf
 
 
 def test_pdf_bridge_page_provenance_unicode_and_typed_limits() -> None:
     extension = pytest.importorskip("lumen_docintel")
-    from app.ingestion.native import NativeExecutor
     from app.domain.native_runtime import RuntimeBudget
+    from app.ingestion.native import NativeExecutor
+
     executor = NativeExecutor()
     document = executor.extract_pdf(_pdf())
     assert len(document.source_parts) == 3
-    assert document.generation.outcome == "partial"
+    assert json.loads(document.generation_json)["outcome"] == "partial"
     for block, span in zip(document.blocks, document.spans, strict=True):
-        assert document.rendered_text[span.char_start:span.char_end] == block.text
+        assert document.rendered_text[span.char_start : span.char_end] == block.text
         assert block.regions[0].bbox is not None
     with pytest.raises(extension.DocIntelBudgetError):
         executor.extract_pdf(_pdf(), budget=RuntimeBudget(max_memory_bytes=128))
@@ -23,6 +28,7 @@ def test_pdf_bridge_page_provenance_unicode_and_typed_limits() -> None:
 
 def test_pdf_shadow_failure_preserves_python_output(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.ingestion import native
+
     monkeypatch.setattr(native, "_extension", lambda: None)
     result = native.parse_pdf_candidate(_pdf(), mode="shadow")
     assert "Intro" in result.text
@@ -32,6 +38,7 @@ def test_pdf_shadow_failure_preserves_python_output(monkeypatch: pytest.MonkeyPa
 
 def test_pdf_defaults_to_python_and_invalid_mode_is_rejected() -> None:
     from app.ingestion.native import parse_pdf_candidate
+
     result = parse_pdf_candidate(_pdf())
     assert result.route == "python"
     assert result.canonical is None
@@ -42,7 +49,8 @@ def test_pdf_defaults_to_python_and_invalid_mode_is_rejected() -> None:
 def test_pdf_shadow_needs_ocr_is_visible_and_not_promoted() -> None:
     pytest.importorskip("lumen_docintel")
     from app.ingestion.native import parse_pdf_candidate
+
     result = parse_pdf_candidate(_pdf(scanned=True), mode="shadow")
     assert result.route == "python"
     assert result.canonical is not None
-    assert result.canonical.generation.outcome == "needs_ocr"
+    assert json.loads(result.canonical.generation_json)["outcome"] == "needs_ocr"

@@ -74,3 +74,14 @@ Instantiate one executor per worker child after fork. The optional
 `docker-compose.ingestion-native.yml` bounds worker processes; it enables no
 parser. Memory diagnostics count tracked Rust allocations, not process RSS.
 Streaming windows retain the document deadline and output/work counters.
+
+PDF candidate (#671): `formats::pdf::extract(bytes, Budget)` is a strict bounded
+interpreter with positioned glyphs, heuristic reading order/headings, source
+page boxes, metadata/bookmarks and typed per-page OCR outcomes. It adds flate2
+1.1.10 and sha2 0.10.9 (both MIT OR Apache-2.0), without native binaries.
+The backend facade's `parse_pdf_candidate(mode="python"|"shadow"|"native")`
+is an independent PDF opt-in seam; normal `parsers.py` stays live. Shadow never
+replaces Python text. Stage wiring and production cutover remain #669/#687.
+See [engine evaluation](../docs/ingestion/pdf-engine-evaluation.md) and generated
+[layout benchmark](../docs/ingestion/pdf-layout-benchmark.json). Supported-subset
+coverage must be evaluated before promotion; broader coverage is tracked in #722.

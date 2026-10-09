@@ -12,6 +12,13 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use syntax::{File, Value};
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageOutcome {
+    Extracted,
+    NeedsOcr,
+}
+
 pub(super) struct Memory {
     pub ctx: Context,
     holds: Vec<Reservation>,
@@ -260,10 +267,10 @@ fn metadata(file: &File, m: &mut Memory) -> Result<serde_json::Value, CoreError>
         }
         Ok(())
     }
-    if let Some(outlines) = root.get("Outlines") {
-        if let Some(first) = file.dictionary(outlines)?.get("First") {
-            walk(file, first, 1, &mut outline, &mut seen, m)?;
-        }
+    if let Some(outlines) = root.get("Outlines")
+        && let Some(first) = file.dictionary(outlines)?.get("First")
+    {
+        walk(file, first, 1, &mut outline, &mut seen, m)?;
     }
     Ok(json!({"metadata":values,"outline":outline}))
 }
@@ -296,7 +303,7 @@ pub fn extract_with_context(
         let page_text = &unit.value.0;
         memory.reserve(page_text.glyphs.len() * 512 + 1024)?;
         let blocks = layout::blocks(page, page_text, ctx)?;
-        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"outcome":if blocks.is_empty(){"needs_ocr"}else{"extracted"}}));
+        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"outcome":if blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
         document.blocks.extend(blocks);
     }
     let normalization_hooks = layout::furniture(&mut document, &pages, ctx)?;

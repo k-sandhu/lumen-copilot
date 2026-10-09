@@ -57,6 +57,48 @@ boundary before promotion; unsupported cases count against corpus coverage.
 
 ## Verification record
 
-[~] 2026-10-08: implementation and fixture measurements pending this draft.
-Residual risk: supported-subset coverage and heuristics need the held-out corpus.
+Generated Windows cold measurements (21 document-arm rows) are retained in
+[pdf-layout-benchmark.json](pdf-layout-benchmark.json). Every unsuccessful
+document stays in the denominator. The provenance baseline is a PDF-only
+projection equivalent to #625; #630/#638 persistence and diagnostics are read
+for compatibility but are not merged or presented as a full integrated baseline.
+
+| Generated layout fixture | Current pypdf | #625-equivalent pypdf | Rust candidate |
+|---|---:|---:|---:|
+| Fact coverage | 100% | 100% | 100% |
+| Reading-order pairs | 66.7% | 66.7% | 100% |
+| Exact code-point spans | 100% | 100% | 100% |
+| Page provenance | unavailable | 100% | 100% |
+| Cold extraction incl. parser import | 303.9 ms | 416.8 ms | 26.6 ms |
+| Process peak RSS | 63.05 MiB | 62.68 MiB | 23.31 MiB |
+| Incremental peak RSS | 40.79 MiB | 40.42 MiB | 1.24 MiB |
+
+These tiny cold fixtures do not establish steady-state throughput or answer
+accuracy. The original #670 digital fixture includes a blank page: Rust retains
+all digital facts/page maps and reports partial/needs-OCR conservatively rather
+than deciding that blank output is an intentional blank page. Scanned and mixed
+pages remain incomplete. Rotation and repeated furniture fixtures retain all
+facts and exact spans. Original hard-hyphen evidence remains immutable; only
+soft-hyphen de-hyphenation is provided as a derived normalization hook.
+
+Verified offline: 28 Rust workspace tests (12 PDF tests including property runs),
+29 targeted Python parser/bridge/fidelity tests with a dedicated temporary root,
+wheel build/import, strict mypy facade and Ruff. Tests first reproduced missing
+PDF module/routing; negative tests cover malicious expansion, deep objects,
+encrypted/corrupt input, cancellation and healthy reuse. No containers or live
+datastores were exercised.
+
+[~] 2026-10-08: full backend suite deferred under the 4000 MiB threshold
+(3336 MiB available during final workspace testing); rely on CI. Residual risk:
+unrelated backend regressions are not ruled out by targeted checks.
+
+[~] 2026-10-08: local cargo-deny executable unavailable; pinned Cargo.lock and
+the inherited Linux CI license/advisory gate cover new dependencies. Residual
+risk: local transitive advisory scan is not verified.
+
+[~] 2026-10-08: held-out corpus, warm throughput/scaling, Linux/macOS wheel
+execution and full #625/#630/#638 integration remain unverified. Residual risk:
+format coverage, script/font order and heuristic boxes may fail enterprise PDFs.
+Broader engine coverage/containment is tracked separately in #722. Owner chooses
+production budgets, evaluation thresholds and broader-engine strategy.
 Merge gate: hold until measured against the baseline evaluation; a human merges.
