@@ -34,6 +34,8 @@ processing must not be represented as offline or as having verified retention,
 regional guarantees or zero retention. Owners decide deployment/provider terms.
 
 The cache key is (tenant, SHA-256 of submitted one-page bytes, engine/profile).
+PDFium-generated trailer IDs are replaced with deterministic source/page IDs
+before hashing or dispatch, preserving byte lengths and cross-reference offsets.
 No cross-tenant cache reuse. Reserve a page and the total ceiling in a short durable
 transaction under a tenant policy lock, and commit a content-free OCR intent audit
 before dispatch. Known results and actual usage commit before canonical merging.
