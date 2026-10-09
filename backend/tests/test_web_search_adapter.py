@@ -123,7 +123,11 @@ async def _searx_client(handler: object, **kw: object) -> SearxngClient:
     transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
     client = httpx.AsyncClient(transport=transport)
     return SearxngClient(
-        "http://searxng:8080", timeout_seconds=5.0, user_agent="LumenTest/1", client=client, **kw  # type: ignore[arg-type]
+        "http://searxng:8080",
+        timeout_seconds=5.0,
+        user_agent="LumenTest/1",
+        client=client,
+        **kw,  # type: ignore[arg-type]
     )
 
 

@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.core.errors import NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -57,6 +56,7 @@ from app.services.run_delivery_service import (
     deliver_run,
 )
 from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -96,7 +96,7 @@ async def ctx() -> AsyncIterator[_Ctx]:
     factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
             tb = await TenantRepository(seed).create(name="Globex")

@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     ChunkInput,
@@ -35,6 +34,7 @@ from app.domain.entities import (
     MessageRole,
     Role,
 )
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -47,7 +47,7 @@ async def session() -> AsyncIterator[AsyncSession]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(copy_sqlite_schema)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             yield db
