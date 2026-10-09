@@ -314,6 +314,12 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "media_max_duration_seconds",
         # Non-secret CPU/resource limits, not stateful infrastructure or credentials.
         "native_ingestion_threads",
+        "native_doc_accept",
+        "native_doc_shadow",
+        "native_doc_cutover",
+        "native_ppt_accept",
+        "native_ppt_shadow",
+        "native_ppt_cutover",
         "native_ingestion_max_documents",
         "native_ingestion_max_memory_bytes",
         "native_ingestion_max_input_bytes",

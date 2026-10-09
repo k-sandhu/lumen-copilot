@@ -80,6 +80,67 @@ class CancellationHandle:
 _DEFAULT_BUDGET = RuntimeBudget()
 
 
+class LegacyOfficeDisabledError(ValueError):
+    """Legacy format evaluation was not explicitly accepted in configuration."""
+
+
+def legacy_office_route(*, settings: Settings) -> str:
+    """Flags cannot promote a parser that this spike has deliberately not adopted."""
+    return "unsupported"
+
+
+def reject_legacy_office(
+    data: bytes,
+    *,
+    format_name: str,
+    settings: Settings,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+) -> None:
+    """Explicit accepted evaluation yields a typed refusal, never empty evidence."""
+    accepted = (
+        settings.native_doc_accept
+        if format_name == "doc"
+        else settings.native_ppt_accept
+        if format_name == "ppt"
+        else False
+    )
+    if not accepted:
+        raise LegacyOfficeDisabledError("legacy format evaluation is disabled")
+    extension = _extension()
+    if extension is None or not callable(getattr(extension, "reject_legacy_office", None)):
+        raise NativeUnavailableError("native legacy refusal extension is unavailable")
+    extension.reject_legacy_office(data, json.dumps(asdict(budget)))
+
+
+def shadow_legacy_office(
+    data: bytes,
+    *,
+    format_name: str,
+    python_text: str,
+    settings: Settings,
+) -> tuple[str, dict[str, object]]:
+    """Retain Python evidence; refusal telemetry never includes contents."""
+    shadow = (
+        settings.native_doc_accept and settings.native_doc_shadow
+        if format_name == "doc"
+        else settings.native_ppt_accept and settings.native_ppt_shadow
+        if format_name == "ppt"
+        else False
+    )
+    if not shadow:
+        return python_text, {"candidate_outcome": "disabled"}
+    try:
+        reject_legacy_office(data, format_name=format_name, settings=settings)
+    except Exception as exc:  # noqa: BLE001 — shadow cannot alter live Python evidence
+        outcome = (
+            "unsupported_legacy_format"
+            if getattr(exc, "code", None) == "unsupported_legacy_format"
+            else "error"
+        )
+        return python_text, {"candidate_outcome": outcome}
+    return python_text, {"candidate_outcome": "error"}
+
+
 class NativeExecutor:
     """Create lazily AFTER Celery forks; reuse one executor per worker child."""
 
