@@ -7,6 +7,7 @@ requires-python = "==3.12.*"
 
 # Runtime dependencies. Pinned (no unpinned / no :latest) per AGENTS.md §3 / ADR-0003 §10.
 dependencies = [
+    "jsonschema==4.26.0",  # versioned classification reference-data validation (#689)
     "fastapi==0.115.6",
     # Multipart parsing remains for small tenant-branding/avatar forms only;
     # uploaded document/media bytes use the v2 browser-to-storage data plane.
@@ -57,6 +58,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "types-jsonschema==4.26.0.20261006",
     "pytest==8.3.4",
     "pytest-asyncio==0.25.0",
     "pytest-xdist==3.8.0",
