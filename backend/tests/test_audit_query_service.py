@@ -24,12 +24,12 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome
 from app.services.audit import AuditSink
 from app.services.audit_query_service import AuditQueryService
+from tests._db_helpers import copy_sqlite_schema
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -45,7 +45,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         yield async_sessionmaker(bind=engine, expire_on_commit=False)
     finally:
         await engine.dispose()

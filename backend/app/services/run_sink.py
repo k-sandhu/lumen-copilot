@@ -192,9 +192,7 @@ class RunTranscriptSink:
         first_line = text.splitlines()[0].strip()
         return first_line[:200] if len(first_line) > 200 else first_line
 
-    async def persist(
-        self, *, runs: RunRepository, steps: RunStepRepository, run_id: UUID
-    ) -> None:
+    async def persist(self, *, runs: RunRepository, steps: RunStepRepository, run_id: UUID) -> None:
         """Write the captured transcript to ``run_steps`` (append-only), tenant-scoped.
 
         Called by the run task inside its own transaction so the transcript commits

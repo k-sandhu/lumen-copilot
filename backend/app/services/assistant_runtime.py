@@ -112,9 +112,7 @@ def resolve_allowlist(tool_allowlist: object) -> frozenset[str]:
     if not names:
         return default_allowlist()
     known = registered_names()
-    return frozenset(
-        name for name in names if is_mcp_tool_name(name) or name in known
-    )
+    return frozenset(name for name in names if is_mcp_tool_name(name) or name in known)
 
 
 def scope_collection_ids(knowledge_scope: object) -> list[UUID] | None:
