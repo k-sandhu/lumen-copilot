@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -52,5 +53,9 @@ def test_pdf_shadow_needs_ocr_is_visible_and_not_promoted() -> None:
 
     result = parse_pdf_candidate(_pdf(scanned=True), mode="shadow")
     assert result.route == "python"
+    if sys.platform == "darwin":
+        assert result.canonical is None
+        assert result.native_error == "native_failed"
+        return
     assert result.canonical is not None
     assert json.loads(result.canonical.generation_json)["outcome"] == "needs_ocr"

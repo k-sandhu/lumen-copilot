@@ -15,9 +15,12 @@ pub(super) struct Glyph {
     pub bbox: BoundingBox,
     pub size: f64,
     pub bold: bool,
+    pub baseline: Option<f64>,
+    pub source_order: Option<usize>,
 }
 #[derive(Default)]
 pub(super) struct PageText {
+    pub needs_ocr: bool,
     pub glyphs: Vec<Glyph>,
     pub has_images: bool,
     pub lines: Vec<[f64; 4]>,
@@ -422,6 +425,8 @@ fn show(
             m.reserve(256 + text.len() * 4)?;
             m.ctx.output(text.chars().count())?;
             out.glyphs.push(Glyph {
+                baseline: None,
+                source_order: None,
                 text,
                 bbox: BoundingBox {
                     x0,

@@ -1,4 +1,4 @@
-# PDF extraction candidate — issues #671 and #672
+# PDF extraction candidates — issues #671, #672 and #722
 
 ADR-0027 candidate decision, 2026-10-08. Production selection remains subject to
 the owner's held-out baseline evaluation. Python pypdf stays authoritative by default.
@@ -14,13 +14,13 @@ Upstream sources: [pdfium-render](https://github.com/ajrcarey/pdfium-render),
 
 | Candidate | Licence | Position fidelity / reading order | Speed and memory | Malformed input / packaging |
 |---|---|---|---|---|
-| pdfium-render + PDFium | wrapper MIT/Apache-2.0; engine BSD-3-Clause, bundled components separately reviewed | Native glyph boxes and fonts; still needs order/table reconstruction | Native engine; no measured local comparison; engine calls cannot be interrupted cooperatively | Requires process isolation for hard RSS/deadline and serialized engine calls. Docker/CI/Windows need separate pinned official platform binaries, checksums and notices. Not adopted; no binary downloaded. |
+| pdfium-render + PDFium (#722) | wrapper MIT/Apache-2.0; engine BSD-3-Clause, bundled permissive component notices retained | Native character boxes and fonts feed the existing order/table reconstruction | OS-supervised recycled processes; aggregate corpus measurement gates selection | Pinned non-V8 chromium/7881 release archives, five platform SHA-256 pins, verified download and wheel notices. Python remains live; acceptance in [pdfium-engine-v1.md](pdfium-engine-v1.md). |
 | lopdf + reconstruction | MIT | PDF operators, font maps and widths available; own glyph/layout interpretation required | Pure Rust; full object loading/decompression has a cost; not measured here | Parser/decompression is outside our Context accounting; requires instrumented loader or isolation. No native binary. |
 | pdf-extract | MIT | OutputDev callbacks expose text transforms; plain text alone loses layout | Pure Rust interpreter atop lopdf; not measured here | Inherits loader constraints and font dependencies; no native binary. |
 | hayro | MIT/Apache-2.0 | Renderer/interpreter; extraction needs a custom device; selection/search are outside stated scope | Pure Rust rendering work unnecessary for text-only ingestion; not measured here | Broader image/font graph and uninstrumented parsing; no native binary. |
 | Bounded in-core PDF interpreter (this draft) | repository MIT/Apache-2.0; flate2 MIT/Apache-2.0 | Source text matrices and supplied widths; heuristic boxes explicitly labelled; column/line reconstruction | Token, expansion and output allocations charged before growth; actual fixture measurements recorded separately | Strict supported subset, typed unsupported for unimplemented constructs; no vendor loader, native binary or OS-specific packaging. |
 
-GPL/AGPL/LGPL engines are excluded. The draft selects the bounded in-core
+GPL/AGPL/LGPL engines are excluded. The #671/#672 drafts select the bounded in-core
 interpreter as a measurable, fail-closed candidate. It does **not** claim equivalent
 coverage to a complete PDF renderer. A broader engine must retain the budget
 boundary before promotion; unsupported cases count against corpus coverage.
@@ -102,3 +102,23 @@ format coverage, script/font order and heuristic boxes may fail enterprise PDFs.
 Broader engine coverage/containment is tracked separately in #722. Owner chooses
 production budgets, evaluation thresholds and broader-engine strategy.
 Merge gate: hold until measured against the baseline evaluation; a human merges.
+
+
+## PDFium follow-up (#722)
+
+The candidate uses pinned PDFium through isolated process slots as described in
+[pdfium-engine-v1.md](pdfium-engine-v1.md). The interpreter remains an explicit
+baseline and Python remains live. The generated expanded report is
+[pdfium-generated-benchmark.json](pdfium-generated-benchmark.json); private-corpus
+numbers appear only as aggregate tables in the draft PR. Seven modern construct
+fixtures recover expected text with PDFium and pypdf; the interpreter recovers
+four, rejects object/xref streams and incremental updates, and reverses RTL.
+Existing layout/table gold remains green, including four non-table negatives.
+Scan/blank/mixed outcomes remain typed rather than promoted to empty success.
+These measurements do not establish production parity or approve cutover.
+
+[~] 2026-10-09: macOS native extraction fails closed before input because the
+required OS memory cap is unavailable on tested runners. Pinned macOS wheel
+artifact verification is separate from untrusted extraction. Residual risk:
+macOS developers must use Python until [#738](https://github.com/k-sandhu/lumen-copilot/issues/738)
+provides an owner-approved enforceable isolation mechanism.

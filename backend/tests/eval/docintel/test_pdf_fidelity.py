@@ -12,14 +12,15 @@ from tests.eval.docintel.metrics import Score, require_fidelity
 from tests.eval.docintel.pdf_fixtures import corpus
 
 
-def test_generated_layout_gold_passes_native_gate_and_baseline_loses_order() -> None:
+@pytest.mark.parametrize("arm", ["native-extraction", "pdfium-extraction"])
+def test_generated_layout_gold_passes_native_gate_and_baseline_loses_order(arm: str) -> None:
     pytest.importorskip("lumen_docintel")
     fixture = corpus()[0]
     payload = {
         "data": base64.b64encode(fixture.data).decode(),
         "mime": fixture.mime,
         "gold": asdict(fixture.gold),
-        "arm": "native-extraction",
+        "arm": arm,
     }
     native = _child(payload)
     require_fidelity(Score(**native["score"]), format_name="pdf")
