@@ -71,6 +71,7 @@ from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, Tran
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
+from app.ingestion.fingerprint import FingerprintError, build_ingestion_fingerprint
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
     VIDEO_MIME_TYPES,
@@ -391,6 +392,16 @@ async def _ingest_claimed_document(
         overlap=settings.ingestion_chunk_overlap,
     )
     if not chunks:
+        try:
+            fingerprint = build_ingestion_fingerprint(
+                data,
+                mime_type=mime_type,
+                chunk_size=settings.ingestion_chunk_size,
+                overlap=settings.ingestion_chunk_overlap,
+                embeddings=[],
+            )
+        except FingerprintError as exc:
+            raise IngestionError(f"could not fingerprint extraction: {exc}") from exc
         async with tenant_session_scope(tenant_id) as session:
             persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
                 document_id,
@@ -400,7 +411,7 @@ async def _ingest_claimed_document(
             )
             if persisted is not None:
                 await DocumentRepository(session, tenant_id).set_extraction(
-                    document_id, text=text, locations=parsed.locations
+                    document_id, text=text, locations=parsed.locations, fingerprint=fingerprint
                 )
         if persisted is None:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
@@ -451,6 +462,17 @@ async def _ingest_claimed_document(
             code="embedding_count_mismatch",
         )
 
+    try:
+        fingerprint = build_ingestion_fingerprint(
+            data,
+            mime_type=mime_type,
+            chunk_size=settings.ingestion_chunk_size,
+            overlap=settings.ingestion_chunk_overlap,
+            embeddings=embeddings,
+        )
+    except FingerprintError as exc:
+        raise IngestionError(f"could not fingerprint extraction: {exc}") from exc
+
     chunk_inputs = [
         ChunkInput(
             text=chunk.text,
@@ -472,7 +494,7 @@ async def _ingest_claimed_document(
             )
             if persisted is not None:
                 await DocumentRepository(session, tenant_id).set_extraction(
-                    document_id, text=text, locations=parsed.locations
+                    document_id, text=text, locations=parsed.locations, fingerprint=fingerprint
                 )
     except ValueError as exc:
         raise IngestionError(

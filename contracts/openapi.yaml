@@ -3581,6 +3581,25 @@ components:
         char_start: { type: integer, minimum: 0 }
         char_end: { type: integer, minimum: 0 }
 
+    IngestionFingerprint:
+      type: object
+      additionalProperties: false
+      required: [schema_version, source_sha256, mime_type, parser_version, parser_code_sha256, parser_dependencies, chunker_version, chunker_code_sha256, chunk_size, chunk_overlap]
+      description: Provenance of the retained extraction/chunk generation, not a readiness assertion. Legacy documents have no fingerprint.
+      properties:
+        schema_version: { type: integer, const: 1 }
+        source_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        mime_type: { type: string }
+        parser_version: { type: string }
+        parser_code_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        parser_dependencies: { type: object, additionalProperties: { type: string } }
+        chunker_version: { type: string }
+        chunker_code_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        chunk_size: { type: integer, minimum: 1 }
+        chunk_overlap: { type: integer, minimum: 0 }
+        embedding_model: { type: [string, "null"] }
+        embedding_dimension: { type: [integer, "null"], minimum: 1 }
+
     DocumentKind:
       type: string
       description: Processing/viewer family derived from the validated MIME type.
@@ -3605,6 +3624,11 @@ components:
           minimum: 0
           description: Player-relative media duration; null for ordinary documents.
         status: { $ref: "#/components/schemas/DocumentStatus" }
+        ingestion_fingerprint:
+          anyOf:
+            - { $ref: "#/components/schemas/IngestionFingerprint" }
+            - { type: "null" }
+          description: Optional provenance of the retained extraction generation, including actual embedding results when nonempty.
         source_locations:
           type: array
           description: Permissioned source-part map. Empty or absent means unknown until re-ingestion; never inferred for legacy documents.

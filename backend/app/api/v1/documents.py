@@ -63,6 +63,23 @@ class SourceLocationResponse(BaseModel):
     char_end: int = Field(ge=0)
 
 
+class IngestionFingerprintResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    schema_version: Literal[1]
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mime_type: str
+    parser_version: str
+    parser_code_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parser_dependencies: dict[str, str]
+    chunker_version: str
+    chunker_code_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chunk_size: int = Field(ge=1)
+    chunk_overlap: int = Field(ge=0)
+    embedding_model: str | None = None
+    embedding_dimension: int | None = Field(default=None, ge=1)
+
+
 class DocumentResponse(BaseModel):
     """``#/components/schemas/Document`` — the wire projection of a document."""
 
@@ -82,6 +99,7 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     source_locations: list[SourceLocationResponse] = Field(default_factory=list)
+    ingestion_fingerprint: IngestionFingerprintResponse | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -132,6 +150,11 @@ def _to_response(view: DocumentView) -> DocumentResponse:
             )
             for location in d.source_locations
         ],
+        ingestion_fingerprint=(
+            IngestionFingerprintResponse.model_validate(d.ingestion_fingerprint)
+            if d.ingestion_fingerprint is not None
+            else None
+        ),
     )
 
 
