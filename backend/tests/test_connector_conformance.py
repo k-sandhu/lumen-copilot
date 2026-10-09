@@ -2620,6 +2620,18 @@ def test_connector_cannot_read_independent_audit_database_settings(
     ), [str(v) for v in violations]
 
 
+def test_connector_cannot_read_test_password_hashing_policy(tmp_path: Path) -> None:
+    body = (
+        "from app.core.config import get_settings\n"
+        "def go():\n    return get_settings().test_fast_password_hashing\n"
+    )
+    violations = scan_package(_write_package(tmp_path, body))
+    assert any(
+        v.rule == "settings-seam" and "Lumen's password-hashing policy" in v.detail
+        for v in violations
+    ), [str(v) for v in violations]
+
+
 def test_settings_classification_is_complete() -> None:
     """Every ``Settings`` field is classified forbidden-infra XOR allowed-config.
 
