@@ -236,3 +236,22 @@ async def test_budget_ledger_rechecks_override_before_another_dispatch(sqlite_en
             taxonomy_version="1.0.0",
         )
     assert not await ledger.reserve(attempt(tenant), Decimal(".01"), Decimal(".05"))
+
+
+async def test_corrupted_source_never_enters_compute(sqlite_engine):
+    from app.tasks.classification import classify_document_async
+
+    tenant, document = await seed()
+    async with db_session.tenant_session_scope(tenant) as s:
+        await ClassificationRepository(s, tenant).set_policy(bounded_controls())
+
+    async def forbidden(*args):
+        raise AssertionError("corrupted source dispatched")
+
+    assert await classify_document_async(
+        tenant, document, settings=fixtures._settings(), compute=forbidden
+    )
+    async with db_session.tenant_session_scope(tenant) as s:
+        assert (await ClassificationRepository(s, tenant).get(document)).result[
+            "reason"
+        ] == "classification_invalid_configuration"

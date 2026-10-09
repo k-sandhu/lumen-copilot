@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 from uuid import UUID, uuid4
@@ -213,6 +214,8 @@ async def classify_document_async(
     if work is None:
         return False
     try:
+        if hashlib.sha256(work.input_json.encode()).hexdigest() != work.extraction_id:
+            raise ValueError("classification source checksum mismatch")
         result = await compute(work, controls, settings)
     except NativeUnavailableError:
         result = {
