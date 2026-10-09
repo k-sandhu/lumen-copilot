@@ -43,3 +43,8 @@ through RuntimeBudget and NativeExecutor; no configuration enables a parser.
 The optional compose override caps process concurrency without changing the
 general-worker default. Streaming sessions retain source input/work/output
 counters and the same deadline across windows.
+
+These seven settings are explicitly classified as allowed deployment configuration
+by the connector conformance seam (ADR-0019): they contain only non-secret CPU
+and resource limits, no infrastructure endpoints or credentials. The exhaustive
+settings guard and its unclassified-field negative test remain in force.
