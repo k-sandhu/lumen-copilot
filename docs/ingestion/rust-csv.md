@@ -47,3 +47,5 @@ passed, clippy/all-targets and Ruff passed. Wheel rebuilt/imported; 7 targeted
 CSV/detection Python tests passed, including incomplete cutover and old wheels.
 
 [x] 2026-10-09: strict mypy with backend configuration passed (9 source files).
+
+Final shared-helper refresh (2026-10-09): reused the binary-signature guard from the HTML branch; the four targeted CSV Rust tests passed after the refresh.
