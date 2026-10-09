@@ -43,6 +43,9 @@ back to the baseline, including the 1,000-row vertical merge. The combined Pytho
 regression/parity run has 49 passing nodes. Separate dependency #708 / PR #712
 replaces quadratic canonical overlap validation with a bounded rectangle sweep;
 its four regression/property tests pass.
+Joint Office checkout: all 32 core Rust tests and Clippy all targets pass offline.
+Dependency #713 / PR #714 pins the existing local bridge dependency; complete
+cargo-deny checks (advisories, bans, licenses, sources) pass without policy changes.
 
 [~] 2026-10-08: full offline backend suite deferred because available RAM was
 below 4000 MiB. Residual risk: unrelated regressions are not exhaustively checked.
