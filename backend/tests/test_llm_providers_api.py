@@ -40,12 +40,12 @@ from sqlalchemy.pool import StaticPool
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 from app.api.deps import get_db_session
 from app.auth import hash_password
-from app.db.base import Base
 from app.db.models import AuditEvent
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
 from app.services import llm_providers_service as svc
+from tests._db_helpers import copy_sqlite_schema
 
 _PASSWORD = "devpassword"
 
@@ -86,7 +86,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")

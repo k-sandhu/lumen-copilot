@@ -166,6 +166,7 @@ def test_disabled_sandbox_outside_local_still_boots_on_the_tag_default() -> None
 # cannot reproduce the defect).
 
 _ENV_BOOT_MINIMUM = {
+    "ENVIRONMENT": "local",
     "DATABASE_URL": "sqlite+aiosqlite://",
     "REDIS_URL": "redis://localhost:6379/0",
     "CELERY_BROKER_URL": "redis://localhost:6379/1",
