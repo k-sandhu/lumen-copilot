@@ -73,6 +73,19 @@ fn encoding_binary_and_limits() {
 }
 proptest! {
  #[test]
+ fn intact_source_code_unicode_and_line_regions(lines in prop::collection::vec("[a-zé東京🦀,{}]{1,20}",1..20)) {
+  let input=lines.join("\r\n");
+  let r=render(parse(input.as_bytes(),Limits::default(),Mode::Code("rust")).unwrap()).unwrap();
+  prop_assert_eq!(r.document.blocks.len(),1);
+  prop_assert_eq!(r.document.blocks[0].kind,BlockKind::Code);
+  prop_assert_eq!(&r.document.blocks[0].text,&lines.join("\n"));
+  let expected=format!("lines:1-{}",lines.len());
+  prop_assert_eq!(r.document.blocks[0].regions[0].name.as_deref(),Some(expected.as_str()));
+  prop_assert_eq!(r.document.blocks[0].regions[1].name.as_deref(),Some("language:rust"));
+  let span=&r.spans[0];
+  prop_assert_eq!(r.rendered_text.chars().skip(span.char_start).take(span.char_end-span.char_start).collect::<String>(),lines.join("\n"));
+ }
+ #[test]
  fn unicode_exact_offsets_and_line_provenance(lines in prop::collection::vec("[a-zé東京🦀]{1,20}",1..20)) {
   let source=lines.join("\r\n\r\n");
   let r=render(parse(source.as_bytes(),Limits::default(),Mode::Text).unwrap()).unwrap();
