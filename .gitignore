@@ -41,3 +41,9 @@ codex-*.md
 # RAG benchmark corpus — real files fetched by tests/eval/benchmark/download.py;
 # only the manifest + checksum pins are committed, never the binaries (#420)
 backend/tests/eval/benchmark/corpus/
+
+# Native build outputs
+target/
+*.pyd
+*.so
+*.dylib
