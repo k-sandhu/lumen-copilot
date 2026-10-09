@@ -1,0 +1,194 @@
+{
+  "source": "synthetic",
+  "release_calibration": null,
+  "reports": {
+    "rules": {
+      "metric_definition": "classification-eval-1",
+      "bins": 10,
+      "sample_count": 4,
+      "per_level_accuracy": [
+        0.25,
+        0.25,
+        0.25
+      ],
+      "per_level_denominators": [
+        4,
+        4,
+        4
+      ],
+      "per_level_ece": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "per_level_confidence_coverage": [
+        0.25,
+        0.25,
+        0.25
+      ],
+      "facet_f1": {
+        "contains_tables": 0.0,
+        "signed": 0.0
+      },
+      "facet_macro_f1": 0.0,
+      "facet_prediction_coverage": 0.0,
+      "path_ece": 0.0,
+      "path_confidence_coverage": 0.25,
+      "order_pairs": 4,
+      "order_path_flip_rate": 0,
+      "order_top_level_total_variation": 0.0,
+      "latency_mean_ms": 0.0,
+      "latency_p95_ms": 0.0,
+      "known_cost_usd": "0",
+      "unknown_cost_documents": 0,
+      "unknown_cost_attempts": 0,
+      "cost_usd": "0",
+      "corpus_sha256": "23b48976aecdaac20e83871d4b97c9dc849077892508b940281e34a0dc224798",
+      "recordings_sha256": "88f527fb444a1b1b738c8582ccdabc6451000ec83cac34e5601254c198344f9a",
+      "taxonomy_version": "1.0.0",
+      "mode": "rules",
+      "latency_source": "scripted_fixture",
+      "replay_elapsed_ms": 190.3007000219077,
+      "requested_models": [
+        "openai/gpt-6-luna-decisions"
+      ],
+      "reported_models": [],
+      "methods": [
+        "rules",
+        "unclassified"
+      ],
+      "prompt_versions": [
+        "classification-1.1"
+      ],
+      "rules_versions": [
+        "1"
+      ]
+    },
+    "decisions": {
+      "metric_definition": "classification-eval-1",
+      "bins": 10,
+      "sample_count": 4,
+      "per_level_accuracy": [
+        1,
+        1,
+        1
+      ],
+      "per_level_denominators": [
+        4,
+        4,
+        4
+      ],
+      "per_level_ece": [
+        0.16249999999999998,
+        0.07499999999999996,
+        0.07499999999999996
+      ],
+      "per_level_confidence_coverage": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "facet_f1": {
+        "contains_tables": 1.0,
+        "signed": 1.0
+      },
+      "facet_macro_f1": 1.0,
+      "facet_prediction_coverage": 1.0,
+      "path_ece": 0.29074999999999995,
+      "path_confidence_coverage": 1.0,
+      "order_pairs": 4,
+      "order_path_flip_rate": 0.25,
+      "order_top_level_total_variation": 0.15703125,
+      "latency_mean_ms": 45.0,
+      "latency_p95_ms": 45.0,
+      "known_cost_usd": "0.00011",
+      "unknown_cost_documents": 0,
+      "unknown_cost_attempts": 0,
+      "cost_usd": "0.00011",
+      "corpus_sha256": "23b48976aecdaac20e83871d4b97c9dc849077892508b940281e34a0dc224798",
+      "recordings_sha256": "88f527fb444a1b1b738c8582ccdabc6451000ec83cac34e5601254c198344f9a",
+      "taxonomy_version": "1.0.0",
+      "mode": "decisions",
+      "latency_source": "scripted_fixture",
+      "replay_elapsed_ms": 256.94779999321327,
+      "requested_models": [
+        "openai/gpt-6-luna-decisions"
+      ],
+      "reported_models": [
+        "synthetic-recording"
+      ],
+      "methods": [
+        "decisions"
+      ],
+      "prompt_versions": [
+        "classification-1.1"
+      ],
+      "rules_versions": [
+        "1"
+      ]
+    },
+    "structured_output": {
+      "metric_definition": "classification-eval-1",
+      "bins": 10,
+      "sample_count": 4,
+      "per_level_accuracy": [
+        1,
+        1,
+        1
+      ],
+      "per_level_denominators": [
+        4,
+        4,
+        4
+      ],
+      "per_level_ece": [
+        0.275,
+        0.1875,
+        0.1875
+      ],
+      "per_level_confidence_coverage": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "facet_f1": {
+        "contains_tables": 1.0,
+        "signed": 1.0
+      },
+      "facet_macro_f1": 1.0,
+      "facet_prediction_coverage": 1.0,
+      "path_ece": 0.52109375,
+      "path_confidence_coverage": 1.0,
+      "order_pairs": 4,
+      "order_path_flip_rate": 0,
+      "order_top_level_total_variation": 0.0,
+      "latency_mean_ms": 90.0,
+      "latency_p95_ms": 90.0,
+      "known_cost_usd": "0.00011",
+      "unknown_cost_documents": 4,
+      "unknown_cost_attempts": 11,
+      "cost_usd": null,
+      "corpus_sha256": "23b48976aecdaac20e83871d4b97c9dc849077892508b940281e34a0dc224798",
+      "recordings_sha256": "88f527fb444a1b1b738c8582ccdabc6451000ec83cac34e5601254c198344f9a",
+      "taxonomy_version": "1.0.0",
+      "mode": "structured_output",
+      "latency_source": "scripted_fixture",
+      "replay_elapsed_ms": 222.20239997841418,
+      "requested_models": [
+        "openai/gpt-6-luna-decisions"
+      ],
+      "reported_models": [
+        "synthetic-recording"
+      ],
+      "methods": [
+        "structured_output"
+      ],
+      "prompt_versions": [
+        "classification-1.1"
+      ],
+      "rules_versions": [
+        "1"
+      ]
+    }
+  }
+}

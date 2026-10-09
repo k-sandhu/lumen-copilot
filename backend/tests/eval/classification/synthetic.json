@@ -1,0 +1,1924 @@
+{
+  "source": "synthetic",
+  "recording_origin": "scripted fixtures, not provider observations",
+  "taxonomy_version": "1.0.0",
+  "tokenizer_origin": "synthetic WordLevel diagnostic only",
+  "cases": [
+    {
+      "id": "invoice",
+      "gold_path": "financial/transactions/invoice",
+      "gold_facets": {
+        "contains_tables": true,
+        "signed": false
+      },
+      "split": "held_out",
+      "features": {
+        "excerpts": [
+          {
+            "block_id": "b0",
+            "char_end": 105,
+            "char_start": 0,
+            "regions": [],
+            "role": "representative",
+            "text": "Synthetic invoice INV-001. Supplier: Example Co. Item A quantity 2 unit price 10 total 20. Amount due 20."
+          },
+          {
+            "block_id": "t1",
+            "char_end": 168,
+            "char_start": 107,
+            "regions": [],
+            "role": "table_headers",
+            "text": "Item | Quantity | Unit price | Amount\nExample A | 2 | 10 | 20"
+          }
+        ],
+        "extraction_id": null,
+        "form_like": false,
+        "format": "text",
+        "heading_profile": {},
+        "language": null,
+        "part_counts": {},
+        "rule_ids": [],
+        "rule_path": null,
+        "rules_version": "1",
+        "scanned_ratio": null,
+        "schema_version": 1,
+        "signatures": [],
+        "source_sha256": null,
+        "table_density": 0.5,
+        "taxonomy_version": "1.0.0",
+        "token_count": 41
+      },
+      "recordings": {
+        "decisions": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial",
+                    "probabilities": {
+                      "legal": 0.006249999999999999,
+                      "financial": 0.9,
+                      "tax": 0.006249999999999999,
+                      "regulatory": 0.006249999999999999,
+                      "environmental": 0.006249999999999999,
+                      "safety": 0.006249999999999999,
+                      "engineering": 0.006249999999999999,
+                      "academic": 0.006249999999999999,
+                      "medical": 0.006249999999999999,
+                      "government": 0.006249999999999999,
+                      "hr": 0.006249999999999999,
+                      "marketing": 0.006249999999999999,
+                      "correspondence": 0.006249999999999999,
+                      "forms": 0.006249999999999999,
+                      "data": 0.006249999999999999,
+                      "presentations": 0.006249999999999999,
+                      "other": 0.006249999999999999
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions",
+                    "probabilities": {
+                      "financial/transactions": 0.9,
+                      "financial/statements": 0.033333333333333326,
+                      "financial/planning": 0.033333333333333326,
+                      "financial/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions/invoice",
+                    "probabilities": {
+                      "financial/transactions/invoice": 0.9,
+                      "financial/transactions/receipt": 0.033333333333333326,
+                      "financial/transactions/purchase_order": 0.033333333333333326,
+                      "financial/transactions/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  },
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.8,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial",
+                    "probabilities": {
+                      "legal": 0.006249999999999999,
+                      "financial": 0.9,
+                      "tax": 0.006249999999999999,
+                      "regulatory": 0.006249999999999999,
+                      "environmental": 0.006249999999999999,
+                      "safety": 0.006249999999999999,
+                      "engineering": 0.006249999999999999,
+                      "academic": 0.006249999999999999,
+                      "medical": 0.006249999999999999,
+                      "government": 0.006249999999999999,
+                      "hr": 0.006249999999999999,
+                      "marketing": 0.006249999999999999,
+                      "correspondence": 0.006249999999999999,
+                      "forms": 0.006249999999999999,
+                      "data": 0.006249999999999999,
+                      "presentations": 0.006249999999999999,
+                      "other": 0.006249999999999999
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions",
+                    "probabilities": {
+                      "financial/transactions": 0.9,
+                      "financial/statements": 0.033333333333333326,
+                      "financial/planning": 0.033333333333333326,
+                      "financial/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions/invoice",
+                    "probabilities": {
+                      "financial/transactions/invoice": 0.9,
+                      "financial/transactions/receipt": 0.033333333333333326,
+                      "financial/transactions/purchase_order": 0.033333333333333326,
+                      "financial/transactions/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  },
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.8,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          }
+        },
+        "structured_output": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial",
+                    "probabilities": {
+                      "legal": 0.015625,
+                      "financial": 0.75,
+                      "tax": 0.015625,
+                      "regulatory": 0.015625,
+                      "environmental": 0.015625,
+                      "safety": 0.015625,
+                      "engineering": 0.015625,
+                      "academic": 0.015625,
+                      "medical": 0.015625,
+                      "government": 0.015625,
+                      "hr": 0.015625,
+                      "marketing": 0.015625,
+                      "correspondence": 0.015625,
+                      "forms": 0.015625,
+                      "data": 0.015625,
+                      "presentations": 0.015625,
+                      "other": 0.015625
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions",
+                    "probabilities": {
+                      "financial/transactions": 0.75,
+                      "financial/statements": 0.08333333333333333,
+                      "financial/planning": 0.08333333333333333,
+                      "financial/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions/invoice",
+                    "probabilities": {
+                      "financial/transactions/invoice": 0.75,
+                      "financial/transactions/receipt": 0.08333333333333333,
+                      "financial/transactions/purchase_order": 0.08333333333333333,
+                      "financial/transactions/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  },
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.8
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.1
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial",
+                    "probabilities": {
+                      "legal": 0.015625,
+                      "financial": 0.75,
+                      "tax": 0.015625,
+                      "regulatory": 0.015625,
+                      "environmental": 0.015625,
+                      "safety": 0.015625,
+                      "engineering": 0.015625,
+                      "academic": 0.015625,
+                      "medical": 0.015625,
+                      "government": 0.015625,
+                      "hr": 0.015625,
+                      "marketing": 0.015625,
+                      "correspondence": 0.015625,
+                      "forms": 0.015625,
+                      "data": 0.015625,
+                      "presentations": 0.015625,
+                      "other": 0.015625
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions",
+                    "probabilities": {
+                      "financial/transactions": 0.75,
+                      "financial/statements": 0.08333333333333333,
+                      "financial/planning": 0.08333333333333333,
+                      "financial/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/transactions/invoice",
+                    "probabilities": {
+                      "financial/transactions/invoice": 0.75,
+                      "financial/transactions/receipt": 0.08333333333333333,
+                      "financial/transactions/purchase_order": 0.08333333333333333,
+                      "financial/transactions/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  },
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.8
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.1
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          }
+        }
+      }
+    },
+    {
+      "id": "safety",
+      "gold_path": "safety/hazards/safety_data_sheet",
+      "gold_facets": {
+        "signed": false,
+        "contains_tables": false
+      },
+      "split": "held_out",
+      "features": {
+        "excerpts": [
+          {
+            "block_id": "b0",
+            "char_end": 136,
+            "char_start": 0,
+            "regions": [],
+            "role": "representative",
+            "text": "Synthetic Safety Data Sheet. Hazard Identification. First-Aid Measures. Accidental Release Measures. Example substance for testing only."
+          }
+        ],
+        "extraction_id": null,
+        "form_like": false,
+        "format": "text",
+        "heading_profile": {},
+        "language": null,
+        "part_counts": {},
+        "rule_ids": [
+          "safety-sheet-heading-v1"
+        ],
+        "rule_path": "safety/hazards/safety_data_sheet",
+        "rules_version": "1",
+        "scanned_ratio": null,
+        "schema_version": 1,
+        "signatures": [
+          "accidental release measures",
+          "first-aid measures",
+          "hazard identification",
+          "safety data sheet"
+        ],
+        "source_sha256": null,
+        "table_density": 0.0,
+        "taxonomy_version": "1.0.0",
+        "token_count": 23
+      },
+      "recordings": {
+        "decisions": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety",
+                    "probabilities": {
+                      "legal": 0.006249999999999999,
+                      "financial": 0.006249999999999999,
+                      "tax": 0.006249999999999999,
+                      "regulatory": 0.006249999999999999,
+                      "environmental": 0.006249999999999999,
+                      "safety": 0.9,
+                      "engineering": 0.006249999999999999,
+                      "academic": 0.006249999999999999,
+                      "medical": 0.006249999999999999,
+                      "government": 0.006249999999999999,
+                      "hr": 0.006249999999999999,
+                      "marketing": 0.006249999999999999,
+                      "correspondence": 0.006249999999999999,
+                      "forms": 0.006249999999999999,
+                      "data": 0.006249999999999999,
+                      "presentations": 0.006249999999999999,
+                      "other": 0.006249999999999999
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards",
+                    "probabilities": {
+                      "safety/hazards": 0.9,
+                      "safety/incidents": 0.033333333333333326,
+                      "safety/procedures": 0.033333333333333326,
+                      "safety/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards/safety_data_sheet",
+                    "probabilities": {
+                      "safety/hazards/safety_data_sheet": 0.9,
+                      "safety/hazards/risk_assessment": 0.033333333333333326,
+                      "safety/hazards/job_safety_analysis": 0.033333333333333326,
+                      "safety/hazards/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  },
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety",
+                    "probabilities": {
+                      "legal": 0.006249999999999999,
+                      "financial": 0.006249999999999999,
+                      "tax": 0.006249999999999999,
+                      "regulatory": 0.006249999999999999,
+                      "environmental": 0.006249999999999999,
+                      "safety": 0.9,
+                      "engineering": 0.006249999999999999,
+                      "academic": 0.006249999999999999,
+                      "medical": 0.006249999999999999,
+                      "government": 0.006249999999999999,
+                      "hr": 0.006249999999999999,
+                      "marketing": 0.006249999999999999,
+                      "correspondence": 0.006249999999999999,
+                      "forms": 0.006249999999999999,
+                      "data": 0.006249999999999999,
+                      "presentations": 0.006249999999999999,
+                      "other": 0.006249999999999999
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards",
+                    "probabilities": {
+                      "safety/hazards": 0.9,
+                      "safety/incidents": 0.033333333333333326,
+                      "safety/procedures": 0.033333333333333326,
+                      "safety/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards/safety_data_sheet",
+                    "probabilities": {
+                      "safety/hazards/safety_data_sheet": 0.9,
+                      "safety/hazards/risk_assessment": 0.033333333333333326,
+                      "safety/hazards/job_safety_analysis": 0.033333333333333326,
+                      "safety/hazards/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  },
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          }
+        },
+        "structured_output": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety",
+                    "probabilities": {
+                      "legal": 0.015625,
+                      "financial": 0.015625,
+                      "tax": 0.015625,
+                      "regulatory": 0.015625,
+                      "environmental": 0.015625,
+                      "safety": 0.75,
+                      "engineering": 0.015625,
+                      "academic": 0.015625,
+                      "medical": 0.015625,
+                      "government": 0.015625,
+                      "hr": 0.015625,
+                      "marketing": 0.015625,
+                      "correspondence": 0.015625,
+                      "forms": 0.015625,
+                      "data": 0.015625,
+                      "presentations": 0.015625,
+                      "other": 0.015625
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards",
+                    "probabilities": {
+                      "safety/hazards": 0.75,
+                      "safety/incidents": 0.08333333333333333,
+                      "safety/procedures": 0.08333333333333333,
+                      "safety/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards/safety_data_sheet",
+                    "probabilities": {
+                      "safety/hazards/safety_data_sheet": 0.75,
+                      "safety/hazards/risk_assessment": 0.08333333333333333,
+                      "safety/hazards/job_safety_analysis": 0.08333333333333333,
+                      "safety/hazards/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  },
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.1
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.1
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety",
+                    "probabilities": {
+                      "legal": 0.015625,
+                      "financial": 0.015625,
+                      "tax": 0.015625,
+                      "regulatory": 0.015625,
+                      "environmental": 0.015625,
+                      "safety": 0.75,
+                      "engineering": 0.015625,
+                      "academic": 0.015625,
+                      "medical": 0.015625,
+                      "government": 0.015625,
+                      "hr": 0.015625,
+                      "marketing": 0.015625,
+                      "correspondence": 0.015625,
+                      "forms": 0.015625,
+                      "data": 0.015625,
+                      "presentations": 0.015625,
+                      "other": 0.015625
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards",
+                    "probabilities": {
+                      "safety/hazards": 0.75,
+                      "safety/incidents": 0.08333333333333333,
+                      "safety/procedures": 0.08333333333333333,
+                      "safety/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "safety/hazards/safety_data_sheet",
+                    "probabilities": {
+                      "safety/hazards/safety_data_sheet": 0.75,
+                      "safety/hazards/risk_assessment": 0.08333333333333333,
+                      "safety/hazards/job_safety_analysis": 0.08333333333333333,
+                      "safety/hazards/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  },
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.1
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.1
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          }
+        }
+      }
+    },
+    {
+      "id": "contract",
+      "gold_path": "legal/agreements/contract",
+      "gold_facets": {
+        "signed": true,
+        "contains_tables": false
+      },
+      "split": "held_out",
+      "features": {
+        "excerpts": [
+          {
+            "block_id": "b0",
+            "char_end": 139,
+            "char_start": 0,
+            "regions": [],
+            "role": "signature",
+            "text": "Synthetic Service Contract. Example parties agree to deliver services for a fixed fee. Signed by Example Person. Signature: synthetic mark."
+          }
+        ],
+        "extraction_id": null,
+        "form_like": false,
+        "format": "text",
+        "heading_profile": {},
+        "language": null,
+        "part_counts": {},
+        "rule_ids": [],
+        "rule_path": null,
+        "rules_version": "1",
+        "scanned_ratio": null,
+        "schema_version": 1,
+        "signatures": [],
+        "source_sha256": null,
+        "table_density": 0.0,
+        "taxonomy_version": "1.0.0",
+        "token_count": 25
+      },
+      "recordings": {
+        "decisions": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal",
+                    "probabilities": {
+                      "legal": 0.9,
+                      "financial": 0.006249999999999999,
+                      "tax": 0.006249999999999999,
+                      "regulatory": 0.006249999999999999,
+                      "environmental": 0.006249999999999999,
+                      "safety": 0.006249999999999999,
+                      "engineering": 0.006249999999999999,
+                      "academic": 0.006249999999999999,
+                      "medical": 0.006249999999999999,
+                      "government": 0.006249999999999999,
+                      "hr": 0.006249999999999999,
+                      "marketing": 0.006249999999999999,
+                      "correspondence": 0.006249999999999999,
+                      "forms": 0.006249999999999999,
+                      "data": 0.006249999999999999,
+                      "presentations": 0.006249999999999999,
+                      "other": 0.006249999999999999
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements",
+                    "probabilities": {
+                      "legal/agreements": 0.9,
+                      "legal/litigation": 0.033333333333333326,
+                      "legal/corporate": 0.033333333333333326,
+                      "legal/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements/contract",
+                    "probabilities": {
+                      "legal/agreements/contract": 0.9,
+                      "legal/agreements/nda": 0.033333333333333326,
+                      "legal/agreements/lease": 0.033333333333333326,
+                      "legal/agreements/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  },
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.8,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal",
+                    "probabilities": {
+                      "legal": 0.9,
+                      "financial": 0.006249999999999999,
+                      "tax": 0.006249999999999999,
+                      "regulatory": 0.006249999999999999,
+                      "environmental": 0.006249999999999999,
+                      "safety": 0.006249999999999999,
+                      "engineering": 0.006249999999999999,
+                      "academic": 0.006249999999999999,
+                      "medical": 0.006249999999999999,
+                      "government": 0.006249999999999999,
+                      "hr": 0.006249999999999999,
+                      "marketing": 0.006249999999999999,
+                      "correspondence": 0.006249999999999999,
+                      "forms": 0.006249999999999999,
+                      "data": 0.006249999999999999,
+                      "presentations": 0.006249999999999999,
+                      "other": 0.006249999999999999
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements",
+                    "probabilities": {
+                      "legal/agreements": 0.9,
+                      "legal/litigation": 0.033333333333333326,
+                      "legal/corporate": 0.033333333333333326,
+                      "legal/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements/contract",
+                    "probabilities": {
+                      "legal/agreements/contract": 0.9,
+                      "legal/agreements/nda": 0.033333333333333326,
+                      "legal/agreements/lease": 0.033333333333333326,
+                      "legal/agreements/other": 0.033333333333333326
+                    },
+                    "confidence": 0.9,
+                    "type": "choice"
+                  },
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.8,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          }
+        },
+        "structured_output": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal",
+                    "probabilities": {
+                      "legal": 0.75,
+                      "financial": 0.015625,
+                      "tax": 0.015625,
+                      "regulatory": 0.015625,
+                      "environmental": 0.015625,
+                      "safety": 0.015625,
+                      "engineering": 0.015625,
+                      "academic": 0.015625,
+                      "medical": 0.015625,
+                      "government": 0.015625,
+                      "hr": 0.015625,
+                      "marketing": 0.015625,
+                      "correspondence": 0.015625,
+                      "forms": 0.015625,
+                      "data": 0.015625,
+                      "presentations": 0.015625,
+                      "other": 0.015625
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements",
+                    "probabilities": {
+                      "legal/agreements": 0.75,
+                      "legal/litigation": 0.08333333333333333,
+                      "legal/corporate": 0.08333333333333333,
+                      "legal/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements/contract",
+                    "probabilities": {
+                      "legal/agreements/contract": 0.75,
+                      "legal/agreements/nda": 0.08333333333333333,
+                      "legal/agreements/lease": 0.08333333333333333,
+                      "legal/agreements/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  },
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.1
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.8
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal",
+                    "probabilities": {
+                      "legal": 0.75,
+                      "financial": 0.015625,
+                      "tax": 0.015625,
+                      "regulatory": 0.015625,
+                      "environmental": 0.015625,
+                      "safety": 0.015625,
+                      "engineering": 0.015625,
+                      "academic": 0.015625,
+                      "medical": 0.015625,
+                      "government": 0.015625,
+                      "hr": 0.015625,
+                      "marketing": 0.015625,
+                      "correspondence": 0.015625,
+                      "forms": 0.015625,
+                      "data": 0.015625,
+                      "presentations": 0.015625,
+                      "other": 0.015625
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements",
+                    "probabilities": {
+                      "legal/agreements": 0.75,
+                      "legal/litigation": 0.08333333333333333,
+                      "legal/corporate": 0.08333333333333333,
+                      "legal/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "legal/agreements/contract",
+                    "probabilities": {
+                      "legal/agreements/contract": 0.75,
+                      "legal/agreements/nda": 0.08333333333333333,
+                      "legal/agreements/lease": 0.08333333333333333,
+                      "legal/agreements/other": 0.08333333333333333
+                    },
+                    "confidence": 0.75
+                  },
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.1
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.8
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          }
+        }
+      }
+    },
+    {
+      "id": "ambiguous",
+      "gold_path": "other/other/other",
+      "gold_facets": {
+        "signed": false,
+        "contains_tables": false
+      },
+      "split": "held_out",
+      "features": {
+        "excerpts": [
+          {
+            "block_id": "b0",
+            "char_end": 112,
+            "char_start": 0,
+            "regions": [],
+            "role": "representative",
+            "text": "Synthetic mixed notes: planning discussion and several unrelated reminders. No stable business purpose or title."
+          }
+        ],
+        "extraction_id": null,
+        "form_like": false,
+        "format": "text",
+        "heading_profile": {},
+        "language": null,
+        "part_counts": {},
+        "rule_ids": [],
+        "rule_path": null,
+        "rules_version": "1",
+        "scanned_ratio": null,
+        "schema_version": 1,
+        "signatures": [],
+        "source_sha256": null,
+        "table_density": 0.0,
+        "taxonomy_version": "1.0.0",
+        "token_count": 18
+      },
+      "recordings": {
+        "decisions": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "other",
+                    "probabilities": {
+                      "legal": 0.021875,
+                      "financial": 0.021875,
+                      "tax": 0.021875,
+                      "regulatory": 0.021875,
+                      "environmental": 0.021875,
+                      "safety": 0.021875,
+                      "engineering": 0.021875,
+                      "academic": 0.021875,
+                      "medical": 0.021875,
+                      "government": 0.021875,
+                      "hr": 0.021875,
+                      "marketing": 0.021875,
+                      "correspondence": 0.021875,
+                      "forms": 0.021875,
+                      "data": 0.021875,
+                      "presentations": 0.021875,
+                      "other": 0.65
+                    },
+                    "confidence": 0.65,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial",
+                    "probabilities": {
+                      "legal": 0.021875,
+                      "financial": 0.65,
+                      "tax": 0.021875,
+                      "regulatory": 0.021875,
+                      "environmental": 0.021875,
+                      "safety": 0.021875,
+                      "engineering": 0.021875,
+                      "academic": 0.021875,
+                      "medical": 0.021875,
+                      "government": 0.021875,
+                      "hr": 0.021875,
+                      "marketing": 0.021875,
+                      "correspondence": 0.021875,
+                      "forms": 0.021875,
+                      "data": 0.021875,
+                      "presentations": 0.021875,
+                      "other": 0.021875
+                    },
+                    "confidence": 0.65,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "financial/other",
+                    "probabilities": {
+                      "financial/transactions": 0.11666666666666665,
+                      "financial/statements": 0.11666666666666665,
+                      "financial/planning": 0.11666666666666665,
+                      "financial/other": 0.65
+                    },
+                    "confidence": 0.65,
+                    "type": "choice"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "scanned": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_tables": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "contains_personal_data": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "draft": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "signed": {
+                    "noul": 0.1,
+                    "type": "noul"
+                  },
+                  "multi_document_bundle": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "contains_images": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "redacted": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "handwritten": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  },
+                  "multilingual": {
+                    "noul": 0.5,
+                    "type": "noul"
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 45.0
+          }
+        },
+        "structured_output": {
+          "fixed": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "other",
+                    "probabilities": {
+                      "legal": 0.021875,
+                      "financial": 0.021875,
+                      "tax": 0.021875,
+                      "regulatory": 0.021875,
+                      "environmental": 0.021875,
+                      "safety": 0.021875,
+                      "engineering": 0.021875,
+                      "academic": 0.021875,
+                      "medical": 0.021875,
+                      "government": 0.021875,
+                      "hr": 0.021875,
+                      "marketing": 0.021875,
+                      "correspondence": 0.021875,
+                      "forms": 0.021875,
+                      "data": 0.021875,
+                      "presentations": 0.021875,
+                      "other": 0.65
+                    },
+                    "confidence": 0.65
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.1
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.1
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          },
+          "seeded_shuffle": {
+            "responses": [
+              {
+                "answers": {
+                  "document_type": {
+                    "choice": "other",
+                    "probabilities": {
+                      "legal": 0.021875,
+                      "financial": 0.021875,
+                      "tax": 0.021875,
+                      "regulatory": 0.021875,
+                      "environmental": 0.021875,
+                      "safety": 0.021875,
+                      "engineering": 0.021875,
+                      "academic": 0.021875,
+                      "medical": 0.021875,
+                      "government": 0.021875,
+                      "hr": 0.021875,
+                      "marketing": 0.021875,
+                      "correspondence": 0.021875,
+                      "forms": 0.021875,
+                      "data": 0.021875,
+                      "presentations": 0.021875,
+                      "other": 0.65
+                    },
+                    "confidence": 0.65
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              },
+              {
+                "answers": {
+                  "scanned": {
+                    "probability": 0.5
+                  },
+                  "contains_tables": {
+                    "probability": 0.1
+                  },
+                  "contains_personal_data": {
+                    "probability": 0.5
+                  },
+                  "draft": {
+                    "probability": 0.5
+                  },
+                  "signed": {
+                    "probability": 0.1
+                  },
+                  "multi_document_bundle": {
+                    "probability": 0.5
+                  },
+                  "contains_images": {
+                    "probability": 0.5
+                  },
+                  "redacted": {
+                    "probability": 0.5
+                  },
+                  "handwritten": {
+                    "probability": 0.5
+                  },
+                  "multilingual": {
+                    "probability": 0.5
+                  }
+                },
+                "model": "synthetic-recording",
+                "usage": {
+                  "input_tokens": 40,
+                  "output_tokens": 20,
+                  "cost": 1e-05
+                }
+              }
+            ],
+            "simulated_latency_ms": 90.0
+          }
+        }
+      }
+    }
+  ]
+}
