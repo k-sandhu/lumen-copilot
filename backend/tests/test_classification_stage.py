@@ -123,3 +123,43 @@ async def test_deterministic_rule_never_calls_model():
     assert result["method"] == "rules"
     assert result["facets"]["signed"]["value"] is None
     assert gateway.calls == []
+
+
+async def test_singleton_other_path_uses_only_root_choice_and_one_facet_request():
+    class StrictGateway:
+        calls = []
+
+        async def decide(self, state, questions, *, policy):
+            self.calls.append(questions)
+            answers = {}
+            for question in questions:
+                if isinstance(question, ChoiceQuestion):
+                    if len(question.options) < 2:
+                        raise DecisionError("decision_invalid_input")
+                    answers[question.name] = ChoiceAnswer(
+                        "other", {o.value: float(o.value == "other") for o in question.options}, 0.9
+                    )
+                else:
+                    answers[question.name] = PredicateAnswer(0.5)
+            return DecisionResult(
+                answers,
+                DecisionUsage(TokenUsage(10, 2, 12), Decimal(".001")),
+                "fixture",
+                "decisions",
+                (),
+                Decimal(".001"),
+            )
+
+    tenant = uuid4()
+    gateway = StrictGateway()
+    result = await classify(
+        evidence(), load_taxonomy(), gateway, tenant_id=tenant, policy=policy(tenant)
+    )
+    assert result["status"] == "classified"
+    assert result["path"] == "other/other/other"
+    assert len(gateway.calls) == 2
+    assert len(gateway.calls[1]) == len(load_taxonomy()["facets"])
+    assert result["levels"][1]["probabilities"] == {"other/other": 1.0}
+    assert result["levels"][2]["probabilities"] == {"other/other/other": 1.0}
+    assert result["total_cost_usd"] == "0.002"
+    assert result["facets"]["signed"]["value"] is None

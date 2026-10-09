@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+PROMPT_VERSION = "classification-1.1"
+
 _PATH = re.compile(r"[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*){0,3}")
 _FACET = re.compile(r"[a-z][a-z0-9_]*")
 
