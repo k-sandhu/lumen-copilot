@@ -35,5 +35,6 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 | [0022](0022-group-access-model.md) | Group access model — group principals, and who a source is visible to (supersedes 0021 §5) | Accepted |
 | [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2 and claim-linked answers | Proposed |
 | [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
+| [0028](0028-adopt-saas-backbone-as-the-platform-layer.md) | Adopt SaaS Backbone as the platform layer, with Rust in the backbone's data plane (supersedes parts of 0003, 0004, 0005, 0010, 0015, 0022) | Proposed |
 
 > The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.

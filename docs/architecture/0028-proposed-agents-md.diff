@@ -1,0 +1,79 @@
+Review-only proposal for AGENTS.md (ADR-0028, #716). AGENTS.md section 5 requires owner approval.
+Once approved, apply on the backbone-migration branch in package F with: git apply docs/architecture/0028-proposed-agents-md.diff
+It reaches main with the cutover PR; applying it to main earlier would describe a stack main does not run.
+
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -28,12 +28,13 @@
+ When these still don't resolve it, **stop and ask** rather than invent product behavior. (See precedence, §4.)
+ 
+ ## 3. Stack / architecture context
+-Decided in [ADR-0003](docs/architecture/0003-application-stack.md) (closes OD-2). **Monorepo, cleanly split, OSS-only, LLM-agnostic:**
+-- **`backend/`** — FastAPI (Python 3.12, async), SQLAlchemy 2.0 async + Alembic, Celery workers. *The only backend.*
++Decided in [ADR-0003](docs/architecture/0003-application-stack.md) (closes OD-2); the platform layer is SaaS Backbone per [ADR-0028](docs/architecture/0028-adopt-saas-backbone-as-the-platform-layer.md). **Monorepo, cleanly split, OSS-only, LLM-agnostic:**
++- **`backend/`** — a SaaS Backbone product: `backbone.kernel.Backbone` composes the backbone's platform modules with Copilot's product modules in `backend/app/main.py` (`BACKBONE_APP=app.main:bb`); FastAPI via `backbone.web`; SQLAlchemy 2.0 async under the backbone unit of work, with per-module Alembic branches. One product image, built `FROM` the pinned backbone runtime, runs the API, the worker (with outbox relay), the scheduler and migrations. *The only backend.*
+ - **`frontend/`** — React + Vite SPA (TypeScript, static). *No second server.*
+ - **`contracts/`** — OpenAPI + WebSocket envelopes; the source of truth for the FE/BE wire.
+-- **Data:** PostgreSQL 16 + `pgvector` (relational **and** vectors), Redis (cache + Celery broker + WebSocket pub/sub backplane), MinIO (S3-compatible object storage).
+-- **LLM:** every model call goes through the LiteLLM gateway (`backend/app/llm/`), OpenRouter first, swappable. Streaming over **WebSocket**; request/response stays REST.
++- **Data:** PostgreSQL (tenant RLS under a non-owner app role), OpenFGA (authorization), OpenSearch (the single retrieval store, as a backbone search engine — [ADR-0010](docs/architecture/0010-dedicated-text-search-engine.md), ADR-0028 §4), Valkey (cache and rate limits only), S3-compatible object storage through backbone `files`.
++- **Rust:** the backbone's data plane — `bb-gateway` (realtime WebSocket/SSE), `bb-worker` (native jobs), `backbone_native` (extraction, the document core, chunking, redaction). Copilot ships no Cargo workspace and no PyO3 module (ADR-0028 §5).
++- **LLM:** every model call goes through the backbone `llm` port, OpenRouter first, swappable. Streaming over **WebSocket/SSE** through `bb-gateway`; request/response stays REST.
+ 
+ Per-tier coding contracts live next to the code: [`backend/AGENTS.md`](backend/AGENTS.md), [`frontend/AGENTS.md`](frontend/AGENTS.md), [`contracts/AGENTS.md`](contracts/AGENTS.md) — they elaborate this contract for their area but never contradict it. Cross-tier features follow [ADR-0006](docs/architecture/0006-contract-first-parallel-implementation.md) (contract-first, then parallel build). Local run: one `docker compose up` ([ADR-0005](docs/architecture/0005-local-run-and-developer-workflow.md)).
+ 
+@@ -57,22 +58,27 @@
+ 
+ **The one module that owns each concern** (nobody else may talk to it):
+ 
++Platform concerns are owned by SaaS Backbone modules ([ADR-0028](docs/architecture/0028-adopt-saas-backbone-as-the-platform-layer.md)). Product modules call backbone **ports** and never import backbone models, services or adapters, or a peer module's internals. Copilot keeps no copy of a backbone capability as a fallback; a missing capability is built upstream or its surface stays disabled.
++
+ | Concern | Single owning module |
+ |---|---|
+-| LLM providers (chat, stream, embeddings, tools) | `backend/app/llm/` (LiteLLM gateway) |
+-| Vector + lexical retrieval | `backend/app/retrieval/` |
+-| Dedicated text-search index (OpenSearch — the single retrieval store, [ADR-0010](docs/architecture/0010-dedicated-text-search-engine.md)) | `backend/app/search/` |
+-| Relational database | `backend/app/db/` (models + repositories) |
+-| Object storage (uploads, artifacts) | `backend/app/storage/` (S3/MinIO) |
+-| Background jobs | `backend/app/tasks/` (Celery) |
+-| Identity & tenant ("who is asking") | `backend/app/auth/` |
++| LLM providers (chat, stream, embeddings, tools) | backbone `llm` (`LLMProvider`) |
++| Permissioned passage retrieval (orchestration, hydration, admission) | `backend/app/retrieval/` — the only caller of backbone `Searcher` for document passages |
++| Text-search index (OpenSearch — the single retrieval store, [ADR-0010](docs/architecture/0010-dedicated-text-search-engine.md)) | backbone `search`, engine `opensearch` |
++| Relational database | backbone `kernel` (unit of work, RLS, migrations); product models and repositories inside each product module |
++| Object storage (uploads, artifacts) | backbone `files` (`FileAccess`) |
++| Background jobs and schedules | backbone `jobs` / `events` (Postgres queue + outbox) |
++| Identity & tenant ("who is asking") | backbone `identity` + `tenancy` |
++| Authorization | backbone `authz` (OpenFGA) + product `.fga` fragments |
++| Audit | backbone `audit` (`uow.audit`, `AuditLog`) |
+ | External source connectors | `backend/app/connectors/<name>/` |
+-| Realtime transport (WS + Redis backplane) | `backend/app/realtime/` |
+-| Config & secrets | `backend/app/core/config.py` (`pydantic-settings`) |
++| Realtime transport | backbone `realtime` + `bb-gateway` |
++| Config & secrets | backbone settings (`ModuleSettings`) and `secrets` |
++| Native (Rust) code | the backbone Rust workspace, via `backbone_native` and `bb-worker` |
+ | API/WS wire contract | `contracts/` |
+ | Backend access from the UI | `frontend/src/api/` (generated client) |
+ 
+-A new external system ⇒ a new module **and** a new row here, in the *same* change (§7.6). Mission filters get one chokepoint each (permission filter in `retrieval/`, citations through the chat runtime, audit through one sink) — see [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapters.md).
++A new external system ⇒ a new module **and** a new row here, in the *same* change (§7.6). Mission filters get one chokepoint each: permissions in the OpenFGA model plus `retrieval/`, citations through the product `AnswerValidator`, audit through backbone `audit` — see [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapters.md) and ADR-0028 §7.
+ 
+ ## 7. Hard rules (process — in force now)
+ Stack-independent; binding from the first commit:
+@@ -106,6 +112,7 @@
+ 
+ ## 11. Git & scope
+ - Short-lived branch (or worktree) **per issue**; merge fast via PR.
++- *Exception ([ADR-0028](docs/architecture/0028-adopt-saas-backbone-as-the-platform-layer.md) §9):* the backbone migration uses one integration branch, `backbone-migration`. Package PRs target it with `Closes #<N>`, and one cutover PR merges it into `main`.
+ - Conventional Commits; one logical change per commit. (Auto-push-on-commit arrives with the `.claude/` harness so nothing is stranded.)
+ - Keep each PR scoped to one issue; body carries `Closes #<N>`.
+ 
+@@ -118,7 +125,7 @@
+ ├── docker-compose.yml         # one-command local stack (ADR-0005)
+ ├── .env.example               # local-dev defaults; real .env is git-ignored
+ ├── glean-user-stories.md      # input research → source for the issue pipeline (being finalized)
+-├── backend/                   # FastAPI service — see backend/AGENTS.md
++├── backend/                   # SaaS Backbone product (FastAPI via backbone.web) — see backend/AGENTS.md
+ ├── frontend/                  # React + Vite SPA — see frontend/AGENTS.md
+ ├── contracts/                 # OpenAPI + WS envelopes (FE/BE source of truth) — see contracts/AGENTS.md
+ ├── .github/ISSUE_TEMPLATE/    # user-story + epic issue forms
