@@ -11,6 +11,9 @@ enablement (false), candidate model, optional fallback model, timeout (30s), ret
 (1), backoff (0.5s), concurrency (2), input/response byte caps (32768/262144), question
 and option caps (32/64), fallback output cap (4096), option order (`fixed`) and
 shuffle seed (0). Cost budget and per-call ceiling default to zero and deny calls.
+These non-secret deployment controls are explicitly listed in the connector
+conformance config classification. Provider credentials and the test-only
+password-hashing policy remain forbidden settings.
 The byte limit covers evidence plus questions/options; #691/#692 must enforce a
 separate tokenizer-based bound before calling it. No PDFs/files/images in this slice.
 
