@@ -281,7 +281,7 @@ class AuditAction(str, enum.Enum):
     LLM_PROVIDER_DISCOVERED = "llm_provider.discovered"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
-    # ADR-0027 / #690: safe model-decision accounting through the canonical sink.
+    # ADR-0028 / #690: safe model-decision accounting through the canonical sink.
     MODEL_DECISION_REQUESTED = "model.decision_requested"
     MODEL_DECISION_COMPLETED = "model.decision_completed"
     ACTION_APPROVED = "action.approved"

@@ -1,6 +1,6 @@
 # Constrained-decision capability (#690)
 
-Design: [ADR-0027](../../../docs/architecture/0027-hierarchical-document-classification.md).
+Design: [ADR-0028](../../../docs/architecture/0028-hierarchical-document-classification.md).
 `DecisionsGateway.decide` accepts bounded text and vendor-free choice, predicate
 and score questions; it returns typed answers or `DecisionError`. It does not
 classify documents or schedule work. Reuse one gateway instance per tenant/worker to

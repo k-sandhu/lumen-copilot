@@ -1,6 +1,6 @@
 """Constrained decisions over HTTP, with a strict-schema LiteLLM fallback.
 
-ADR-0027: vendor shapes never leave this module. No network at import, no
+ADR-0028: vendor shapes never leave this module. No network at import, no
 automatic classifier, no unaccounted call. A reused instance bounds concurrency
 per tenant/worker; the injected tenant ledger MUST bound spend across all workers.
 """

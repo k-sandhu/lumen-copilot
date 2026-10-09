@@ -617,7 +617,7 @@ class Settings(PasswordHashingSettings):
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
 
-    # ADR-0027 / #690. Separate admission from chat; no automatic document calls.
+    # ADR-0028 / #690. Separate admission from chat; no automatic document calls.
     decisions_enabled: bool = Field(default=False, alias="DECISIONS_ENABLED")
     decisions_model: str = Field(
         default="openai/gpt-6-luna-decisions", min_length=1, alias="DECISIONS_MODEL"

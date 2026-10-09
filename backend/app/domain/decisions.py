@@ -1,4 +1,4 @@
-"""Vendor-free constrained decisions and mandatory accounting boundary (ADR-0027)."""
+"""Vendor-free constrained decisions and mandatory accounting boundary (ADR-0028)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""#690 / ADR-0027: recorded provider shapes, no inference network."""
+"""#690 / ADR-0028: recorded provider shapes, no inference network."""
 
 import json
 from dataclasses import replace

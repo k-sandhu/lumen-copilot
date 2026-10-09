@@ -63,7 +63,7 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "user.identity_attested",
         "retrieval.query",
         "answer.generated",
-        # ADR-0027 / #690: intent and usage/cost terminal model-decision events.
+        # ADR-0028 / #690: intent and usage/cost terminal model-decision events.
         "model.decision_requested",
         "model.decision_completed",
         "permission.denied",
