@@ -1,4 +1,4 @@
-"""Optional native ingestion facade (ADR-0026); the sole extension importer."""
+"""Optional native ingestion facade (ADR-0027); the sole extension importer."""
 
 from __future__ import annotations
 
