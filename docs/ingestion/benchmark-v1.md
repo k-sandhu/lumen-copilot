@@ -30,7 +30,9 @@ ADR-0025 owner approval of held-out definitions/margins is still required before
 promotion. Answer/retrieval evaluation remains out of this benchmark's scope.
 
 The Rust foundation has no format parser. Its extraction candidate arms therefore
-report `native_parser_not_landed`, no speedup and no promotion pass. The optional `--model-control` rendering measurement is separately labeled; they cannot substitute for
+report `native_parser_not_landed`, no speedup and no promotion pass. The optional `--model-control` measurements include rendering and a bounded
+Unicode executor workload with one/two/four threads, retaining accounted memory
+separately from RSS. These cold end-to-end controls are separately labeled; they cannot substitute for
 extraction or answer fidelity. Parser registration must add its paired corpus arm
 and pass its own per-format gate before #687 can enable it.
 

@@ -78,6 +78,7 @@ def _child(payload: dict[str, Any]) -> dict[str, Any]:
     code = None
     spans = ()
     outcome = "indexed"
+    accounted = None
     try:
         data = base64.b64decode(payload["data"], validate=True)
         if len(data) > _MAX_INPUT:
@@ -100,10 +101,21 @@ def _child(payload: dict[str, Any]) -> dict[str, Any]:
             }
             rendered = json.loads(lumen_docintel.render_document(json.dumps(model)))
             text = rendered["rendered_text"]
+            expected_text = model["blocks"][0]["text"]
             spans = tuple(
-                (s["char_start"], s["char_end"], text[s["char_start"] : s["char_end"]])
-                for s in rendered["spans"]
+                (s["char_start"], s["char_end"], expected_text) for s in rendered["spans"]
             )
+        elif arm == "native-executor-control":
+            from app.ingestion.native import NativeExecutor
+
+            executor = NativeExecutor(threads=payload["threads"], max_documents=1)
+            units = tuple(data.decode("utf-8").splitlines())
+            computed = executor.run_units(units)
+            if computed.units != units:
+                raise ValueError("executor changed input")
+            text = "\n".join(computed.units)
+            spans = ((0, len(text), data.decode("utf-8")),)
+            accounted = computed.peak_accounted_bytes
         else:
             outcome = "unsupported"
             code = "native_parser_not_landed"
@@ -128,17 +140,20 @@ def _child(payload: dict[str, Any]) -> dict[str, Any]:
         "input_bytes_per_second": len(data) / elapsed if elapsed else None,
         "output_chars_per_second": len(text) / elapsed if elapsed else None,
         "peak_rss_bytes": peak,
+        "peak_accounted_bytes": accounted,
+        "threads": payload.get("threads"),
         "peak_rss_increment_bytes": max(0, peak - before),
         "score": asdict(evaluate(text, gold, spans=spans, outcome=outcome)),
     }
 
 
-def _isolated(fixture: Fixture, arm: str) -> dict[str, Any]:
+def _isolated(fixture: Fixture, arm: str, *, threads: int | None = None) -> dict[str, Any]:
     payload = {
         "data": base64.b64encode(fixture.data).decode("ascii"),
         "gold": asdict(fixture.gold),
         "mime": fixture.mime,
         "arm": arm,
+        "threads": threads,
     }
     try:
         child = subprocess.run(
@@ -207,6 +222,7 @@ def _external(manifest: Path) -> list[Fixture]:
                         tuple(tuple(v) for v in g.get("associations", ())),
                         tuple(g.get("order", ())),
                         g.get("native_regions", 0),
+                        tuple(tuple(pair) for pair in g.get("headers", ())),
                     ),
                     language=row.get("language", "unknown"),
                     case="external",
@@ -261,6 +277,10 @@ def run(*, external: Path | None = None, model_control: bool = False) -> dict[st
             Gold(facts=("Intro", "North", "-120", "kg", "PageTwo")),
         )
         controls.append(_isolated(control, "native-model-control"))
+        units = "\n".join("A😀世界" * 128 for _ in range(1024))
+        workload = Fixture("executor-unicode", "text", "text/plain", units.encode(), Gold())
+        for threads in (1, 2, 4):
+            controls.append(_isolated(workload, "native-executor-control", threads=threads))
     groups = {}
     for row in rows:
         key = (
