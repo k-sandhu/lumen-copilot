@@ -6,8 +6,8 @@ physical line numbering. Readable records include key paths and values; metadata
 exposes typed values and exact block-local Unicode value spans. Aggregated output
 is bounded; records larger than max_record_bytes fail without silent truncation.
 
-XML accepts UTF-8 (or ASCII) declarations and uses streaming namespace-aware events and Clark-name sibling paths, UTF-8
-source line/byte locations and supplied attributes. DTDs are unsupported; custom
+XML accepts UTF-8 (or ASCII) declarations and uses streaming namespace-aware
+events and Clark-name sibling paths, UTF-8 source line/byte locations and supplied attributes. DTDs are unsupported; custom
 entities fail. No entity expansion, resource fetch or schema-specific calculation.
 Depth, input, retained memory, output, work and deadline limits produce typed errors.
 
@@ -27,3 +27,32 @@ Merge gate: hold until measured against the baseline evaluation; a human merges.
 
 Production routing also awaits namespace-aware recognition #733: pure parsers
 resolve arbitrary prefixes, while the foundation detector uses literal markers.
+
+## Dependencies and verification (2026-10-09)
+
+New direct core crates: quick-xml 0.42.0 (MIT), sha2 0.11.0 (MIT OR Apache-2.0).
+Bridge reuses serde_json 1.0.151 (MIT OR Apache-2.0); preserve_order uses the
+already pinned indexmap 2.14.2 (MIT OR Apache-2.0). All four cargo-deny checks pass.
+
+[x] 2026-10-09: seven Rust tests passed, including JSON/element/fact Unicode
+path/span properties, 400-record streaming within 16 MiB accounting, entity/depth/
+output/memory negatives and text coalescing regressions. Clippy/all-targets,
+fmt and Ruff pass. Native Windows wheel rebuilt/imported.
+[x] 2026-10-09: 23 scoped Python tests passed; 7 candidate tests repeated after
+XML corrections passed. Candidate runner reports are checked in per family.
+Primary JSON/JSONL/XML/XBRL/inline XBRL fixtures score 100% facts, associations,
+order and exact offsets. XML entity fixture is rejected. Non-fact generic XML
+and HTML/XHTML routing fallback probes are rejected by tagged-fact parsers; their
+0% rows remain visible in reports and are not pooled into primary-format scores.
+Python does not support these formats. No performance claim from tiny fixtures.
+
+[~] 2026-10-09: full offline backend suite started at 4461 MiB, then stopped
+after a foundation tmp_path setup error (WinError 5 on the shared pytest temp
+root). The failing test passed with an isolated task temp root. Remaining broad
+coverage awaits CI; this PR has made its one full-suite attempt. Residual risk:
+broader integration regressions remain unverified. Promotion awaits detection #728/#733, canonical
+stages #667–#669 and held-out quality/performance/RSS evaluation. Residual risk:
+caller-budget routing, specialized format selection and persisted structure.
+[s] 2026-10-09: live service tests excluded by task; deployed behavior unverified.
+
+[x] 2026-10-09: backend-configured strict mypy passed for 13 source files.

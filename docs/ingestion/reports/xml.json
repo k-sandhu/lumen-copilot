@@ -1,0 +1,104 @@
+{
+  "rows": [
+    {
+      "fixture": "xml-facts",
+      "sha256": "c133f81ae32dcd15d02006364c7405365185c784b261396603f631e44c6ebec3",
+      "format": "xml",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 3.71999922208488e-05,
+      "input_bytes_per_second": 1370968.028628161,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23334912,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "xml-facts",
+      "sha256": "c133f81ae32dcd15d02006364c7405365185c784b261396603f631e44c6ebec3",
+      "format": "xml",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.01490929996361956,
+      "input_bytes_per_second": 3420.6837426603515,
+      "peak_rss_bytes": 23576576,
+      "peak_rss_increment_bytes": 266240,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    },
+    {
+      "fixture": "xml-entity",
+      "sha256": "b6f5ee9841506b12120adaefeecce3b8668f32e90be00e68ec2c19444d190d76",
+      "format": "xml",
+      "language": "en",
+      "expected": "failed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 0.00023179996060207486,
+      "input_bytes_per_second": 327868.9081853093,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23441408,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "xml-entity",
+      "sha256": "b6f5ee9841506b12120adaefeecce3b8668f32e90be00e68ec2c19444d190d76",
+      "format": "xml",
+      "language": "en",
+      "expected": "failed",
+      "arm": "native-candidate",
+      "outcome": "failed",
+      "code": "DocIntelUnsupportedError",
+      "seconds": 0.015624699997715652,
+      "input_bytes_per_second": 4864.093391304235,
+      "peak_rss_bytes": 24248320,
+      "peak_rss_increment_bytes": 790528,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "failed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "answer_quality": "unmeasured"
+}
