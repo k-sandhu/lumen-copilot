@@ -1665,6 +1665,18 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
         "    return get_settings().s3_secret_key\n",
         "reads Lumen's `s3_secret_key`",
     ),
+    "reads the local classification artifact path": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    return get_settings().classification_tokenizer_path\n",
+        "reads Lumen's `classification_tokenizer_path`",
+    ),
+    "reads the local fallback artifact path": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n"
+        "    return get_settings().classification_fallback_tokenizer_path\n",
+        "reads Lumen's `classification_fallback_tokenizer_path`",
+    ),
     # Round-6: a field the blacklist did NOT list until this round. The
     # completeness guard is what forced it onto the list; here it proves the
     # runtime seam actually refuses it.

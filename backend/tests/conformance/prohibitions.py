@@ -199,6 +199,8 @@ CONFIG_MODULE = "app.core.config"
 # methods and unclassified attributes fail closed. Dynamic/reflective access
 # remains review-caught under the first-party trust model.
 FORBIDDEN_SETTINGS: dict[str, str] = {
+    "classification_tokenizer_path": "Lumen's local classification tokenizer artifact",
+    "classification_fallback_tokenizer_path": "Lumen's local fallback tokenizer artifact",
     # Dedicated audit capacity is database infrastructure owned by app.db.
     "audit_db_pool_size": "Lumen's independent audit database pool capacity",
     "audit_db_pool_timeout_seconds": "Lumen's independent audit database acquisition deadline",
@@ -339,6 +341,12 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "native_ingestion_tokenizer_path",
         "native_ingestion_tokenizer_sha256",
         "native_ingestion_tokenizer_model",
+        "classification_taxonomy_version",
+        "classification_tokenizer_model",
+        "classification_tokenizer_sha256",
+        "classification_fallback_tokenizer_model",
+        "classification_fallback_tokenizer_sha256",
+        "classification_sweep_interval_seconds",
         "native_ingestion_chunk_tokens",
         "native_ingestion_chunk_chars",
         "native_ingestion_overlap_chars",
