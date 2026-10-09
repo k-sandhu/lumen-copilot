@@ -21,7 +21,8 @@ truncation/padding. Oversized atomic units or overlap that prevents progress
 return a typed budget error, never silently drop evidence or reduce overlap.
 
 Tables are atomic rows. Their supplied grid must render as tab-separated cells
-and newline-separated rows, including blank/merged positions; an unknown mapping
+and newline-separated rows, including blank/merged positions, or the Office
+candidate's labeled rows validated against supplied cell-span annotations; an unknown mapping
 is rejected rather than guessed. A row is never divided. Header cells (including
 spanning row labels), supplied caption and units accompany evidence as separate
 context, repeated on each applicable row. Heading breadcrumbs likewise remain

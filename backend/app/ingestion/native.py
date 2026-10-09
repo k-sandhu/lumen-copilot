@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
+from app.domain.native_chunking import ChunkedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
 
 
@@ -131,3 +132,41 @@ def configured_native_executor(settings: Settings) -> tuple[NativeExecutor, Runt
         timeout_ms=settings.native_ingestion_timeout_ms,
     )
     return executor, budget
+
+
+def chunk_canonical(
+    document: CanonicalDocument,
+    *,
+    settings: Settings,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> ChunkedDocument:
+    """Explicit candidate computation; production routing remains in #687."""
+    from app.ingestion.tokenizer_artifact import load_tokenizer_artifact
+
+    if settings.native_ingestion_tokenizer_model != settings.llm_embedding_model:
+        raise ValueError("tokenizer model must match the configured embedding model")
+    artifact = load_tokenizer_artifact(
+        settings.native_ingestion_tokenizer_path,
+        sha256=settings.native_ingestion_tokenizer_sha256,
+    )
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return ChunkedDocument.from_json(
+        extension.chunk_document(
+            document.document_json,
+            artifact,
+            json.dumps(
+                {
+                    "max_tokens": settings.native_ingestion_chunk_tokens,
+                    "max_chars": settings.native_ingestion_chunk_chars,
+                    "overlap_chars": settings.native_ingestion_overlap_chars,
+                    "embedding_model": settings.llm_embedding_model,
+                }
+            ),
+            json.dumps(asdict(budget)),
+            token._token,
+        )
+    )

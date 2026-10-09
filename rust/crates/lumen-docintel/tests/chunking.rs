@@ -1,7 +1,7 @@
+use lumen_docintel_core::CoreError;
 use lumen_docintel_core::canonical::{Block, BlockKind, Cell, Document, HeaderRole, Table};
 use lumen_docintel_core::chunking::{ChunkSettings, chunk_document};
 use lumen_docintel_core::runtime::{Budget, Cancellation, Context};
-use lumen_docintel_core::CoreError;
 use proptest::prelude::*;
 
 fn tokenizer() -> String {
@@ -16,21 +16,43 @@ fn tokenizer() -> String {
         "post_processor":null,"decoder":null,
         "model":{"type":"BPE","dropout":null,"unk_token":"[UNK]",
         "continuing_subword_prefix":null,"end_of_word_suffix":null,
-        "fuse_unk":false,"byte_fallback":false,"vocab":vocab,"merges":[]}}).to_string()
+        "fuse_unk":false,"byte_fallback":false,"vocab":vocab,"merges":[]}})
+    .to_string()
 }
-fn context() -> Context { Context::new(Budget::default(), Cancellation::default()).unwrap() }
+fn context() -> Context {
+    Context::new(Budget::default(), Cancellation::default()).unwrap()
+}
 fn doc(text: String) -> Document {
-    Document { blocks: vec![Block { id: "body".into(), text, ..Default::default() }], ..Default::default() }
+    Document {
+        blocks: vec![Block {
+            id: "body".into(),
+            text,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
 }
 fn settings(size: usize, overlap: usize) -> ChunkSettings {
-    ChunkSettings { max_tokens: size, max_chars: size, overlap_chars: overlap, embedding_model: "fixture".into() }
+    ChunkSettings {
+        max_tokens: size,
+        max_chars: size,
+        overlap_chars: overlap,
+        embedding_model: "fixture".into(),
+    }
 }
 
 #[test]
 fn early_sentence_boundary_retains_exact_overlap() {
     let d = doc(format!("{}. {}", "a".repeat(800), "b".repeat(1500)));
     let result = chunk_document(d, &tokenizer(), &settings(1200, 200), &context()).unwrap();
-    assert_eq!(result.chunks.iter().map(|c| (c.char_start,c.char_end)).collect::<Vec<_>>(), vec![(0,801),(601,1801),(1601,2302)]);
+    assert_eq!(
+        result
+            .chunks
+            .iter()
+            .map(|c| (c.char_start, c.char_end))
+            .collect::<Vec<_>>(),
+        vec![(0, 801), (601, 1801), (1601, 2302)]
+    );
     assert!(result.rendered.document.generation.tokenizer_id.is_some());
     assert!(result.rendered.document.generation.fingerprint.is_some());
 }
@@ -61,21 +83,110 @@ proptest! {
 
 #[test]
 fn table_rows_repeat_headers_and_units_separate_from_evidence() {
-    let cell = |row,column,text:&str,header_role,unit| Cell { row,column,text:text.into(),header_role,unit,row_span:1,column_span:1,..Default::default() };
-    let table = Table { rows:3, columns:2, cells:vec![cell(1,1,"a",HeaderRole::Column,None),cell(1,2,"kg",HeaderRole::Column,None),cell(2,1,"b",HeaderRole::Row,None),cell(2,2,"12",HeaderRole::Unknown,Some("kg".into())),cell(3,1,"a",HeaderRole::Row,None),cell(3,2,"34",HeaderRole::Unknown,Some("kg".into()))],caption:None };
-    let d = Document { blocks:vec![Block { id:"t".into(),kind:BlockKind::Table,text:"a\tkg\nb\t12\na\t34".into(),table:Some(table),..Default::default() }],..Default::default() };
-    let result = chunk_document(d.clone(), &tokenizer(), &settings(64,0), &context()).unwrap();
-    assert_eq!(result.chunks.len(),3);
+    let cell = |row, column, text: &str, header_role, unit| Cell {
+        row,
+        column,
+        text: text.into(),
+        header_role,
+        unit,
+        row_span: 1,
+        column_span: 1,
+        ..Default::default()
+    };
+    let table = Table {
+        rows: 3,
+        columns: 2,
+        cells: vec![
+            cell(1, 1, "a", HeaderRole::Column, None),
+            cell(1, 2, "kg", HeaderRole::Column, None),
+            cell(2, 1, "b", HeaderRole::Row, None),
+            cell(2, 2, "12", HeaderRole::Unknown, Some("kg".into())),
+            cell(3, 1, "a", HeaderRole::Row, None),
+            cell(3, 2, "34", HeaderRole::Unknown, Some("kg".into())),
+        ],
+        caption: None,
+    };
+    let d = Document {
+        blocks: vec![Block {
+            id: "t".into(),
+            kind: BlockKind::Table,
+            text: "a\tkg\nb\t12\na\t34".into(),
+            table: Some(table),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let result = chunk_document(d.clone(), &tokenizer(), &settings(64, 0), &context()).unwrap();
+    assert_eq!(result.chunks.len(), 3);
     assert!(result.chunks[1].context.contains("kg"));
     assert!(result.chunks[2].context.contains("kg"));
-    assert_eq!(result.chunks[1].text,"b\t12\n");
-    assert_eq!(chunk_document(d,&tokenizer(), &settings(3,0), &context()).unwrap_err(),CoreError::Budget);
+    assert_eq!(result.chunks[1].text, "b\t12\n");
+    assert_eq!(
+        chunk_document(d, &tokenizer(), &settings(3, 0), &context()).unwrap_err(),
+        CoreError::Budget
+    );
 }
 
 #[test]
 fn invalid_settings_and_cancelled_work_are_typed() {
-    assert_eq!(chunk_document(doc("a".into()), &tokenizer(), &settings(0,0), &context()).unwrap_err(),CoreError::InvalidInput);
-    let token = Cancellation::default(); token.cancel();
-    let ctx = Context::new(Budget::default(),token).unwrap();
-    assert_eq!(chunk_document(doc("a".into()), &tokenizer(), &settings(10,0), &ctx).unwrap_err(),CoreError::Cancelled);
+    assert_eq!(
+        chunk_document(doc("a".into()), &tokenizer(), &settings(0, 0), &context()).unwrap_err(),
+        CoreError::InvalidInput
+    );
+    let token = Cancellation::default();
+    token.cancel();
+    let ctx = Context::new(Budget::default(), token).unwrap();
+    assert_eq!(
+        chunk_document(doc("a".into()), &tokenizer(), &settings(10, 0), &ctx).unwrap_err(),
+        CoreError::Cancelled
+    );
+}
+
+#[test]
+fn office_row_mapping_uses_supplied_cell_spans() {
+    let cell = |row, text: &str| Cell {
+        row,
+        column: 1,
+        row_span: 1,
+        column_span: 1,
+        text: text.into(),
+        ..Default::default()
+    };
+    let mut d = Document {
+        blocks: vec![Block {
+            id: "t".into(),
+            kind: BlockKind::Table,
+            text: "[Table]\nRow 1: C1=a\nRow 2: C1=12\n[/Table]".into(),
+            table: Some(Table {
+                rows: 2,
+                columns: 1,
+                cells: vec![cell(1, "a"), cell(2, "12")],
+                caption: None,
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    d.generation.diagnostics = Some(serde_json::json!({"annotations":[
+        {"kind":"cell_span","block":"t","row":1,"char_start":17,"char_end":18},
+        {"kind":"cell_span","block":"t","row":2,"char_start":29,"char_end":31}
+    ]}));
+    let result = chunk_document(d, &tokenizer(), &settings(64, 0), &context()).unwrap();
+    assert_eq!(result.chunks.len(), 2);
+    assert!(result.chunks[1].text.contains("Row 2: C1=12"));
+}
+
+#[test]
+fn tokenizer_truncation_cannot_hide_oversized_evidence() {
+    let mut artifact: serde_json::Value = serde_json::from_str(&tokenizer()).unwrap();
+    artifact["truncation"] = serde_json::json!({"direction":"Right","max_length":1,"strategy":"LongestFirst","stride":0});
+    let result = chunk_document(
+        doc("a".repeat(50)),
+        &artifact.to_string(),
+        &settings(8, 0),
+        &context(),
+    )
+    .unwrap();
+    assert!(result.chunks.len() > 1);
+    assert!(result.chunks.iter().all(|c| c.text.chars().count() <= 8));
 }
