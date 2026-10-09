@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
 from app.core.config import Settings
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import ConflictError, ForbiddenError, NotFoundError
 from app.db.ingestion_shadow import ShadowRepository
 from app.db.repositories import AuditEventRepository, GroupRepository
 from app.db.session import tenant_session_scope
@@ -26,6 +26,7 @@ from app.domain.ingestion_shadow import (
 )
 from app.ingestion.native import candidate_identity, extract_format_candidate
 from app.ingestion.parsers import parse_document
+from app.ingestion.stage_identity import parser_identity
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document, permitted_document_ids
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
@@ -89,7 +90,7 @@ class IngestionAdminService:
             metadata=metadata,
         )
 
-    @audited_resource("ingestion.shadow.report", "document", "document_id")
+    @audited_resource("ingestion.shadow.report", "document", "document_id", missing_result=True)
     async def report(
         self, *, document_id: UUID | None = None, cursor: UUID | None = None, limit: int = 100
     ) -> DiagnosticPage:
@@ -118,7 +119,9 @@ class IngestionAdminService:
             )
             return DiagnosticPage(visible, rows[-1].id if len(rows) == limit else None)
 
-    @audited_resource("ingestion.reingestion.preview", "document", "document_id")
+    @audited_resource(
+        "ingestion.reingestion.preview", "document", "document_id", missing_result=True
+    )
     async def preview(
         self,
         *,
@@ -154,7 +157,7 @@ class IngestionAdminService:
             )
             return InventoryPage(visible, rows[-1].id if len(rows) == limit else None)
 
-    @audited_resource("ingestion.original.replay", "document", "document_id")
+    @audited_resource("ingestion.original.replay", "document", "document_id", missing_result=True)
     async def replay(self, document_id: UUID) -> ShadowComparison:
         require_role(self._principal, Role.ADMIN)
         # Authorization and audit commit before original bytes are read.
@@ -179,7 +182,13 @@ class IngestionAdminService:
         fingerprint = hashlib.sha256(
             (
                 hashlib.sha256(data).hexdigest()
-                + json.dumps(candidate_identity(self._settings), sort_keys=True)
+                + json.dumps(
+                    {
+                        "candidate": candidate_identity(self._settings),
+                        "baseline": parser_identity(document.mime_type),
+                    },
+                    sort_keys=True,
+                )
             ).encode()
         ).hexdigest()
 
@@ -227,10 +236,21 @@ class IngestionAdminService:
         await record(recorded[0])
         return recorded[0]
 
-    @audited_resource("ingestion.reingestion.execute", "document", "document_id")
+    @audited_resource(
+        "ingestion.reingestion.execute", "document", "document_id", missing_result=True
+    )
     async def execute_generation(self, *, document_id: UUID | None = None) -> None:
         require_role(self._principal, Role.ADMIN)
-        raise ConflictError(
+        if document_id is not None:
+            async with tenant_session_scope(self._principal.tenant_id) as session:
+                if (
+                    await get_permitted_document(
+                        session, allow_set=await self._allow_set(session), document_id=document_id
+                    )
+                    is None
+                ):
+                    raise NotFoundError()
+        raise ForbiddenError(
             "Immutable generation retention/backfill policy requires owner approval.",
             code="generation_policy_required",
         )

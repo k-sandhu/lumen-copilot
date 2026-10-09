@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from app.domain.canonical import CanonicalDocument
@@ -42,6 +42,54 @@ class ShadowComparison:
     positional_mismatches: int
     block_count: int
     failure_code: str | None = None
+
+    @classmethod
+    def from_payload(cls, raw: dict[str, object]) -> ShadowComparison:
+        expected = {
+            "source_format",
+            "status",
+            "baseline_chars",
+            "candidate_chars",
+            "exact_equal",
+            "positional_mismatches",
+            "block_count",
+            "failure_code",
+        }
+        if (
+            set(raw) != expected
+            or raw["source_format"] not in FORMATS
+            or raw["status"]
+            not in {"indexed", "partial", "needs_ocr", "unsupported", "encrypted", "failed"}
+        ):
+            raise ValueError("invalid shadow schema")
+        for name in ("baseline_chars", "candidate_chars", "positional_mismatches", "block_count"):
+            if type(raw[name]) is not int or cast(int, raw[name]) < 0:
+                raise ValueError("invalid shadow counters")
+        if type(raw["exact_equal"]) is not bool or raw["failure_code"] not in {
+            None,
+            "native_unavailable",
+            "native_failed",
+            "budget",
+            "timeout",
+            "encrypted",
+            "parse",
+            "invalid_structure",
+            "native_panic",
+            "output_limit",
+            "worker_memory",
+            "worker_failed",
+        }:
+            raise ValueError("invalid shadow diagnostics")
+        return cls(
+            cast(str, raw["source_format"]),
+            cast(str, raw["status"]),
+            cast(int, raw["baseline_chars"]),
+            cast(int, raw["candidate_chars"]),
+            cast(bool, raw["exact_equal"]),
+            cast(int, raw["positional_mismatches"]),
+            cast(int, raw["block_count"]),
+            cast(str | None, raw["failure_code"]),
+        )
 
 
 @dataclass(frozen=True, slots=True)

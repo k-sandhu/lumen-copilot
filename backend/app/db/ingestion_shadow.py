@@ -95,8 +95,9 @@ class ShadowRepository:
             await self._session.scalars(stmt.order_by(models.IngestionShadow.id).limit(limit))
         ).all()
         return [
-            ShadowRecord(r.id, r.document_id, ShadowComparison(**r.comparison_json)) for r in rows
-        ]  # type: ignore[arg-type]
+            ShadowRecord(r.id, r.document_id, ShadowComparison.from_payload(r.comparison_json))
+            for r in rows
+        ]
 
     async def inventory(
         self,

@@ -89,7 +89,7 @@ async def test_shadow_records_are_scoped_content_free_and_idempotent(sqlite_engi
 
 @pytest.mark.asyncio
 async def test_original_replay_keeps_citations_and_enforces_admin_permissions(
-    sqlite_engine,
+    sqlite_engine,  # noqa: F811
     monkeypatch,  # noqa: F811
 ):  # noqa: F811
     from uuid import uuid4
@@ -98,7 +98,7 @@ async def test_original_replay_keeps_citations_and_enforces_admin_permissions(
     import app.services.ingestion_admin as admin_module
     from app.auth.principal import Principal
     from app.core.config import Settings
-    from app.core.errors import ConflictError, ForbiddenError, NotFoundError
+    from app.core.errors import ForbiddenError, NotFoundError
     from app.db.repositories import (
         ChatSessionRepository,
         ChunkInput,
@@ -156,7 +156,7 @@ async def test_original_replay_keeps_citations_and_enforces_admin_permissions(
     assert (await service.preview(collection_id=document.collection_id)).documents == (
         (doc, "text"),
     )
-    with pytest.raises(ConflictError, match="owner approval"):
+    with pytest.raises(ForbiddenError, match="owner approval"):
         await service.execute_generation(document_id=doc)
     with pytest.raises(NotFoundError):
         await service.report(document_id=foreign_doc)
@@ -177,7 +177,7 @@ async def test_original_replay_keeps_citations_and_enforces_admin_permissions(
     )
     with pytest.raises(NotFoundError):
         await unauthorized.replay(doc)
-    assert len([event for event in ledger.events if event.action == "permission.denied"]) == 3
+    assert len([event for event in ledger.events if event.action == "permission.denied"]) == 4
 
 
 @pytest.mark.asyncio

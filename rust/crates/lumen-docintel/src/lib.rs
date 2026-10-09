@@ -39,5 +39,5 @@ pub mod runtime;
 
 pub mod chunking;
 
-pub mod normalization;
 pub mod formats;
+pub mod normalization;

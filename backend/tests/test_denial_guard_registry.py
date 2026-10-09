@@ -35,6 +35,7 @@ from app.services.connector_oauth_service import ConnectorOAuthService
 from app.services.document_service import DocumentService
 from app.services.document_upload_service import DocumentAccessService, DocumentUploadService
 from app.services.groups_service import GroupsService
+from app.services.ingestion_admin import IngestionAdminService
 from app.services.llm_providers_service import LlmProviderService
 from app.services.mcp_servers_service import McpServersService
 from app.services.run_delivery_service import RunDeliveryService
@@ -44,6 +45,7 @@ from app.services.schedules_service import SchedulesService
 from app.services.sources_service import SourcesService
 
 _OWNER_SEAMS = {
+    "IngestionAdminService": IngestionAdminService,
     "AssistantsService": AssistantsService,
     "AssistantGovernanceService": AssistantGovernanceService,
     "AssistantTestService": AssistantTestService,

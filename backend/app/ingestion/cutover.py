@@ -51,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def run(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     settings = get_settings()
-    store = ObjectStore.from_settings(settings)
+    store = ObjectStore(settings)
     try:
         if args.token_file.stat().st_size > 16384:
             raise InvalidTokenError()
