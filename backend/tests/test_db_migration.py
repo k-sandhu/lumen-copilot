@@ -29,6 +29,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from app.db.base import Base
+from tests._live_helpers import worker_database_name
 
 # Importing models registers them on Base.metadata.
 import app.db.models  # noqa: F401  isort: skip
@@ -1171,7 +1172,7 @@ async def test_live_upgrade_then_downgrade_round_trip() -> None:
 
     from app.core.config import get_settings
 
-    tmp_db = f"lumen_migtest_{uuid.uuid4().hex[:12]}"
+    tmp_db = worker_database_name(f"lumen_migtest_{uuid.uuid4().hex[:12]}")
     admin_url = _swap_db(_PG_URL, "postgres")  # maintenance DB for CREATE/DROP
     tmp_url = _swap_db(_PG_URL, tmp_db)
 
@@ -1233,7 +1234,7 @@ async def test_live_embedding_upgrade_downgrade_preserves_both_vector_sets() -> 
     from app.core.config import get_settings
     from app.db import models
 
-    tmp_db = f"lumen_embedmig_{uuid.uuid4().hex[:12]}"
+    tmp_db = worker_database_name(f"lumen_embedmig_{uuid.uuid4().hex[:12]}")
     migration_role = f"lumen_migrole_{uuid.uuid4().hex[:12]}"
     migration_password = uuid.uuid4().hex
     admin_url = _swap_db(_PG_URL, "postgres")
@@ -1684,7 +1685,7 @@ INSERT INTO chunks (
 
     try:
         for case, expected_error in cases:
-            database = f"lumen_embedstate_{uuid.uuid4().hex[:10]}"
+            database = worker_database_name(f"lumen_embedstate_{uuid.uuid4().hex[:10]}")
             await _create_database(database)
             tmp_url = _swap_db(_PG_URL, database)
             os.environ["DATABASE_URL"] = tmp_url

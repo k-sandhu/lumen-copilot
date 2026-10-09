@@ -45,7 +45,6 @@ import app.db.session as db_session
 import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
@@ -55,6 +54,7 @@ from app.db.repositories import (
 from app.domain.entities import DocumentStatus, Role
 from app.domain.llm import Embedding
 from app.tasks.ingest import ingest_document
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -264,7 +264,7 @@ async def _setup_and_seed(url: str, *, count: int) -> list[tuple[uuid.UUID, uuid
     """
     setup_engine = create_async_engine(url)
     async with setup_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
 
     maker = async_sessionmaker(bind=setup_engine, expire_on_commit=False)
     seeded: list[tuple[uuid.UUID, uuid.UUID, str]] = []
