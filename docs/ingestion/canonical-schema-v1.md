@@ -1,6 +1,6 @@
 # Canonical computation contract v1 (#664)
 
-ADR-0025 and ADR-0026 define the semantics. This internal, offline contract adds
+ADR-0025 and ADR-0027 define the semantics. This internal, offline contract adds
 no API, storage migration, retained-generation policy or format parser.
 
 A Document has `schema_version=1`, `renderer_version=1`, ordered `blocks`,
