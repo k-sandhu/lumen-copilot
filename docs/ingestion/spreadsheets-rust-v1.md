@@ -40,6 +40,9 @@ unknown; simple percent/currency display annotations are explicitly derived.
 
 Separate dependency #708 / PR #712 repairs large canonical table validation;
 its four regression/property tests pass, including a 1,000-cell workbook.
+Joint Office checkout: all 32 core Rust tests and Clippy all targets pass offline.
+Dependency #713 / PR #714 pins the existing local bridge dependency; complete
+cargo-deny checks (advisories, bans, licenses, sources) pass without policy changes.
 [~] 2026-10-08: XLS preserves calamine values/formulas/merges, but custom BIFF
 formats and legacy hidden-row metadata require further fixtures/qualification.
 ODS style/number-format inheritance also needs qualification. Residual risk:
