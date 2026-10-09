@@ -125,4 +125,4 @@ def map_acl(raw: Mapping[str, object], ctx: AclMappingContext) -> frozenset[str]
     return frozenset(principals)
 
 
-__all__ = ["CONTENT_READ_ROLES", "map_acl"]
+__all__ = ("CONTENT_READ_ROLES", "map_acl")

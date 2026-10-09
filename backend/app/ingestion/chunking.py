@@ -8,8 +8,8 @@ round-trip is asserted by the tests, because citations depend on it.
 
 Design choices (kept simple and deterministic for the skeleton):
 
-* **Character windows with overlap.** A fixed ``chunk_size`` window slides by
-  ``chunk_size - overlap`` so adjacent chunks share ``overlap`` characters —
+* **Character windows with overlap.** The next window starts ``overlap``
+  characters before the actual cut so adjacent windows share that context —
   context that would otherwise be split across a boundary is retrievable from
   either side. Size/overlap are configuration (``Settings``), never literals at
   the call site.
@@ -112,7 +112,6 @@ def chunk_text(text: str, *, chunk_size: int, overlap: int) -> list[TextChunk]:
         return []
 
     chunks: list[TextChunk] = []
-    stride = chunk_size - overlap
     window_start = 0
     ordinal = 0
 
@@ -120,6 +119,10 @@ def chunk_text(text: str, *, chunk_size: int, overlap: int) -> list[TextChunk]:
         hard_end = min(window_start + chunk_size, total)
         # Only look for a nicer boundary when we are not already at the very end.
         cut = hard_end if hard_end >= total else _find_boundary(text, window_start, hard_end)
+        # A boundary inside already-covered overlap cannot advance the end.
+        # Use the full window instead, retaining overlap without duplicate spans.
+        if cut < hard_end and cut - window_start <= overlap:
+            cut = hard_end
 
         piece = text[window_start:cut]
         if piece.strip():
@@ -136,13 +139,8 @@ def chunk_text(text: str, *, chunk_size: int, overlap: int) -> list[TextChunk]:
         if cut >= total:
             break
 
-        # Advance by the stride from the window start, but never past the cut we
-        # actually made (a short boundary-trimmed chunk must still make progress
-        # and keep ``overlap`` characters of context with its predecessor).
-        next_start = min(window_start + stride, cut)
-        # Guarantee forward progress even in degenerate overlap/boundary cases.
-        if next_start <= window_start:
-            next_start = window_start + 1
-        window_start = next_start
+        # Measure from the actual cut, including when it falls early. The guard
+        # above ensures cut > window_start + overlap, so starts and ends progress.
+        window_start = cut - overlap
 
     return chunks

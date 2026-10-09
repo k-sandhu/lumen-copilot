@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -33,7 +33,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     CitationRepository,
@@ -56,6 +55,7 @@ from app.realtime.backplane import _MAX_REPLAY, InMemoryBackplane
 from app.services.assistant_runtime import AssistantRunConfig
 from app.services.chat_runtime import ChatRuntime
 from app.services.tools.types import ToolContext, ToolDefinition
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -188,6 +188,11 @@ class _FakeRetrieval:
         # revoked/deleted shape); hydrating fakes override.
         return {}
 
+    async def search_conversation(self, **kwargs: Any) -> tuple[list[Any], dict[uuid.UUID, str]]:
+        from tests.test_transcript_recall import search_with_fake_permissions
+
+        return await search_with_fake_permissions(self, **kwargs)
+
     async def valid_chunk_pairs(
         self, *, principal: object, chunk_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, uuid.UUID]:
@@ -239,7 +244,7 @@ async def ctx() -> AsyncIterator[_Ctx]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             tenant = await TenantRepository(seed).create(name="Acme")
@@ -2514,6 +2519,7 @@ def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
     body = _hybrid_body(
         query_text="q",
         embedding=[0.1, 0.2],
+        embedding_fingerprint="f" * 64,
         allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
         k=5,
         document_ids=[doc],
@@ -2528,6 +2534,7 @@ def test_hybrid_body_carries_document_terms_in_both_legs() -> None:
     unpinned = _hybrid_body(
         query_text="q",
         embedding=[0.1, 0.2],
+        embedding_fingerprint="f" * 64,
         allow=SearchAllowFilter(tenant_id=tenant, owner_ids=frozenset({uuid.uuid4()})),
         k=5,
     )
@@ -4692,6 +4699,141 @@ async def test_continuation_never_fails_over_and_degrades_to_the_partial(ctx: _C
         assert assistant[-1].content == "Part one."
 
 
+@pytest.mark.parametrize("summary_exists", [True, False])
+async def test_recall_keeps_send_time_cursor_when_summary_changes(
+    ctx: _Ctx, summary_exists: bool
+) -> None:
+    """R1-003: the provider handshake races compaction, including first creation."""
+    from datetime import UTC, timedelta
+
+    from sqlalchemy import update
+
+    from app.core.config import get_settings
+    from app.db import models
+    from app.db.repositories import SessionSummaryRepository
+    from app.domain.entities import MessageRole
+    from app.services.chat_service import ChatService
+    from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+
+    base = datetime(2021, 1, 1, tzinfo=UTC)
+    ids = [uuid.UUID(int=i + 1) for i in range(8)]
+    async with ctx.sessionmaker() as session:
+        repo = MessageRepository(session, ctx.tenant_id)
+        for i, mid in enumerate(ids):
+            await repo.add_with_id(
+                message_id=mid,
+                session_id=ctx.session_id,
+                role=MessageRole.ASSISTANT if i % 2 else MessageRole.USER,
+                content=f"snapshot turn{i}",
+                source_document_ids=(),
+            )
+            await session.execute(
+                update(models.Message)
+                .where(models.Message.id == mid)
+                .values(created_at=base + timedelta(minutes=i))
+            )
+        if summary_exists:
+            await SessionSummaryRepository(session, ctx.tenant_id).upsert_summary(
+                ctx.session_id,
+                summary="s",
+                covers_through_message_id=ids[3],
+                covered_created_at=base + timedelta(minutes=3),
+            )
+        await session.commit()
+
+    backplane = InMemoryBackplane()
+    async with ctx.sessionmaker() as session:
+        sent = await ChatService(
+            session,
+            tenant_id=ctx.tenant_id,
+            owner_id=ctx.principal.user_id,
+            settings=get_settings(),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, ctx.tenant_id, ctx.principal.user_id
+            ),
+        ).send_message(
+            ctx.session_id,
+            content="What did we discuss?",
+            model=None,
+            backplane=backplane,
+        )
+        assert sent is not None
+        await session.commit()
+
+    entered, advance_done = asyncio.Event(), asyncio.Event()
+
+    class _PausedGateway(_RecordingScriptedGateway):
+        async def stream_tools(self, messages: object, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+            if not self.seen:
+                entered.set()
+                await advance_done.wait()
+            async for ev in super().stream_tools(messages, **kwargs):
+                yield ev
+
+    gateway = _PausedGateway(
+        [
+            [
+                StreamEvent(
+                    finish_reason="tool_calls",
+                    tool_calls=(
+                        ToolCall(
+                            id="recall_a",
+                            name="read_conversation",
+                            arguments={"query": "snapshot", "k": 10},
+                        ),
+                        ToolCall(
+                            id="recall_b",
+                            name="read_conversation",
+                            arguments={"query": "turn", "k": 10},
+                        ),
+                    ),
+                )
+            ],
+            [StreamEvent(text="ok"), StreamEvent(finish_reason="stop")],
+        ]
+    )
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    answer = asyncio.create_task(
+        runtime.run(
+            stream_id=sent.stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model=sent.model,
+            history=[
+                ChatMessage(role=LlmRole(m.role.value), content=m.content) for m in sent.history
+            ],
+            collection_ids=None,
+            summary=sent.summary,
+            compaction_cursor=sent.compaction_cursor,
+        )
+    )
+    try:
+        await entered.wait()
+        async with ctx.sessionmaker() as writer:
+            await SessionSummaryRepository(writer, ctx.tenant_id).upsert_summary(
+                ctx.session_id,
+                summary="advanced",
+                covers_through_message_id=ids[5],
+                covered_created_at=base + timedelta(minutes=5),
+            )
+            await writer.commit()
+        advance_done.set()
+        assert await answer
+    finally:
+        advance_done.set()
+        if not answer.done():
+            answer.cancel()
+            await asyncio.gather(answer, return_exceptions=True)
+    tools = [m.content for m in gateway.seen[-1] if m.role == LlmRole.TOOL]
+    assert len(tools) == 2
+    for text in tools:
+        assert "snapshot turn4" not in text and "snapshot turn5" not in text
+        if summary_exists:
+            assert "snapshot turn3" in text
+        else:
+            assert "Nothing has been compacted" in text
+
+
 # --- #416: rolling summary + evidence carry-forward --------------------------
 
 
@@ -5004,7 +5146,18 @@ async def test_rehydration_through_the_real_retrieval_service(ctx: _Ctx) -> None
     """#446 finding 8: the REAL RetrievalService (not a fake) enforces the
     owner-or-grant predicate on rehydration — the owner's own document
     hydrates; a document owned by NOBODY in the allow-set is stripped."""
+    from app.db.repositories import DocumentRepository
+    from app.domain.entities import DocumentStatus
     from app.retrieval import RetrievalService
+
+    # Real hydration is now intentionally Ready-only (R1-002). This fixture's
+    # default Pending document is not valid evidence until its ingestion state
+    # reflects a completed publication.
+    async with ctx.sessionmaker() as session:
+        await DocumentRepository(session, ctx.tenant_id).set_status(
+            ctx.document_id, DocumentStatus.READY
+        )
+        await session.commit()
 
     gateway = _RecordingScriptedGateway(
         [[StreamEvent(text="ok"), StreamEvent(finish_reason="stop")]]
@@ -6697,3 +6850,217 @@ async def test_answer_max_tokens_is_threaded_into_stream_tools(ctx: _Ctx) -> Non
     )
     await asyncio.wait_for(consumer2, timeout=2.0)
     assert gateway2.max_tokens_seen == [None]
+
+
+async def _run_recall_only_answer(
+    *,
+    sessionmaker: Any,
+    principal: Principal,
+    session_id: uuid.UUID,
+    document_id: uuid.UUID,
+    chunk_id: uuid.UUID,
+    retrieval_factory: Any,
+    ending: str,
+    source: str,
+    compact_copy: bool = True,
+) -> tuple[uuid.UUID, uuid.UUID, str]:
+    """Real recall → provider sees it → persisted answer, with no passage search.
+
+    Shared with the migrated PostgreSQL regression; the provider's next call is
+    the handshake proving the result actually reached synthesis, not just a fake
+    provenance field handed directly to persistence.
+    """
+    from sqlalchemy import update
+
+    from app.db import models
+    from app.db.repositories import SessionSummaryRepository
+    from app.domain.chat import GroundedCitation
+
+    base = datetime(2021, 1, 1, tzinfo=UTC)
+    original = uuid.uuid4()
+    name = "secret-q3-plan.pdf"
+    recalled = "The secret margin was 41%." if source == "citation" else f"Do you mean {name}?"
+    needle = "41%" if source == "citation" else name
+    answer = f"Was {needle} the earlier figure?" if ending == "question" else f"Earlier: {needle}."
+    async with sessionmaker() as session:
+        await ChatRuntime.__new__(ChatRuntime)._persist(  # noqa: SLF001
+            session=session,
+            tenant_id=principal.tenant_id,
+            session_id=session_id,
+            assistant_message_id=original,
+            model="m",
+            content=recalled,
+            prompt_context=[],
+            citations=(
+                [
+                    GroundedCitation(
+                        document_id=document_id,
+                        document_name=name,
+                        chunk_id=chunk_id,
+                        snippet="41%",
+                        char_start=0,
+                        char_end=3,
+                        score=1,
+                    )
+                ]
+                if source == "citation"
+                else []
+            ),
+        )
+        await session.execute(
+            update(models.Message).where(models.Message.id == original).values(created_at=base)
+        )
+        await SessionSummaryRepository(session, principal.tenant_id).upsert_summary(
+            session_id,
+            summary="Earlier discussion",
+            covers_through_message_id=original,
+            covered_created_at=base,
+            mentioned_documents={document_id: name},
+        )
+        await session.commit()
+
+    recall_call = ToolCall(id="recall-source", name="read_conversation", arguments={"k": 1})
+    final = (
+        [
+            StreamEvent(
+                tool_calls=(
+                    ToolCall(
+                        id="clarify",
+                        name="ask_user",
+                        arguments={
+                            "question": answer,
+                            "options": [{"label": "Yes"}, {"label": "No"}],
+                        },
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        ]
+        if ending == "question"
+        else [StreamEvent(text=answer), StreamEvent(finish_reason="stop")]
+    )
+
+    class RecallGateway(_ScriptedGateway):
+        async def stream_tools(self, messages: Any, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+            if self.calls:
+                assert any(
+                    m.role is LlmRole.TOOL
+                    and m.tool_call_id == recall_call.id
+                    and needle in m.content
+                    for m in messages
+                ), "the real recall result must reach the provider before it copies the prose"
+            async for event in super().stream_tools(messages, **kwargs):
+                yield event
+
+    gateway = RecallGateway(
+        [[StreamEvent(tool_calls=(recall_call,), finish_reason="tool_calls")], final],
+        synthesis=final,
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = ChatRuntime(
+        sessionmaker=sessionmaker,
+        gateway=gateway,  # type: ignore[arg-type]
+        backplane=backplane,
+        principal=principal,
+        request_id="pr570-r3",
+        source_ip="unknown",
+        default_max_tool_turns=1 if ending == "forced" else 3,
+        retrieval_factory=retrieval_factory,
+        suggestions_enabled=False,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=session_id,
+        question="Repeat the earlier point",
+        model="anthropic/claude-opus-4.8",
+        history=[],
+        collection_ids=None,
+        compaction_cursor=(base, original),
+    )
+    envelopes = await _drain(backplane, stream_id)
+    assert envelopes[-1]["type"] == "done", envelopes[-1]
+    assert not [e for e in envelopes if e.get("name") == "citation"]
+    assert gateway.calls == 2
+    assert gateway.synthesis_calls == (1 if ending == "forced" else 0)
+    async with sessionmaker() as session:
+        messages = await MessageRepository(session, principal.tenant_id).list_for_session(
+            session_id
+        )
+        copied = next(m for m in messages if m.role.value == "assistant" and m.id != original)
+        assert copied.content == answer
+        assert (copied.question is not None) == (ending == "question")
+        assert (
+            await CitationRepository(session, principal.tenant_id).list_for_message(copied.id) == []
+        )
+        # Compact the new answer in a separate committed transaction.
+        if compact_copy:
+            await SessionSummaryRepository(session, principal.tenant_id).upsert_summary(
+                session_id,
+                summary="Earlier discussion continued",
+                covers_through_message_id=copied.id,
+                covered_created_at=copied.created_at,
+                mentioned_documents={document_id: name},
+            )
+        await session.commit()
+    return original, copied.id, needle
+
+
+@pytest.mark.parametrize("ending", ["answer", "question", "forced"])
+@pytest.mark.parametrize("source", ["citation", "mention"])
+async def test_recall_only_answer_keeps_source_provenance(
+    ctx: _Ctx, ending: str, source: str
+) -> None:
+    """R2-001: revoked evidence cannot be laundered through a recall-only answer."""
+    from app.services.tools.impls.recall import _read_conversation
+    from app.services.transcript_recall import SessionTranscriptReader
+
+    class PermittedRetrieval(_FakeRetrieval):
+        permitted = True
+
+        async def permitted_document_names(
+            self, *, principal: object, document_ids: list[uuid.UUID]
+        ) -> dict[uuid.UUID, str]:
+            return (
+                {ctx.document_id: "secret-q3-plan.pdf"}
+                if self.permitted and ctx.document_id in document_ids
+                else {}
+            )
+
+    retrieval = PermittedRetrieval([])
+    original, copied, needle = await _run_recall_only_answer(
+        sessionmaker=ctx.sessionmaker,
+        principal=ctx.principal,
+        session_id=ctx.session_id,
+        document_id=ctx.document_id,
+        chunk_id=ctx.chunk_id,
+        retrieval_factory=lambda _session: retrieval,
+        ending=ending,
+        source=source,
+    )
+    retrieval.permitted = False
+    async with ctx.sessionmaker() as session:
+        message = await MessageRepository(session, ctx.tenant_id).get(copied)
+        assert message is not None
+        result = await _read_conversation(
+            {},
+            ToolContext(
+                principal=ctx.principal,
+                retrieval=retrieval,  # type: ignore[arg-type]
+                transcript=SessionTranscriptReader(
+                    session=session,
+                    principal=ctx.principal,
+                    session_id=ctx.session_id,
+                    compaction_cursor=(message.created_at, copied),
+                ),
+            ),
+        )
+        assert (
+            needle not in result.content
+        ), "the derived answer must not replay revoked recalled prose"
+        assert "withheld_turns" not in result.payload
+        provenance = await MessageRepository(session, ctx.tenant_id).source_documents_for_messages(
+            [original, copied]
+        )
+        assert provenance[copied] == (ctx.document_id,)
+    assert retrieval.queries == [], "recall must not fabricate retrieved passages or citations"

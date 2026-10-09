@@ -152,6 +152,28 @@ function asCitation(data: unknown): ChatCitation | null {
   const c = data as Record<string, unknown>;
   if (typeof c.id !== 'string') return null;
   if (typeof c.charStart !== 'number' || typeof c.charEnd !== 'number') return null;
+  const hasTimeStart = c.timeStartMs !== undefined;
+  const hasTimeEnd = c.timeEndMs !== undefined;
+  const hasTranscriptSegment = c.transcriptSegmentId !== undefined;
+  const hasSpeakerId = c.speakerId !== undefined;
+  const hasSpeakerName = c.speakerName !== undefined;
+  const hasMediaMetadata = hasTranscriptSegment || hasSpeakerId || hasSpeakerName;
+  if (hasTimeStart !== hasTimeEnd) return null;
+  if (hasMediaMetadata && !hasTimeStart) return null;
+  if (
+    hasTimeStart &&
+    (typeof c.timeStartMs !== 'number' ||
+      typeof c.timeEndMs !== 'number' ||
+      !Number.isInteger(c.timeStartMs) ||
+      !Number.isInteger(c.timeEndMs) ||
+      c.timeStartMs < 0 ||
+      c.timeEndMs <= c.timeStartMs)
+  ) {
+    return null;
+  }
+  if (hasTranscriptSegment && typeof c.transcriptSegmentId !== 'string') return null;
+  if (hasSpeakerId && typeof c.speakerId !== 'string') return null;
+  if (hasSpeakerName && typeof c.speakerName !== 'string') return null;
   // A corpus-document citation carries a `documentId`; a web citation (#221)
   // carries a `url` instead (and no document_id — INV-3). Accept EITHER shape so
   // web citations survive the reducer; the renderer classifies by URL presence

@@ -32,13 +32,14 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session, get_object_store_dep
 from app.auth import hash_password
+from app.core.config import get_settings
 from app.core.errors import NotFoundError
-from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
 from app.storage.keys import assert_key_owned_by, build_key
 from app.storage.object_store import StoredObject
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -97,7 +98,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
@@ -240,6 +241,39 @@ async def test_add_feed_url_seeds_mode_feed(client: AsyncClient, seeded: _Seeded
     assert resp.json()["config"] == {"url": f"http://{_PUBLIC}/blog/rss", "mode": "feed"}
 
 
+async def test_failed_embedding_contract_returns_503_without_source_state_drift(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """R2-002: real HTTP create/resync admission is typed and write-free."""
+
+    from app.ingestion.contract import (
+        mark_embedding_contract_invalid,
+        mark_embedding_contract_valid,
+    )
+
+    token = await _login(client, seeded.alice_email)
+    created = await _add(client, token, f"http://{_PUBLIC}/before-contract-failure")
+    assert created.status_code == 201
+    source_id = created.json()["id"]
+    mark_embedding_contract_invalid("embedding_dimension_mismatch")
+    try:
+        blocked_create = await _add(client, token, f"http://{_PUBLIC}/blocked-create")
+        assert blocked_create.status_code == 503
+        assert blocked_create.json()["code"] == "embedding_dimension_mismatch"
+
+        blocked_sync = await client.post(f"/api/v1/sources/{source_id}/sync", headers=_auth(token))
+        assert blocked_sync.status_code == 503
+        assert blocked_sync.json()["code"] == "embedding_dimension_mismatch"
+
+        listed = await client.get("/api/v1/sources", headers=_auth(token))
+        assert listed.status_code == 200
+        assert [(item["id"], item["status"]) for item in listed.json()["items"]] == [
+            (source_id, "pending")
+        ]
+    finally:
+        mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
+
+
 # --- SSRF / validation negatives (422) --------------------------------------
 
 
@@ -298,7 +332,9 @@ async def test_add_malformed_body_is_422(client: AsyncClient, seeded: _Seeded) -
 # --- INV-1/INV-2: cross-tenant + cross-owner → 404 --------------------------
 
 
-async def test_sync_other_owner_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_sync_other_owner_is_404(
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
+) -> None:
     bob_token = await _login(client, seeded.bob_email)
     resp = await _add(client, bob_token, f"http://{_PUBLIC}/bob")
     bob_source_id = resp.json()["id"]
@@ -306,6 +342,11 @@ async def test_sync_other_owner_is_404(client: AsyncClient, seeded: _Seeded) -> 
     alice_token = await _login(client, seeded.alice_email)
     resp = await client.post(f"/api/v1/sources/{bob_source_id}/sync", headers=_auth(alice_token))
     assert resp.status_code == 404  # never 403 (existence non-disclosure)
+    assert len(durable_audit_ledger.events) == 1
+    assert durable_audit_ledger.events[0].metadata == {
+        "attempted_action": "source.sync",
+        "reason": "not_visible",
+    }
 
 
 async def test_delete_cross_tenant_is_404(client: AsyncClient, seeded: _Seeded) -> None:

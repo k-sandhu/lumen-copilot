@@ -12,6 +12,7 @@ and the wire's ``GdriveSource`` health surface (contract-validated).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -42,7 +43,6 @@ from app.connectors.base import (
 )
 from app.core.config import Settings
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
@@ -53,10 +53,11 @@ from app.db.repositories import (
 )
 from app.db.session import session_scope
 from app.db.tenant_context import bind_bypass
-from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
+from app.domain.entities import DocumentKind, DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
 from app.search.filters import acl_freshness_floor
 from app.tasks.sync_source import sync_source_async
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -138,6 +139,26 @@ class _FakeIndexStore:
         self, *, tenant_id: uuid.UUID, document_id: uuid.UUID, refresh: bool = False
     ) -> None:
         type(self).events.append(("delete", document_id))
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_generation", document_id))
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_older", document_id))
 
     async def stamp_acl_stale(
         self,
@@ -235,7 +256,7 @@ async def sqlite_engine() -> AsyncIterator[None]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
     prev_engine = db_session._engine
     prev_maker = db_session._sessionmaker
     db_session._engine = engine
@@ -1035,12 +1056,10 @@ async def test_crash_between_page_commit_and_ingestion_is_recovered_by_the_sweep
     assert enqueued == [(seeded.tenant_id, stranded_id)]
 
 
-async def test_sweep_ignores_non_connector_and_ready_documents(
+async def test_sweep_includes_uploads_but_ignores_ready_failed_and_deleted_documents(
     sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep is connector-scoped and status-scoped: a plain upload pending
-    ingestion (its own task owns it) and a ready connector document are both
-    left alone."""
+    """Recovery covers both post-commit producers but no terminal/deleted row."""
     from sqlalchemy import update as sa_update
 
     seeded = await _seed()
@@ -1067,20 +1086,123 @@ async def test_sweep_ignores_non_connector_and_ready_documents(
             external_id="done",
             status=DocumentStatus.READY,
         )
+        failed = await documents.create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="failed.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/failed",
+            acl_enforced=True,
+            source_id=seeded.source_id,
+            external_id="failed",
+            status=DocumentStatus.FAILED,
+        )
+        deleted = await documents.create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="deleted.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/deleted",
+            acl_enforced=False,
+        )
+        assert await documents.delete(deleted.id) is True
         await session.execute(
             sa_update(models.Document)
-            .where(models.Document.id.in_([upload.id, done.id]))
+            .where(models.Document.id.in_([upload.id, done.id, failed.id]))
             .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
         )
         await session.commit()
 
     poll_module = import_module("app.tasks.connector_poll")
+    enqueued: list[tuple[uuid.UUID, uuid.UUID, bool]] = []
+
+    def _record_enqueue(tid: uuid.UUID, did: uuid.UUID, *, media: bool = False) -> None:
+        enqueued.append((tid, did, media))
+
+    monkeypatch.setattr(poll_module, "enqueue_ingestion", _record_enqueue)
+    assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, upload.id, False)]
+
+
+async def test_parallel_stranded_sweeps_atomically_reserve_one_delivery(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-001: age discovery is a lease/CAS, not duplicate fan-out."""
+
+    from sqlalchemy import update as sa_update
+
+    seeded = await _seed()
+    async with db_session.session_scope() as session:
+        upload = await DocumentRepository(session, seeded.tenant_id).create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="reserved-recovery.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            storage_key="t/reserved-recovery",
+            acl_enforced=False,
+        )
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id == upload.id)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+
+    poll_module = import_module("app.tasks.connector_poll")
     enqueued: list[tuple[uuid.UUID, uuid.UUID]] = []
     monkeypatch.setattr(
-        poll_module, "enqueue_ingestion", lambda tid, did: enqueued.append((tid, did))
+        poll_module,
+        "enqueue_ingestion",
+        lambda tenant_id, document_id: enqueued.append((tenant_id, document_id)),
     )
-    assert await poll_module._sweep_stranded(_settings()) == 0
-    assert enqueued == []
+
+    swept = await asyncio.gather(
+        poll_module._sweep_stranded(_settings()),
+        poll_module._sweep_stranded(_settings()),
+    )
+
+    assert sum(swept) == 1
+    assert enqueued == [(seeded.tenant_id, upload.id)]
+
+
+async def test_recovery_reservation_preserves_original_processing_telemetry(
+    sqlite_engine: None,
+) -> None:
+    from sqlalchemy import update as sa_update
+
+    from app.db.repositories import SourceReconcileRepository
+
+    seeded = await _seed()
+    cutoff = datetime.now(UTC) - timedelta(minutes=30)
+    async with db_session.session_scope() as session:
+        document = await DocumentRepository(session, seeded.tenant_id).create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="stale.wav",
+            mime_type="audio/wav",
+            size_bytes=1,
+            storage_key="t/stale",
+            acl_enforced=False,
+            kind=DocumentKind.AUDIO,
+            status=DocumentStatus.PROCESSING,
+        )
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id == document.id)
+            .values(updated_at=cutoff - timedelta(minutes=1))
+        )
+    async with db_session.session_scope() as session:
+        reservations = await SourceReconcileRepository(
+            session
+        ).reserve_stranded_ingestion_documents(
+            older_than=cutoff,
+            limit=10,
+        )
+    assert reservations == [
+        (seeded.tenant_id, document.id, DocumentStatus.PROCESSING, DocumentKind.AUDIO)
+    ]
 
 
 async def test_cursor_expired_falls_back_to_full_resync(
@@ -1210,3 +1332,39 @@ def test_beat_schedule_carries_connector_sync_poll() -> None:
     entry: dict[str, Any] = celery_app.conf.beat_schedule["connector-sync-poll"]
     assert entry["task"] == "lumen.poll_connector_syncs"
     assert entry["schedule"] == float(get_settings().connector_sync_interval_minutes) * 60.0
+
+
+async def test_sweep_routes_stranded_direct_media_to_bounded_queue(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import update as sa_update
+
+    seeded = await _seed()
+    async with db_session.session_scope() as session:
+        media = await DocumentRepository(session, seeded.tenant_id).create(
+            owner_id=seeded.owner_id,
+            collection_id=seeded.collection_id,
+            filename="stranded-meeting.wav",
+            mime_type="audio/wav",
+            size_bytes=100,
+            storage_key=f"{seeded.tenant_id}/quarantine/stranded-meeting.wav",
+            acl_enforced=False,
+            status=DocumentStatus.PENDING,
+            kind=DocumentKind.AUDIO,
+        )
+        await session.execute(
+            sa_update(models.Document)
+            .where(models.Document.id == media.id)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        await session.commit()
+
+    poll_module = import_module("app.tasks.connector_poll")
+    enqueued: list[tuple[uuid.UUID, uuid.UUID, bool]] = []
+
+    def _record_enqueue(tid: uuid.UUID, did: uuid.UUID, *, media: bool = False) -> None:
+        enqueued.append((tid, did, media))
+
+    monkeypatch.setattr(poll_module, "enqueue_ingestion", _record_enqueue)
+    assert await poll_module._sweep_stranded(_settings()) == 1
+    assert enqueued == [(seeded.tenant_id, media.id, True)]

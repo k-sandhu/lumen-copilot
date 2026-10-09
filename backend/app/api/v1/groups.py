@@ -38,6 +38,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    authenticated_denial_context,
     extract_request_id,
     require_roles,
 )
@@ -169,6 +170,12 @@ def _build_service(
         actor_id=principal.user_id,
         roles=principal.roles,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )

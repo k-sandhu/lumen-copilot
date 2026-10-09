@@ -14,8 +14,8 @@ library (``pypdf`` / ``python-docx`` / ``python-pptx`` / ``openpyxl``) is import
   swap/upgrade is localized.
 
 **Fail-closed (AC-6 / INV-8).** Every failure path is a typed
-:class:`DocumentParseError`: an unsupported MIME type, or a corrupt/unreadable
-file of a supported type. The Celery task maps that to ``status=failed`` with the
+:class:`DocumentParseError`: an unsupported MIME type, a corrupt/unreadable
+file, or a DOCX extraction limit. The Celery task maps that to ``status=failed`` with the
 reason — never a silent drop and never an unmapped crash. Parsing is pure CPU
 work with no network and no I/O beyond the in-memory bytes it is handed.
 """
@@ -39,19 +39,25 @@ _MD = "text/markdown"
 
 SUPPORTED_MIME_TYPES: frozenset[str] = frozenset({_PDF, _DOCX, _PPTX, _XLSX, _TXT, _MD})
 
+# Hard bounds on the DOCX representation/traversal (spec 0010), not provider or
+# deployment tuning. Check before expansion, and never return truncated success.
+_DOCX_MAX_OUTPUT_CHARS = 2_000_000
+_DOCX_MAX_WORK_UNITS = 100_000
+_DOCX_MAX_TABLE_DEPTH = 32
+
 
 def _render_parts(
-    parts: list[tuple[str, str]],
+    parts: list[tuple[str, str, bool]],
     *,
     kind: LocationKind,
     separator: str,
-    keep_empty: bool,
     locations: list[SourceLocation] | None,
 ) -> str:
+    """Render participating parts, independently of their text's truthiness."""
     rendered: list[str] = []
     offset = 0
-    for number, (name, text) in enumerate(parts, start=1):
-        if text or keep_empty:
+    for number, (name, text, participates) in enumerate(parts, start=1):
+        if participates:
             if rendered:
                 offset += len(separator)
             start = offset
@@ -65,7 +71,7 @@ def _render_parts(
 
 
 class DocumentParseError(Exception):
-    """Parsing failed — unsupported type or a corrupt/unreadable file (AC-6).
+    """Parsing failed — unsupported, unreadable or over extraction limits (AC-6).
 
     Carried by the task into ``Document.status=failed`` with the reason. A domain
     error, not an HTTP one; the task records it on the document row.
@@ -102,10 +108,9 @@ def _parse_pdf(data: bytes, *, locations: list[SourceLocation] | None = None) ->
         reader = PdfReader(io.BytesIO(data))
         pages = [page.extract_text() or "" for page in reader.pages]
         return _render_parts(
-            [(f"Page {number}", text) for number, text in enumerate(pages, start=1)],
+            [(f"Page {number}", text, True) for number, text in enumerate(pages, start=1)],
             kind="page",
             separator="\n\n",
-            keep_empty=True,
             locations=locations,
         )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
@@ -113,70 +118,335 @@ def _parse_pdf(data: bytes, *, locations: list[SourceLocation] | None = None) ->
 
 
 def _parse_docx(data: bytes) -> str:
-    """Extract paragraph text from a DOCX (``python-docx``, imported lazily)."""
+    """Extract paragraphs and labelled table rows in body order (spec 0010)."""
     import docx
+    from docx.document import Document as DocxDocument
+    from docx.table import Table, _Cell
+    from docx.text.paragraph import Paragraph
+
+    output: list[str] = []
+    output_chars = 0
+    work_units = 0
+
+    def charge_work(amount: int = 1) -> None:
+        nonlocal work_units
+        work_units += amount
+        if work_units > _DOCX_MAX_WORK_UNITS:
+            raise DocumentParseError("DOCX extraction work limit exceeded")
+
+    def check_size(size: int) -> None:
+        if size > _DOCX_MAX_OUTPUT_CHARS:
+            raise DocumentParseError("DOCX extraction output limit exceeded")
+
+    def emit(text: str) -> None:
+        nonlocal output_chars
+        check_size(output_chars + len(text))
+        output_chars += len(text)
+        output.append(text)
+
+    def scalar_join(parts: list[str]) -> str:
+        check_size(sum(map(len, parts)) + max(0, len(parts) - 1))
+        return "\n".join(parts)
+
+    def render_blocks(container: DocxDocument | _Cell, depth: int) -> None:
+        for index, block in enumerate(container.iter_inner_content()):
+            charge_work()
+            if index:
+                emit("\n")
+            if isinstance(block, Paragraph):
+                emit(block.text)
+            elif isinstance(block, Table):
+                render_table(block, depth + 1)
+
+    def render_table(table: Table, depth: int) -> None:
+        if depth > _DOCX_MAX_TABLE_DEPTH:
+            raise DocumentParseError("DOCX extraction depth limit exceeded")
+        emit("[Table]")
+        headers: list[str] = []
+        width = len(table.columns)
+        charge_work(width)
+        # Cache scalar rendering and origin metadata. Full nested content goes
+        # straight to the bounded output once; aliases never materialize it.
+        origins: dict[object, tuple[tuple[int, int], str, bool]] = {}
+        previous: dict[int, _Cell] = {}
+        for number, row in enumerate(table.rows, start=1):
+            charge_work()
+            # python-docx row.cells recursively follows every vertical merge.
+            # Keep the preceding grid instead, visiting each physical cell once.
+            grid_cells: dict[int, _Cell] = {}
+            column = row.grid_cols_before + 1
+            for tc in row._tr.tc_lst:
+                charge_work(1 + tc.grid_span)
+                grid_origin = previous[column] if tc.vMerge == "continue" else _Cell(tc, table)
+                for occupied in range(column, column + tc.grid_span):
+                    grid_cells[occupied] = grid_origin
+                column += tc.grid_span
+            previous = grid_cells
+            row_width = max(width, column - 1 + row.grid_cols_after)
+            charge_work(row_width)
+            emit(f"\nRow {number}: ")
+            for column in range(1, row_width + 1):
+                cell = grid_cells.get(column)
+                position = (number, column)
+                origin, scalar, has_nested = position, "", False
+                if cell is not None:
+                    if cell._tc not in origins:
+                        paragraphs: list[str] = []
+                        scalar_chars = 0
+                        for block in cell.iter_inner_content():
+                            charge_work()
+                            if isinstance(block, Paragraph):
+                                text = block.text
+                                scalar_chars += len(text) + bool(paragraphs)
+                                check_size(scalar_chars)
+                                paragraphs.append(text)
+                            elif isinstance(block, Table):
+                                has_nested = True
+                        scalar = scalar_join(paragraphs)
+                        if has_nested:
+                            scalar = scalar.strip("\n")
+                        origins[cell._tc] = (position, scalar, has_nested)
+                    origin, scalar, has_nested = origins[cell._tc]
+                nested_reference = (
+                    f" [nested tables at R{origin[0]}C{origin[1]}]" if has_nested else ""
+                )
+                if number == 1:
+                    check_size(len(scalar) + 2 * scalar.count("\n") + len(nested_reference))
+                    headers.append(scalar.replace("\n", " / ") + nested_reference)
+                label = (
+                    f" [{headers[column - 1]}]"
+                    if number > 1 and column <= len(headers) and headers[column - 1]
+                    else ""
+                )
+                if column > 1:
+                    emit(" | ")
+                emit(f"C{column}{label}=")
+                if origin != position:
+                    emit(scalar)
+                    emit(nested_reference)
+                    emit(f" [merged from R{origin[0]}C{origin[1]}]")
+                elif cell is not None:
+                    render_blocks(cell, depth)
+        emit("\n[/Table]")
 
     try:
         document = docx.Document(io.BytesIO(data))
-        paragraphs = [p.text for p in document.paragraphs]
+        render_blocks(document, 0)
+    except DocumentParseError:
+        raise
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse DOCX: {type(exc).__name__}") from exc
-    return "\n".join(paragraphs)
+    return "".join(output)
 
 
 def _parse_pptx(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
-    """Extract text-frame text from a PPTX (``python-pptx``, imported lazily)."""
+    """Extract numbered slides, grouped text, tables and existing notes."""
     from pptx import Presentation
+    from pptx.shapes.autoshape import Shape
+    from pptx.shapes.graphfrm import GraphicFrame
+    from pptx.shapes.group import GroupShape
+    from pptx.shapes.shapetree import GroupShapes, SlideShapes
+
+    def render_shapes(shapes: SlideShapes | GroupShapes) -> tuple[list[str], bool]:
+        lines: list[str] = []
+        has_content = False
+        for shape in shapes:
+            if isinstance(shape, GroupShape):
+                group_lines, group_has_content = render_shapes(shape.shapes)
+                lines.extend(group_lines)
+                has_content = has_content or group_has_content
+            elif isinstance(shape, GraphicFrame) and shape.has_table:
+                lines.append("[Table]")
+                headers: list[str] = []
+                for number, row in enumerate(shape.table.rows, start=1):
+                    values = ["" if cell.is_spanned else cell.text for cell in row.cells]
+                    has_content = has_content or any(value.strip() for value in values)
+                    if number == 1:
+                        headers = [value.replace("\n", " / ") for value in values]
+                    cells = []
+                    for column, value in enumerate(values, start=1):
+                        label = (
+                            f" [{headers[column - 1]}]"
+                            if number > 1 and headers[column - 1]
+                            else ""
+                        )
+                        cells.append(f"C{column}{label}={value}")
+                    lines.append(f"Row {number}: " + " | ".join(cells))
+                lines.append("[/Table]")
+            elif isinstance(shape, Shape) and shape.has_text_frame:
+                text = shape.text_frame.text
+                if text.strip():
+                    lines.append(text)
+                    has_content = True
+        return lines, has_content
 
     try:
         presentation = Presentation(io.BytesIO(data))
-        parts: list[tuple[str, str]] = []
+        parts: list[tuple[str, str, bool]] = []
         for number, slide in enumerate(presentation.slides, start=1):
-            lines: list[str] = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for paragraph in shape.text_frame.paragraphs:
-                        text = "".join(run.text for run in paragraph.runs)
-                        if text:
-                            lines.append(text)
+            content, has_content = render_shapes(slide.shapes)
+            if slide.has_notes_slide:
+                frame = slide.notes_slide.notes_text_frame
+                if frame is not None and frame.text.strip():
+                    content.extend([f"Notes (Slide {number}):", frame.text])
+                    has_content = True
             title_shape = slide.shapes.title
             title = title_shape.text if title_shape is not None else ""
-            name = f"Slide {number}" + (f": {title}" if title.strip() else "")
-            parts.append((name, "\n".join(lines)))
-        return _render_parts(
-            parts, kind="slide", separator="\n", keep_empty=False, locations=locations
-        )
+            heading = f"Slide {number}" + (f": {title}" if title.strip() else "")
+            parts.append(
+                (heading, "\n".join([heading, *content]) if has_content else "", has_content)
+            )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PPTX: {type(exc).__name__}") from exc
+    return _render_parts(parts, kind="slide", separator="\n", locations=locations)
 
 
 def _parse_xlsx(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
-    """Extract cell text from an XLSX (``openpyxl``, imported lazily).
+    """Render sheet names, labelled coordinates, formats and formula caches."""
+    import zipfile
+    from xml.etree import ElementTree
 
-    Reads values only (``data_only=True``) and renders each non-empty row as a
-    tab-joined line, sheets separated by a blank line. Read-only mode keeps the
-    workbook off the heap for large sheets.
-    """
     from openpyxl import load_workbook
+    from openpyxl.utils import coordinate_to_tuple, get_column_letter
+    from openpyxl.worksheet.cell_range import CellRange
+    from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+
+    def render_formula(expression: object) -> str:
+        if isinstance(expression, str):
+            return expression
+        if isinstance(expression, ArrayFormula):
+            return f"{expression.text or ''}; array range={expression.ref}"
+        if isinstance(expression, DataTableFormula):
+            # The pinned adapter yields source attributes in a fixed order.
+            attributes = "; ".join(f"{key}={value}" for key, value in expression if key != "t")
+            return f"dataTable; {attributes}"
+        raise ValueError("unsupported XLSX formula type")
 
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         try:
-            parts: list[tuple[str, str]] = []
-            for worksheet in workbook.worksheets:
-                rows: list[str] = []
-                for row in worksheet.iter_rows(values_only=True):
-                    cells = [str(cell) for cell in row if cell is not None]
-                    if cells:
-                        rows.append("\t".join(cells))
-                parts.append((worksheet.title, "\n".join(rows)))
-            return _render_parts(
-                parts, kind="sheet", separator="\n\n", keep_empty=False, locations=locations
-            )
+            formulas = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
+            try:
+                parts: list[tuple[str, str, bool]] = []
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    for worksheet, formula_sheet in zip(
+                        workbook.worksheets, formulas.worksheets, strict=True
+                    ):
+                        merges: list[str] = []
+                        merged_bounds: list[tuple[int, int, int, int]] = []
+                        supplied_caches: set[str] = set()
+                        # ReadOnlyWorksheet omits merged ranges. Validate them
+                        # before either projection can expose covered values.
+                        # It also decodes empty string caches as None, so retain
+                        # cache presence/type directly from the source XML.
+                        source_row = source_column = 0
+                        source_coordinate = source_type = ""
+                        has_formula = has_cache = False
+                        with archive.open(worksheet._worksheet_path) as content:
+                            for event, element in ElementTree.iterparse(
+                                content, events=("start", "end")
+                            ):
+                                tag = element.tag.rpartition("}")[2]
+                                if event == "start":
+                                    if tag == "row":
+                                        source_row = int(element.get("r", str(source_row + 1)))
+                                        source_column = 0
+                                    elif tag == "c":
+                                        source_coordinate = element.get("r", "")
+                                        if source_coordinate:
+                                            _, source_column = coordinate_to_tuple(
+                                                source_coordinate
+                                            )
+                                        else:
+                                            source_column += 1
+                                            source_coordinate = (
+                                                f"{get_column_letter(source_column)}{source_row}"
+                                            )
+                                        source_type = element.get("t", "n")
+                                        has_formula = has_cache = False
+                                    continue
+                                if tag == "f":
+                                    has_formula = True
+                                elif tag == "v":
+                                    has_cache = element.text is not None or source_type == "str"
+                                elif tag == "c" and has_formula and has_cache:
+                                    supplied_caches.add(source_coordinate)
+                                elif tag == "mergeCell":
+                                    reference = element.attrib["ref"]
+                                    merged_bounds.append(CellRange(reference).bounds)
+                                    merges.append(reference)
+                                element.clear()
+                        rows: list[str] = []
+                        headers: list[str] = []
+                        for number, (row, formula_row) in enumerate(
+                            zip(worksheet.iter_rows(), formula_sheet.iter_rows(), strict=True),
+                            start=1,
+                        ):
+                            # Keep rectangles rather than expanding potentially
+                            # large merges into a set of individual coordinates.
+                            covered = [
+                                any(
+                                    min_row <= number <= max_row
+                                    and min_col <= column <= max_col
+                                    and (number, column) != (min_row, min_col)
+                                    for min_col, min_row, max_col, max_row in merged_bounds
+                                )
+                                for column in range(1, len(formula_row) + 1)
+                            ]
+                            if not any(
+                                cell.value is not None and not covered[column]
+                                for column, cell in enumerate(formula_row)
+                            ):
+                                continue
+                            first = not headers
+                            if first:
+                                headers = [
+                                    str(cell.value)
+                                    if cell.value is not None and not covered[column]
+                                    else ""
+                                    for column, cell in enumerate(row)
+                                ]
+                            cells: list[str] = []
+                            for column, (cell, formula) in enumerate(
+                                zip(row, formula_row, strict=True), start=1
+                            ):
+                                coordinate = f"{get_column_letter(column)}{number}"
+                                if covered[column - 1]:
+                                    cells.append(f"{coordinate}=")
+                                    continue
+                                label = (
+                                    f" [{headers[column - 1]}]"
+                                    if not first and headers[column - 1]
+                                    else ""
+                                )
+                                value = str(cell.value) if cell.value is not None else ""
+                                if cell.value is not None and cell.number_format != "General":
+                                    value += f" [format={cell.number_format}]"
+                                if formula.data_type == "f":
+                                    cache = (
+                                        "cached value unavailable"
+                                        if coordinate not in supplied_caches
+                                        else "cached value supplied; freshness unknown"
+                                    )
+                                    value += f" [formula={render_formula(formula.value)}; {cache}]"
+                                cells.append(f"{coordinate}{label}={value}")
+                            rows.append(
+                                f"Row {number} (Sheet {worksheet.title}): " + " | ".join(cells)
+                            )
+                        if rows:
+                            heading = [f"Sheet: {worksheet.title}"]
+                            if merges:
+                                heading.append("Merged cells: " + ", ".join(merges))
+                            parts.append((worksheet.title, "\n".join(heading + rows), bool(rows)))
+                        else:
+                            parts.append((worksheet.title, "", False))
+            finally:
+                formulas.close()
         finally:
             workbook.close()
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse XLSX: {type(exc).__name__}") from exc
+    return _render_parts(parts, kind="sheet", separator="\n\n", locations=locations)
 
 
 # MIME type -> parser. Each value localizes its library import to its own body.
@@ -199,7 +469,7 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
 
     Raises:
         UnsupportedMimeTypeError: ``mime_type`` is outside the allowlist (AC-6).
-        DocumentParseError: a supported type whose bytes are corrupt/unreadable.
+        DocumentParseError: corrupt/unreadable bytes or a DOCX extraction limit.
     """
     normalized = mime_type.split(";", 1)[0].strip().lower()
     parser = _PARSERS.get(normalized)
@@ -209,7 +479,7 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
 
 
 def parse_document_with_locations(data: bytes, *, mime_type: str) -> ParsedDocument:
-    """Extract once, retaining native source-part locations (spec 0013)."""
+    """Extract once, retaining native source-part locations (spec 0015)."""
     normalized = mime_type.split(";", 1)[0].strip().lower()
     locations: list[SourceLocation] = []
     if normalized == _PDF:

@@ -237,7 +237,37 @@ question; no new INV-2 surface.
 - No mid-run blocking questions, multi-question forms, or answer-by-WS (the
   socket stays one-directional).
 - No suggestion personalization/learning; no persistence of suggestions.
-- No server-side composer history; no cross-session recall.
+- No server-side composer history; no **cross-session** recall.
+  *(Amended by [#569](https://github.com/k-sandhu/lumen-copilot/issues/569),
+  epic #533 R1.)* The standing non-goal is reaching **another conversation** —
+  that needs a permission story this spec does not have, and it stays out.
+  Reading back **the current session's own** compacted range is not covered by
+  it and now ships as the T0 `read_conversation` tool: the user already owns and
+  can read every byte of that transcript via `GET /chat/sessions/{id}/messages`;
+  only the *model* had lost it once the rolling summariser (§ADR-0016 §3.2)
+  folded a turn away. Recall is bounded to turns that have LEFT the prompt,
+  carries no citations, and re-checks the union of each ASSISTANT turn's stored
+  source-document provenance and stored document mentions against current
+  retrieval permissions. ANY inaccessible dependency or UNKNOWN provenance
+  withholds the WHOLE assistant turn before matching or candidate selection:
+  it contributes no text, counts, ranking signal or provenance. Recall never
+  rewrites assistant prose or redacts filenames inline. Permitted assistant text
+  and the caller's own USER words are returned as-is within the simple per-result
+  prefix bound; USER turns retain the ownership/tenant checks and the documented
+  dependency exception. Stored mentions are computed from the original stored
+  body and summary mention map, never clipped/rendered text. The bounded candidate
+  window, two-call budget and repeat refusal remain in force. Existing summary
+  sanitisation is preserved. Each recall evaluates the caller's permitted document
+  IDs and names once, before candidate selection, and uses that same immutable
+  snapshot for the SQL pre-filter, matching/K-selection and final withholding.
+  A revocation committed after that snapshot is an ordinary concurrent race:
+  the entire result is consistent with permissions at the snapshot instant.
+  It never combines selection under earlier permissions with withholding under
+  later permissions; excluded turns affect neither selection nor any result
+  metadata. Event-handshake PostgreSQL regressions commit revocation between the
+  permission snapshot and candidate read, and between the candidate read and
+  rendering, and compare every result byte against before/after controls.
+  See ADR-0016 §3.3 (owner decision 2026-10-01; PR #570 R11).
 - `event:narration` (#414), sub-agent progress envelopes (ADR-0018 §5), and any
   workflow *engine* (ADR-0011 §6) remain their own work.
 

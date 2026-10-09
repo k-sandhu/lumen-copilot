@@ -135,8 +135,12 @@
     "ChatCitation": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=citation. Mirrors openapi Citation (spec 0004 INV-3): a permitted passage the answer cites. The UI renders it as a clickable reference resolving to the document + span.",
+      "description": "`event.data` for name=citation. Mirrors openapi Citation (spec 0004 INV-3 / spec 0008): a permitted passage the answer cites. Media citations additionally carry a paired player-relative millisecond span and transcript segment so the UI can seek the original audio/video.",
       "required": ["id", "documentId", "documentName", "chunkId", "snippet", "charStart", "charEnd"],
+      "dependentRequired": {
+        "timeStartMs": ["timeEndMs"],
+        "timeEndMs": ["timeStartMs"]
+      },
       "properties": {
         "id": { "type": "string", "format": "uuid" },
         "documentId": { "type": "string", "format": "uuid" },
@@ -145,6 +149,11 @@
         "snippet": { "type": "string" },
         "charStart": { "type": "integer", "minimum": 0 },
         "charEnd": { "type": "integer", "minimum": 0 },
+        "timeStartMs": { "type": "integer", "minimum": 0 },
+        "timeEndMs": { "type": "integer", "minimum": 1 },
+        "transcriptSegmentId": { "type": "string", "format": "uuid" },
+        "speakerId": { "type": "string" },
+        "speakerName": { "type": "string" },
         "score": { "type": "number" }
       }
     },

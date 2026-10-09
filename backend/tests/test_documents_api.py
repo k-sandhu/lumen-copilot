@@ -29,9 +29,11 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
@@ -43,7 +45,6 @@ from app.api.deps import get_db_session, get_object_store_dep, get_settings_dep
 from app.auth import hash_password
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkInput,
@@ -54,12 +55,13 @@ from app.db.repositories import (
     TenantRepository,
     UserRepository,
 )
-from app.domain.entities import DocumentStatus, Role, SourceStatus
+from app.domain.entities import DocumentKind, DocumentStatus, Role, SourceStatus
 from app.ingestion.chunking import chunk_text
 from app.main import create_app
 from app.services.document_service import reassemble_chunk_texts
 from app.storage.keys import assert_key_owned_by, build_key
 from app.storage.object_store import StoredObject
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -144,7 +146,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
@@ -288,6 +290,70 @@ def _upload_files(filename: str = "report.txt", data: bytes = b"hello", ctype: s
 # --- Happy path: upload ----------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "kind,status,duration",
+    [
+        (DocumentKind.DOCUMENT, DocumentStatus.READY, None),
+        (DocumentKind.AUDIO, DocumentStatus.PENDING, None),
+        (DocumentKind.AUDIO, DocumentStatus.READY, 4_000),
+    ],
+)
+async def test_document_duration_response_matches_required_nullable_contract(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    kind: DocumentKind,
+    status: DocumentStatus,
+    duration: int | None,
+) -> None:
+    from app.api.v1.documents import DocumentResponse
+
+    token = await _login(client, seeded.alice_email)
+    collection_id = await _seed_collection(
+        sessionmaker,
+        tenant_id=seeded.tenant_a,
+        owner_email=seeded.alice_email,
+    )
+    async with sessionmaker() as session:
+        owner = await UserRepository(session, seeded.tenant_a).get_by_email(seeded.alice_email)
+        assert owner is not None
+        repo = DocumentRepository(session, seeded.tenant_a)
+        document = await repo.create(
+            owner_id=owner.id,
+            collection_id=collection_id,
+            filename="fixture",
+            mime_type="text/plain" if kind is DocumentKind.DOCUMENT else "audio/mpeg",
+            size_bytes=8,
+            storage_key=f"{seeded.tenant_a}/fixture",
+            acl_enforced=False,
+            kind=kind,
+        )
+        if duration is not None:
+            await repo.update_media_metadata(
+                document.id,
+                kind=kind,
+                duration_ms=duration,
+                transcript_language="en",
+                transcription_model="fake",
+            )
+        await repo.set_status(document.id, status=status)
+        await session.commit()
+    schema = yaml.safe_load(
+        (Path(__file__).parents[2] / "contracts/openapi.yaml").read_text(encoding="utf-8")
+    )["components"]["schemas"]["Document"]
+    for path in [
+        f"/api/v1/documents/{document.id}",
+        f"/api/v1/documents?collection_id={collection_id}",
+    ]:
+        response = await client.get(path, headers=_auth(token))
+        assert response.status_code == 200, response.text
+        body = response.json()
+        item = body["items"][0] if "items" in body else body
+        assert set(schema["required"]) <= item.keys()
+        assert item["duration_ms"] == duration
+    assert DocumentResponse.model_fields["duration_ms"].is_required()
+
+
 async def test_upload_returns_201_pending_owned_by_caller(
     client: AsyncClient, seeded: _Seeded, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -301,28 +367,8 @@ async def test_upload_returns_201_pending_owned_by_caller(
         data={"collection_id": str(coll_id)},
         files=_upload_files(),
     )
-    assert resp.status_code == 201, resp.text
-    body = resp.json()
-    assert set(body) >= {
-        "id",
-        "filename",
-        "mime_type",
-        "size_bytes",
-        "collection_id",
-        "owner_id",
-        "status",
-        "chunk_count",
-        "created_at",
-        "updated_at",
-    }
-    assert body["filename"] == "report.txt"
-    assert body["mime_type"] == _TXT
-    assert body["size_bytes"] == len(b"hello")
-    assert body["collection_id"] == str(coll_id)
-    assert body["status"] == "pending"  # ingestion (#21) not run here
-    assert body["chunk_count"] == 0
-    me = await client.get("/api/v1/auth/me", headers=_auth(token))
-    assert body["owner_id"] == me.json()["id"]
+    assert resp.status_code == 410, resp.text
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 async def test_upload_stores_object_in_object_store(
@@ -341,12 +387,9 @@ async def test_upload_stores_object_in_object_store(
         data={"collection_id": str(coll_id)},
         files=_upload_files(data=b"the body bytes"),
     )
-    assert resp.status_code == 201, resp.text
-    # The bytes landed under the caller's tenant prefix (the #22 seam).
-    assert len(store.objects) == 1
-    key = next(iter(store.objects))
-    assert key.startswith(f"{seeded.tenant_a}/")
-    assert store.objects[key] == b"the body bytes"
+    assert resp.status_code == 410, resp.text
+    assert resp.json()["code"] == "document_upload_retired"
+    assert store.objects == {}
 
 
 async def test_upload_enqueues_ingestion_after_commit(
@@ -366,10 +409,9 @@ async def test_upload_enqueues_ingestion_after_commit(
         data={"collection_id": str(coll_id)},
         files=_upload_files(),
     )
-    assert resp.status_code == 201, resp.text
-    document_id = uuid.UUID(resp.json()["id"])
-    # Exactly one enqueue, for this tenant + document (fired after the commit).
-    assert enqueued == [(seeded.tenant_a, document_id)]
+    assert resp.status_code == 410, resp.text
+    assert resp.json()["code"] == "document_upload_retired"
+    assert enqueued == []
 
 
 async def test_failed_upload_does_not_enqueue_ingestion(
@@ -390,7 +432,8 @@ async def test_failed_upload_does_not_enqueue_ingestion(
         data={"collection_id": str(coll_id)},
         files=_upload_files(),
     )
-    assert resp.status_code == 404, resp.text
+    assert resp.status_code == 410, resp.text
+    assert resp.json()["code"] == "document_upload_retired"
     assert enqueued == []
 
 
@@ -586,9 +629,9 @@ async def test_content_redirects_302_to_presigned_url(
     resp = await client.get(
         f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
     )
-    assert resp.status_code == 302
-    assert resp.headers["location"].startswith("https://storage.test/")
-    assert store.presigned  # the #22 presign_get path was used
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_content_retired"
+    assert store.presigned == []
 
 
 async def test_content_streams_inline_when_redirect_disabled(
@@ -597,7 +640,7 @@ async def test_content_streams_inline_when_redirect_disabled(
     store: FakeObjectStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Flip the config flag so the API streams the bytes inline instead of 302.
+    # Even the legacy artifact-delivery flag cannot revive document byte proxying.
     monkeypatch.setenv("DOCUMENT_CONTENT_REDIRECT", "false")
     from app.core.config import get_settings
 
@@ -626,14 +669,8 @@ async def test_content_streams_inline_when_redirect_disabled(
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             token = await _login(ac, seeded.alice_email)
             resp = await ac.get(f"/api/v1/documents/{doc_id}/content", headers=_auth(token))
-        assert resp.status_code == 200
-        # The inline stream carries the document's OWN (allowlisted) content-type
-        # so the browser can render it inline — not a generic octet-stream that
-        # would force a download and defeat the viewer preview (#242).
-        assert resp.headers["content-type"].startswith(_TXT)  # the seeded doc's mime
-        assert resp.headers["content-type"] != "application/octet-stream"
-        assert resp.headers["content-disposition"].startswith("inline")
-        assert resp.content == b"inline bytes here"
+        assert resp.status_code == 410
+        assert resp.json()["code"] == "document_content_retired"
     finally:
         monkeypatch.delenv("DOCUMENT_CONTENT_REDIRECT", raising=False)
         get_settings.cache_clear()
@@ -748,13 +785,8 @@ async def test_upload_emits_document_uploaded_audit(
         data={"collection_id": str(coll_id)},
         files=_upload_files(),
     )
-    doc_id = created.json()["id"]
-    async with sessionmaker() as session:
-        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
-    ev = next(e for e in events if e.action == "document.uploaded")
-    assert ev.resource_id == doc_id
-    assert ev.resource_type == "document"
-    assert ev.outcome.value == "allowed"
+    assert created.status_code == 410
+    assert created.json()["code"] == "document_upload_retired"
 
 
 async def test_content_emits_document_downloaded_audit(
@@ -774,12 +806,14 @@ async def test_content_emits_document_downloaded_audit(
         collection_id=coll,
     )
     token = await _login(client, seeded.alice_email)
-    await client.get(
+    response = await client.get(
         f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
     )
+    assert response.status_code == 410
+    assert response.json()["code"] == "document_content_retired"
     async with sessionmaker() as session:
         events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
-    assert any(e.action == "document.downloaded" and e.resource_id == str(doc_id) for e in events)
+    assert not any(e.action == "document.downloaded" for e in events)
 
 
 async def test_delete_emits_document_deleted_audit(
@@ -813,6 +847,7 @@ async def test_get_other_owner_same_tenant_is_404(
     seeded: _Seeded,
     sessionmaker: async_sessionmaker[AsyncSession],
     store: FakeObjectStore,
+    durable_audit_ledger,
 ) -> None:
     coll = await _seed_collection(
         sessionmaker, tenant_id=seeded.tenant_a, owner_email=seeded.bob_email
@@ -827,6 +862,12 @@ async def test_get_other_owner_same_tenant_is_404(
     token = await _login(client, seeded.alice_email)
     resp = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
     assert resp.status_code == 404
+    assert len(durable_audit_ledger.events) == 1
+    denial = durable_audit_ledger.events[0]
+    assert denial.tenant_id == seeded.tenant_a
+    assert denial.resource_type == "document"
+    assert denial.resource_id == str(doc_id)
+    assert denial.metadata == {"attempted_action": "document.read", "reason": "not_visible"}
 
 
 async def test_get_cross_tenant_is_404(
@@ -870,7 +911,8 @@ async def test_content_other_owner_is_404(
     resp = await client.get(
         f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_content_retired"
 
 
 async def test_delete_cross_tenant_is_404_and_leaves_row_and_object(
@@ -917,7 +959,8 @@ async def test_upload_into_other_owner_collection_is_404(
         data={"collection_id": str(coll)},
         files=_upload_files(),
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
     # Nothing stored, no row created.
     assert store.objects == {}
 
@@ -935,7 +978,8 @@ async def test_upload_into_cross_tenant_collection_is_404(
         data={"collection_id": str(coll)},
         files=_upload_files(),
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 async def test_upload_unknown_collection_is_404(client: AsyncClient, seeded: _Seeded) -> None:
@@ -946,7 +990,8 @@ async def test_upload_unknown_collection_is_404(client: AsyncClient, seeded: _Se
         data={"collection_id": str(uuid.uuid4())},
         files=_upload_files(),
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 # --- Negative: authentication (INV-4 → 401) --------------------------------
@@ -1003,7 +1048,8 @@ async def test_upload_oversize_is_413(
                 data={"collection_id": str(coll_id)},
                 files=_upload_files(data=b"way too big"),
             )
-        assert resp.status_code == 413
+        assert resp.status_code == 410
+        assert resp.json()["code"] == "document_upload_retired"
     finally:
         monkeypatch.delenv("MAX_UPLOAD_BYTES", raising=False)
         get_settings.cache_clear()
@@ -1022,7 +1068,8 @@ async def test_upload_unsupported_content_type_is_415(
         data={"collection_id": str(coll_id)},
         files=_upload_files(filename="evil.zip", data=b"PK\x03\x04", ctype="application/zip"),
     )
-    assert resp.status_code == 415
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 # --- Negative: malformed multipart (INV-8 → 422) ---------------------------
@@ -1035,7 +1082,8 @@ async def test_upload_missing_file_is_422(client: AsyncClient, seeded: _Seeded) 
         headers=_auth(token),
         data={"collection_id": str(uuid.uuid4())},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 async def test_upload_missing_collection_id_is_422(client: AsyncClient, seeded: _Seeded) -> None:
@@ -1045,7 +1093,8 @@ async def test_upload_missing_collection_id_is_422(client: AsyncClient, seeded: 
         headers=_auth(token),
         files=_upload_files(),
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 async def test_upload_non_uuid_collection_id_is_422(client: AsyncClient, seeded: _Seeded) -> None:
@@ -1056,7 +1105,8 @@ async def test_upload_non_uuid_collection_id_is_422(client: AsyncClient, seeded:
         data={"collection_id": "not-a-uuid"},
         files=_upload_files(),
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 410
+    assert resp.json()["code"] == "document_upload_retired"
 
 
 async def test_get_malformed_uuid_is_422(client: AsyncClient, seeded: _Seeded) -> None:
@@ -1362,7 +1412,7 @@ async def _seed_connector_document(
 
 
 async def _assert_every_read_path_404s(client: AsyncClient, token: str, doc_id: uuid.UUID) -> None:
-    """Metadata, text, streamed content, and presign must all be 404."""
+    """Active metadata/text stay 404; the retired content path is always 410."""
     meta = await client.get(f"/api/v1/documents/{doc_id}", headers=_auth(token))
     assert meta.status_code == 404, meta.text
     text = await client.get(f"/api/v1/documents/{doc_id}/text", headers=_auth(token))
@@ -1370,8 +1420,8 @@ async def _assert_every_read_path_404s(client: AsyncClient, token: str, doc_id: 
     content = await client.get(
         f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
     )
-    # 404 — never a 302 to a presigned URL (that would leak the bytes outright).
-    assert content.status_code == 404, content.text
+    assert content.status_code == 410, content.text
+    assert content.json()["code"] == "document_content_retired"
 
 
 async def _connector_setup(
@@ -1488,7 +1538,8 @@ async def test_fresh_mirror_admits_the_named_principal(
     content = await client.get(
         f"/api/v1/documents/{doc_id}/content", headers=_auth(token), follow_redirects=False
     )
-    assert content.status_code == 302
+    assert content.status_code == 410
+    assert content.json()["code"] == "document_content_retired"
 
 
 async def test_empty_mirror_denies_the_INLINE_content_stream(
@@ -1515,7 +1566,8 @@ async def test_empty_mirror_denies_the_INLINE_content_stream(
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             token = await _login(ac, seeded.alice_email)
             resp = await ac.get(f"/api/v1/documents/{doc_id}/content", headers=_auth(token))
-        assert resp.status_code == 404, resp.text
+        assert resp.status_code == 410, resp.text
+        assert resp.json()["code"] == "document_content_retired"
     finally:
         monkeypatch.delenv("DOCUMENT_CONTENT_REDIRECT", raising=False)
         get_settings.cache_clear()

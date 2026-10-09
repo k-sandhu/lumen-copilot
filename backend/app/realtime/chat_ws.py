@@ -43,12 +43,16 @@ backplane connection; no task or connection leaks).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+import uuid
+from typing import Annotated
 
-from app.api.deps import get_backplane, get_settings_dep
-from app.auth import InvalidTokenError, verify_access_token
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+
+from app.api.deps import AuditSinkFactory, get_backplane, get_settings_dep
+from app.auth import InvalidTokenError, Principal, verify_access_token
 from app.core.logging import get_logger
 from app.realtime.backplane import is_terminal
+from app.services.chat_stream_access import ChatStreamAccessService
 
 router = APIRouter()
 log = get_logger(__name__)
@@ -63,11 +67,42 @@ log = get_logger(__name__)
 _WS_POLICY_VIOLATION = 1008
 
 
+async def verified_stream_principal(
+    websocket: WebSocket,
+    access_token: str = Query(default=""),
+) -> Principal | None:
+    """Authenticate through auth/ before accepting or creating actor attribution."""
+    try:
+        return verify_access_token(access_token, get_settings_dep())
+    except InvalidTokenError:
+        await websocket.close(code=_WS_POLICY_VIOLATION)
+        return None
+
+
+async def stream_access_service(
+    websocket: WebSocket,
+    principal: Annotated[Principal | None, Depends(verified_stream_principal)],
+    make_audit_sink: AuditSinkFactory,
+) -> ChatStreamAccessService | None:
+    if principal is None:
+        return None
+    return ChatStreamAccessService(
+        backplane=get_backplane(),
+        principal=principal,
+        denials=make_audit_sink.denial_context(
+            principal.tenant_id,
+            principal=principal,
+            request_id=websocket.headers.get("x-request-id") or uuid.uuid4().hex,
+            source_ip=websocket.client.host if websocket.client else "unknown",
+        ),
+    )
+
+
 @router.websocket("/ws/chat/{stream_id}")
 async def chat_ws(
     websocket: WebSocket,
     stream_id: str,
-    access_token: str = Query(default=""),
+    access: Annotated[ChatStreamAccessService | None, Depends(stream_access_service)],
 ) -> None:
     """Authenticate + authorize, then relay the answer stream for ``stream_id``.
 
@@ -80,13 +115,7 @@ async def chat_ws(
     Only on a clean match does the endpoint subscribe to the backplane and forward
     each envelope verbatim until a terminal one arrives or the client goes away.
     """
-    settings = get_settings_dep()
-    try:
-        principal = verify_access_token(access_token, settings)
-    except InvalidTokenError:
-        # Deny before accept (no envelope). The close runs pre-handshake, so the
-        # client sees an HTTP 403 upgrade rejection, not a 1008 close frame.
-        await websocket.close(code=_WS_POLICY_VIOLATION)
+    if access is None:
         return
 
     backplane = get_backplane()
@@ -94,12 +123,7 @@ async def chat_ws(
     # not enough — the stream id alone confers no access (INV-1/INV-2). An unknown
     # id and a foreign/cross-tenant one are treated the same (deny, no envelope,
     # existence non-disclosure). Logged without revealing whether the id existed.
-    owner = await backplane.get_owner(stream_id)
-    if (
-        owner is None
-        or owner.owner_id != principal.user_id
-        or owner.tenant_id != principal.tenant_id
-    ):
+    if not await access.authorize(stream_id):
         log.info("ws_chat.denied", stream_id=stream_id)
         await websocket.close(code=_WS_POLICY_VIOLATION)
         return

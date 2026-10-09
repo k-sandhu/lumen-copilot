@@ -43,6 +43,7 @@ from app.api.deps import (
     OAuthTokenHttpDep,
     ObjectStoreDep,
     SettingsDep,
+    authenticated_denial_context,
     extract_request_id,
 )
 from app.connectors.oauth import REAUTHORIZE_REQUIRED
@@ -390,6 +391,7 @@ def _build_service(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
     request: Request,
 ) -> SourcesService:
     """Assemble the per-request service from the identity + adapter + audit seams.
@@ -404,8 +406,15 @@ def _build_service(
         roles=principal.roles,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
+        embedding_space_fingerprint=settings.embedding_space_fingerprint,
     )
 
 
@@ -420,6 +429,7 @@ async def list_sources(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> SourceListResponse:
@@ -430,6 +440,7 @@ async def list_sources(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     page = await service.list_page(cursor=cursor, limit=limit)
@@ -449,12 +460,14 @@ async def create_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
 ) -> SourceResponse | GdriveSourceResponse:
     """Add a source — a web URL (any member) or a managed connector (admin only).
 
     Web: validates + SSRF-checks the URL (ADR-0009 §3) — a blocked or invalid
     URL is **422** (``url_blocked``); the source returns ``pending`` with the
-    first sync enqueued. Managed (``gdrive``): admin-gated at action time
+    first sync enqueued. A known-failed embedding startup contract is **503**
+    before persistence. Managed (``gdrive``): admin-gated at action time
     (ADR-0019 §1 — non-admin is **403**, audited); the source is created
     ``pending_auth`` and syncs only after the connect flow completes. Errors are
     typed ``AppError``\\ s mapped by the global handler.
@@ -465,6 +478,7 @@ async def create_source(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     if isinstance(body, WebSourceCreateRequest):
@@ -488,6 +502,7 @@ async def sync_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
 ) -> SourceResponse | GdriveSourceResponse:
     """Re-sync one of the caller's sources (re-fetch + re-index); else 404.
 
@@ -496,7 +511,8 @@ async def sync_source(
     success codes). A non-owner or cross-tenant **web** source is **404**
     (INV-1/INV-2). Managed sources are admin-gated at action time (**403**,
     ADR-0019 §1) and cannot sync while awaiting consent (**409**
-    ``source_pending_auth``, INV-8).
+    ``source_pending_auth``, INV-8). A known-failed embedding startup contract
+    is **503** without a status change.
     """
     service = _build_service(
         session=session,
@@ -504,6 +520,7 @@ async def sync_source(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     result = await service.resync(source_id)
@@ -525,6 +542,7 @@ async def delete_source(
     tenant_id: CurrentTenant,
     make_audit_sink: AuditSinkFactory,
     object_store: ObjectStoreDep,
+    settings: SettingsDep,
 ) -> Response:
     """Delete a source; removes its docs + objects (+ backing collection if empty), else 404."""
     service = _build_service(
@@ -533,6 +551,7 @@ async def delete_source(
         tenant_id=tenant_id,
         make_audit_sink=make_audit_sink,
         object_store=object_store,
+        settings=settings,
         request=request,
     )
     deleted = await service.delete(source_id)
@@ -588,6 +607,7 @@ async def connect_source(
     settings: SettingsDep,
     state_store: OAuthStateStoreDep,
     token_http: OAuthTokenHttpDep,
+    make_audit_sink: AuditSinkFactory,
 ) -> SourceConnectResponse:
     """Start (or restart) a managed source's OAuth consent flow (admin only).
 
@@ -597,10 +617,9 @@ async def connect_source(
     ``not_connectable``; unknown/foreign is **404** (INV-1). The returned URL
     carries only the opaque single-use state handle (ADR-0019 §1).
 
-    ``tenant_id`` is depended on for its side effect (RLS GUC binding); the
-    service reads the tenant from the principal.
+    ``tenant_id`` both arms the RLS GUC and scopes the durable denial context;
+    it comes from the same token-bound principal the service receives.
     """
-    del tenant_id  # dependency retained for the RLS bind side effect
     service = _build_oauth_service(
         session=session,
         settings=settings,
@@ -608,7 +627,16 @@ async def connect_source(
         token_http=token_http,
         request=request,
     )
-    authorization_url = await service.start_connect(source_id, principal=principal)
+    authorization_url = await service.start_connect(
+        source_id,
+        principal=principal,
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
+    )
     await session.commit()
     return SourceConnectResponse(authorization_url=authorization_url)
 

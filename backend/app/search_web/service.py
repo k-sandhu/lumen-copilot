@@ -89,9 +89,7 @@ class WebSearchService:
             return self._default_k
         return max(1, min(self._max_k, requested))
 
-    async def search(
-        self, query: str, *, k: int | None = None
-    ) -> tuple[WebSearchResult, ...]:
+    async def search(self, query: str, *, k: int | None = None) -> tuple[WebSearchResult, ...]:
         """Run one rate-limited web search, optionally enriching top results.
 
         Order: (1) admission-check the per-tenant window (ADR-0014 §3) — an
@@ -151,9 +149,7 @@ class WebSearchService:
         ]
         return (*enriched, *rest)
 
-    async def _fetch_passage(
-        self, url: str, *, client: httpx.AsyncClient
-    ) -> str | None:
+    async def _fetch_passage(self, url: str, *, client: httpx.AsyncClient) -> str | None:
         """Fetch + extract one result page through the SSRF chokepoint, or ``None``.
 
         Returns the extracted, budget-trimmed passage text on success. A page that

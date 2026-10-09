@@ -57,6 +57,7 @@ const LABELS: Record<string, string> = {
   search_documents: 'Document search',
   list_documents: 'List documents',
   get_document: 'Read document',
+  read_conversation: 'Recall earlier turns',
   web_search: 'Web search',
   write_file: 'Write a file',
   run_python: 'Run Python (code execution)',

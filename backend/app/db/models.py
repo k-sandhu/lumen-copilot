@@ -18,8 +18,8 @@ Tenancy & ownership invariants baked into the schema (spec 0004 §2.1/§2.2):
 * ``audit_events`` is append-only (the app DB role gets no UPDATE/DELETE on it —
   enforced in the migration, §2.4); the model is write-then-read only.
 
-The pgvector column width comes from settings (``LLM_EMBEDDING_DIMENSIONS``); the
-migration pins the same literal so the table and the model agree.
+The active pgvector column width is a schema constant shared with the config
+default; startup readiness rejects a runtime override that disagrees.
 """
 
 from __future__ import annotations
@@ -29,10 +29,12 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -47,7 +49,7 @@ from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
-from app.core.config import get_settings
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS, LEGACY_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.types import Embedding, StringArray
 
@@ -288,6 +290,10 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
             sqlite_where=text("external_id IS NOT NULL"),
         ),
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_nonneg"),
+        CheckConstraint("kind in ('document', 'audio', 'video')", name="ck_documents_kind"),
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms >= 0", name="ck_documents_duration_nonneg"
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -313,13 +319,25 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # The object-store key (tenant-prefixed, content-addressed; app.storage.keys).
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # Tenant-prefixed object key; direct uploads use random quarantine keys,
+    # while connector/legacy small objects may be content-addressed.
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ingestion_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # Durable fencing token for one active ingestion claimant. Every heartbeat,
+    # checkpoint, and terminal write compares this value so a stale/redelivered
+    # worker cannot overwrite a newer run after lease takeover.
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    # Durable, content-safe ingestion diagnostics (#346).  The attempt count is
+    # incremented when a worker claims the row; the structured failure contains
+    # only a normalized code, safe operator copy, attempt, and correlation id.
+    ingestion_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    ingestion_failure: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
     # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
@@ -347,6 +365,10 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     # The provider's stable document id — identity-based reconcile (§3); NULL
     # for direct uploads and full-replace connectors.
     external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="document")
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    transcript_language: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    transcription_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     collection: Mapped[Collection] = relationship(back_populates="documents")
     source: Mapped[Source | None] = relationship(back_populates="documents")
@@ -355,20 +377,80 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     )
 
 
+class DocumentUpload(TenantScopedMixin, TimestampMixin, Base):
+    """A server-private S3 multipart control-plane session (spec 0008)."""
+
+    __tablename__ = "document_uploads"
+    __table_args__ = (
+        UniqueConstraint("document_id", name="uq_document_uploads_document_id"),
+        Index("ix_document_uploads_tenant_owner", "tenant_id", "owner_id"),
+        Index("ix_document_uploads_expires_at", "expires_at"),
+        CheckConstraint("size_bytes > 0", name="ck_document_uploads_size_positive"),
+        CheckConstraint("part_size_bytes >= 5242880", name="ck_document_uploads_part_size"),
+        CheckConstraint(
+            "part_count >= 1 AND part_count <= 10000", name="ck_document_uploads_part_count"
+        ),
+        CheckConstraint(
+            "state in ('initiated', 'completing', 'completed', 'aborted', 'expired', 'failed')",
+            name="ck_document_uploads_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    # Reserved before a Document row exists; therefore intentionally not an FK.
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # Never exposed on the wire or in audit metadata.
+    provider_upload_id: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="initiated")
+    part_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    part_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_modified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Chunk(TenantScopedMixin, TimestampMixin, Base):
     """A retrievable passage of a document, embedding stored in-row (spec 0004 §4).
 
     The ``embedding`` column sits beside ``tenant_id`` + ``document_id`` so a
     permission-aware retrieval query is one ``WHERE`` clause. Width =
-    ``LLM_EMBEDDING_DIMENSIONS`` (1024). Nullable so a row can exist before the
+    the canonical schema contract (2048). Nullable so a row can exist before the
     embedding is computed (two-phase ingestion, #21).
     """
 
     __tablename__ = "chunks"
     __table_args__ = (
         UniqueConstraint("document_id", "ord", name="uq_chunks_document_ord"),
+        # Composite targets below let the database prove that any optional
+        # transcript segment belongs to this exact source document. The
+        # ordinary single-column FK remains responsible for SET NULL when a
+        # transcript is regenerated.
+        UniqueConstraint("id", "transcript_segment_id", name="uq_chunks_id_transcript_segment"),
+        ForeignKeyConstraint(
+            ("transcript_segment_id", "document_id"),
+            ("transcript_segments.id", "transcript_segments.document_id"),
+            name="fk_chunks_transcript_segment_document",
+        ),
         CheckConstraint("char_start >= 0", name="ck_chunks_char_start_nonneg"),
         CheckConstraint("char_end >= char_start", name="ck_chunks_char_span"),
+        CheckConstraint(
+            "(time_start_ms IS NULL AND time_end_ms IS NULL) OR "
+            "(time_start_ms IS NOT NULL AND time_end_ms IS NOT NULL "
+            "AND time_start_ms >= 0 AND time_end_ms > time_start_ms)",
+            name="ck_chunks_time_span",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -381,13 +463,168 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     ord: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(
-        Embedding(get_settings().llm_embedding_dimensions), nullable=True
+        Embedding(CANONICAL_EMBEDDING_DIMENSIONS), nullable=True
     )
+    # Migration 0044 keeps every pre-existing 1,024-float vector intact beside
+    # the native 2,048 target. It is read only by DB migration/recovery tooling;
+    # retrieval never mixes vector spaces.
+    legacy_embedding: Mapped[list[float] | None] = mapped_column(
+        "embedding_legacy_1024",
+        Embedding(LEGACY_EMBEDDING_DIMENSIONS),
+        nullable=True,
+    )
+    # Coordinate-space identity for ``embedding``. NULL only for legacy/not-yet
+    # re-embedded rows; retrieval and index publication require the current
+    # settings fingerprint before a chunk is eligible.
+    embedding_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source_locations: Mapped[list[dict[str, object]] | None] = mapped_column(_JSON, nullable=True)
+    time_start_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    time_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    transcript_segment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transcript_segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    speaker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    speaker_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class TranscriptSpeaker(TenantScopedMixin, Base):
+    """A file-local diarizer speaker plus contextual name evidence."""
+
+    __tablename__ = "transcript_speakers"
+    __table_args__ = (
+        UniqueConstraint("document_id", "speaker_id", name="uq_transcript_speaker"),
+        CheckConstraint(
+            "name_status in ('unknown', 'inferred')", name="ck_transcript_speaker_name_status"
+        ),
+        CheckConstraint(
+            "name_confidence IS NULL OR (name_confidence >= 0 AND name_confidence <= 1)",
+            name="ck_transcript_speaker_confidence",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    speaker_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    name_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    name_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    name_method: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    evidence_segment_ids: Mapped[list[str]] = mapped_column(_JSON, nullable=False, default=list)
+
+
+class TranscriptSegment(TenantScopedMixin, Base):
+    """One ordered, diarized transcript turn with player-relative timing."""
+
+    __tablename__ = "transcript_segments"
+    __table_args__ = (
+        UniqueConstraint("document_id", "ordinal", name="uq_transcript_segment_ordinal"),
+        UniqueConstraint("id", "document_id", name="uq_transcript_segments_id_document"),
+        CheckConstraint("ordinal >= 0", name="ck_transcript_segment_ordinal"),
+        CheckConstraint(
+            "start_ms >= 0 AND end_ms > start_ms", name="ck_transcript_segment_time_span"
+        ),
+        CheckConstraint(
+            "char_start >= 0 AND char_end > char_start", name="ck_transcript_segment_char_span"
+        ),
+        CheckConstraint(
+            "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+            name="ck_transcript_segment_confidence",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    speaker_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    char_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+
+
+class TranscriptionCheckpoint(TenantScopedMixin, TimestampMixin, Base):
+    """Normalized paid STT chunk result, durable before embedding/retry."""
+
+    __tablename__ = "transcription_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", "model", name="uq_transcription_checkpoint"),
+        CheckConstraint("chunk_index >= 0", name="ck_transcription_checkpoint_index"),
+        CheckConstraint(
+            "start_ms >= 0 AND end_ms > start_ms", name="ck_transcription_checkpoint_time_span"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    language: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Provider-neutral normalized word dicts: text/start_ms/end_ms/speaker_id.
+    words: Mapped[list[dict[str, object]]] = mapped_column(_JSON, nullable=False, default=list)
+
+
+class LegacyEmbeddingArchive(TenantScopedMixin, Base):
+    """Detached rollback vectors for connector content revisions during #346.
+
+    No document FK by design: full-source reconciliation may delete/recreate a
+    document, but rollback evidence must remain byte-for-byte until the 1,024
+    space is explicitly retired by a later migration.
+    """
+
+    __tablename__ = "embedding_legacy_archive_0044"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "content_revision",
+            "replacement_attempt",
+            "replacement_fingerprint",
+            "ord",
+            name="uq_embedding_legacy_archive_revision_ord",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    original_chunk_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    content_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    replacement_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    replacement_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    ord: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    char_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(
+        Embedding(LEGACY_EMBEDDING_DIMENSIONS), nullable=False
+    )
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class ChatSession(TenantScopedMixin, TimestampMixin, Base):
@@ -539,6 +776,10 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     # the REST AskUserQuestion payload verbatim, so the UI can re-render the
     # options after reload. NULL for every other turn.
     question: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # Immutable answer-level provenance, independent of chunk/citation cascades.
+    # NULL means unknown (legacy); [] means explicitly no source documents.
+    # No document FK: deletion must retain the id so recall fails closed.
+    source_document_ids: Mapped[list[str] | None] = mapped_column(_JSON, nullable=True)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
     citations: Mapped[list[Citation]] = relationship(
@@ -555,8 +796,19 @@ class Citation(TenantScopedMixin, TimestampMixin, Base):
 
     __tablename__ = "citations"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ("chunk_id", "transcript_segment_id"),
+            ("chunks.id", "chunks.transcript_segment_id"),
+            name="fk_citations_chunk_transcript_segment",
+        ),
         CheckConstraint("char_start >= 0", name="ck_citations_char_start_nonneg"),
         CheckConstraint("char_end >= char_start", name="ck_citations_char_span"),
+        CheckConstraint(
+            "(time_start_ms IS NULL AND time_end_ms IS NULL) OR "
+            "(time_start_ms IS NOT NULL AND time_end_ms IS NOT NULL "
+            "AND time_start_ms >= 0 AND time_end_ms > time_start_ms)",
+            name="ck_citations_time_span",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -575,6 +827,16 @@ class Citation(TenantScopedMixin, TimestampMixin, Base):
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     score: Mapped[float | None] = mapped_column(nullable=True)
+    time_start_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    time_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    transcript_segment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transcript_segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    speaker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    speaker_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     message: Mapped[Message] = relationship(back_populates="citations")
 

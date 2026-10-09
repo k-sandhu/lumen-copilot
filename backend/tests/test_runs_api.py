@@ -32,7 +32,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session
 from app.auth import hash_password
-from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -66,6 +65,8 @@ from app.domain.entities import (
 )
 from app.main import create_app
 from app.services.assistants_service import config_from_assistant
+from tests._audit_helpers import RecordingDurableAuditTransactions
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -113,7 +114,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
@@ -390,11 +391,27 @@ async def test_cross_tenant_run_detail_is_404(client: AsyncClient, seeded: _Seed
     assert resp.status_code == 404
 
 
-async def test_other_owner_run_detail_is_404(client: AsyncClient, seeded: _Seeded) -> None:
+async def test_other_owner_run_detail_is_404(
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
     """INV-2: a run owned by another user in the same tenant is 404, never 403."""
     token = await _login(client, seeded.alice_email)
-    resp = await client.get(f"/api/v1/runs/{seeded.bob_run}", headers=_auth(token))
+    resp = await client.get(
+        f"/api/v1/runs/{seeded.bob_run}",
+        headers={**_auth(token), "x-request-id": "req-run-private-get"},
+    )
     assert resp.status_code == 404
+    denials = [
+        event
+        for event in durable_audit_ledger.events
+        if event.resource_id == str(seeded.bob_run) and event.action == "permission.denied"
+    ]
+    assert len(denials) == 1
+    assert denials[0].actor_id == seeded.alice_id
+    assert denials[0].request_id == "req-run-private-get"
+    assert denials[0].outcome.value == "denied"
 
 
 async def test_unknown_run_id_is_404(client: AsyncClient, seeded: _Seeded) -> None:

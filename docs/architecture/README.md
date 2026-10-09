@@ -7,6 +7,8 @@ We record decisions that are **costly to reverse and not self-evident from the c
 **When to write one:** a technology or boundary choice, a licensing constraint, a deliberate scope cut.
 **When not to:** routine, reversible choices that are obvious from the code.
 
+For a dated visual walkthrough of the decisions, supersessions, and implementation status, see the [architecture evolution HTML presentation](../presentations/architecture-evolution.html) and its [usage and evidence notes](../presentations/README.md). The presentation is an October 2, 2026 snapshot; this ADR index remains the decision catalog.
+
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
@@ -31,5 +33,8 @@ We record decisions that are **costly to reverse and not self-evident from the c
 | [0020](0020-reusable-root-sandbox-sessions.md) | Reusable root-capable Python sandbox sessions | Accepted |
 | [0021](0021-data-pack-connector.md) | Data packs as a connector — curated document sets as a managed source | Accepted |
 | [0022](0022-group-access-model.md) | Group access model — group principals, and who a source is visible to (supersedes 0021 §5) | Accepted |
+| [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2 and claim-linked answers | Proposed |
+| [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
+| [0026](0026-continuous-integration.md) | Offline backend and frontend CI gates, locked dependencies, caches, and bounded test workers | Accepted |
 
-> The remaining open decisions — CI (OD-7) and the rest of the `.claude/` harness (OD-6 remainder) — are tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). (Security & domain invariants (OD-4) closed 2026-06-18 by [spec 0004](../specs/0004-security-and-domain-invariants.md).) Each costly, non-obvious choice gets its own ADR before code lands.
+> The remaining `.claude/` harness work (OD-6 remainder) is tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). CI (OD-7) closed through #655 and ADR-0026. Each costly, non-obvious choice gets its own ADR before code lands.

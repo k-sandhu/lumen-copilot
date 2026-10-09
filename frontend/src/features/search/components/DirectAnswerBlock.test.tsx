@@ -5,7 +5,7 @@
  * passage; a citation whose result_id is absent from the page's results is
  * dropped (an answer never cites an un-retrievable passage — spec 0004 INV-3).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { DirectAnswer, SearchResult } from '@/api';
@@ -80,7 +80,9 @@ describe('DirectAnswerBlock', () => {
     render(<DirectAnswerBlock answer={answer} resultsById={byId(result, second)} />);
 
     // Two inline citation chips, named for their sources — not a trailing "Sources" row.
-    expect(screen.getByRole('button', { name: /citation 1: PTO Policy 2026/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /citation 1: PTO Policy 2026/i }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /citation 2: Pricing Guardrails/i }),
     ).toBeInTheDocument();
@@ -108,5 +110,59 @@ describe('DirectAnswerBlock', () => {
     // Only citation [1] is a real chip; [9] resolves to nothing → no chip.
     expect(screen.getAllByRole('button', { name: /citation/i })).toHaveLength(1);
     expect(screen.getByText(/\[9\] stays literal/)).toBeInTheDocument();
+  });
+
+  it('displays and forwards a media citation timestamp to the shared viewer', async () => {
+    const onOpenDocument = vi.fn();
+    const mediaResult: SearchResult = {
+      ...result,
+      document_id: 'doc-media',
+      document_kind: 'video',
+      title: 'meeting.mp4',
+    };
+    const answer: DirectAnswer = {
+      text: 'John introduced himself. [1]',
+      citations: [{ result_id: 'r1', time_start_ms: 12_500, time_end_ms: 18_000 }],
+    };
+    const user = userEvent.setup();
+    render(
+      <DirectAnswerBlock
+        answer={answer}
+        resultsById={byId(mediaResult)}
+        onOpenDocument={onOpenDocument}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /meeting.mp4 at 0:12/i }));
+    expect(onOpenDocument).toHaveBeenCalledWith('doc-media', 'meeting.mp4', 12_500);
+  });
+
+  it('treats omitted citation times as text and never opens a zero-time player', async () => {
+    const onOpenDocument = vi.fn();
+    const documentResult: SearchResult = {
+      ...result,
+      document_id: 'doc-text',
+    };
+    const answer: DirectAnswer = {
+      text: 'The policy applies. [1]',
+      citations: [
+        {
+          result_id: 'r1',
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    render(
+      <DirectAnswerBlock
+        answer={answer}
+        resultsById={byId(documentResult)}
+        onOpenDocument={onOpenDocument}
+      />,
+    );
+
+    const chip = screen.getByRole('button', { name: 'Citation 1: PTO Policy 2026' });
+    expect(chip).not.toHaveAccessibleName(/ at /i);
+    await user.click(chip);
+    expect(onOpenDocument).not.toHaveBeenCalled();
   });
 });
