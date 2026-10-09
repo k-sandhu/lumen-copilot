@@ -39,3 +39,7 @@ promotion gates. Residual risk: production budget/structure/evaluation coverage.
 [s] 2026-10-09: live service tests excluded by task; deployed behavior unverified.
 
 [x] 2026-10-09: configured backend mypy passed for 6 source files.
+
+[x] 2026-10-09: refreshed text dependency; notebook/text Rust checks pass
+(10 tests). Rebuilt native wheel; 4 installed notebook/text Python checks pass.
+Nested Markdown cells inherit distinct code/list units and workspace budgets.
