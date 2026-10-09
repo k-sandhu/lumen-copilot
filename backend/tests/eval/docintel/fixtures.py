@@ -305,7 +305,15 @@ def corpus() -> list[Fixture]:
         order=("Intro", "North", "PageTwo"),
     )
     result = [
-        Fixture("pdf-columns", "pdf", "application/pdf", _pdf(), gold),
+        Fixture(
+            "pdf-columns",
+            "pdf",
+            "application/pdf",
+            _pdf(),
+            Gold(
+                facts=gold.facts, associations=gold.associations, order=gold.order, native_regions=3
+            ),
+        ),
         Fixture(
             "pdf-scanned",
             "pdf",

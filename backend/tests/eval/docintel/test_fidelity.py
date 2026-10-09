@@ -109,3 +109,12 @@ def test_cell_header_associations_need_the_correct_header() -> None:
         evaluate("North -120", gold, cell_headers=(("Region", "North"), ("Mass", "-120"))),
         format_name="xlsx",
     )
+
+
+def test_gold_tracks_blank_pdf_parts_and_nested_attachment_facts() -> None:
+    from tests.eval.docintel.fixtures import corpus
+
+    fixtures = {fixture.id: fixture for fixture in corpus()}
+    assert fixtures["pdf-columns"].gold.native_regions == 3
+    assert "AttachmentFact" in fixtures["zip-nested"].gold.facts
+    assert "AttachmentFact" in fixtures["eml-facts"].gold.facts
