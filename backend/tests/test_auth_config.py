@@ -33,6 +33,21 @@ _BASE = {
 _PROD_SECRETS_KEY = generate_master_key()
 
 
+@pytest.fixture(autouse=True)
+def _explicit_boot_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise actual boot defaults, independent of the suite's test identity."""
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    for key in (
+        "JWT_SECRET",
+        "SECRETS_ENCRYPTION_KEY",
+        "GDRIVE_OAUTH_CLIENT_ID",
+        "GDRIVE_OAUTH_CLIENT_SECRET",
+        "CONNECTOR_OAUTH_REDIRECT_BASE_URL",
+        "CONNECTOR_OAUTH_FRONTEND_RETURN_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_default_embedding_route_and_dimension_are_one_contract() -> None:
     """Regression #346: clean deployments default to the migrated 2,048 route."""
     settings = Settings(_env_file=None, **_BASE)
