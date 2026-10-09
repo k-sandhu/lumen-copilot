@@ -26,23 +26,24 @@ corrupt packages fail closed. Limits are engineering profiles, not production
 capacities. Entry points also accept the runtime Context for cancellation.
 
 Generation metadata retains source SHA-256, parser/build/dependency identities,
-renderer/schema versions and explicit outcome/diagnostics. Downstream chunker,
+renderer/schema versions and explicit outcome/diagnostics. Build identity hashes
+format code, shared package/canonical/runtime code and the pinned dependency graph.
+Downstream chunker,
 embedding and persistence identities remain Python's responsibility. Local cell
 span annotations distinguish source evidence from repeated derived labels.
 Full baseline evaluation, resource measurements and production cutover remain
 human merge gates (#670/#687); generated fixtures alone do not authorize them.
 
-Verification on 2026-10-08: focused Rust suite passed (5 tests, including 256
+Verification on 2026-10-08: focused Rust suite passed (6 tests, including 256
 Unicode/table property cases); clippy all targets passed; cargo-deny 0.20.2
 licenses/advisories passed offline. Existing Python fixtures are replayed through
 `backend/tests/test_rust_docx_parity.py` with the `docx_extract` example driver.
-13 of 14 comparisons pass exactly after projecting canonical block separators
-back to the baseline. The 1,000-row vertical-merge extraction succeeds but
-canonical rendering hits the foundation's quadratic comparison ceiling (#708).
-The combined Python regression/parity run has 48 passing nodes and that failure.
+All 14 comparisons pass exactly after projecting canonical block separators
+back to the baseline, including the 1,000-row vertical merge. The combined Python
+regression/parity run has 49 passing nodes. Separate dependency #708 / PR #712
+replaces quadratic canonical overlap validation with a bounded rectangle sweep;
+its four regression/property tests pass.
 
-[~] 2026-10-08: #708 blocks long-table canonical render parity. Residual risk:
-valid medium/large tables cannot yet complete rendering. No promotion permitted.
 [~] 2026-10-08: full offline backend suite deferred because available RAM was
 below 4000 MiB. Residual risk: unrelated regressions are not exhaustively checked.
 [~] 2026-10-08: live gates, held-out fidelity, RSS/throughput and cross-platform
