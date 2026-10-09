@@ -61,7 +61,8 @@ from app.db.repositories import (
 )
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, Role, Source, SourceStatus
-from app.services.audit import AuditSink
+from app.ingestion.contract import require_embedding_work_admission
+from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -169,8 +170,10 @@ class SourcesService:
         roles: tuple[Role, ...] = (),
         object_store: ObjectStore,
         audit: AuditSink,
+        denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
+        embedding_space_fingerprint: str,
     ) -> None:
         self._session = session
         self._sources = SourceRepository(session, tenant_id)
@@ -181,8 +184,11 @@ class SourcesService:
         self._roles = roles
         self._object_store = object_store
         self._audit = audit
+        self._denials = denials
+        self._denials.assert_user(tenant_id, owner_id)
         self._request_id = request_id
         self._source_ip = source_ip
+        self._embedding_space_fingerprint = embedding_space_fingerprint
 
     # --- internal helpers ---------------------------------------------------
 
@@ -203,7 +209,13 @@ class SourcesService:
         except UnknownConnectorError:
             return False
 
-    async def _require_admin(self, source_id: UUID | None, reason: str) -> None:
+    async def _require_admin(
+        self,
+        source_id: UUID | None,
+        reason: str,
+        *,
+        attempted_action: str,
+    ) -> None:
         """Action-time admin gate for managed-source mutations (ADR-0019 §1).
 
         Checked against the roles resolved for THIS request — a demoted owner
@@ -212,24 +224,16 @@ class SourcesService:
         """
         if Role.ADMIN in self._roles:
             return
-        await self._audit.emit(
-            action=AuditAction.PERMISSION_DENIED,
-            actor=AuditActor.user(self._owner_id),
+        await self._denials.emit(
             resource_type="source",
             resource_id=str(source_id) if source_id is not None else "new",
-            outcome=AuditOutcome.DENIED,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
-            metadata={"reason": reason},
+            attempted_action=attempted_action,
+            reason=reason,
+            required_roles=(Role.ADMIN.value,),
         )
-        # The typed 403 aborts the request before the route's commit, which
-        # would roll the deny-audit back with it — commit it now (INV-6; the
-        # gate runs before any other write in every mutation path, so nothing
-        # else rides this commit).
-        await self._session.commit()
         raise ForbiddenError("Managed-source mutations require the admin role.")
 
-    async def _visible(self, source_id: UUID) -> Source | None:
+    async def _visible(self, source_id: UUID, *, attempted_action: str) -> Source | None:
         """Fetch a source the caller may see, or ``None`` (→ 404).
 
         ``None`` for a missing id, a foreign-tenant id (the repository sees no
@@ -241,8 +245,20 @@ class SourcesService:
         """
         source = await self._sources.get(source_id)
         if source is None:
+            await self._denials.emit(
+                resource_type="source",
+                resource_id=str(source_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             return None
         if not self._is_managed(source.type) and not self._owns(source):
+            await self._denials.emit(
+                resource_type="source",
+                resource_id=str(source_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             return None
         return source
 
@@ -266,6 +282,7 @@ class SourcesService:
 
     # --- use-cases ----------------------------------------------------------
 
+    @audited_resource("source.create", "source", None)
     async def add(
         self,
         *,
@@ -293,6 +310,8 @@ class SourcesService:
            syncs after its connect flow completes).
 
         Raises:
+            DependencyError: API startup already proved the embedding contract
+                unavailable; raised before any web-source persistence.
             ForbiddenError: a non-admin creating a managed source (INV-5).
             ValidationError: unknown ``source_type``, or an invalid / SSRF-blocked
                 config — all mapped to **422** (INV-8) with the connector's stable
@@ -310,7 +329,11 @@ class SourcesService:
         if managed:
             # Every managed-source mutation is admin-gated at action time
             # (ADR-0019 §1) — creation included, audited on denial.
-            await self._require_admin(None, "managed_source_create")
+            await self._require_admin(
+                None,
+                "managed_source_create",
+                attempted_action="source.create",
+            )
 
         # SSRF + config validation. The connector raises a vendor-free
         # ConnectorConfigError (e.g. url_blocked); map it to the HTTP-aware
@@ -323,6 +346,13 @@ class SourcesService:
             validated = connector.validate_config(raw_config)
         except ConnectorConfigError as exc:
             raise ValidationError(exc.detail, code=exc.code) from exc
+
+        if not managed:
+            # Startup already proved whether this API process can admit new
+            # embedding work. Reject a web source before its backing collection
+            # or Pending row exists; an unvalidated process remains consumable-
+            # worker gated for backward compatibility (R2-002).
+            require_embedding_work_admission(self._embedding_space_fingerprint)
 
         # A backing collection homes the source's ingested documents. Named after
         # the connector + its salient config so it is recognisable in the
@@ -382,8 +412,9 @@ class SourcesService:
 
     async def get(self, source_id: UUID) -> Source | None:
         """Fetch one of the caller's sources, or ``None`` if not visible (→ 404)."""
-        return await self._visible(source_id)
+        return await self._visible(source_id, attempted_action="source.read")
 
+    @audited_resource("source.sync", "source", "source_id", missing_result=True)
     async def resync(self, source_id: UUID) -> tuple[Source, bool] | None:
         """Re-enqueue a sync for one of the caller's sources.
 
@@ -391,15 +422,21 @@ class SourcesService:
         source was already ``syncing`` (a no-op → the contract's 200) and ``True``
         when a fresh sync was enqueued and the status moved to ``syncing`` (→ 202).
         Returns ``None`` when the source is not visible to the caller (→ 404).
-        Audits ``source.synced`` on a real enqueue (INV-6).
+        Audits ``source.synced`` on a real enqueue (INV-6). A known-failed
+        embedding contract raises ``DependencyError`` before the status update,
+        audit, or enqueue, preserving the existing aggregate.
         """
-        source = await self._visible(source_id)
+        source = await self._visible(source_id, attempted_action="source.sync")
         if source is None:
             return None
         if self._is_managed(source.type):
             # Action-time admin gate (ADR-0019 §1): a demoted owner loses
             # on-demand sync too. 403, audited — after the 404 visibility check.
-            await self._require_admin(source_id, "managed_source_sync")
+            await self._require_admin(
+                source_id,
+                "managed_source_sync",
+                attempted_action="source.sync",
+            )
             if source.status == SourceStatus.PENDING_AUTH:
                 raise ConflictError(
                     "source is awaiting OAuth consent and cannot sync",
@@ -409,8 +446,15 @@ class SourcesService:
             # Already in flight — no new sync, no new audit (idempotent no-op).
             return source, False
 
+        # Resync publishes embedding work for every connector type. Do not
+        # advance the durable source to Syncing when startup has already proved
+        # this coordinate space unavailable; the request gets a typed 503 and
+        # the existing status remains truthful (R2-002).
+        require_embedding_work_admission(self._embedding_space_fingerprint)
+
         updated = await self._sources.update_status(source_id, status=SourceStatus.SYNCING)
-        assert updated is not None  # visibility already established  # noqa: S101
+        if updated is None:
+            return None
 
         await self._audit.emit(
             action=AuditAction.SOURCE_SYNCED,
@@ -426,6 +470,7 @@ class SourcesService:
         self._enqueue_sync_after_commit(source_id)
         return updated, True
 
+    @audited_resource("source.delete", "source", "source_id", missing_result=True)
     async def delete(self, source_id: UUID) -> bool:
         """Delete one of the caller's sources, leaving no orphans (ADR-0009 §5).
 
@@ -460,12 +505,16 @@ class SourcesService:
         deleted only once no surviving document (this tenant) still references it —
         and is best-effort (a storage blip never fails the delete).
         """
-        source = await self._visible(source_id)
+        source = await self._visible(source_id, attempted_action="source.delete")
         if source is None:
             return False
         if self._is_managed(source.type):
             # Action-time admin gate (ADR-0019 §1) — 403, audited.
-            await self._require_admin(source_id, "managed_source_delete")
+            await self._require_admin(
+                source_id,
+                "managed_source_delete",
+                attempted_action="source.delete",
+            )
 
         # Snapshot — taken before any delete so the backing-collection emptiness
         # check below reads a stable pre-delete view regardless of autoflush.
@@ -534,7 +583,7 @@ class SourcesService:
                 )
 
         deleted = await self._sources.delete(source_id)
-        if not deleted:  # pragma: no cover — visibility already established
+        if not deleted:
             return False
         await self._audit.emit(
             action=AuditAction.SOURCE_DELETED,

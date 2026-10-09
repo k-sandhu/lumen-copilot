@@ -39,10 +39,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from uuid import UUID
 
 from app.core.errors import ValidationError
 from app.core.logging import get_logger
 from app.domain.llm import ChatMessage, Role, ToolSpec
+from app.llm.tool_names import ToolNameMap
 
 log = get_logger(__name__)
 
@@ -302,6 +304,7 @@ def assemble_context(
     max_input_resolver: MaxInputResolver | None = None,
     summary: str | None = None,
     evidence_lines: Sequence[str] = (),
+    evidence_document_ids: Sequence[UUID] | None = None,
 ) -> ContextBudget:
     """Assemble the prompt under the model's input budget; return a :class:`ContextBudget`.
 
@@ -343,7 +346,19 @@ def assemble_context(
                 "fetch by id with get_document / search for details.]\n"
                 + "\n".join(f"- {line}" for line in evidence_lines)
             )
-        segments.summary.append(ChatMessage(role=Role.USER, content="\n\n".join(parts)))
+        segments.summary.append(
+            ChatMessage(
+                role=Role.USER,
+                content="\n\n".join(parts),
+                # Summary text has no complete durable provenance. Name
+                # sanitisation alone cannot prove all prose source-free.
+                source_document_ids=(
+                    None
+                    if summary or evidence_document_ids is None
+                    else tuple(evidence_document_ids)
+                ),
+            )
+        )
 
     max_input = resolve(model) or cfg.fallback_max_input_tokens
     # A degenerate window (tiny model / oversized headroom) still yields a
@@ -356,8 +371,8 @@ def assemble_context(
     # initial assembly and the per-turn refit never disagree about a message's
     # size, #424 re-review). Tools ride the ``tools`` param but spend the window.
     reserved = [*segments.memory, *segments.summary]
-    system_message = ChatMessage(role=Role.SYSTEM, content=system_prompt)
-    question_message = ChatMessage(role=Role.USER, content=question)
+    system_message = ChatMessage(role=Role.SYSTEM, content=system_prompt, source_document_ids=())
+    question_message = ChatMessage(role=Role.USER, content=question, source_document_ids=())
     tools_text = _tools_wire_text(tools)
 
     def _msg_cost(m: ChatMessage) -> int:
@@ -477,27 +492,34 @@ def _message_wire_text(message: ChatMessage) -> str:
     """Serialize one message to the EXACT wire shape the gateway sends, for counting.
 
     Mirrors :meth:`LLMGateway._to_wire_messages` field-for-field (role, content,
-    the OpenAI ``tool_calls`` array with each call's id/name/serialized arguments,
+    the OpenAI ``tool_calls`` array with each call's id/projected name/serialized arguments,
     ``tool_call_id``, and ``name``) so the estimate counts every byte the provider
     actually receives — tool-call metadata included (#424 re-review, new finding
     1). ``sort_keys`` for determinism.
     """
     import json
 
+    name_map = ToolNameMap(
+        [call.name for call in message.tool_calls]
+        + ([message.name] if message.name is not None else [])
+    )
     entry: dict[str, object] = {"role": message.role.value, "content": message.content}
     if message.tool_calls:
         entry["tool_calls"] = [
             {
                 "id": tc.id,
                 "type": "function",
-                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                "function": {
+                    "name": name_map.to_wire(tc.name),
+                    "arguments": json.dumps(tc.arguments),
+                },
             }
             for tc in message.tool_calls
         ]
     if message.tool_call_id is not None:
         entry["tool_call_id"] = message.tool_call_id
     if message.name is not None:
-        entry["name"] = message.name
+        entry["name"] = name_map.to_wire(message.name)
     try:
         return json.dumps(entry, sort_keys=True)
     except (TypeError, ValueError):  # pragma: no cover — args are JSON by construction
@@ -892,11 +914,12 @@ def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:
     """
     import json
 
+    name_map = ToolNameMap(t.name for t in tools)
     payload = [
         {
             "type": "function",
             "function": {
-                "name": t.name,
+                "name": name_map.to_wire(t.name),
                 "description": t.description,
                 "parameters": t.parameters,
             },

@@ -19,10 +19,11 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.core.errors import ValidationError
-from app.db.base import Base
+from app.core.config import get_settings
+from app.core.errors import DependencyError, ValidationError
 from app.db.repositories import (
     AuditEventRepository,
+    CollectionRepository,
     DocumentRepository,
     SourceRepository,
     TenantRepository,
@@ -33,6 +34,8 @@ from app.domain.entities import DocumentStatus, Role, SourceStatus
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
 from app.storage.keys import assert_key_owned_by
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -71,7 +74,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
@@ -126,8 +129,10 @@ def _service(
         owner_id=owner_id,
         object_store=store or _FakeObjectStore(),  # type: ignore[arg-type]
         audit=AuditSink(AuditEventRepository(session, tenant_id)),
+        denials=denial_context(RecordingDurableAuditTransactions(), session, tenant_id, owner_id),
         request_id="req-1",
         source_ip="203.0.113.5",
+        embedding_space_fingerprint=get_settings().embedding_space_fingerprint,
     )
 
 
@@ -171,6 +176,35 @@ async def test_add_rejects_unknown_type(
         with pytest.raises(ValidationError) as exc:
             await svc.add(source_type="dropbox", url=f"http://{_PUBLIC}/x")
         assert exc.value.code == "unsupported_source_type"
+
+
+async def test_add_web_source_rejects_failed_startup_contract_before_any_write(
+    sessionmaker: async_sessionmaker[AsyncSession], seeded: _Seeded
+) -> None:
+    """R2-002: failed startup preflight cannot create a forever-Pending source."""
+
+    from app.ingestion.contract import (
+        mark_embedding_contract_invalid,
+        mark_embedding_contract_valid,
+    )
+
+    mark_embedding_contract_invalid("embedding_dimension_mismatch")
+    async with sessionmaker() as session:
+        svc = _service(session, tenant_id=seeded.tenant_a, owner_id=seeded.alice)
+        with pytest.raises(DependencyError) as excinfo:
+            await svc.add(source_type="web", url=f"http://{_PUBLIC}/contract-down")
+
+        assert excinfo.value.code == "embedding_dimension_mismatch"
+        assert (
+            await SourceRepository(session, seeded.tenant_a).list_for_owner_page(
+                seeded.alice, limit=20
+            )
+            == []
+        )
+        assert (
+            await CollectionRepository(session, seeded.tenant_a).list_for_owner(seeded.alice) == []
+        )
+    mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
 
 
 # --- list -------------------------------------------------------------------
@@ -262,6 +296,40 @@ async def test_resync_enqueues_and_moves_to_syncing(
 
         events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
         assert AuditAction.SOURCE_SYNCED.value in {e.action for e in events}
+
+
+async def test_resync_rejects_failed_contract_without_corrupting_status(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: _Seeded,
+    no_broker: list[tuple[uuid.UUID, uuid.UUID]],
+) -> None:
+    """R2-002: admission failure leaves the durable aggregate truthful."""
+
+    from app.ingestion.contract import (
+        mark_embedding_contract_invalid,
+        mark_embedding_contract_valid,
+    )
+
+    async with sessionmaker() as session:
+        source = await _service(session, tenant_id=seeded.tenant_a, owner_id=seeded.alice).add(
+            source_type="web", url=f"http://{_PUBLIC}/existing"
+        )
+        await session.commit()
+        no_broker.clear()
+        mark_embedding_contract_invalid("embedding_dimension_mismatch")
+
+        with pytest.raises(DependencyError) as excinfo:
+            await _service(session, tenant_id=seeded.tenant_a, owner_id=seeded.alice).resync(
+                source.id
+            )
+
+        assert excinfo.value.code == "embedding_dimension_mismatch"
+        unchanged = await SourceRepository(session, seeded.tenant_a).get(source.id)
+        assert unchanged is not None and unchanged.status is SourceStatus.PENDING
+        assert no_broker == []
+        events = await AuditEventRepository(session, seeded.tenant_a).list_recent()
+        assert AuditAction.SOURCE_SYNCED.value not in {event.action for event in events}
+    mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
 
 
 async def test_resync_already_syncing_is_noop(

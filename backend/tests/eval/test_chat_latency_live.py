@@ -276,6 +276,7 @@ async def _seed() -> _SeedInfo:
         base_url=_OS_URL,
         index=index,
         dimensions=settings.llm_embedding_dimensions,
+        embedding_fingerprint=settings.embedding_space_fingerprint,
         timeout_seconds=30.0,
     )
     try:
@@ -303,6 +304,7 @@ async def _seed() -> _SeedInfo:
                 documents=GOLDEN_DOCUMENTS,
                 embed=gateway.embed,
                 store=store,
+                embedding_fingerprint=settings.embedding_space_fingerprint,
             )
             await seed.commit()
         return _SeedInfo(
@@ -468,6 +470,7 @@ def _ws_harness(settings: Settings, *, unreachable_route: bool) -> Iterator[_Har
         base_url=_OS_URL,
         index=info.index,
         dimensions=settings.llm_embedding_dimensions,
+        embedding_fingerprint=settings.embedding_space_fingerprint,
         timeout_seconds=30.0,
     )
     app_engine = create_async_engine(_PG_URL, poolclass=NullPool)

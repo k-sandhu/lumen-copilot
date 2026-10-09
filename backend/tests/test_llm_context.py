@@ -53,9 +53,7 @@ def _assemble(
         history=history,
         question=question,
         tools=tools,
-        config=ContextConfig(
-            fallback_max_input_tokens=fallback, output_headroom_tokens=headroom
-        ),
+        config=ContextConfig(fallback_max_input_tokens=fallback, output_headroom_tokens=headroom),
         counter=_CHAR_COUNTER,
         max_input_resolver=lambda _model: max_input,
     )
@@ -254,9 +252,7 @@ def test_fit_transcript_compacts_a_huge_tool_result_instead_of_refusing() -> Non
     turn fits — the answer proceeds on the (bounded, content-bearing) digest."""
     system = _msg(Role.SYSTEM, "SYS")
     question = _msg(Role.USER, "q")
-    huge = ChatMessage(
-        role=Role.TOOL, content="x" * 5000, tool_call_id="c1", name="search_text"
-    )
+    huge = ChatMessage(role=Role.TOOL, content="x" * 5000, tool_call_id="c1", name="search_text")
     fitted = _fit([system, question, huge], max_input=1024 + 400)
     result = fitted[-1]
     assert result.tool_call_id == "c1"  # still present + paired
@@ -361,9 +357,7 @@ def test_estimate_counts_tool_call_arguments_not_just_content() -> None:
     with_big_args = ChatMessage(
         role=Role.ASSISTANT,
         content="",  # NO content — the weight is entirely in the arguments
-        tool_calls=(
-            ToolCall(id="c1", name="run_python", arguments={"code": "X" * 4000}),
-        ),
+        tool_calls=(ToolCall(id="c1", name="run_python", arguments={"code": "X" * 4000}),),
     )
     plain_cost = estimate_message_tokens([plain], counter=_CHAR_COUNTER)
     big_cost = estimate_message_tokens([with_big_args], counter=_CHAR_COUNTER)
@@ -470,9 +464,7 @@ def test_compaction_is_chunked_not_one_at_a_time() -> None:
     question = _msg(Role.USER, "q")
     tail: list[ChatMessage] = []
     for i in range(6):
-        tail.append(
-            _tool_call(f"c{i}")
-        )
+        tail.append(_tool_call(f"c{i}"))
         tail.append(_tool_result(f"c{i}", f"{i}" * 1000))
     messages = [system, question, *tail]
 

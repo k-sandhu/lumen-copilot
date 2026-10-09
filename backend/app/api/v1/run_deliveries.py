@@ -33,6 +33,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
+    authenticated_denial_context,
     extract_request_id,
 )
 from app.domain.entities import RunDelivery, RunDeliveryKind, RunDeliveryStatus
@@ -104,6 +105,12 @@ def _build_service(
         tenant_id=tenant_id,
         recipient_id=principal.user_id,
         audit=make_audit_sink(tenant_id),
+        denials=authenticated_denial_context(
+            make_audit_sink,
+            tenant_id=tenant_id,
+            principal=principal,
+            request=request,
+        ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
     )

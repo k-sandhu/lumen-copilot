@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
-from app.db.base import Base
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.repositories import (
     ChunkInput,
     ChunkRepository,
@@ -36,10 +36,11 @@ from app.domain.tools import ERROR_BAD_ARGS, RiskTier
 from app.retrieval import RetrievalService
 from app.services.tools.registry import default_allowlist, get_tool, registered_names, tool_specs
 from app.services.tools.types import ToolContext
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
-_EMBED_DIM = 1024
+_EMBED_DIM = CANONICAL_EMBEDDING_DIMENSIONS
 
 
 class _FakeGateway:
@@ -88,7 +89,7 @@ async def session_and_world() -> AsyncIterator[tuple[AsyncSession, _World]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as session:
             ta = await TenantRepository(session).create(name="Acme")
@@ -161,6 +162,16 @@ async def _call(session: AsyncSession, principal: Principal, name: str, args: di
 
 _RETRIEVAL_TOOLS = frozenset({"search_text", "search_documents", "list_documents", "get_document"})
 
+#: The non-retrieval tools that are ALSO on the ad-hoc default allow-list. Named
+#: exhaustively, deliberately: this set is a governance surface, so adding a
+#: ``default_offered`` tool must be a visible, reviewed edit here rather than
+#: something a subset assertion absorbs silently (deny-by-default, issue #219).
+#: ``ask_user`` — the interactive clarifying-question tool (spec 0006 #429).
+#: ``read_conversation`` — reading back THIS session's own compacted turns
+#: (#569); not a widened reach, since the caller already owns and can read every
+#: byte of that transcript through ``GET /chat/sessions/{id}/messages``.
+_OTHER_DEFAULT_TOOLS = frozenset({"ask_user", "read_conversation"})
+
 
 def test_registry_discovers_the_retrieval_tools() -> None:
     assert _RETRIEVAL_TOOLS <= registered_names()
@@ -177,14 +188,14 @@ def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
 def test_default_allowlist_is_the_read_only_retrieval_tools() -> None:
     # Ad-hoc chat's default allow-list = the read-only default-offered tools:
     # the four retrieval tools (list_documents auto-joined on discovery, #371)
-    # plus ask_user, the interactive clarifying-question tool (spec 0006 #429).
-    assert default_allowlist() == _RETRIEVAL_TOOLS | {"ask_user"}
+    # plus the non-retrieval defaults enumerated above.
+    assert default_allowlist() == _RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS
 
 
 def test_tool_specs_render_the_allowlist_to_llm_specs() -> None:
     specs = tool_specs(default_allowlist())
     names = {s.name for s in specs}
-    assert names == _RETRIEVAL_TOOLS | {"ask_user"}
+    assert names == _RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS
     # Each spec carries the JSON-Schema parameters the model fills in.
     by_name = {s.name: s for s in specs}
     assert by_name["search_text"].parameters["required"] == ["query"]
@@ -381,17 +392,20 @@ async def test_tight_budget_clamps_every_retrieval_tool(
     assert spy.list_k == 3  # list_documents now honours the tight ceiling too
 
 
-def test_rendered_snippet_is_the_single_source_of_the_model_visible_form() -> None:
-    """#431 re-review NEW-1: the snippet string the tool reply shows and the one
-    the runtime records for compaction derive from ONE helper — byte-identical,
-    ellipsis and rstrip included — so a digest can never present a truncated
-    sentence as complete."""
+async def test_search_text_returns_the_complete_passage_at_any_snippet_budget(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    """A snippet budget must not truncate evidence returned to the model (#611).
+
+    The full passage, including a fact beyond character 600, must be available in
+    both the tool result and its citation-bearing passages, even when the context
+    assembler supplies a smaller display budget.
+    """
     from app.domain.retrieval import RetrievedPassage
     from app.services.tools.impls.retrieval import _render_passages, rendered_snippet
 
-    # A passage longer than the budget, with a whitespace boundary right at the
-    # cut point (the rstrip + ellipsis case the review flagged).
-    text = ("evidence word " * 60).strip()  # ~840 chars, spaces throughout
+    # Put the late fact beyond the historical 600-character truncation point.
+    text = ("evidence word " * 60).strip() + " LATE FACT: the launch date is 2031-04-19."
     passage = RetrievedPassage(
         chunk_id=uuid.uuid4(),
         document_id=uuid.uuid4(),
@@ -402,28 +416,41 @@ def test_rendered_snippet_is_the_single_source_of_the_model_visible_form() -> No
         char_end=len(text),
         score=0.5,
     )
-    budget = 600
-    expected = rendered_snippet(text, budget)
-    assert expected.endswith("…")  # over-budget ⇒ visible truncation marker
-    assert not expected[:-1].endswith(" ")  # rstrip applied before the ellipsis
-    # The tool reply embeds EXACTLY that string.
-    assert expected in _render_passages([passage], budget)
+    assert len(text) > 600
+    assert "LATE FACT: the launch date is 2031-04-19." in text[600:]
 
-    # A short passage renders unchanged (no ellipsis) through the same helper.
-    short = rendered_snippet("short text", budget)
-    assert short == "short text"
-    assert short in _render_passages(
-        [
-            RetrievedPassage(
-                chunk_id=uuid.uuid4(),
-                document_id=uuid.uuid4(),
-                document_name="d",
-                ord=0,
-                text="short text",
-                char_start=0,
-                char_end=10,
-                score=None,
-            )
-        ],
-        budget,
-    )
+    # Keep the formatting helper's output byte-identical to the entire evidence;
+    # reducing the context budget must not change the evidence itself.
+    assert rendered_snippet(text, 600) == text
+    assert rendered_snippet(text, 300) == text
+    assert _render_passages([passage], 600).endswith(text)
+    assert _render_passages([passage], 300).endswith(text)
+
+    # Exercise the actual registered search tool: the full returned passage and
+    # the model-visible snippet must both preserve the same late fact.
+    class _PassageRetrieval(_RecordingRetrieval):
+        async def search_text(
+            self,
+            *,
+            principal: object,
+            query: str,
+            k: int,
+            collection_ids: object = None,
+            document_ids: object = None,
+        ) -> list:
+            return [passage]
+
+    _, world = session_and_world
+    for budget in (600, 300):
+        ctx = ToolContext(
+            principal=_principal(world.alice, world.tenant_a),
+            retrieval=_PassageRetrieval(),  # type: ignore[arg-type]
+            collection_ids=None,
+            snippet_budget=budget,
+        )
+        result = await get_tool("search_text").handler({"query": "launch date"}, ctx)
+        assert result.ok is True
+        assert result.passages == (passage,)
+        assert result.passages[0].text == text
+        assert text in result.content
+        assert "LATE FACT: the launch date is 2031-04-19." in result.content

@@ -12,4 +12,4 @@ dropping a package like this, with no edit to a shared registry.
 
 from app.connectors.web.connector import CONNECTOR, WebConnector, detect_mode
 
-__all__ = ["CONNECTOR", "WebConnector", "detect_mode"]
+__all__ = ("CONNECTOR", "WebConnector", "detect_mode")

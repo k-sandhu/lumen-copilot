@@ -732,6 +732,7 @@ def _complete(call: ToolCall, body: ToolHandlerResult, duration_ms: int) -> Tool
         hit_count=body.hit_count,
         passages=body.passages,
         document_ids=body.document_ids,
+        source_document_ids=body.source_document_ids,
     )
 
 

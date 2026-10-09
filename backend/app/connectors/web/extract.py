@@ -237,11 +237,11 @@ def _feed_link(entry: ET.Element) -> str:
     return ""
 
 
-__all__ = [
+__all__ = (
     "MAX_CHILD_URLS",
     "ExtractedPage",
     "FeedItem",
     "extract_page_text",
     "parse_feed",
     "parse_sitemap",
-]
+)

@@ -128,6 +128,9 @@ export interface SourceLocation {
   char_end: number;
 }
 
+/** Processing/viewer family derived from the validated MIME type (spec 0008). */
+export type DocumentKind = 'document' | 'audio' | 'video';
+
 /** A document's metadata, including its ingestion status. */
 export interface Document {
   id: string;
@@ -136,9 +139,13 @@ export interface Document {
   size_bytes: number;
   collection_id: string;
   owner_id: string;
+  /** Validated viewer family; migration backfills ordinary documents. */
+  kind: DocumentKind;
+  /** Zero-based player duration for media; null for ordinary documents. */
+  duration_ms: number | null;
   status: DocumentStatus;
   /** Failure reason when status is failed. */
-  error?: string;
+  error?: string | null;
   /** Number of indexed chunks (0 until ingestion completes). */
   chunk_count: number;
   created_at: string;
@@ -170,6 +177,116 @@ export interface DocumentText {
   chunk_count: number;
   /** True when the server capped the text (DOCUMENT_TEXT_MAX_BYTES). */
   truncated: boolean;
+}
+
+// --- Direct multipart uploads + media transcript (spec 0008 / #571) -------
+
+export interface DocumentUploadCreate {
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  collection_id: string;
+  last_modified_at?: string | null;
+}
+
+export type DocumentUploadState =
+  | 'initiated'
+  | 'completing'
+  | 'completed'
+  | 'aborted'
+  | 'expired'
+  | 'failed';
+
+export interface UploadedPart {
+  part_number: number;
+  etag: string;
+  size_bytes: number;
+}
+
+export interface DocumentUploadSession {
+  id: string;
+  document_id: string;
+  state: DocumentUploadState;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  collection_id: string;
+  part_size_bytes: number;
+  part_count: number;
+  completed_parts: UploadedPart[];
+  expires_at: string;
+  error?: string | null;
+  document: Document | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SignedUploadPart {
+  part_number: number;
+  url: string;
+  expires_at: string;
+  required_headers: Record<string, string>;
+}
+
+export interface SignedUploadPartList {
+  items: SignedUploadPart[];
+}
+
+export interface CompleteUploadPart {
+  part_number: number;
+  etag: string;
+}
+
+export type DocumentAccessPurpose = 'preview' | 'download';
+
+export interface DocumentAccessUrl {
+  url: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  expires_at: string;
+  purpose: DocumentAccessPurpose;
+  supports_byte_ranges: boolean;
+}
+
+export type SpeakerNameStatus = 'unknown' | 'inferred';
+export type SpeakerNameMethod = 'self_introduction' | 'contextual_dialogue';
+
+export interface TranscriptSpeaker {
+  speaker_id: string;
+  display_name: string | null;
+  name_status: SpeakerNameStatus;
+  name_confidence: number | null;
+  name_method: SpeakerNameMethod | null;
+  evidence_segment_ids: string[];
+}
+
+export interface TranscriptSegment {
+  id: string;
+  ordinal: number;
+  speaker_id: string;
+  start_ms: number;
+  end_ms: number;
+  char_start: number;
+  char_end: number;
+  text: string;
+  confidence?: number | null;
+}
+
+export interface TranscriptPage {
+  document_id: string;
+  duration_ms: number;
+  language: string | null;
+  transcription_model: string;
+  speakers: TranscriptSpeaker[];
+  items: TranscriptSegment[];
+  next_cursor: string | null;
+}
+
+export interface TranscriptQuery {
+  cursor?: string;
+  limit?: number;
+  around_ms?: number;
 }
 
 // --- Artifacts (contracts/openapi.yaml §artifacts, CC-B #208 / panel #222) ---
@@ -279,6 +396,12 @@ export interface Citation {
   snippet: string;
   char_start: number;
   char_end: number;
+  /** Paired player-relative media span; both omitted for ordinary documents. */
+  time_start_ms?: number;
+  time_end_ms?: number;
+  transcript_segment_id?: string;
+  speaker_id?: string;
+  speaker_name?: string;
   /** Optional retrieval/rerank score. */
   score?: number;
   /**
@@ -492,6 +615,12 @@ export interface SearchResult {
   permission: PermissionState;
   /** Source document id when the result resolves to a document (click-through). */
   document_id?: string;
+  document_kind?: DocumentKind;
+  time_start_ms?: number;
+  time_end_ms?: number;
+  transcript_segment_id?: string;
+  speaker_id?: string;
+  speaker_name?: string;
   /** Optional retrieval/rerank score. */
   score?: number;
 }
@@ -508,6 +637,11 @@ export interface SearchCitation {
   snippet?: string;
   char_start?: number;
   char_end?: number;
+  time_start_ms?: number;
+  time_end_ms?: number;
+  transcript_segment_id?: string;
+  speaker_id?: string;
+  speaker_name?: string;
 }
 
 /**
@@ -549,99 +683,109 @@ export interface SearchQuery {
 // --- Audit (contracts/openapi.yaml §audit, M2 #80) ---
 
 /**
- * Audit event taxonomy (spec 0004 §2.4) — all 84 actions the backend can
+ * Audit event taxonomy (spec 0004 §2.4) — all 85 actions the backend can
  * emit. This had drifted to 14 (#545), so most emitted actions were untypeable
  * here and unfilterable through `GET /audit?type=`.
  *
  * Kept in lockstep by `src/api/audit-taxonomy.test.ts`, which reads
  * `contracts/openapi.yaml` directly — the taxonomy only ever grows, so a failure
- * there means "add the new action to this union too".
+ * there means "add the new action to this runtime tuple too".  Exporting the
+ * tuple lets UI consumers render the complete contract taxonomy rather than
+ * maintaining a second, silently drifting list.
  */
-export type AuditEventType =
-  | 'action.approved'
-  | 'action.executed'
-  | 'action.requested'
-  | 'answer.generated'
-  | 'artifact.created'
-  | 'artifact.deleted'
-  | 'artifact.downloaded'
-  | 'assistant.certified'
-  | 'assistant.created'
-  | 'assistant.deleted'
-  | 'assistant.deprecated'
-  | 'assistant.disabled'
-  | 'assistant.drafted'
-  | 'assistant.featured'
-  | 'assistant.ownership_transferred'
-  | 'assistant.published'
-  | 'assistant.rolled_back'
-  | 'assistant.tested'
-  | 'assistant.updated'
-  | 'auth.login'
-  | 'auth.login_failed'
-  | 'auth.logout'
-  | 'autonomy_cap.updated'
-  | 'code_run.cancelled'
-  | 'code_run.denied'
-  | 'code_run.finished'
-  | 'code_run.started'
-  | 'collection.created'
-  | 'document.deleted'
-  | 'document.downloaded'
-  | 'document.uploaded'
-  | 'document.viewed'
-  | 'group.created'
-  | 'group.deleted'
-  | 'group.member_added'
-  | 'group.member_removed'
-  | 'group.updated'
-  | 'llm_provider.created'
-  | 'llm_provider.deleted'
-  | 'llm_provider.discovered'
-  | 'llm_provider.updated'
-  | 'mcp_server.deleted'
-  | 'mcp_server.registered'
-  | 'mcp_server.tested'
-  | 'mcp_server.updated'
-  | 'permission.denied'
-  | 'permission.granted'
-  | 'permission.revoked'
-  | 'retrieval.evidence_rehydrated'
-  | 'retrieval.query'
-  | 'run.cancelled'
-  | 'run.delivered'
-  | 'run.delivery_read'
-  | 'run.digest_sent'
-  | 'run.escalated'
-  | 'run.finished'
-  | 'run.rerouted'
-  | 'run.resumed'
-  | 'run.started'
-  | 'sandbox_policy.updated'
-  | 'sandbox_session.closed'
-  | 'sandbox_session.created'
-  | 'sandbox_session.reset'
-  | 'schedule.created'
-  | 'schedule.deleted'
-  | 'schedule.paused'
-  | 'schedule.resumed'
-  | 'schedule.run_now'
-  | 'schedule.updated'
-  | 'secret.accessed'
-  | 'secret.created'
-  | 'secret.deleted'
-  | 'session.summarized'
-  | 'source.added'
-  | 'source.connected'
-  | 'source.deleted'
-  | 'source.synced'
-  | 'tenant.branding_updated'
-  | 'tenant.settings_updated'
-  | 'tool.invoked'
-  | 'tool.result'
-  | 'tool_policy.updated'
-  | 'user.avatar_updated'
-  | 'user.identity_attested';
+export const AUDIT_EVENT_TYPES = [
+  'action.approved',
+  'action.executed',
+  'action.requested',
+  'answer.generated',
+  'artifact.created',
+  'artifact.deleted',
+  'artifact.downloaded',
+  'assistant.certified',
+  'assistant.created',
+  'assistant.deleted',
+  'assistant.deprecated',
+  'assistant.disabled',
+  'assistant.drafted',
+  'assistant.featured',
+  'assistant.ownership_transferred',
+  'assistant.published',
+  'assistant.rolled_back',
+  'assistant.tested',
+  'assistant.updated',
+  'auth.login',
+  'auth.login_failed',
+  'auth.logout',
+  'autonomy_cap.updated',
+  'code_run.cancelled',
+  'code_run.denied',
+  'code_run.finished',
+  'code_run.started',
+  'collection.created',
+  'collection.deleted',
+  'document.deleted',
+  'document.downloaded',
+  'document.transcribed',
+  'document.upload_aborted',
+  'document.upload_expired',
+  'document.upload_started',
+  'document.uploaded',
+  'document.viewed',
+  'group.created',
+  'group.deleted',
+  'group.member_added',
+  'group.member_removed',
+  'group.updated',
+  'llm_provider.created',
+  'llm_provider.deleted',
+  'llm_provider.discovered',
+  'llm_provider.updated',
+  'mcp_server.deleted',
+  'mcp_server.registered',
+  'mcp_server.tested',
+  'mcp_server.updated',
+  'permission.denied',
+  'permission.granted',
+  'permission.revoked',
+  'retrieval.evidence_rehydrated',
+  'retrieval.query',
+  'run.cancelled',
+  'run.delivered',
+  'run.delivery_read',
+  'run.digest_sent',
+  'run.escalated',
+  'run.finished',
+  'run.rerouted',
+  'run.resumed',
+  'run.started',
+  'sandbox_policy.updated',
+  'sandbox_session.closed',
+  'sandbox_session.created',
+  'sandbox_session.reset',
+  'schedule.created',
+  'schedule.deleted',
+  'schedule.paused',
+  'schedule.resumed',
+  'schedule.run_now',
+  'schedule.updated',
+  'secret.accessed',
+  'secret.created',
+  'secret.deleted',
+  'session.summarized',
+  'source.added',
+  'source.connected',
+  'source.deleted',
+  'source.synced',
+  'tenant.branding_updated',
+  'tenant.settings_updated',
+  'tool.invoked',
+  'tool.result',
+  'tool_policy.updated',
+  'user.avatar_updated',
+  'user.identity_attested',
+] as const;
+
+export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 
 /** The outcome recorded for an audit event (spec 0004 §2.4). */
 export type AuditDecision = 'allowed' | 'denied' | 'error';
@@ -1860,6 +2004,11 @@ export interface ChatCitation {
   snippet: string;
   charStart: number;
   charEnd: number;
+  timeStartMs?: number;
+  timeEndMs?: number;
+  transcriptSegmentId?: string;
+  speakerId?: string;
+  speakerName?: string;
   score?: number;
 }
 
@@ -1876,6 +2025,7 @@ export type ChatTool =
   | 'search_documents'
   | 'list_documents'
   | 'get_document'
+  | 'read_conversation'
   | 'web_search';
 
 /** `event.data` for name=tool_call — the agent invoked a retrieval tool. */

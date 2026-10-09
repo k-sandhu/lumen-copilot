@@ -23,7 +23,7 @@ import argparse
 import asyncio
 from uuid import UUID
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.db.repositories import DocumentRepository, TenantRepository
 from app.db.session import dispose_engine, session_scope
 from app.search.store import OpenSearchStore
@@ -39,9 +39,10 @@ async def reindex_tenant(
     *,
     store: OpenSearchStore,
     page_size: int = _PAGE_SIZE,
+    settings: Settings | None = None,
 ) -> int:
     """Reindex every document of one tenant; returns the documents synced."""
-    settings = get_settings()
+    active_settings = settings or get_settings()
     synced = 0
     after: UUID | None = None
     while True:
@@ -53,7 +54,7 @@ async def reindex_tenant(
             return synced
         for document_id in ids:
             await sync_document_index_async(
-                tenant_id, document_id, settings=settings, store=store
+                tenant_id, document_id, settings=active_settings, store=store
             )
             synced += 1
         after = ids[-1]

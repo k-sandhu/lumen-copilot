@@ -234,13 +234,13 @@ export interface MetadataRow {
 /**
  * The values we genuinely have to drive the inspector metadata grid (#120). The
  * chat/citation wire (Citation / ChatCitation, spec 0004 INV-3) carries NONE of
- * these source-provenance fields: not the owner, not a last-modified date, and
- * not a last-indexed timestamp. The only timestamp the chat turn has is the
- * ANSWER/message time (`message.created_at`) — which is when the answer was
- * produced, NOT when the underlying source was indexed or modified. Presenting
- * it as "Last indexed" would fabricate provenance (a doc indexed months ago
- * could read "Last indexed: Just now"). So every field here defaults to absent
- * and `sourceMetadataRows` renders "Not available" rather than invent a value.
+ * these indexing-provenance fields: not the owner, not a last-modified date, and
+ * not a last-indexed timestamp. Media citations can carry a player-relative
+ * timestamp, but that locates a spoken passage; it says nothing about indexing
+ * recency. The answer/message time likewise says only when the answer was
+ * produced. Presenting either as "Last indexed" would fabricate provenance, so
+ * every field here defaults to absent and `sourceMetadataRows` renders "Not
+ * available" rather than invent a value.
  * A field lights up honestly only if a source ever actually carries it — which
  * requires it on the wire (a separate search-result contract carries indexing
  * metadata; the chat citation wire does not). See the regression test in
@@ -253,8 +253,8 @@ export interface SourceMetadataInput {
   lastModified?: string | undefined;
   /**
    * Last-indexed label, when known (currently never on the chat wire — the
-   * citation contract carries no indexing timestamp, so do NOT pass the
-   * answer/message time here; that is the answer time, not source indexing).
+   * citation contract carries no indexing timestamp, so do not pass its media
+   * offset or the answer/message time here; neither is source indexing).
    */
   lastIndexed?: string | undefined;
 }

@@ -33,7 +33,7 @@ from app.api.deps import (
     CurrentTenant,
     CurrentUser,
     DbSession,
-    extract_request_id,
+    authenticated_denial_context,
 )
 from app.core.errors import ValidationError as DomainValidationError
 from app.domain.entities import (
@@ -272,8 +272,9 @@ def _build_service(
         owner_id=principal.user_id,
         roles=principal.roles,
         audit=make_audit_sink(tenant_id),
-        request_id=extract_request_id(request) or "unknown",
-        source_ip=request.client.host if request.client else "unknown",
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=tenant_id, principal=principal, request=request
+        ),
     )
 
 

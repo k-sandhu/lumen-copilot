@@ -34,6 +34,7 @@ import { useCreateSavedSearch, useSearch, useSearchCollections } from '../model/
 import { SearchTypeahead } from './SearchTypeahead';
 import { DirectAnswerBlock } from './DirectAnswerBlock';
 import { ResultPreviewDrawer } from './ResultPreviewDrawer';
+import { validMediaTimeSpan } from '@/lib/mediaTime';
 import { SearchResultRow } from './SearchResultRow';
 import { SearchFilters, type SearchFilterState } from './SearchFilters';
 import { TrimNotice } from './TrimNotice';
@@ -42,6 +43,7 @@ import { TrimNotice } from './TrimNotice';
 interface OpenPreview {
   documentId: string;
   title: string;
+  initialTimeMs?: number;
 }
 
 /** Map a transport failure to a user-facing, actionable message. */
@@ -161,14 +163,21 @@ export function SearchScreen() {
                   // The active scope filtered every row away. Keep the sidebar
                   // (above) so the user can see and clear the scope, and offer a
                   // one-click reset here.
-                  <FilteredEmptyState
-                    query={data.query}
-                    onClear={() => setFilters({})}
-                  />
+                  <FilteredEmptyState query={data.query} onClear={() => setFilters({})} />
                 ) : (
                   <>
                     {data.direct_answer ? (
-                      <DirectAnswerBlock answer={data.direct_answer} resultsById={resultsById} />
+                      <DirectAnswerBlock
+                        answer={data.direct_answer}
+                        resultsById={resultsById}
+                        onOpenDocument={(documentId, title, initialTimeMs) =>
+                          setPreview({
+                            documentId,
+                            title,
+                            ...(initialTimeMs !== undefined ? { initialTimeMs } : {}),
+                          })
+                        }
+                      />
                     ) : null}
 
                     <ResultsToolbar
@@ -185,6 +194,10 @@ export function SearchScreen() {
                         // Only a result that resolves to a document is openable
                         // (#375); rows without one stay non-interactive.
                         const documentId = result.document_id;
+                        const mediaSpan = validMediaTimeSpan(
+                          result.time_start_ms,
+                          result.time_end_ms,
+                        );
                         return (
                           <li key={result.id}>
                             <SearchResultRow
@@ -192,7 +205,11 @@ export function SearchScreen() {
                               {...(documentId
                                 ? {
                                     onOpen: () =>
-                                      setPreview({ documentId, title: result.title }),
+                                      setPreview({
+                                        documentId,
+                                        title: result.title,
+                                        ...(mediaSpan ? { initialTimeMs: mediaSpan.startMs } : {}),
+                                      }),
                                   }
                                 : {})}
                             />
@@ -213,6 +230,7 @@ export function SearchScreen() {
         <ResultPreviewDrawer
           documentId={preview.documentId}
           title={preview.title}
+          {...(preview.initialTimeMs !== undefined ? { initialTimeMs: preview.initialTimeMs } : {})}
           onClose={() => setPreview(null)}
         />
       ) : null}

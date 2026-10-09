@@ -32,12 +32,18 @@ async def test_postgres_provenance_round_trip_is_tenant_scoped() -> None:
     if (
         address.hostname not in ("localhost", "127.0.0.1")
         or address.port != 47182
-        or address.path != "/lumentest_ingest"
+        or address.path != "/lumentest_pr625"
     ):
         pytest.skip("requires the explicitly isolated ingestion test database")
 
     class Gateway:
-        async def embed(self, inputs: Sequence[str]) -> list[Embedding]:
+        async def embed(
+            self,
+            inputs: Sequence[str],
+            *,
+            model: str | None = None,
+            cache_namespace: str | None = None,
+        ) -> list[Embedding]:
             return [
                 Embedding(vector=[0.1] * settings.llm_embedding_dimensions, model="synthetic")
                 for _ in inputs

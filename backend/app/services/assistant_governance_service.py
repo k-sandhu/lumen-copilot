@@ -56,7 +56,7 @@ from app.domain.entities import (
     AuditOutcome,
     CertificationState,
 )
-from app.services.audit import AuditSink
+from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 
 _MIN_LIMIT = 1
 _MAX_LIMIT = 100
@@ -126,8 +126,7 @@ class AssistantGovernanceService:
         *,
         tenant_id: UUID,
         actor_id: UUID,
-        request_id: str,
-        source_ip: str,
+        denials: PermissionDeniedContext,
     ) -> None:
         self._session = session
         self._assistants = AssistantRepository(session, tenant_id)
@@ -136,14 +135,14 @@ class AssistantGovernanceService:
         self._tenant_id = tenant_id
         self._actor_id = actor_id
         self._audit = AuditSink(AuditEventRepository(session, tenant_id))
-        self._request_id = request_id
-        self._source_ip = source_ip
+        denials.assert_user(tenant_id, actor_id)
+        self._denials = denials
+        self._request_id = denials.request_id
+        self._source_ip = denials.source_ip
 
     # --- reads --------------------------------------------------------------
 
-    async def list_all(
-        self, *, cursor: str | None, limit: int | None
-    ) -> GovernedAssistantPage:
+    async def list_all(self, *, cursor: str | None, limit: int | None) -> GovernedAssistantPage:
         """A keyset page of EVERY assistant in the tenant with its governance state.
 
         The admin library view (E6-6): spans all owners in the tenant (INV-1 only —
@@ -153,9 +152,7 @@ class AssistantGovernanceService:
         """
         page_size = _clamp_limit(limit)
         after_id = _decode_cursor(cursor) if cursor else None
-        rows = await self._assistants.list_for_tenant_page(
-            limit=page_size + 1, after_id=after_id
-        )
+        rows = await self._assistants.list_for_tenant_page(limit=page_size + 1, after_id=after_id)
         has_more = len(rows) > page_size
         page = rows[:page_size]
         next_cursor = _encode_cursor(page[-1].id) if has_more and page else None
@@ -164,9 +161,8 @@ class AssistantGovernanceService:
 
     # --- governance mutations ----------------------------------------------
 
-    async def certify(
-        self, assistant_id: UUID, *, state: CertificationState
-    ) -> Assistant:
+    @audited_resource("assistant.certify", "assistant", "assistant_id")
+    async def certify(self, assistant_id: UUID, *, state: CertificationState) -> Assistant:
         """Set an assistant's certification (certify / deprecate / clear) — admin only.
 
         ``CERTIFIED`` marks it trusted in the library; ``DEPRECATED`` flags it for
@@ -174,10 +170,8 @@ class AssistantGovernanceService:
         ``assistant.certified`` / ``assistant.deprecated`` (INV-6). Cross-tenant/
         missing id → 404.
         """
-        assistant = await self._load_or_404(assistant_id)
-        updated = await self._update_or_404(
-            assistant_id, {"certification_state": state}
-        )
+        assistant = await self._load_or_404(assistant_id, attempted_action="assistant.certify")
+        updated = await self._update_or_404(assistant_id, {"certification_state": state})
         action = (
             AuditAction.ASSISTANT_DEPRECATED
             if state is CertificationState.DEPRECATED
@@ -190,12 +184,13 @@ class AssistantGovernanceService:
         )
         return await self._with_orphan_flag(updated)
 
+    @audited_resource("assistant.feature", "assistant", "assistant_id")
     async def set_featured(self, assistant_id: UUID, *, featured: bool) -> Assistant:
         """Feature / unfeature an assistant in the library — admin only (E6-6).
 
         Audited ``assistant.featured`` (INV-6). Cross-tenant/missing id → 404.
         """
-        assistant = await self._load_or_404(assistant_id)
+        assistant = await self._load_or_404(assistant_id, attempted_action="assistant.feature")
         updated = await self._update_or_404(assistant_id, {"featured": featured})
         await self._emit(
             action=AuditAction.ASSISTANT_FEATURED,
@@ -204,6 +199,7 @@ class AssistantGovernanceService:
         )
         return await self._with_orphan_flag(updated)
 
+    @audited_resource("assistant.disable", "assistant", "assistant_id")
     async def set_disabled(self, assistant_id: UUID, *, disabled: bool) -> Assistant:
         """Disable / re-enable an assistant — admin only (E6-6, INV-8 enforcement).
 
@@ -215,7 +211,7 @@ class AssistantGovernanceService:
         re-published). Audited ``assistant.disabled`` (INV-6). Cross-tenant/missing
         id → 404.
         """
-        assistant = await self._load_or_404(assistant_id)
+        assistant = await self._load_or_404(assistant_id, attempted_action="assistant.disable")
         if disabled:
             fields: dict[str, object] = {
                 "status": AssistantStatus.DISABLED,
@@ -231,9 +227,8 @@ class AssistantGovernanceService:
         )
         return await self._with_orphan_flag(updated)
 
-    async def transfer_ownership(
-        self, assistant_id: UUID, *, new_owner_id: UUID
-    ) -> Assistant:
+    @audited_resource("assistant.transfer_ownership", "assistant", "assistant_id")
+    async def transfer_ownership(self, assistant_id: UUID, *, new_owner_id: UUID) -> Assistant:
         """Reassign an assistant's accountable owner to another tenant member (E6-8).
 
         The new owner must be a **distinct** member of the same tenant (else 422,
@@ -241,7 +236,10 @@ class AssistantGovernanceService:
         owner. Audited ``assistant.ownership_transferred`` with both the previous and
         the new owner (INV-6). Cross-tenant/missing id → 404.
         """
-        assistant = await self._load_or_404(assistant_id)
+        assistant = await self._load_or_404(
+            assistant_id,
+            attempted_action="assistant.transfer_ownership",
+        )
         if new_owner_id == assistant.owner_id:
             raise ValidationError(
                 "The assistant already has that owner.",
@@ -296,18 +294,27 @@ class AssistantGovernanceService:
 
     # --- helpers ------------------------------------------------------------
 
-    async def _load_or_404(self, assistant_id: UUID) -> Assistant:
+    async def _load_or_404(
+        self,
+        assistant_id: UUID,
+        *,
+        attempted_action: str,
+    ) -> Assistant:
         """Load a tenant assistant or raise 404 (existence non-disclosure, INV-1)."""
         assistant = await self._assistants.get(assistant_id)
         if assistant is None:
+            await self._denials.emit(
+                resource_type="assistant",
+                resource_id=str(assistant_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             raise NotFoundError("Assistant not found.")
         return assistant
 
-    async def _update_or_404(
-        self, assistant_id: UUID, fields: dict[str, object]
-    ) -> Assistant:
+    async def _update_or_404(self, assistant_id: UUID, fields: dict[str, object]) -> Assistant:
         updated = await self._assistants.update(assistant_id, fields=fields)
-        if updated is None:  # pragma: no cover — visibility already established
+        if updated is None:
             raise NotFoundError("Assistant not found.")
         return updated
 

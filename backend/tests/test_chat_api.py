@@ -38,7 +38,6 @@ import app.api.v1.chat as chat_module
 from app.api.deps import get_backplane_dep, get_db_session
 from app.auth import hash_password
 from app.core.config import Settings, get_settings
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkInput,
@@ -59,6 +58,8 @@ from app.realtime.backplane import InMemoryBackplane, StreamOwner
 from app.services.audit import AuditSink
 from app.services.provider_models import make_provider_model_id
 from app.services.secrets_service import build_secrets_service
+from tests._audit_helpers import RecordingDurableAuditTransactions
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -185,7 +186,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
@@ -397,6 +398,102 @@ async def test_get_other_owner_session_is_404(client: AsyncClient, seeded: _Seed
     assert resp.status_code == 404
 
 
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload", "attempted_action"),
+    [
+        ("GET", "", None, "chat.session.read"),
+        ("GET", "/usage", None, "chat.session.usage"),
+        ("PATCH", "", {"title": "must not change"}, "chat.session.update"),
+        ("DELETE", "", None, "chat.session.delete"),
+        ("GET", "/messages", None, "chat.messages.read"),
+        ("POST", "/messages", {"content": "must not persist"}, "chat.message.send"),
+    ],
+)
+@pytest.mark.parametrize("target_owner", ["same_tenant", "cross_tenant"])
+async def test_every_authenticated_chat_404_route_records_one_safe_denial(
+    client: AsyncClient,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+    method: str,
+    suffix: str,
+    payload: dict[str, str] | None,
+    attempted_action: str,
+    target_owner: str,
+) -> None:
+    """R2-001: route wiring cannot omit request context or duplicate service auditing."""
+    owner_email = seeded.bob_email if target_owner == "same_tenant" else seeded.carol_email
+    owner = await _login(client, owner_email)
+    created = await client.post(
+        "/api/v1/chat/sessions",
+        headers=_auth(owner),
+        json={"title": f"hidden-{target_owner}"},
+    )
+    assert created.status_code == 201, created.text
+    target_id = str(created.json()["id"])
+    alice = await _login(client, seeded.alice_email)
+    durable_audit_ledger.events.clear()
+
+    kwargs: dict[str, object] = {"headers": _auth(alice)}
+    if payload is not None:
+        kwargs["json"] = payload
+    response = await client.request(
+        method,
+        f"/api/v1/chat/sessions/{target_id}{suffix}",
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert len(durable_audit_ledger.events) == 1
+    event = durable_audit_ledger.events[0]
+    assert event.tenant_id == seeded.tenant_a
+    assert event.actor_id == seeded.alice_id
+    assert event.action == "permission.denied"
+    assert event.resource_type == "chat_session"
+    assert event.resource_id == target_id
+    assert event.request_id not in (None, "", "unknown")
+    assert event.source_origin == "client"
+    assert event.source_ip is not None
+    # The same closed metadata is emitted whether the target exists in this
+    # tenant or only in another tenant; no existence/detail bit can leak.
+    assert event.metadata == {
+        "attempted_action": attempted_action,
+        "reason": "not_visible",
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload"),
+    [
+        ("GET", "", None),
+        ("GET", "/usage", None),
+        ("PATCH", "", {"title": "x"}),
+        ("DELETE", "", None),
+        ("GET", "/messages", None),
+        ("POST", "/messages", {"content": "x"}),
+    ],
+)
+async def test_unauthenticated_chat_direct_resource_routes_emit_no_tenant_denial(
+    client: AsyncClient,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+    method: str,
+    suffix: str,
+    payload: dict[str, str] | None,
+) -> None:
+    """R2-001/INV-4: a 401 has no trusted tenant/actor to put in the product ledger."""
+    kwargs: dict[str, object] = {}
+    if payload is not None:
+        kwargs["json"] = payload
+    response = await client.request(
+        method,
+        f"/api/v1/chat/sessions/{uuid.uuid4()}{suffix}",
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 401
+    assert durable_audit_ledger.events == []
+
+
 async def test_list_sessions_without_token_is_401(client: AsyncClient) -> None:
     resp = await client.get("/api/v1/chat/sessions")
     assert resp.status_code == 401
@@ -457,6 +554,110 @@ async def test_send_returns_202_with_user_message_and_stream_id(
 
 
 # --- WS streaming -----------------------------------------------------------
+
+
+def _with_ws_peer(application, peer):
+    async def with_peer(scope, receive, send):
+        if scope["type"] == "websocket":
+            scope = {**scope, "client": peer}
+        await application(scope, receive, send)
+
+    return with_peer
+
+
+@pytest.mark.parametrize("target", ["private", "cross_tenant", "unknown"])
+def test_ws_denial_has_exactly_one_durable_safe_event(
+    app: FastAPI,
+    backplane: InMemoryBackplane,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+    target: str,
+) -> None:
+    """R5-002: authenticated stream guards own product audit before handshake rejection."""
+    stream_id = "r6-hidden-stream"
+    if target != "unknown":
+        _bind_owner(backplane, stream_id, owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    email = seeded.carol_email if target == "cross_tenant" else seeded.bob_email
+    actor_id = seeded.carol_id if target == "cross_tenant" else seeded.bob_id
+    tenant_id = seeded.tenant_b if target == "cross_tenant" else seeded.tenant_a
+    with TestClient(_with_ws_peer(app, ("203.0.113.79", 50000))) as client:
+        login = client.post("/api/v1/auth/login", json={"email": email, "password": _PASSWORD})
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+        before = len(durable_audit_ledger.events)
+        with pytest.raises(WebSocketDisconnect) as denied:
+            with client.websocket_connect(
+                f"/ws/chat/{stream_id}?access_token={token}&secret=must-not-be-audited",
+                headers={"x-request-id": "r6-ws-denial", "x-tenant-id": str(seeded.tenant_a)},
+            ):
+                pytest.fail("hidden stream was accepted")
+        assert denied.value.code == 1008
+        rows = durable_audit_ledger.events[before:]
+        assert len(rows) == 1
+        event = rows[0]
+        assert event.tenant_id == tenant_id
+        assert event.actor_id == actor_id
+        assert event.action == "permission.denied"
+        assert event.outcome.value == "denied"
+        assert event.resource_type == "chat_stream"
+        assert event.resource_id == stream_id
+        assert event.request_id == "r6-ws-denial"
+        assert event.source_origin == "client"
+        assert event.source_ip == "203.0.113.79"
+        assert event.metadata == {
+            "attempted_action": "chat.stream.subscribe",
+            "reason": "not_visible",
+        }
+        assert token not in repr(event)
+        assert "must-not-be-audited" not in repr(event)
+
+
+@pytest.mark.parametrize("token", ["", "not-a-token"])
+def test_ws_unauthenticated_denial_has_zero_audit_events(
+    app: FastAPI, durable_audit_ledger: RecordingDurableAuditTransactions, token: str
+) -> None:
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"/ws/chat/unknown?access_token={token}"):
+                pytest.fail("invalid token was accepted")
+    assert durable_audit_ledger.events == []
+
+
+def test_ws_denial_sink_failure_is_observable(
+    app: FastAPI,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.bob_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        durable_audit_ledger.fail_with = RuntimeError("r6 audit unavailable")
+        with pytest.raises(RuntimeError, match="r6 audit unavailable"):
+            with client.websocket_connect(f"/ws/chat/unknown?access_token={token}"):
+                pytest.fail("unaudited rejection was accepted")
+    assert durable_audit_ledger.events == []
+
+
+def test_ws_denial_mints_correlation_and_uses_unknown_peer_origin(
+    app: FastAPI,
+    seeded: _Seeded,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    with TestClient(_with_ws_peer(app, None)) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.bob_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        for _ in range(2):
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect(f"/ws/chat/unknown?access_token={token}"):
+                    pytest.fail("hidden stream accepted")
+    first, second = durable_audit_ledger.events
+    assert first.request_id != second.request_id
+    assert all(event.request_id and event.request_id != "unknown" for event in (first, second))
+    assert all(
+        event.source_origin == "unknown" and event.source_ip is None for event in (first, second)
+    )
 
 
 def test_ws_rejects_missing_token(app: FastAPI) -> None:

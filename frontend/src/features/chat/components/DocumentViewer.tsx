@@ -1,34 +1,27 @@
 /**
  * Citation click-through target (AC-2): opens the cited document at the passage.
  * Re-skinned (#89) to lead with the kit SourceInspector — the cited passage with
- * the matched span highlighted — then embeds the document's original bytes below
+ * the matched span highlighted — then embeds the shared signed preview below
  * it. The SourceInspector makes every answer trace to a verifiable source passage
  * (mission filter #2).
  *
- * SOURCE PROVENANCE (#120 GUARD): the chat/citation wire (Citation /
- * ChatCitation) carries NO source-provenance fields — no owner, no last-modified,
- * no last-indexed timestamp. The only timestamp a chat turn has is the
- * answer/message time, which is the answer's age, NOT when the source was indexed
- * or modified. So the metadata grid (owner / last-modified / last-indexed) and
- * the inspector freshness pill render "Not available" / nothing rather than
- * present the answer time as source provenance — never fabricate where a doc was
- * last indexed. A field lights up honestly only when a source actually carries
- * it (e.g. the `owner` prop, wired through if a source ever starts providing one).
+ * SOURCE PROVENANCE (#120 GUARD): media citations can carry player-relative
+ * source timestamps and diarized speaker data, which this viewer uses for exact
+ * seeking. The chat wire still carries no owner, last-modified, or last-indexed
+ * metadata. Its only recency timestamp is the answer/message time, which is the
+ * answer's age, not when the source was indexed or modified. The metadata grid
+ * therefore renders honest unknowns instead of treating either an answer time or
+ * a media offset as indexing freshness.
  *
- * AUTH (INV-4): `GET /documents/{id}/content` is a `bearerAuth` endpoint — it is
- * authorized by the in-memory access JWT, not a cookie. A browser-initiated
- * `<iframe src>` / `<a href>` GET cannot attach an `Authorization: Bearer`
- * header, so we cannot point them at the bare endpoint (it would 401). The
- * document region is the shared `DocumentPreviewBody` (#242/#245): it fetches
- * through the api/ boundary (bearer attached, 302→presigned followed), renders
- * a `blob:` URL for browser-renderable types, server-extracted text for office
- * types (the chat wire carries no mime type — the blob's content-type decides),
- * and always offers the original download. 404 (INV-2) renders as unavailable;
- * object URLs are revoked on unmount / citation change.
+ * AUTH (INV-4): the API authenticates a JSON access-capability request; the
+ * native player/iframe then reads the short-lived storage URL directly. Media
+ * citations seek after metadata without autoplay. A fresh visibility denial
+ * remains an opaque 404.
  */
 import { Icon, SourceInspector } from '@/ui';
 import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
 import { cn } from '@/lib/cn';
+import { formatMediaTimestamp } from '@/lib/mediaTime';
 import type { UiCitation } from '../model/citation';
 import { passageFromCitation, sourceMetadataRows } from '../model/presentation';
 
@@ -48,8 +41,9 @@ export interface DocumentViewerProps {
   /**
    * Last-indexed label for the metadata grid (#120), when known. Not on the
    * chat wire today (the citation contract carries no indexing timestamp) →
-   * "Not available". Do NOT pass the answer/message time here: that is when the
-   * answer was produced, not when the source was indexed (#120 GUARD).
+   * "Not available". A media citation's player-relative timestamp is a precise
+   * passage location, not indexing recency; do not pass it or the answer time
+   * here (#120 GUARD).
    */
   lastIndexed?: string | undefined;
   onClose: () => void;
@@ -80,7 +74,10 @@ export function DocumentViewer({
         <div className="min-w-0">
           <h2 className="lc-viewer__title">{citation.documentName}</h2>
           <p className="lc-viewer__sub">
-            Cited passage · characters {citation.charStart}–{citation.charEnd}
+            {citation.timeStartMs !== undefined
+              ? `Cited at ${formatMediaTimestamp(citation.timeStartMs)}`
+              : `Cited passage · characters ${citation.charStart}–${citation.charEnd}`}
+            {citation.speakerName ? ` · ${citation.speakerName} (inferred)` : ''}
           </p>
         </div>
         <button
@@ -95,9 +92,9 @@ export function DocumentViewer({
 
       {/*
         The kit SourceInspector surfaces the cited passage. We do NOT pass a
-        `freshness` here: the only timestamp a chat turn carries is the answer
-        time, and labelling that as source freshness/indexing would fabricate
-        provenance (#120 GUARD). Owner lights up only if a source carries one.
+        `freshness` here: answer time is not source indexing recency, and a media
+        citation timestamp is only a player-relative passage location. Labelling
+        either as freshness would fabricate provenance (#120 GUARD).
       */}
       {/*
         Cap the passage/metadata block and let it scroll: a long cited passage
@@ -132,11 +129,14 @@ export function DocumentViewer({
             </div>
           ))}
         </dl>
-
       </div>
 
       <div className="min-h-0 flex-1">
-        <DocumentPreviewBody documentId={documentId} filename={citation.documentName} />
+        <DocumentPreviewBody
+          documentId={documentId}
+          filename={citation.documentName}
+          {...(citation.timeStartMs !== undefined ? { initialTimeMs: citation.timeStartMs } : {})}
+        />
       </div>
     </section>
   );

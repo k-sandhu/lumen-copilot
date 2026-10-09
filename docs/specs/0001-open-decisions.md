@@ -2,7 +2,7 @@
 
 > Playbook rule: *any "not sure" is recorded as an open decision — never silently defaulted.* This is that registry. Each row is **blocking** for the scaffolding that depends on it; an agent must not invent an answer (see `AGENTS.md` §4 precedence).
 
-**Status:** open — OD-1 / OD-2 / OD-3 / OD-4 / OD-5 closed. **OD-6 (partial), OD-7 remain open — don't default them; ask.** **Last reviewed:** 2026-06-18.
+**Status:** open — OD-1 / OD-2 / OD-3 / OD-4 / OD-5 / OD-7 closed. **OD-6 remains partially open — don't default it; ask.** **Last reviewed:** 2026-10-02.
 
 | # | Decision | Depends on | Blocks | Notes |
 |---|---|---|---|---|
@@ -12,11 +12,11 @@
 | ~~**OD-4**~~ | ~~**Security & domain invariants**~~ | — | — | ✅ **Closed 2026-06-18** by [spec 0004](0004-security-and-domain-invariants.md) + `AGENTS.md` §9. Row-level tenancy; deny-by-default ACL; app-managed authn (SSO→Keycloak); audit taxonomy; read-before-write tiers. Each invariant → a negative test (INV-1..INV-8). |
 | ~~**OD-5**~~ | ~~**Local-run path**~~ (compose + dev runner) | — | — | ✅ **Closed 2026-06-17** by [ADR-0005](../architecture/0005-local-run-and-developer-workflow.md). One `docker compose up`; `471xx` host ports. The `/verify` gate **scripts** still pend OD-6/OD-7. |
 | **OD-6** | **`.claude/` harness** (permission tiers, hooks, slash commands, review subagents) | OD-2 + smoke existing | smoke-on-change, auto-push, `/verify`, `/verify-live` | **Partially addressed:** slash-commands, role subagents, the Orchestrator (parallel fan-out), and loop-mode invocation landed cross-harness via [ADR-0002](../architecture/0002-multi-harness-agent-roles.md) (2026-06-17). Permission tiers, hooks, auto-push, `/verify`, and the external multi-process launcher still deferred to the post-stack phase. |
-| **OD-7** | **CI** | smoke + tests exist | local/CI parity | Mirror the fast-gate chain exactly. |
+| ~~**OD-7**~~ | ~~**CI**~~ | smoke + tests exist | local/CI parity | Closed 2026-10-02 by explicit sponsor instruction in #655 and [ADR-0026](../architecture/0026-continuous-integration.md): backend and frontend offline gates with locked dependencies and caches. Protected agent-contract wording awaits owner approval. |
 
 ## How to close a decision
 1. Open an **ADR** (OD-2 / OD-3 / OD-5) or a **spec** (OD-1 / OD-4); get confirmation.
 2. Fill the corresponding `AGENTS.md` section **in the same change**.
 3. Strike the row here with the date + a link to the ADR/spec that closed it.
 
-> Treat every **still-open** decision above (OD-6 remainder, OD-7) as undefined: **ask, don't assume.**
+> Treat every **still-open** decision above (OD-6 remainder) as undefined: **ask, don't assume.**
