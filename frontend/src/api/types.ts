@@ -734,6 +734,8 @@ export const AUDIT_EVENT_TYPES = [
   'mcp_server.registered',
   'mcp_server.tested',
   'mcp_server.updated',
+  'model.decision_completed',
+  'model.decision_requested',
   'permission.denied',
   'permission.granted',
   'permission.revoked',
