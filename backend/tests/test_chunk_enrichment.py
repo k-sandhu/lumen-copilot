@@ -247,7 +247,7 @@ async def test_invalid_generation_consumes_claim_without_mutating_evidence(failu
     assert (await enrich_chunks(**args))[0].generated_text is None
     assert (await enrich_chunks(**args))[0].generated_text is None
     assert gateway.calls == 1
-    args["settings"] = Settings(
+    args["settings"] = Settings.model_construct(
         chunk_context_generated_enabled=True,
         chunk_context_model="fixture",
         chunk_context_max_tokens=1,
@@ -291,3 +291,10 @@ def test_native_structure_lineage_remains_separate():
     assert inputs[0].text == "Evidence"
     assert inputs[0].block_id == "b1" and inputs[0].cell_indices == (0,)
     assert "USD" in inputs[0].structural_context
+
+
+def test_operational_generation_requires_contract_review():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="reviewed audit contract"):
+        Settings(chunk_context_generated_enabled=True, chunk_context_model="fixture")
