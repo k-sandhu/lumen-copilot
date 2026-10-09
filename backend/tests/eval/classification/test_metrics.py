@@ -22,7 +22,7 @@ def sample(
         {
             "path": path,
             "status": "classified" if path else "unclassified",
-            "confidence": confidence,
+            "confidence": confidence if path else None,
             "facets": facets or {"signed": {"value": None}},
             "levels": [
                 {
@@ -96,7 +96,7 @@ def test_calibration_never_approves_synthetic_or_unapproved_configuration():
         "bins": 10,
     }
     values = [sample(source="authorized_private", split="calibration") for _ in range(100)]
-    values += [sample(source="authorized_private", split="held_out") for _ in range(30)]
+    values += [sample(source="authorized_private", split="held_out") for _ in range(50)]
     for i, value in enumerate(values):
         value.case_id = str(i)
     artifact = calibration(values, config=config, taxonomy_version="1.0.0", corpus_sha256="a")
