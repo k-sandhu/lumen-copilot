@@ -149,6 +149,30 @@ fn normalize_document(
 }
 
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn classification_features(
+    py: Python<'_>,
+    document_json: String,
+    tokenizer_json: String,
+    settings_json: String,
+    rules_json: String,
+    budget_json: String,
+    token: &CancellationToken,
+) -> PyResult<String> {
+    let cancellation = token.0.clone();
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+        lumen_docintel_core::classification::features_json(
+            &document_json,
+            &tokenizer_json,
+            &settings_json,
+            &rules_json,
+            &ctx,
+        )
+    })
+}
+
+#[pyfunction]
 fn chunk_document(
     py: Python<'_>,
     document_json: String,
@@ -200,6 +224,36 @@ impl CancellationToken {
 struct NativeRuntime(lumen_docintel_core::runtime::Runtime);
 #[pymethods]
 impl NativeRuntime {
+    #[allow(clippy::too_many_arguments)]
+    fn classification_batch(
+        &self,
+        py: Python<'_>,
+        documents: Vec<String>,
+        tokenizer: String,
+        settings: String,
+        rules: String,
+        budget: String,
+        token: &CancellationToken,
+    ) -> PyResult<Vec<String>> {
+        let cancellation = token.0.clone();
+        compute(py, || {
+            if documents.len() > 128 {
+                return Err(CoreError::Budget);
+            }
+            let budget = lumen_docintel_core::runtime::parse_budget_json(&budget)?;
+            self.0
+                .classification_batch(
+                    &documents,
+                    &tokenizer,
+                    &settings,
+                    &rules,
+                    budget,
+                    cancellation,
+                )
+                .into_iter()
+                .collect()
+        })
+    }
     #[new]
     fn new(py: Python<'_>, threads: usize, max_documents: usize) -> PyResult<Self> {
         compute(py, || {
@@ -290,6 +344,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_document, m)?)?;
+    m.add_function(wrap_pyfunction!(classification_features, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(wrap_pyfunction!(detect_format, m)?)?;
     m.add_class::<CancellationToken>()?;

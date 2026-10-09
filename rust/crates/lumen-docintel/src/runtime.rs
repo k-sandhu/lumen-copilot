@@ -343,6 +343,33 @@ impl Runtime {
             })
             .collect()
     }
+    pub fn classification_batch(
+        &self,
+        docs: &[String],
+        tokenizer: &str,
+        settings: &str,
+        rules: &str,
+        budget: Budget,
+        token: Cancellation,
+    ) -> Vec<Result<String, CoreError>> {
+        docs.chunks(self.max_documents)
+            .flat_map(|wave| {
+                self.pool.install(|| {
+                    wave.par_iter()
+                        .map(|doc| {
+                            catch_unwind(AssertUnwindSafe(|| {
+                                let ctx = Context::new(budget, token.clone())?;
+                                crate::classification::features_json(
+                                    doc, tokenizer, settings, rules, &ctx,
+                                )
+                            }))
+                            .unwrap_or(Err(CoreError::Panic))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect()
+    }
     pub fn run_json(
         &self,
         input: &str,
@@ -420,9 +447,11 @@ impl Runtime {
 }
 
 pub fn context_json(budget_json: &str, token: Cancellation) -> Result<Context, CoreError> {
+    Context::new(parse_budget_json(budget_json)?, token)
+}
+pub fn parse_budget_json(budget_json: &str) -> Result<Budget, CoreError> {
     if budget_json.len() > 4096 {
         return Err(CoreError::Budget);
     }
-    let budget = serde_json::from_str(budget_json).map_err(|_| CoreError::InvalidInput)?;
-    Context::new(budget, token)
+    serde_json::from_str(budget_json).map_err(|_| CoreError::InvalidInput)
 }

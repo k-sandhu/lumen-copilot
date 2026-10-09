@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.core.config import Settings
 
 from app.domain.canonical import CanonicalDocument
+from app.domain.classification_features import ClassificationFeatures
 from app.domain.document_detection import DetectedDocument
 from app.domain.native_chunking import ChunkedDocument
 from app.domain.native_normalization import NormalizedDocument
@@ -103,6 +104,29 @@ class NativeExecutor:
             )
         )
 
+    def classification_batch(
+        self,
+        documents: tuple[CanonicalDocument, ...],
+        *,
+        tokenizer_json: str,
+        rules_json: str,
+        settings_json: str,
+        budget: RuntimeBudget = _DEFAULT_BUDGET,
+        cancellation: CancellationHandle | None = None,
+    ) -> tuple[ClassificationFeatures, ...]:
+        token = cancellation or CancellationHandle()
+        return tuple(
+            ClassificationFeatures.from_json(value)
+            for value in self._runtime.classification_batch(
+                [d.document_json for d in documents],
+                tokenizer_json,
+                settings_json,
+                rules_json,
+                json.dumps(asdict(budget)),
+                token._token,
+            )
+        )
+
     def stream_units(
         self,
         windows: Iterable[tuple[str, ...]],
@@ -187,5 +211,40 @@ def normalize_canonical(
     return NormalizedDocument.from_json(
         extension.normalize_document(
             document.document_json, json.dumps(asdict(budget)), token._token
+        )
+    )
+
+
+def classification_features(
+    document: CanonicalDocument,
+    *,
+    tokenizer_json: str,
+    rules_json: str,
+    max_tokens: int,
+    max_excerpt_chars: int,
+    format: str,
+    override_path: str | None = None,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> ClassificationFeatures:
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return ClassificationFeatures.from_json(
+        extension.classification_features(
+            document.document_json,
+            tokenizer_json,
+            json.dumps(
+                {
+                    "max_tokens": max_tokens,
+                    "max_excerpt_chars": max_excerpt_chars,
+                    "format": format,
+                    "override_path": override_path,
+                }
+            ),
+            rules_json,
+            json.dumps(asdict(budget)),
+            token._token,
         )
     )

@@ -37,4 +37,5 @@ pub mod runtime;
 
 pub mod chunking;
 
+pub mod classification;
 pub mod normalization;
