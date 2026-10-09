@@ -1,0 +1,10 @@
+{
+  "is_bug": {"probability": 0.96},
+  "team": {
+    "choice": "payments", "confidence": 0.75,
+    "probabilities": {"account": 0, "frontend": 0.16, "payments": 0.84}
+  },
+  "urgency": {
+    "confidence": 0.99, "probabilities": {"0": 0, "1": 0.01, "2": 0.99}, "score": 1.99
+  }
+}

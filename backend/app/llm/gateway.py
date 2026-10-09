@@ -33,6 +33,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -539,6 +540,91 @@ class LLMGateway:
             }
             for t in tools
         ]
+
+    async def structured_chat(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        schema: dict[str, Any],
+        model: str,
+        api_key: str | None = None,
+        timeout_seconds: float | None = None,
+        max_tokens: int,
+    ) -> Completion:
+        """Strict OpenRouter JSON output for the decisions fallback (#690).
+
+        Callers must verify model capability before admission. The provider must
+        enforce parameters; there is no silent prompt-only JSON downgrade. No
+        automatic LiteLLM retry or fallback bypasses the decisions budget ledger.
+        """
+        if not model.startswith("openrouter/") or not model.removeprefix("openrouter/"):
+            raise LlmProviderError(
+                "Structured fallback requires an OpenRouter route.",
+                code="decision_fallback_unsupported",
+            )
+        key = api_key if api_key is not None else self._settings.openrouter_api_key
+        if not key.strip():
+            raise LlmProviderError("Provider is not configured.", code="decision_unconfigured")
+        import litellm
+
+        try:
+            response = await litellm.acompletion(
+                model=model,
+                messages=self._to_wire_messages(messages),
+                stream=False,
+                timeout=timeout_seconds or self._settings.decisions_timeout_seconds,
+                max_tokens=max_tokens,
+                num_retries=0,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "constrained_decisions",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                provider={"require_parameters": True},
+                api_key=key,
+            )
+        except Exception as exc:  # noqa: BLE001 — no vendor details escape
+            raise _map_vendor_error(exc) from None
+        try:
+            choice = response.choices[0]
+            if getattr(choice.message, "refusal", None):
+                raise LlmProviderError("Decision refused.", code="decision_refused")
+            if getattr(choice, "finish_reason", None) != "stop":
+                raise ValueError("Incomplete output")
+            content = choice.message.content
+            if not isinstance(content, str) or not content:
+                raise ValueError("Missing content")
+            raw_usage = response.usage
+            prompt = getattr(raw_usage, "prompt_tokens", None)
+            output = getattr(raw_usage, "completion_tokens", None)
+            if any(
+                isinstance(count, bool) or not isinstance(count, int) or count < 0
+                for count in (prompt, output)
+            ):
+                raise ValueError("Missing token accounting")
+            raw_cost = getattr(raw_usage, "cost", None)
+            if isinstance(raw_cost, bool) or not isinstance(raw_cost, int | float | Decimal):
+                raise ValueError("Missing cost accounting")
+            cost = Decimal(str(raw_cost))
+            if not cost.is_finite() or cost < 0:
+                raise ValueError("Invalid cost")
+            reported = getattr(response, "model", None)
+            if not isinstance(reported, str) or not reported.strip():
+                raise ValueError("Missing reported model")
+            return Completion(
+                content=content,
+                model=reported,
+                finish_reason="stop",
+                usage=_extract_usage(response),
+                cost_usd=cost,
+            )
+        except (AttributeError, IndexError, ValueError, TypeError, InvalidOperation):
+            raise LlmProviderError(
+                "Malformed structured decision.", code="decision_malformed_response"
+            ) from None
 
     async def chat(
         self,
