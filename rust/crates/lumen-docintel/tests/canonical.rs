@@ -88,18 +88,18 @@ fn compact_json_cannot_expand_unbounded_model_collections() {
         .collect::<Vec<_>>()
         .join(",");
     let input = format!(r#"{{"generation":{{"diagnostics":[{values}]}}}}"#);
-    assert_eq!(
+    assert!(matches!(
         lumen_docintel_core::canonical::render_json(&input),
         Err(CoreError::Budget)
-    );
+    ));
     let cells = std::iter::repeat_n("{}", 100_001)
         .collect::<Vec<_>>()
         .join(",");
     let input = format!(
         r#"{{"blocks":[{{"id":"table","kind":"table","table":{{"rows":1,"columns":1,"cells":[{cells}]}}}}]}}"#
     );
-    assert_eq!(
+    assert!(matches!(
         lumen_docintel_core::canonical::render_json(&input),
         Err(CoreError::Budget)
-    );
+    ));
 }
