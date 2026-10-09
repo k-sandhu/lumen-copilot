@@ -74,9 +74,7 @@ impl Session {
         Ok(())
     }
 }
-pub fn decoded(bytes: &[u8], s: &mut Session) -> Result<DecodedText, CoreError> {
-    s.ctx.checkpoint()?;
-    // Reserve the bounded decoder/detection workspace before dependency calls.
+pub fn reject_binary(bytes: &[u8]) -> Result<(), CoreError> {
     if bytes.starts_with(b"%PDF-")
         || [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"]
             .iter()
@@ -87,6 +85,12 @@ pub fn decoded(bytes: &[u8], s: &mut Session) -> Result<DecodedText, CoreError> 
     {
         return Err(CoreError::Unsupported);
     }
+    Ok(())
+}
+pub fn decoded(bytes: &[u8], s: &mut Session) -> Result<DecodedText, CoreError> {
+    s.ctx.checkpoint()?;
+    // Reserve the bounded decoder/detection workspace before dependency calls.
+    reject_binary(bytes)?;
     let decoded = decode_text(bytes)?;
     let controls = decoded
         .text
