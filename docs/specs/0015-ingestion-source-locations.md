@@ -1,4 +1,4 @@
-# Spec 0013 — Exact source-part provenance
+# Spec 0015 — Exact source-part provenance
 
 Tracking: [#621](https://github.com/k-sandhu/lumen-copilot/issues/621).
 
@@ -14,6 +14,15 @@ keeps its string interface and identical rendering. Format helpers collect
 maps while extracting; there is no second lossy parse. Chunk text stays exactly
 `source[char_start:char_end]`; each chunk records all nonempty intersecting
 source parts, so a chunk crossing a page boundary can name both pages.
+
+Workbook rendering retains every sheet with at least one rendered row, even
+when that row is an empty shared-string cell. Such a sheet contributes its
+separator and has a zero-width location; a sheet with no rendered rows has a
+zero-width location without contributing a separator. For sheets containing
+`alpha`, an empty shared string, and `omega`, the exact text remains
+`alpha\n\n\n\nomega`, and the final sheet starts at character 9. Golden
+regressions cover leading, middle and trailing empty shared-string sheets for
+both parser interfaces, their exact spans, and intersecting chunk locations.
 
 Persist text and map on the document and locations on its chunks in the same
 tenant-scoped transaction. Search indexing/backfill carries locations as

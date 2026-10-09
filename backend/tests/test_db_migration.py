@@ -98,6 +98,26 @@ def _alembic_config(url: str | None = None) -> Config:
     return cfg
 
 
+def test_offline_ingestion_locations_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The renumbered provenance revision still adds nullable fields and reverses."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0043_code_run_resolved_packages:0047_ingestion_locations", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table documents add column source_text text;" in up
+    assert "alter table documents add column ingestion_metadata jsonb;" in up
+    assert "alter table chunks add column source_locations jsonb;" in up
+
+    command.downgrade(cfg, "0047_ingestion_locations:0043_code_run_resolved_packages", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table chunks drop column source_locations;" in down
+    assert "alter table documents drop column ingestion_metadata;" in down
+    assert "alter table documents drop column source_text;" in down
+
+
 def test_metadata_covers_every_mvp_table() -> None:
     """The ORM registry and the spec-0004 table list agree."""
     assert set(Base.metadata.tables) == _ALL_TABLES
@@ -127,8 +147,8 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0044_ingestion_locations"]
-    locations = script.get_revision("0044_ingestion_locations")
+    assert list(script.get_heads()) == ["0047_ingestion_locations"]
+    locations = script.get_revision("0047_ingestion_locations")
     assert locations is not None
     assert locations.down_revision == "0043_code_run_resolved_packages"
     mvp = script.get_revision("0002_mvp_schema")

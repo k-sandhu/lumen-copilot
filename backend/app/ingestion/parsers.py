@@ -41,17 +41,17 @@ SUPPORTED_MIME_TYPES: frozenset[str] = frozenset({_PDF, _DOCX, _PPTX, _XLSX, _TX
 
 
 def _render_parts(
-    parts: list[tuple[str, str]],
+    parts: list[tuple[str, str, bool]],
     *,
     kind: LocationKind,
     separator: str,
-    keep_empty: bool,
     locations: list[SourceLocation] | None,
 ) -> str:
+    """Render participating parts, independently of their text's truthiness."""
     rendered: list[str] = []
     offset = 0
-    for number, (name, text) in enumerate(parts, start=1):
-        if text or keep_empty:
+    for number, (name, text, participates) in enumerate(parts, start=1):
+        if participates:
             if rendered:
                 offset += len(separator)
             start = offset
@@ -102,10 +102,9 @@ def _parse_pdf(data: bytes, *, locations: list[SourceLocation] | None = None) ->
         reader = PdfReader(io.BytesIO(data))
         pages = [page.extract_text() or "" for page in reader.pages]
         return _render_parts(
-            [(f"Page {number}", text) for number, text in enumerate(pages, start=1)],
+            [(f"Page {number}", text, True) for number, text in enumerate(pages, start=1)],
             kind="page",
             separator="\n\n",
-            keep_empty=True,
             locations=locations,
         )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
@@ -130,7 +129,7 @@ def _parse_pptx(data: bytes, *, locations: list[SourceLocation] | None = None) -
 
     try:
         presentation = Presentation(io.BytesIO(data))
-        parts: list[tuple[str, str]] = []
+        parts: list[tuple[str, str, bool]] = []
         for number, slide in enumerate(presentation.slides, start=1):
             lines: list[str] = []
             for shape in slide.shapes:
@@ -142,10 +141,8 @@ def _parse_pptx(data: bytes, *, locations: list[SourceLocation] | None = None) -
             title_shape = slide.shapes.title
             title = title_shape.text if title_shape is not None else ""
             name = f"Slide {number}" + (f": {title}" if title.strip() else "")
-            parts.append((name, "\n".join(lines)))
-        return _render_parts(
-            parts, kind="slide", separator="\n", keep_empty=False, locations=locations
-        )
+            parts.append((name, "\n".join(lines), bool(lines)))
+        return _render_parts(parts, kind="slide", separator="\n", locations=locations)
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PPTX: {type(exc).__name__}") from exc
 
@@ -162,17 +159,15 @@ def _parse_xlsx(data: bytes, *, locations: list[SourceLocation] | None = None) -
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         try:
-            parts: list[tuple[str, str]] = []
+            parts: list[tuple[str, str, bool]] = []
             for worksheet in workbook.worksheets:
                 rows: list[str] = []
                 for row in worksheet.iter_rows(values_only=True):
                     cells = [str(cell) for cell in row if cell is not None]
                     if cells:
                         rows.append("\t".join(cells))
-                parts.append((worksheet.title, "\n".join(rows)))
-            return _render_parts(
-                parts, kind="sheet", separator="\n\n", keep_empty=False, locations=locations
-            )
+                parts.append((worksheet.title, "\n".join(rows), bool(rows)))
+            return _render_parts(parts, kind="sheet", separator="\n\n", locations=locations)
         finally:
             workbook.close()
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
@@ -209,7 +204,7 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
 
 
 def parse_document_with_locations(data: bytes, *, mime_type: str) -> ParsedDocument:
-    """Extract once, retaining native source-part locations (spec 0013)."""
+    """Extract once, retaining native source-part locations (spec 0015)."""
     normalized = mime_type.split(";", 1)[0].strip().lower()
     locations: list[SourceLocation] = []
     if normalized == _PDF:
