@@ -1007,6 +1007,13 @@ class Settings(PasswordHashingSettings):
     native_ingestion_max_output_chars: int = Field(default=2_000_000, ge=1)
     native_ingestion_max_work_units: int = Field(default=100_000, ge=1)
     native_ingestion_timeout_ms: int = Field(default=30_000, ge=1)
+    native_ingestion_tokenizer_path: str = ""
+    native_ingestion_tokenizer_sha256: str = ""
+    native_ingestion_tokenizer_model: str = ""
+    # Candidate engineering profile; no production format is enabled here.
+    native_ingestion_chunk_tokens: int = Field(default=512, ge=1, le=32768)
+    native_ingestion_chunk_chars: int = Field(default=4096, ge=1, le=32768)
+    native_ingestion_overlap_chars: int = Field(default=200, ge=0, le=32767)
 
     ingestion_chunk_size: int = Field(default=1200, alias="INGESTION_CHUNK_SIZE")
     ingestion_chunk_overlap: int = Field(default=200, alias="INGESTION_CHUNK_OVERLAP")
