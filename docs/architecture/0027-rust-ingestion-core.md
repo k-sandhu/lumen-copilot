@@ -1,4 +1,4 @@
-# ADR-0026 — Rust ingestion core behind the Python backend
+# ADR-0027 — Rust ingestion core behind the Python backend
 
 Status: **Proposed — sponsor-directed foundation; human acceptance and baseline evaluation required before merge.**
 
