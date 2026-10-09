@@ -299,7 +299,26 @@ pub enum Content {
 }
 impl Node {
     pub fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs.get(name).map(String::as_str)
+        self.attrs
+            .get(name)
+            .or_else(|| {
+                self.attrs
+                    .iter()
+                    .find(|(k, _)| k.ends_with(&format!("}}{name}")))
+                    .map(|(_, v)| v)
+            })
+            .map(String::as_str)
+    }
+    pub fn relationship_attr(&self, name: &str) -> Option<&str> {
+        for ns in [
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "http://purl.oclc.org/ooxml/officeDocument/relationships",
+        ] {
+            if let Some(value) = self.attrs.get(&format!("{{{ns}}}{name}")) {
+                return Some(value);
+            }
+        }
+        None
     }
     pub fn child(&self, name: &str) -> Option<&Node> {
         self.children.iter().find(|n| n.name == name)
@@ -367,7 +386,17 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
                 };
                 for a in e.attributes() {
                     let a = a.map_err(|_| CoreError::Parse)?;
-                    let key = a.key.local_name().as_ref().to_owned();
+                    if a.key.as_ref() == "xmlns" || a.key.as_ref().starts_with("xmlns:") {
+                        continue;
+                    }
+                    let (namespace, local) = reader.resolver().resolve_attribute(a.key);
+                    let key = match namespace {
+                        ResolveResult::Bound(ns) => {
+                            format!("{{{}}}{}", ns.as_ref(), local.as_ref())
+                        }
+                        ResolveResult::Unbound => local.as_ref().to_owned(),
+                        _ => return Err(CoreError::Parse),
+                    };
                     let value = a
                         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         .map_err(|_| CoreError::Parse)?
@@ -446,11 +475,30 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
 }
 
 pub fn generation(bytes: &[u8], parser: &str, source: &str) -> Generation {
+    // Include every shared computation layer and the pinned dependency graph.
+    // A package-reader or renderer repair must invalidate previous generations.
+    let mut build = Sha256::new();
+    for component in [
+        source,
+        include_str!("package.rs"),
+        include_str!("../canonical.rs"),
+        include_str!("../runtime.rs"),
+        include_str!("../../../../Cargo.lock"),
+    ] {
+        build.update((component.len() as u64).to_le_bytes());
+        build.update(component.as_bytes());
+    }
     Generation {
         source_sha256: Some(sha256(bytes)),
         parser_id: Some(parser.to_owned()),
         parser_version: Some("1".to_owned()),
-        build_id: Some(sha256(source.as_bytes())),
+        build_id: Some(
+            build
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        ),
         dependency_versions: [
             ("zip".to_owned(), "8.6.0".to_owned()),
             ("quick-xml".to_owned(), "0.42.0".to_owned()),

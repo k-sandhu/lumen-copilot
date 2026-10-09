@@ -24,6 +24,8 @@ Row/cell limits return explicit partial outcomes/incomplete regions. Hard memory
 time/work and package security limits return errors, never successful truncation.
 Blank sheets retain zero-width native source parts. Renderer v1 joins sheet
 blocks with two newlines, matching the Python sheet separator.
+Generation build identities include format code, shared package/canonical/runtime
+code and the pinned dependency graph, so shared repairs invalidate prior output.
 
 The #670 evaluation and #687 promotion remain owner merge gates. Production
 budgets, resource measurements and dependency interruption/isolation need
@@ -36,8 +38,8 @@ ODS typed/mixed-content/repeat/budget cases, a generated compound BIFF8 XLS and
 256 Unicode/native-coordinate properties. Complex Excel display formats remain
 unknown; simple percent/currency display annotations are explicitly derived.
 
-[~] 2026-10-08: large canonical tables remain blocked by #708's pairwise overlap
-validation budget. Residual risk: successful extraction may fail canonical render.
+Separate dependency #708 / PR #712 repairs large canonical table validation;
+its four regression/property tests pass, including a 1,000-cell workbook.
 [~] 2026-10-08: XLS preserves calamine values/formulas/merges, but custom BIFF
 formats and legacy hidden-row metadata require further fixtures/qualification.
 ODS style/number-format inheritance also needs qualification. Residual risk:
