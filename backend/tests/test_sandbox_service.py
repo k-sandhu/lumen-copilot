@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.core.errors import ConflictError, NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -32,6 +31,7 @@ from app.sandbox.service import (
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.storage.keys import build_artifact_key
 from tests._audit_helpers import denial_context_from_session
+from tests._db_helpers import copy_sqlite_schema
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip
@@ -116,7 +116,7 @@ async def session(durable_audit_ledger) -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as value:
             value.info["durable_audit_ledger"] = durable_audit_ledger

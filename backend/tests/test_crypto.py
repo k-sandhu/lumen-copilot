@@ -65,9 +65,7 @@ def test_tampered_ciphertext_fails_closed() -> None:
     env = cipher.encrypt("integrity-matters")
     tampered = bytearray(env.ciphertext)
     tampered[0] ^= 0x01  # flip one bit
-    bad = EncryptedSecret(
-        ciphertext=bytes(tampered), nonce=env.nonce, key_version=env.key_version
-    )
+    bad = EncryptedSecret(ciphertext=bytes(tampered), nonce=env.nonce, key_version=env.key_version)
 
     with pytest.raises(SecretDecryptionError):
         cipher.decrypt(bad)
