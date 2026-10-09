@@ -16,6 +16,8 @@ from tests.eval.docintel.pdfium_fixtures import annotations, cid, incremental, o
 
 @pytest.fixture(autouse=True)
 def require_pdfium() -> None:
+    if sys.platform == "darwin":
+        pytest.skip("macOS native extraction fails closed: enforceable memory cap unavailable")
     pytest.importorskip("lumen_docintel")
     from app.ingestion.native import NativeUnavailableError, _pdfium_library
 

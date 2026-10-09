@@ -80,7 +80,7 @@ def apply_memory_limit(cap: int) -> None:
             raise OSError("worker limit unavailable")
         if not kernel.AssignProcessToJobObject(_JOB, kernel.GetCurrentProcess()):
             raise OSError("worker limit unavailable")
-    elif sys.platform in {"linux", "darwin"}:
+    elif sys.platform == "linux":
         import resource
 
         resource.setrlimit(resource.RLIMIT_AS, (cap, cap))

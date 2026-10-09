@@ -116,3 +116,8 @@ skips PDFs over 100 MiB and emits aggregates only. Do not use the older external
 manifest benchmark for private documents: that mode records input identities.
 See [acceptance contract](../docs/ingestion/pdfium-engine-v1.md),
 [binary pins](pdfium-binaries.json) and [native notices](NOTICE.pdfium).
+
+macOS wheels verify the pinned engine and notices, but untrusted PDFium extraction
+fails closed before input: an enforceable OS memory cap is not available through
+RLIMIT_AS on tested macOS runners. Follow-up [#738](https://github.com/k-sandhu/lumen-copilot/issues/738)
+tracks native macOS isolation; Python remains live.

@@ -48,6 +48,10 @@ RUN uv pip install --system --no-cache /tmp/native-wheels/*.whl \
  && python -c "import lumen_docintel; assert lumen_docintel.core_version() == '0.1.0'" \
  && rm -rf /tmp/native-wheels
 COPY backend/ .
+COPY scripts/check-pdfium-wheel.py ./scripts/check-pdfium-wheel.py
+# Load the installed engine, with OS memory and parent deadline limits, during
+# CI image builds. This catches missing runtime libraries and missing wheel data.
+RUN python scripts/check-pdfium-wheel.py
 
 EXPOSE 8000
 
