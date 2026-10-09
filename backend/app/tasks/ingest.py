@@ -78,6 +78,7 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
+from app.domain.ingestion_shadow import CandidateExtraction, ShadowComparison, source_format
 from app.domain.ingestion_stages import StageOutputInvalid, StageOwnershipLost
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document
@@ -99,11 +100,14 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
+from app.ingestion.native import candidate_identity, extract_format_candidate
 from app.ingestion.stage_identity import parser_identity
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
+from app.services.ingestion_shadow import extract_with_mode
 from app.services.ingestion_stages import CheckpointPipeline
+from app.services.shadow_diagnostics import record_comparison
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import sync_document_index_async
@@ -236,6 +240,18 @@ async def ingest_document_async(
     try:
         async with tenant_session_scope(tenant_id) as session:
             documents = DocumentRepository(session, tenant_id)
+            existing = await documents.get(document_id)
+            if (
+                existing is not None
+                and settings.ingestion_format_modes.get(source_format(existing.mime_type), "python")
+                == "native"
+            ):
+                count = await documents.count_chunks(document_id)
+                if count:
+                    # Native cutover cannot replace historical evidence without a generation policy.
+                    return IngestionResult(
+                        document_id, existing.status, count, "immutable_generation_policy_required"
+                    )
             document = await documents.begin_ingestion(
                 document_id, ingestion_run_id=run_id, stale_before=stale_before
             )
@@ -415,14 +431,61 @@ async def _ingest_claimed_document(
         compute=detect_stage,
     )
 
+    format_name = source_format(mime_type)
+    mode = settings.ingestion_format_modes.get(format_name, "python")
+    route_identity = {"mode": mode, "format": format_name, **parser_identity(mime_type)}
+    if mode != "python":
+        try:
+            route_identity["candidate"] = candidate_identity(settings)
+        except Exception:
+            if mode == "native":
+                raise DocumentParseError("Native candidate identity is unavailable.") from None
+            route_identity["candidate"] = {"identity": "unavailable"}
+    comparison_fingerprint = hashlib.sha256(
+        (source_sha256 + json.dumps(route_identity, sort_keys=True)).encode()
+    ).hexdigest()
+
     async def extract_stage() -> dict[str, object]:
-        return {"text": parse_document(data, mime_type=mime_type), "source_sha256": source_sha256}
+        async def baseline() -> str:
+            return parse_document(data, mime_type=mime_type)
+
+        async def candidate() -> CandidateExtraction:
+            return await extract_format_candidate(data, mime_type=mime_type, settings=settings)
+
+        async def record(comparison: ShadowComparison) -> None:
+            await record_comparison(
+                tenant_id,
+                document_id,
+                fingerprint=comparison_fingerprint,
+                comparison=comparison,
+                attempt=attempt,
+            )
+
+        try:
+            result = await extract_with_mode(
+                mode=mode,
+                source_format=format_name,
+                baseline=baseline,
+                candidate=candidate,
+                record=record,
+                max_chars=settings.native_ingestion_max_output_chars,
+            )
+        except DocumentParseError:
+            raise
+        except Exception:
+            raise DocumentParseError(
+                "Native candidate unavailable, invalid or incomplete."
+            ) from None
+        payload: dict[str, object] = {"text": result.text, "source_sha256": source_sha256}
+        if result.canonical is not None:
+            payload["canonical_document"] = result.canonical.document_json
+        return payload
 
     try:
         extracted = await stages.run(
             "extract",
             upstream=detected.output_sha256,
-            config=parser_identity(mime_type),
+            config=route_identity,
             compute=extract_stage,
         )
         text = str(json.loads(extracted.payload_json)["text"])

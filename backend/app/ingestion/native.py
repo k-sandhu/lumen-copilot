@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterable, Iterator
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
+from app.domain.ingestion_shadow import CandidateExtraction
 from app.domain.native_chunking import ChunkedDocument
 from app.domain.native_normalization import NormalizedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
@@ -402,3 +404,60 @@ def parse_pdf_candidate(
             "native_unavailable" if isinstance(error, NativeUnavailableError) else "native_failed"
         )
         return PdfCandidateResult(baseline, "python", native_error=code)
+
+
+async def extract_format_candidate(
+    data: bytes, *, mime_type: str, settings: Settings
+) -> CandidateExtraction:
+    """Only already-landed adapters; no recognition-based parser promotion."""
+    import asyncio
+
+    from app.domain.ingestion_shadow import source_format
+
+    if source_format(mime_type) != "pdf":
+        raise NativeUnavailableError("native format adapter is not in this dependency stack")
+    executor, budget = configured_pdfium_executor(settings)
+    document = await asyncio.to_thread(executor.extract_pdf, data, budget=budget)
+    outcome = json.loads(document.generation_json).get("outcome", "failed")
+    return CandidateExtraction(document.rendered_text, str(outcome), len(document.blocks), document)
+
+
+def candidate_identity(settings: Settings) -> dict[str, object]:
+    """Checkpoint identity covers implementation, pinned library and resource ceilings."""
+    root = Path(__file__).resolve().parents[3]
+    names = [
+        "backend/app/ingestion/native.py",
+        "backend/app/ingestion/_pdf_pool.py",
+        "backend/app/ingestion/_pdf_worker.py",
+        "rust/Cargo.lock",
+        "rust/pdfium-binaries.json",
+    ]
+    source = root / "rust/crates/lumen-docintel/src"
+    paths = [root / name for name in names] + sorted(source.rglob("*.rs"))
+    digest = hashlib.sha256()
+    extension = _extension()
+    if extension is not None and extension.__file__:
+        package = Path(extension.__file__).parent
+        paths += sorted(
+            p for p in package.iterdir() if p.suffix in {".pyd", ".so", ".dylib", ".py"}
+        )
+    for path in paths:
+        if not path.is_file():
+            continue  # Wheels need no checkout: compiled module bytes are fingerprinted above.
+        digest.update(path.name.encode())
+        with path.open("rb") as stream:
+            digest.update(hashlib.file_digest(stream, "sha256").digest())
+
+    return {
+        "build": digest.hexdigest(),
+        "limits": [
+            settings.native_ingestion_max_input_bytes,
+            settings.native_ingestion_max_memory_bytes,
+            settings.native_ingestion_max_output_chars,
+            settings.native_ingestion_max_work_units,
+            settings.native_ingestion_timeout_ms,
+            settings.native_pdf_workers,
+            settings.native_pdf_worker_memory_bytes,
+            settings.native_pdf_pool_memory_bytes,
+        ],
+    }

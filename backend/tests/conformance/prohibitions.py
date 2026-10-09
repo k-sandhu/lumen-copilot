@@ -327,6 +327,7 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "native_ingestion_chunk_chars",
         "native_ingestion_overlap_chars",
         "ingestion_checkpoint_max_output_bytes",
+        "ingestion_format_modes",
         "native_pdf_workers",
         "native_pdf_worker_memory_bytes",
         "native_pdf_pool_memory_bytes",

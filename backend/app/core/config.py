@@ -16,7 +16,7 @@ import hashlib
 import json
 import re
 from functools import lru_cache
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -1014,6 +1014,19 @@ class Settings(PasswordHashingSettings):
     native_ingestion_chunk_tokens: int = Field(default=512, ge=1, le=32768)
     native_ingestion_chunk_chars: int = Field(default=4096, ge=1, le=32768)
     native_ingestion_overlap_chars: int = Field(default=200, ge=0, le=32767)
+    ingestion_format_modes: dict[str, Literal["python", "shadow", "native"]] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("ingestion_format_modes")
+    @classmethod
+    def _known_ingestion_formats(
+        cls, value: dict[str, Literal["python", "shadow", "native"]]
+    ) -> dict[str, Literal["python", "shadow", "native"]]:
+        if set(value) - {"pdf", "docx", "pptx", "xlsx", "text", "markdown"}:
+            raise ValueError("unknown ingestion cutover format")
+        return value
+
     ingestion_checkpoint_max_output_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
     # Zero selects min(cores, 2, pool budget / per-worker OS cap), after fork.
     native_pdf_workers: int = Field(default=0, ge=0, le=64)

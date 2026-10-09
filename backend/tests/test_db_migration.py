@@ -97,6 +97,7 @@ _ALL_TABLES = _MVP_TABLES | {
     # 0044 lossless connector-revision rollback archive.
     "embedding_legacy_archive_0044",
     "ingestion_stage_outputs",
+    "ingestion_shadow",
 }
 
 
@@ -155,7 +156,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0047_ingestion_stages"]
+    assert list(script.get_heads()) == ["0048_ingestion_shadow"]
     provenance = script.get_revision("0046_message_source_provenance")
     assert provenance is not None
     assert provenance.down_revision == "0045_embedding_contract"
@@ -2155,3 +2156,16 @@ def test_offline_direct_media_upload_migration_round_trips(
     assert "alter table citations drop column time_end_ms" in down
     assert "drop constraint fk_chunks_transcript_segment_document" in down
     assert "drop constraint fk_citations_chunk_transcript_segment" in down
+
+
+def test_offline_shadow_migration_round_trips(capsys):
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0047_ingestion_stages:0048_ingestion_shadow", sql=True)
+    sql = capsys.readouterr().out.lower()
+    assert "create table ingestion_shadow" in sql
+    assert "force row level security" in sql and "with check" in sql
+    assert "fk_ingestion_shadow_document_tenant" in sql and "uq_ingestion_shadow_sample" in sql
+    command.downgrade(cfg, "0048_ingestion_shadow:0047_ingestion_stages", sql=True)
+    assert "drop table ingestion_shadow" in capsys.readouterr().out.lower()

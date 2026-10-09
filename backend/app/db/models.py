@@ -378,6 +378,27 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     stage_outputs: Mapped[list[IngestionStageOutput]] = relationship(cascade="all, delete-orphan")
 
 
+class IngestionShadow(TenantScopedMixin, TimestampMixin, Base):
+    __tablename__ = "ingestion_shadow"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "document_id"],
+            ["documents.tenant_id", "documents.id"],
+            ondelete="CASCADE",
+            name="fk_ingestion_shadow_document_tenant",
+        ),
+        UniqueConstraint(
+            "tenant_id", "document_id", "fingerprint", name="uq_ingestion_shadow_sample"
+        ),
+        CheckConstraint("length(fingerprint) = 64", name="ck_ingestion_shadow_fingerprint"),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_format: Mapped[str] = mapped_column(String(16), nullable=False)
+    comparison_json: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False)
+
+
 class IngestionStageOutput(TenantScopedMixin, TimestampMixin, Base):
     """Bounded operational cache; never an authorization or citation source."""
 
