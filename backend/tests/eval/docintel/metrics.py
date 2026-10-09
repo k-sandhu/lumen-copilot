@@ -15,6 +15,7 @@ class Gold:
     order: tuple[str, ...] = ()
     native_regions: int = 0
     headers: tuple[tuple[str, str], ...] = ()
+    regions: tuple[tuple[str, int, str, str | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,12 +46,46 @@ def _find(haystack: tuple[str, ...], needle: tuple[str, ...]) -> int:
     )
 
 
+def _provenance(
+    text: str, gold: Gold, parts: tuple[tuple[str, int, str | None, int, int], ...], count: int
+) -> float:
+    if not gold.regions:
+        return max(0.0, min(count / gold.native_regions, 1.0)) if gold.native_regions else 1.0
+    previous = 0
+    seen = set()
+    for kind, number, _name, start, end in parts:
+        if (
+            kind not in {"page", "slide", "sheet"}
+            or number < 1
+            or (kind, number) in seen
+            or not previous <= start <= end <= len(text)
+        ):
+            return 0.0
+        seen.add((kind, number))
+        previous = end
+    matched = 0
+    for kind, number, anchor, name in gold.regions:
+        matched += any(
+            kind == actual_kind
+            and number == actual_number
+            and (name is None or name == actual_name)
+            and (
+                (start == end)
+                if not anchor
+                else _find(_tokens(text[start:end]), _tokens(anchor)) >= 0
+            )
+            for actual_kind, actual_number, actual_name, start, end in parts
+        )
+    return matched / len(gold.regions)
+
+
 def evaluate(
     text: str,
     gold: Gold,
     *,
     spans: tuple[tuple[int, int, str], ...] = (),
     matched_regions: int = 0,
+    source_parts: tuple[tuple[str, int, str | None, int, int], ...] = (),
     cell_headers: tuple[tuple[str, str], ...] = (),
     outcome: str = "indexed",
 ) -> Score:
@@ -80,7 +115,7 @@ def evaluate(
         sum(pair in cell_headers for pair in gold.headers) / len(gold.headers)
         if gold.headers
         else 1.0,
-        min(matched_regions / gold.native_regions, 1.0) if gold.native_regions else 1.0,
+        _provenance(text, gold, source_parts, matched_regions),
         outcome,
     )
 

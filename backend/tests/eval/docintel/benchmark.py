@@ -230,6 +230,7 @@ def _external(manifest: Path) -> list[Fixture]:
                         tuple(g.get("order", ())),
                         g.get("native_regions", 0),
                         tuple(tuple(pair) for pair in g.get("headers", ())),
+                        tuple(tuple(region) for region in g.get("regions", ())),
                     ),
                     language=row.get("language", "unknown"),
                     case="external",

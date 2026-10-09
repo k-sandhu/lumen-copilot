@@ -49,3 +49,9 @@ Peak RSS uses the current address-space `VmHWM` on Linux, Windows
 fork/exec predecessor's rusage watermark into the fixture measurement.
 These OS high-water measurements are estimates, not enforced resident-memory
 limits. See the [Linux kernel proc field definitions](https://docs.kernel.org/filesystems/proc.html).
+
+Annotated native parts verify kind/index, optional native name and a gold anchor
+inside their exact character range. Duplicate, overlapping or out-of-bounds part
+maps fail. A perfect count cannot compensate for a fact assigned to the wrong
+page. These synthetic location checks complement exact block/chunk slices;
+spatial-coordinate tolerances still require owner-approved held-out definitions.

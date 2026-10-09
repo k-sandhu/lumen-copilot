@@ -496,7 +496,9 @@ def corpus() -> list[Fixture]:
                 "text",
                 "text/plain",
                 ("Intro\nNorth -120 kg\nPageTwo 世界").encode("utf-16"),
-                gold,
+                Gold(
+                    facts=gold.facts + ("世界",), associations=gold.associations, order=gold.order
+                ),
                 language="mixed",
                 case="encoding",
             ),
@@ -505,7 +507,9 @@ def corpus() -> list[Fixture]:
                 "text",
                 "text/plain",
                 ("Intro\nNorth -120 kg\nPageTwo café").encode("cp1252"),
-                gold,
+                Gold(
+                    facts=gold.facts + ("café",), associations=gold.associations, order=gold.order
+                ),
                 language="fr",
                 case="encoding",
             ),

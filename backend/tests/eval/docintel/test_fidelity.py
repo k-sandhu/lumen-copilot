@@ -138,3 +138,22 @@ def test_linux_peak_uses_current_address_space_high_water(monkeypatch: pytest.Mo
         Path, "open", lambda *args, **kwargs: io.StringIO("Name: python\nVmHWM: 42 kB\n")
     )
     assert _rss() == 42 * 1024
+
+
+def test_wrong_native_page_identity_cannot_pass_with_a_perfect_count() -> None:
+    gold = Gold(
+        facts=("Intro", "PageTwo"),
+        regions=(("page", 1, "Intro", None), ("page", 2, "PageTwo", None)),
+    )
+    text = "Intro\nPageTwo"
+    swapped = (("page", 2, None, 0, 5), ("page", 1, None, 6, 13))
+    with pytest.raises(ValueError):
+        require_fidelity(
+            evaluate(text, gold, source_parts=swapped, matched_regions=100), format_name="pdf"
+        )
+    correct = (("page", 1, None, 0, 5), ("page", 2, None, 6, 13))
+    require_fidelity(evaluate(text, gold, source_parts=correct), format_name="pdf")
+    with pytest.raises(ValueError):
+        require_fidelity(
+            evaluate(text, gold, source_parts=(("page", 1, None, 0, 100),)), format_name="pdf"
+        )
