@@ -34,3 +34,39 @@ charset switches, legacy codepage ambiguity, drawing/object/binary destinations,
 and ODT table repeats/spans/nested tables. No claims of complete format fidelity
 or production activation are made. Full baseline/RSS evaluation remains a merge
 gate even when the generated acceptance corpus passes.
+
+## Verification (2026-10-09)
+
+- [x] Rust workspace: 41 tests passed, including seven ODT/RTF tests and generated
+  Unicode/paragraph-path property cases. Initial missing-module failures preceded
+  implementation; table grouping/rendered-size and footnote range regressions
+  failed before their fixes. `cargo fmt --all --check`, workspace Clippy with
+  warnings denied, and cargo-deny licences/advisories passed.
+- [x] Rebuilt native wheel via `uv sync --extra dev --extra native
+  --reinstall-package lumen-docintel`; offline bridge/configuration/conformance
+  gate: 398 passed, 9 expected capability skips. Ruff and strict mypy on touched
+  facade/configuration modules passed. Existing Python dispatch is unchanged.
+- [~] 2026-10-09: full offline backend suite (`PYTEST_ADDOPTS=-n 2`, not-live
+  selection, unique temporary root) started at 3269 MiB available and was stopped
+  at 2398 MiB, below the 2500 MiB full-suite floor. No test failures appeared
+  before termination; worker-loss failure is a consequence of stopping the run.
+  Residual risk: complete fallback suite awaits CI.
+- [~] 2026-10-09: measured baseline fidelity/RSS/throughput and cross-platform
+  packaging await owner evaluation/CI. Live Postgres/OpenSearch and Docker actions
+  were excluded. Residual risk: generated fixtures do not establish production
+  fidelity, end-to-end ingestion or live search/publication.
+
+| Dimension | Generated candidate evidence | Baseline evaluation |
+|---|---|---|
+| ODT supplied headings/lists/tables/footnotes and order | Passed | Unmeasured |
+| RTF headings/lists/tables/footnotes, codepages and UTF-16 escapes | Passed | Unmeasured |
+| Unicode slices and paragraph provenance | Property tests passed | Unmeasured |
+| Malformed/deep/unsupported/budget input | Typed failures passed | Unmeasured |
+| Python preservation, default-OFF flags and bridge detection | Passed | No live cutover |
+
+No newly selected crates: bounded ZIP/XML, encoding and hashing dependencies are
+inherited from the existing foundation/#711. The combined workspace retains
+sha2 0.10.9; package generation reports that actual version. Lockfile licences
+were checked, including the inherited tokenizer advisory exception.
+
+Merge gate: hold until measured against the baseline evaluation; a human merges.
