@@ -96,9 +96,15 @@ pub struct Stats {
     pub work_units: usize,
     pub output_chars: usize,
     pub source_input_bytes: usize,
+    #[serde(skip_serializing_if = "is_zero")]
     pub pages: usize,
+    #[serde(skip_serializing_if = "is_zero")]
     pub glyphs: usize,
     pub limit: Option<&'static str>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<usize, CoreError> {

@@ -166,7 +166,12 @@ fn _extract_pdfium_worker(
         lumen_docintel_core::runtime::context_json(&budget_json, Default::default())
     })?;
     let result = compute(py, || {
-        lumen_docintel_core::formats::pdf::pdfium::extract_json(bytes, &library, &context)
+        let result =
+            lumen_docintel_core::formats::pdf::pdfium::extract_json(bytes, &library, &context);
+        if matches!(result, Err(CoreError::Budget)) && context.stats().limit.is_none() {
+            return Err(context.structural_limit());
+        }
+        result
     });
     if let Err(error) = &result {
         error

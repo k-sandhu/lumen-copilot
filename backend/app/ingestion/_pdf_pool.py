@@ -152,6 +152,9 @@ class PdfProcessPool:
                     "cancelled",
                     "memory_limit",
                     "worker_failed",
+                    "native_panic",
+                    "invalid_structure",
+                    "native_internal",
                 }:
                     raise ValueError
                 result = raw.get("result")

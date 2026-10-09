@@ -309,6 +309,76 @@ pub fn extract_with_context(
     )
 }
 
+fn assemble_page(
+    page: &Page<'_>,
+    page_text: &text::PageText,
+    ctx: &Context,
+    memory: &mut Memory,
+) -> Result<(Vec<canonical::Block>, serde_json::Value), CoreError> {
+    ctx.work(1)?;
+    memory.reserve(page_text.glyphs.len() * 512 + 1024)?;
+    let mut candidates = tables::detect(page, page_text, memory)?;
+    candidates.sort_by(|a, b| {
+        b.bbox
+            .y1
+            .total_cmp(&a.bbox.y1)
+            .then(a.bbox.x0.total_cmp(&b.bbox.x0))
+    });
+    let remaining = tables::remaining(page_text, &candidates, ctx)?;
+    let mut blocks = layout::blocks(page, &remaining, ctx)?;
+    let summaries: Vec<_> = candidates
+        .iter()
+        .map(|c| json!({"columns":c.edges,"rows":c.block.table.as_ref().unwrap().rows}))
+        .collect();
+    for (i, mut candidate) in candidates.into_iter().enumerate() {
+        candidate.block.id = format!("pdf/p{}/t{}", page.number, i + 1);
+        let index = blocks
+            .iter()
+            .position(|b| {
+                let bbox = b.regions[0].bbox.as_ref().unwrap();
+                bbox.y1 < candidate.bbox.y1
+                    && bbox.x0 >= candidate.bbox.x0 - 12.
+                    && bbox.x0 <= candidate.bbox.x1
+            })
+            .unwrap_or(blocks.len());
+        blocks.insert(index, candidate.block);
+    }
+    let diagnostic = json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if page_text.needs_ocr || blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}});
+    Ok((blocks, diagnostic))
+}
+
+fn retain_page(
+    document: &mut Document,
+    diagnostics: &mut Vec<serde_json::Value>,
+    blocks: Vec<canonical::Block>,
+    diagnostic: serde_json::Value,
+    memory: &mut Memory,
+) -> Result<(), CoreError> {
+    // Page scratch covers construction. Retained evidence, table cells, regions,
+    // heading strings and vector growth are charged before leaving that scope.
+    let size = blocks.iter().try_fold(2048usize, |n, b| {
+        n.checked_add(
+            b.text.len().saturating_mul(16)
+                + 4096
+                + b.heading_path
+                    .iter()
+                    .map(|h| h.len() * 4 + 64)
+                    .sum::<usize>()
+                + b.table.as_ref().map_or(0, |t| {
+                    t.cells
+                        .iter()
+                        .map(|c| c.text.len() * 16 + 2048)
+                        .sum::<usize>()
+                }),
+        )
+        .ok_or(CoreError::Budget)
+    })?;
+    memory.reserve(size)?;
+    diagnostics.push(diagnostic);
+    document.blocks.extend(blocks);
+    Ok(())
+}
+
 fn assemble(
     bytes: &[u8],
     pages: &[Page<'_>],
@@ -321,37 +391,33 @@ fn assemble(
     let mut document = Document::default();
     let mut diagnostics = vec![];
     for (page, page_text) in pages.iter().zip(extracted.iter()) {
-        ctx.work(1)?;
-        memory.reserve(page_text.glyphs.len() * 512 + 1024)?;
-        let mut candidates = tables::detect(page, page_text, memory)?;
-        candidates.sort_by(|a, b| {
-            b.bbox
-                .y1
-                .total_cmp(&a.bbox.y1)
-                .then(a.bbox.x0.total_cmp(&b.bbox.x0))
-        });
-        let remaining = tables::remaining(page_text, &candidates, ctx)?;
-        let mut blocks = layout::blocks(page, &remaining, ctx)?;
-        let summaries: Vec<_> = candidates
-            .iter()
-            .map(|c| json!({"columns":c.edges,"rows":c.block.table.as_ref().unwrap().rows}))
-            .collect();
-        for (i, mut candidate) in candidates.into_iter().enumerate() {
-            candidate.block.id = format!("pdf/p{}/t{}", page.number, i + 1);
-            let index = blocks
-                .iter()
-                .position(|b| {
-                    let bbox = b.regions[0].bbox.as_ref().unwrap();
-                    bbox.y1 < candidate.bbox.y1
-                        && bbox.x0 >= candidate.bbox.x0 - 12.
-                        && bbox.x0 <= candidate.bbox.x1
-                })
-                .unwrap_or(blocks.len());
-            blocks.insert(index, candidate.block);
-        }
-        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if page_text.needs_ocr || blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
-        document.blocks.extend(blocks);
+        let mut scratch = Memory::new(ctx.clone());
+        let (blocks, diagnostic) = assemble_page(page, page_text, ctx, &mut scratch)?;
+        retain_page(&mut document, &mut diagnostics, blocks, diagnostic, memory)?;
     }
+    finish_document(
+        bytes,
+        pages,
+        document,
+        diagnostics,
+        metadata,
+        ctx,
+        memory,
+        pdfium,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_document(
+    bytes: &[u8],
+    pages: &[Page<'_>],
+    mut document: Document,
+    diagnostics: Vec<serde_json::Value>,
+    metadata: serde_json::Value,
+    ctx: &Context,
+    memory: &mut Memory,
+    pdfium: bool,
+) -> Result<Document, CoreError> {
     let normalization_hooks = layout::furniture(&mut document, pages, ctx)?;
     let _joined_segments = tables::join(&mut document, pages, memory)?;
     let table_segments = tables::table_segments(&document, ctx)?;
@@ -461,13 +527,9 @@ fn assemble(
 }
 pub fn extract_json(bytes: &[u8], ctx: &Context, runtime: &Runtime) -> Result<String, CoreError> {
     let document = extract_with_context(bytes, ctx, runtime)?;
-    serialize(document, bytes.len(), ctx)
+    serialize(document, ctx)
 }
-fn serialize(
-    mut document: Document,
-    input_bytes: usize,
-    ctx: &Context,
-) -> Result<String, CoreError> {
+fn serialize(mut document: Document, ctx: &Context) -> Result<String, CoreError> {
     let size = document
         .blocks
         .iter()
@@ -482,8 +544,8 @@ fn serialize(
                 })
         })
         .sum::<usize>()
-        + document.source_parts.len() * 2048
-        + input_bytes * 2;
+        + document.source_parts.len() * 2048;
+    // Original bytes are retained/charged by extraction, never serialized here.
     // Covers the retained domain model, rendered clone, serde growth and JSON.
     let _json = ctx.reserve(size.checked_mul(4).ok_or(CoreError::Budget)?)?;
     if let Some(diagnostics) = document.generation.diagnostics.as_mut() {

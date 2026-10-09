@@ -1,7 +1,7 @@
 //! Non-cooperative native engine. Call ONLY in an OS-limited worker process.
 //! No network or source-path access. The library path is inert build configuration.
 use super::{
-    Memory, Page, assemble, serialize,
+    Memory, Page, assemble_page, finish_document, retain_page, serialize,
     syntax::Value,
     text::{Glyph, PageText},
 };
@@ -66,7 +66,8 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
     }
     let null = Value::Null;
     let mut pages = vec![];
-    let mut texts = vec![];
+    let mut canonical = crate::canonical::Document::default();
+    let mut diagnostics = vec![];
     for (index, page) in document.pages().iter().enumerate() {
         ctx.pdf_page();
         ctx.work(1)?;
@@ -84,6 +85,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
         if !width.is_finite() || !height.is_finite() || width <= 0. || height <= 0. {
             return Err(CoreError::Parse);
         }
+        let mut scratch = Memory::new(ctx.clone());
         let mut out = PageText::default();
         let text = page.text().map_err(error)?;
         let mut unusable = false;
@@ -157,7 +159,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
                 continue;
             }
             ctx.output(1)?;
-            memory.reserve(512)?;
+            scratch.reserve(512)?;
             out.glyphs.push(Glyph {
                 text: c.to_string(),
                 bbox,
@@ -180,7 +182,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
             out.needs_ocr = true;
         }
         for object in page.objects().iter() {
-            rules(&object, PdfMatrix::IDENTITY, 0, &mut out, &mut memory)?;
+            rules(&object, PdfMatrix::IDENTITY, 0, &mut out, &mut scratch)?;
         }
         pages.push(Page {
             number: index + 1,
@@ -190,21 +192,29 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
             resources: &null,
             contents: None,
         });
-        texts.push(out);
+        let (blocks, diagnostic) = assemble_page(pages.last().unwrap(), &out, ctx, &mut scratch)?;
+        retain_page(
+            &mut canonical,
+            &mut diagnostics,
+            blocks,
+            diagnostic,
+            &mut memory,
+        )?;
     }
     if pages.is_empty() {
         return Err(CoreError::Parse);
     }
-    let result = assemble(
+    let result = finish_document(
         bytes,
         &pages,
-        &texts.iter().collect::<Vec<_>>(),
+        canonical,
+        diagnostics,
         json!({"metadata":values,"outline":outline}),
         ctx,
         &mut memory,
         true,
     )?;
-    serialize(result, bytes.len(), ctx)
+    serialize(result, ctx)
 }
 
 fn rules(

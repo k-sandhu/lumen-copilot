@@ -14,7 +14,7 @@ _JOB: Any = None
 
 def safe_counters(raw: object) -> dict[str, int | str | None]:
     """Allowlist control telemetry, never forward arbitrary native diagnostics."""
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not raw:
         return {}
     result: dict[str, int | str | None] = {}
     for key in (
@@ -210,6 +210,9 @@ def main() -> None:
             "DocIntelUnsupportedError": "unsupported",
             "DocIntelBudgetError": "budget",
             "DocIntelCancelledError": "cancelled",
+            "DocIntelPanicError": "native_panic",
+            "DocIntelInvalidInputError": "invalid_structure",
+            "DocIntelInternalError": "native_internal",
             "MemoryError": "memory_limit",
         }.get(type(error).__name__, "worker_failed")
         if type(error).__name__ == "PdfWorkerError":

@@ -10,6 +10,17 @@ from app.domain.native_runtime import RuntimeBudget
 from tests.eval.docintel.pdf_fixtures import document, text
 
 
+def test_counter_allowlist_rejects_payloads_and_wrong_types() -> None:
+    from app.ingestion._pdf_worker import safe_counters
+
+    result = safe_counters({"pages": "secret", "glyphs": True, "limit": ["memory"],
+                            "content": "PrivateSentinel", "path": "private"})
+    assert "pages" not in result and "glyphs" not in result
+    assert result["limit"] is None
+    assert "PrivateSentinel" not in json.dumps(result)
+    assert safe_counters({}) == {}
+
+
 @pytest.mark.parametrize(
     ("override", "limit"),
     [
