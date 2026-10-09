@@ -137,8 +137,10 @@ def test_ac1_cumulative_input_tokens_drop_with_proactive_compaction() -> None:
 
     # The baseline is in the ballpark the issue measured (~11,060) — a guard that
     # the harness assembles a realistic 3-tool answer, not that it hit an exact
-    # figure (tokeniser drift is expected).
-    assert 8_000 <= before <= 16_000
+    # figure (tokeniser drift is expected). #618 deliberately shows the agent
+    # complete passages, which lifted this baseline to ~16.8k (#659); the ceiling
+    # still fails a ~2x prompt bloat.
+    assert 8_000 <= before <= 20_000
     # AC-1: the AFTER total drops measurably (the superseded evidence stops riding
     # every later turn at full size).
     assert after < before

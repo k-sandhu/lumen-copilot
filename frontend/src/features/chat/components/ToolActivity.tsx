@@ -13,6 +13,7 @@ const TOOL_LABEL: Record<ChatTool, string> = {
   search_documents: 'Looking up documents',
   list_documents: 'Listing documents',
   get_document: 'Reading a document',
+  read_conversation: 'Looking back at this conversation',
   web_search: 'Searching the web',
 };
 

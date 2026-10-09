@@ -40,11 +40,22 @@ from argon2.exceptions import (
     VerifyMismatchError,
 )
 
+from app.core.config import PasswordHashingSettings, get_password_hashing_settings
+
+
 # One process-wide hasher. Defaults follow argon2-cffi's RFC-9106-aligned
 # recommendations; pinned here (not config) because changing cost parameters is
 # a deliberate security decision, and old hashes still verify (params are in the
 # PHC string). ``type=ID`` selects Argon2id explicitly.
-_hasher = PasswordHasher(type=Type.ID)
+def _build_hasher(settings: PasswordHashingSettings) -> PasswordHasher:
+    # Defense in depth even if a caller bypasses Settings validation. No
+    # configurable production cost: keep argon2-cffi's pinned defaults intact.
+    if settings.environment == "test" and settings.test_fast_password_hashing:
+        return PasswordHasher(type=Type.ID, time_cost=1, memory_cost=8, parallelism=1)
+    return PasswordHasher(type=Type.ID)
+
+
+_hasher = _build_hasher(get_password_hashing_settings())
 
 # A precomputed Argon2id hash of a throwaway value. Verifying against it on the
 # "user not found" path burns the same CPU as a real verify, so login timing

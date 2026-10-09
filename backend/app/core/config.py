@@ -12,16 +12,26 @@ process refuses to boot misconfigured rather than failing deep in a request.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Self
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app import __version__ as _APP_VERSION
 from app.domain.models import ModelTier
+
+# Embedding storage is a schema contract, not a deploy-time guess (#346).  Keep
+# these literals beside Settings so the provider adapter, ORM readiness check,
+# migration, and operator documentation all name the same native vector width.
+CANONICAL_EMBEDDING_MODEL = "openai/nvidia/nemotron-3-embed-1b:free"
+CANONICAL_EMBEDDING_DIMENSIONS = 2048
+LEGACY_EMBEDDING_DIMENSIONS = 1024
+EMBEDDING_SPACE_REVISION = "lumen-native-2048-v1"
 
 
 class ChatModelSetting(BaseModel):
@@ -212,13 +222,11 @@ def _string_set(value: object) -> object:
     return frozenset(item.strip() for item in text.split(",") if item.strip())
 
 
-class Settings(BaseSettings):
-    """Strongly-typed runtime configuration, sourced from the environment.
+class PasswordHashingSettings(BaseSettings):
+    """Import-time hashing policy, independent of service configuration (#655).
 
-    Field names map to the env vars defined in the repo-root ``.env.example``
-    and consumed by ``docker-compose.yml``. Defaults exist only for values that
-    are genuinely optional for the skeleton to boot (e.g. a blank LLM key);
-    infrastructure URLs are required so misconfiguration fails fast.
+    Full Settings inherits these fields and their gate so auth imports and
+    application startup use identical environment/dotenv parsing and validation.
     """
 
     model_config = SettingsConfigDict(
@@ -228,6 +236,36 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    environment: str = Field(default="local", alias="ENVIRONMENT")
+    # None selects fast cost only in the explicit test environment. An explicit
+    # true outside test is a configuration error; false always keeps real cost.
+    test_fast_password_hashing: bool | None = Field(
+        default=None, alias="TEST_FAST_PASSWORD_HASHING"
+    )
+
+    @model_validator(mode="after")
+    def _gate_test_password_hashing(self) -> Self:
+        if self.test_fast_password_hashing and self.environment != "test":
+            raise ValueError("TEST_FAST_PASSWORD_HASHING is allowed only in ENVIRONMENT=test")
+        if self.test_fast_password_hashing is None:
+            self.test_fast_password_hashing = self.environment == "test"
+        return self
+
+
+def get_password_hashing_settings() -> PasswordHashingSettings:
+    """Resolve only hashing policy; never construct/cache application Settings."""
+    return PasswordHashingSettings()
+
+
+class Settings(PasswordHashingSettings):
+    """Strongly-typed runtime configuration, sourced from the environment.
+
+    Field names map to the env vars defined in the repo-root ``.env.example``
+    and consumed by ``docker-compose.yml``. Defaults exist only for values that
+    are genuinely optional for the skeleton to boot (e.g. a blank LLM key);
+    infrastructure URLs are required so misconfiguration fails fast.
+    """
+
     # --- Service identity (surfaced by /health) ---
     service_name: str = "lumen-copilot-backend"
     # Sourced once from the package version (app.__version__, mirroring
@@ -236,8 +274,7 @@ class Settings(BaseSettings):
     # literal. Override per-deploy via the VERSION env var if needed.
     version: str = _APP_VERSION
 
-    # --- Environment / observability ---
-    environment: str = Field(default="local", alias="ENVIRONMENT")
+    # --- Observability (environment is inherited with the hashing policy) ---
     log_level: str = Field(default="info", alias="LOG_LEVEL")
 
     # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
@@ -341,6 +378,18 @@ class Settings(BaseSettings):
 
     # --- Datastores / infra (required: misconfig should fail fast) ---
     database_url: str = Field(alias="DATABASE_URL")
+    # Authenticated denials must survive the request rollback without ever
+    # re-entering/committing the caller's pool transaction (#579, R1-001).  The
+    # durable-audit engine therefore owns a small bounded pool over the same
+    # database.  Pool acquisition and the complete bind/write/commit operation
+    # are independently bounded so a degraded audit store fails closed promptly.
+    audit_db_pool_size: int = Field(default=4, ge=1, le=64, alias="AUDIT_DB_POOL_SIZE")
+    audit_db_pool_timeout_seconds: float = Field(
+        default=2.0, gt=0, le=30, alias="AUDIT_DB_POOL_TIMEOUT_SECONDS"
+    )
+    audit_db_operation_timeout_seconds: float = Field(
+        default=5.0, gt=0, le=60, alias="AUDIT_DB_OPERATION_TIMEOUT_SECONDS"
+    )
     redis_url: str = Field(alias="REDIS_URL")
     celery_broker_url: str = Field(alias="CELERY_BROKER_URL")
     celery_result_backend: str = Field(alias="CELERY_RESULT_BACKEND")
@@ -363,10 +412,58 @@ class Settings(BaseSettings):
     # and the actual transfer still goes directly to/from storage, not through
     # the API process (AC-3).
     s3_presign_ttl_seconds: int = Field(default=900, alias="S3_PRESIGN_TTL_SECONDS")
+    # Browser/storage data-plane CORS. Credentials are never sent to storage.
+    # S3 providers normally accept PutBucketCors at bootstrap. OSS MinIO uses a
+    # process-level allow-list instead, so Compose explicitly marks that setting
+    # externally managed after wiring the same origin set into the MinIO service.
+    s3_cors_allowed_origins: Annotated[frozenset[str], NoDecode] = Field(
+        default=frozenset({"http://localhost:47180"}), alias="S3_CORS_ALLOWED_ORIGINS"
+    )
+    s3_cors_managed_externally: bool = Field(default=False, alias="S3_CORS_MANAGED_EXTERNALLY")
+    # AWS-compatible stores install AbortIncompleteMultipartUpload through the
+    # bucket lifecycle API. Community MinIO does not implement that lifecycle
+    # action, so Compose runs a pinned ``mc rm --incomplete --older-than``
+    # reaper and explicitly declares the cleanup mechanism external here.
+    s3_incomplete_multipart_cleanup_managed_externally: bool = Field(
+        default=False,
+        alias="S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY",
+    )
+    upload_part_size_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=5 * 1024 * 1024,
+        alias="UPLOAD_PART_SIZE_BYTES",
+    )
+    upload_max_parts: int = Field(default=10_000, ge=1, le=10_000, alias="UPLOAD_MAX_PARTS")
+    upload_sign_batch_size: int = Field(
+        # Frozen wire contract + browser uploader both page at 100. This cannot
+        # be deploy-tuned lower without advertising the value on the session.
+        default=100,
+        ge=100,
+        le=100,
+        alias="UPLOAD_SIGN_BATCH_SIZE",
+    )
+    upload_session_ttl_seconds: int = Field(
+        default=24 * 60 * 60, ge=60, alias="UPLOAD_SESSION_TTL_SECONDS"
+    )
+    upload_incomplete_lifecycle_days: int = Field(
+        default=2,
+        ge=1,
+        le=365,
+        alias="UPLOAD_INCOMPLETE_LIFECYCLE_DAYS",
+    )
+    upload_janitor_interval_seconds: int = Field(
+        default=15 * 60, ge=60, alias="UPLOAD_JANITOR_INTERVAL_SECONDS"
+    )
+    upload_janitor_batch_size: int = Field(
+        default=100, ge=1, le=1000, alias="UPLOAD_JANITOR_BATCH_SIZE"
+    )
     # Hard upper bound on a single uploaded object (bytes). Default 50 MiB.
     # Validated before storing so an over-limit upload is a typed 4xx, never a
     # silent drop or a 500 (AC-4 / AC-6).
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
+    max_media_upload_bytes: int = Field(
+        default=5 * 1024 * 1024 * 1024, ge=1, alias="MAX_MEDIA_UPLOAD_BYTES"
+    )
     # Allowlisted upload content-types (AC-4). The declared type is checked
     # against this set before storing. NOTE: a client-declared content-type is
     # not a security guarantee — sniffing/parsing-sandbox hardening is CC-5/OD-4,
@@ -380,6 +477,16 @@ class Settings(BaseSettings):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
                 "text/plain",
                 "text/markdown",
+                "audio/wav",
+                "audio/x-wav",
+                "audio/mpeg",
+                "audio/mp4",
+                "audio/aac",
+                "audio/flac",
+                "audio/ogg",
+                "audio/webm",
+                "video/mp4",
+                "video/webm",
             }
         ),
         alias="UPLOAD_ALLOWED_CONTENT_TYPES",
@@ -391,16 +498,22 @@ class Settings(BaseSettings):
         """Accept a comma-separated env string as the content-type allowlist."""
         return _string_set(value)
 
+    @field_validator("s3_cors_allowed_origins", mode="before")
+    @classmethod
+    def _split_s3_cors_origins(cls, value: object) -> object:
+        return _string_set(value)
+
     # --- Artifact store (CC-12 / issue #208) --------------------------------
     # Files agents/runs *produce* (distinct from uploaded documents): stored via
     # the same ObjectStore under an ``artifacts/`` prefix, but with their own cap
-    # and a **broader** allowlist (agent output is more varied than an upload).
+    # and a distinct allowlist (agent output includes formats that are not
+    # ingestible documents, while document uploads now also include media).
     # Hard upper bound on a single produced artifact (bytes). Default 50 MiB.
     # Validated before storing so an over-cap artifact is a typed 422, never a
     # silent drop or a 500 (#208 AC-2).
     max_artifact_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_ARTIFACT_BYTES")
-    # Allowlisted artifact content-types (#208 AC-2). Broader than the upload set:
-    # also csv/json/png/svg/xlsx/docx/pptx/md/txt/html — the formats a file-writing
+    # Allowlisted artifact content-types (#208 AC-2):
+    # csv/json/png/svg/xlsx/docx/pptx/md/txt/html — the formats a file-writing
     # tool or code sandbox typically emits. The declared type is checked against
     # this set before storing (a client-declared type is a usability/allowlist
     # check, not a security guarantee — sniffing is fenced OUT, OD-4). Comma-
@@ -471,12 +584,9 @@ class Settings(BaseSettings):
             raise ValueError("ARTIFACT_RETENTION_DAYS must be a positive number of days, or unset")
         return value
 
-    # When true (default), GET /documents/{id}/content responds 302 to a
-    # short-TTL presigned GET URL (CC-12, the contract's primary path) so the
-    # bytes transfer directly from storage, not through the API process. When
-    # false, the API streams the bytes inline (application/octet-stream) — useful
-    # where a redirect is undesirable (e.g. same-origin embedding). Both are
-    # contract-valid (the 200 and 302 responses are both defined).
+    # Legacy produced-artifact delivery knob only (#208/#242). Uploaded document
+    # content is retired from v1 and uses the v2 signed-capability endpoint.
+    # True redirects artifact bytes to storage; false streams artifacts inline.
     document_content_redirect: bool = Field(default=True, alias="DOCUMENT_CONTENT_REDIRECT")
     # Cap on the extracted text served by GET /documents/{id}/text (#244), in
     # UTF-8 bytes. The viewer needs readable text, not an unbounded payload —
@@ -491,7 +601,10 @@ class Settings(BaseSettings):
     # engine. An unreachable engine fails retrieval CLOSED (503), never an
     # unfiltered fallback.
     opensearch_url: str = Field(default="http://localhost:47186", alias="OPENSEARCH_URL")
-    opensearch_index: str = Field(default="lumen-chunks", alias="OPENSEARCH_INDEX")
+    # A vector field's dimension cannot be changed in-place.  The v2 index is a
+    # lossless cut-over target; the old lumen-chunks index remains available for
+    # rollback until the controlled re-embedding run is verified.
+    opensearch_index: str = Field(default="lumen-chunks-v2", alias="OPENSEARCH_INDEX")
     # 30s default (#258): bulk writes carry ~20KB-per-chunk embedding payloads
     # and kNN graph insertion is not instant; 10s proved too tight for real
     # batches on a laptop-sized single node. Queries stay far below this.
@@ -503,6 +616,42 @@ class Settings(BaseSettings):
 
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    # OpenRouter speech-to-text adapter (ADR-0023's narrow LiteLLM exception).
+    transcription_model: str = Field(default="x-ai/grok-stt-1.0", alias="TRANSCRIPTION_MODEL")
+    transcription_base_url: str = Field(
+        default="https://openrouter.ai/api/v1", alias="TRANSCRIPTION_BASE_URL"
+    )
+    transcription_timeout_seconds: float = Field(
+        default=60.0, gt=0, le=300, alias="TRANSCRIPTION_TIMEOUT_SECONDS"
+    )
+    transcription_chunk_seconds: int = Field(
+        default=600, ge=1, le=600, alias="TRANSCRIPTION_CHUNK_SECONDS"
+    )
+    transcription_chunk_overlap_seconds: int = Field(
+        default=1, ge=1, le=60, alias="TRANSCRIPTION_CHUNK_OVERLAP_SECONDS"
+    )
+    transcription_provider_options_json: dict[str, object] = Field(
+        default_factory=lambda: dict[str, object](diarize=True),
+        alias="TRANSCRIPTION_PROVIDER_OPTIONS_JSON",
+    )
+    transcription_require_diarization: bool = Field(
+        default=True, alias="TRANSCRIPTION_REQUIRE_DIARIZATION"
+    )
+    media_max_duration_seconds: int = Field(
+        default=8 * 60 * 60, ge=1, alias="MEDIA_MAX_DURATION_SECONDS"
+    )
+    ffmpeg_path: str = Field(default="ffmpeg", min_length=1, alias="FFMPEG_PATH")
+    ffprobe_path: str = Field(default="ffprobe", min_length=1, alias="FFPROBE_PATH")
+
+    @model_validator(mode="after")
+    def _validate_transcription_chunk_overlap(self) -> Settings:
+        if self.transcription_chunk_overlap_seconds >= self.transcription_chunk_seconds:
+            raise ValueError(
+                "TRANSCRIPTION_CHUNK_OVERLAP_SECONDS must be smaller than "
+                "TRANSCRIPTION_CHUNK_SECONDS"
+            )
+        return self
+
     # The gateway FALLBACK model for callers that pass ``model=None`` to
     # ``LLMGateway`` (in practice only ``SearchService._direct_answer``, the
     # optional cited direct answer on /search). This is NOT the chat default and
@@ -518,9 +667,9 @@ class Settings(BaseSettings):
     # LiteLLM's OpenAI-compatible client pointed at ``llm_embedding_api_base``
     # with the OpenRouter key — chat keeps the native ``openrouter/`` route.
     # Hence the ``openai/<author>/<model>`` form: LiteLLM strips ``openai/`` and
-    # sends ``baai/bge-m3`` to the configured base.
+    # sends the provider/model suffix to the configured base.
     llm_embedding_model: str = Field(
-        default="openai/baai/bge-m3",
+        default=CANONICAL_EMBEDDING_MODEL,
         alias="LLM_EMBEDDING_MODEL",
     )
     # Base URL embeddings are sent to (OpenRouter's OpenAI-compatible endpoint).
@@ -529,9 +678,14 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1",
         alias="LLM_EMBEDDING_API_BASE",
     )
-    # Output dimension of ``llm_embedding_model`` (bge-m3 = 1024). Pins the
-    # pgvector column width for the ingestion migration; change with the model.
-    llm_embedding_dimensions: int = Field(default=1024, alias="LLM_EMBEDDING_DIMENSIONS")
+    # Native output dimension of the canonical model.  The schema remains fixed
+    # at this width; a runtime override is allowed only so readiness can reject a
+    # mismatched deployment explicitly instead of failing on an insert later.
+    llm_embedding_dimensions: int = Field(
+        default=CANONICAL_EMBEDDING_DIMENSIONS,
+        ge=1,
+        alias="LLM_EMBEDDING_DIMENSIONS",
+    )
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
     # This is the BATCH budget — ingestion, summarisation, headless runs — where a
@@ -1468,6 +1622,39 @@ class Settings(BaseSettings):
         may be left blank in ``.env``).
         """
         return bool(self.openrouter_api_key.strip())
+
+    @property
+    def embedding_space_fingerprint(self) -> str:
+        """Stable, credential-free identity of the configured coordinate space.
+
+        Width alone does not identify an embedding space.  Model, provider/base,
+        native dimension, and Lumen's normalization contract are hashed together
+        so persisted/indexed vectors and query vectors can fail closed when any
+        coordinate-defining input changes. URL credentials/query/fragment are
+        deliberately excluded from the persisted fingerprint.
+        """
+
+        raw_base = self.llm_embedding_api_base.strip()
+        parsed = urlsplit(raw_base)
+        host = (parsed.hostname or "").lower()
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        normalized_base = (
+            f"{parsed.scheme.lower()}://{host}{parsed.path.rstrip('/')}"
+            if parsed.scheme and host
+            else raw_base.rstrip("/")
+        )
+        payload = json.dumps(
+            {
+                "api_base": normalized_base,
+                "dimensions": self.llm_embedding_dimensions,
+                "model": self.llm_embedding_model.strip(),
+                "revision": EMBEDDING_SPACE_REVISION,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
     # The base64 dev vault key baked into the ``secrets_encryption_key`` default —

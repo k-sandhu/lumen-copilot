@@ -1,0 +1,49 @@
+# Opt-in local runtime, issue #649. Merge after docker-compose.yml.
+# !reset removes inherited source mounts rather than appending an empty list.
+services:
+  backend:
+    image: lumen-copilot-api-fast:local
+    volumes: !reset []
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "2"
+      - --no-access-log
+    stop_grace_period: 30s
+
+  worker:
+    image: lumen-copilot-api-fast:local
+    volumes: !reset []
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    stop_grace_period: 60s
+
+  beat:
+    image: lumen-copilot-api-fast:local
+    volumes: !reset []
+    stop_grace_period: 30s
+
+  frontend:
+    image: lumen-copilot-ui-fast:local
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.fast
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+        VITE_WS_BASE_URL: ${VITE_WS_BASE_URL:-/ws}
+        VITE_ENABLE_DEV_PAGES: ${VITE_ENABLE_DEV_PAGES:-false}
+    volumes: !reset []
+    # Only the API/worker need application secrets; the static image uses its
+    # explicit, public build arguments above. Do not inject .env into Nginx.
+    env_file: !reset []
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5173/_frontend_health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 10s

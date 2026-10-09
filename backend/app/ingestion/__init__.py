@@ -23,6 +23,10 @@ from app.ingestion.parsers import (
     parse_document_with_locations,
 )
 
+# Media helpers are intentionally imported by their concrete module from the
+# worker.  Keeping them out of this legacy document-only export list prevents a
+# broad import cycle while the task composes storage, DB, and LLM adapters.
+
 __all__ = [
     "SUPPORTED_MIME_TYPES",
     "DocumentParseError",

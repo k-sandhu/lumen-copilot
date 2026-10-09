@@ -126,6 +126,16 @@ class SearchResultData:
     owner: UUID | None = None
     document_id: UUID | None = None
     score: float | None = None
+    document_kind: str | None = None
+    # Source offsets stay internal to the service; direct-answer citations use
+    # them while the result wire shape exposes player provenance only.
+    char_start: int | None = None
+    char_end: int | None = None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +150,11 @@ class SearchCitationData:
     snippet: str | None = None
     char_start: int | None = None
     char_end: int | None = None
+    time_start_ms: int | None = None
+    time_end_ms: int | None = None
+    transcript_segment_id: UUID | None = None
+    speaker_id: str | None = None
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +440,14 @@ class SearchService:
                     owner=owner_id,
                     document_id=passage.document_id,
                     score=passage.score,
+                    document_kind=document.kind.value,
+                    char_start=passage.char_start,
+                    char_end=passage.char_end,
+                    time_start_ms=passage.time_start_ms,
+                    time_end_ms=passage.time_end_ms,
+                    transcript_segment_id=passage.transcript_segment_id,
+                    speaker_id=passage.speaker_id,
+                    speaker_name=passage.speaker_name,
                 )
             )
         return results
@@ -474,8 +497,20 @@ class SearchService:
             SearchCitationData(
                 result_id=r.id,
                 snippet=r.snippet[:_GROUNDING_SNIPPET_CHARS],
-                char_start=0,
-                char_end=min(len(r.snippet), _GROUNDING_SNIPPET_CHARS),
+                char_start=r.char_start,
+                char_end=(
+                    min(
+                        r.char_end,
+                        r.char_start + min(len(r.snippet), _GROUNDING_SNIPPET_CHARS),
+                    )
+                    if r.char_start is not None and r.char_end is not None
+                    else None
+                ),
+                time_start_ms=r.time_start_ms,
+                time_end_ms=r.time_end_ms,
+                transcript_segment_id=r.transcript_segment_id,
+                speaker_id=r.speaker_id,
+                speaker_name=r.speaker_name,
             )
             for r in top
         ]
@@ -485,7 +520,8 @@ class SearchService:
     def _grounding_messages(query: str, results: list[SearchResultData]) -> list[ChatMessage]:
         """Build the grounded prompt: answer ONLY from the numbered result passages."""
         sources = "\n\n".join(
-            f"[{i + 1}] {r.title}: {r.snippet[:_GROUNDING_SNIPPET_CHARS]}"
+            f"[{i + 1}] {r.title}{SearchService._search_media_label(r)}: "
+            f"{r.snippet[:_GROUNDING_SNIPPET_CHARS]}"
             for i, r in enumerate(results)
         )
         system = (
@@ -498,6 +534,14 @@ class SearchService:
             ChatMessage(role=Role.SYSTEM, content=system),
             ChatMessage(role=Role.USER, content=query),
         ]
+
+    @staticmethod
+    def _search_media_label(result: SearchResultData) -> str:
+        if result.time_start_ms is None or result.time_end_ms is None:
+            return ""
+        speaker = result.speaker_name or result.speaker_id
+        speaker_label = f", speaker {speaker}" if speaker else ""
+        return f" (time {result.time_start_ms}-{result.time_end_ms} ms{speaker_label})"
 
     # --- audit (INV-6) ------------------------------------------------------
 

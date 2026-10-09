@@ -42,8 +42,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.db.tenant_context import BYPASS_SENTINEL, bind_bypass, bind_tenant
+from tests._db_helpers import copy_sqlite_schema
+from tests._live_helpers import worker_database_name
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -62,7 +63,7 @@ async def sqlite_session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
             yield sess
@@ -144,7 +145,7 @@ async def test_rls_backstop_isolates_tenants_on_postgres() -> None:
 
     from alembic import command
 
-    tmp_db = f"lumen_rlstest_{uuid.uuid4().hex[:12]}"
+    tmp_db = worker_database_name(f"lumen_rlstest_{uuid.uuid4().hex[:12]}")
     app_role = f"lumen_rls_app_{uuid.uuid4().hex[:8]}"
     app_pw = "rls_test_pw"  # noqa: S105 — throwaway role in a throwaway DB
     admin_url = _swap_db(_PG_URL, "postgres")
@@ -313,7 +314,7 @@ async def test_parallel_call_scopes_keep_rls_isolation_on_postgres() -> None:
 
     from alembic import command
 
-    tmp_db = f"lumen_rls412_{uuid.uuid4().hex[:12]}"
+    tmp_db = worker_database_name(f"lumen_rls412_{uuid.uuid4().hex[:12]}")
     app_role = f"lumen_rls412_app_{uuid.uuid4().hex[:8]}"
     app_pw = "rls_test_pw"  # noqa: S105 — throwaway role in a throwaway DB
     admin_url = _swap_db(_PG_URL, "postgres")
@@ -395,10 +396,7 @@ async def test_parallel_call_scopes_keep_rls_isolation_on_postgres() -> None:
                 # Hold every worker inside its bound transaction until ALL four
                 # are bound — the overlap is real, not sequential.
                 await asyncio.wait_for(all_started.wait(), timeout=10)
-                rows = (
-                    (await sess.execute(text("SELECT id, tenant_id FROM collections")))
-                    .all()
-                )
+                rows = (await sess.execute(text("SELECT id, tenant_id FROM collections"))).all()
                 assert all(r[1] == tenant_id for r in rows), "cross-tenant row leaked"
                 return {r[0] for r in rows}
 
@@ -453,7 +451,7 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
     from app.realtime.backplane import InMemoryBackplane
     from app.services.chat_runtime import ChatRuntime
 
-    tmp_db = f"lumen_rls412c_{uuid.uuid4().hex[:12]}"
+    tmp_db = worker_database_name(f"lumen_rls412c_{uuid.uuid4().hex[:12]}")
     app_role = f"lumen_rls412c_app_{uuid.uuid4().hex[:8]}"
     app_pw = "rls_test_pw"  # noqa: S105 — throwaway role in a throwaway DB
     admin_url = _swap_db(_PG_URL, "postgres")
@@ -631,7 +629,7 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
                 api_key: object = None,
                 api_base: object = None,
                 cache_key: object = None,
-                        ):  # noqa: ANN202 — async generator
+            ):  # noqa: ANN202 — async generator
                 msgs = list(messages)  # type: ignore[arg-type]
                 has_tool = any(getattr(m.role, "value", "") == "tool" for m in msgs)
                 if tool_choice == "none" or has_tool:
@@ -647,9 +645,7 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
                         finish_reason="tool_calls",
                     )
 
-        principal = Principal(
-            user_id=user_a, tenant_id=tenant_a, roles=(EntityRole.MEMBER,)
-        )
+        principal = Principal(user_id=user_a, tenant_id=tenant_a, roles=(EntityRole.MEMBER,))
         backplane = InMemoryBackplane()
         stream_id = uuid.uuid4().hex
 
@@ -679,11 +675,7 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
 
         assert envs[-1]["type"] == "done"
         assert started == 3  # all three scopes were live simultaneously
-        results = [
-            e
-            for e in envs
-            if e["type"] == "event" and e.get("name") == "tool_result"
-        ]
+        results = [e for e in envs if e["type"] == "event" and e.get("name") == "tool_result"]
         assert len(results) == 3
         assert all(e["data"]["ok"] is True for e in results)  # type: ignore[index]
         # The factory saw the runtime session + three DISTINCT call scopes.

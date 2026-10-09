@@ -144,9 +144,7 @@ class SecretsCipher:
         """
         nonce = os.urandom(_NONCE_BYTES)
         ciphertext = self._aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
-        return EncryptedSecret(
-            ciphertext=ciphertext, nonce=nonce, key_version=CURRENT_KEY_VERSION
-        )
+        return EncryptedSecret(ciphertext=ciphertext, nonce=nonce, key_version=CURRENT_KEY_VERSION)
 
     def decrypt(self, envelope: EncryptedSecret) -> str:
         """Decrypt a stored envelope back to its UTF-8 plaintext, or fail closed.

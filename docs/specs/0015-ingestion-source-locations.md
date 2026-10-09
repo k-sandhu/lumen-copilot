@@ -1,4 +1,4 @@
-# Spec 0013 — Exact source-part provenance
+# Spec 0015 — Exact source-part provenance
 
 Tracking: [#621](https://github.com/k-sandhu/lumen-copilot/issues/621).
 
@@ -14,6 +14,21 @@ keeps its string interface and identical rendering. Format helpers collect
 maps while extracting; there is no second lossy parse. Chunk text stays exactly
 `source[char_start:char_end]`; each chunk records all nonempty intersecting
 source parts, so a chunk crossing a page boundary can name both pages.
+
+Workbook rendering retains every sheet with at least one rendered row, even
+when that row is an empty shared-string cell. Rendering follows spec 0011:
+sheet headings and labelled cell coordinates are included in mapped spans.
+A sheet with no rendered rows retains a zero-width location without adding a
+separator. Golden regressions cover leading, middle and trailing empty
+shared-string sheets for both parser interfaces, their exact spans, and
+intersecting chunk locations. The pre-reconciliation R1-001 regression also
+proved preservation of the earlier `alpha\n\n\n\nomega` rendering; current
+fixtures pin main's approved labelled rendering independently of the parser.
+
+Ingestion persists text and maps only after main's attempt-fenced chunk write
+admits the active worker, within that same transaction. Superseded workers
+cannot replace extraction metadata. The legacy embedding path that retains
+stable chunk IDs updates locations along with the current embedding.
 
 Persist text and map on the document and locations on its chunks in the same
 tenant-scoped transaction. Search indexing/backfill carries locations as
@@ -38,11 +53,13 @@ text or locations. Invalid/corrupt bytes remain typed parse errors.
 Deployment backfills nothing: old documents have null retained text and empty
 maps, which means unknown location, not page 1. Operators must re-ingest retained
 bytes or upload a new document for maps. Search reindex copies stored chunks
-and locations, without reparsing. Re-ingestion replaces chunk IDs under current
-semantics. Stored historical offsets/passages are not rewritten; previous source
-generations are not retained, so explicit successful re-ingestion may leave old
-citations stale or unresolved. Historical resolution remains a known limitation,
-not a guarantee that an old offset can address a newly rendered source.
+and locations, without reparsing. Ordinary re-ingestion replaces chunk IDs; the
+existing legacy embedding migration preserves same-shape IDs and its rollback
+records. This feature adds no general source-generation retention. Stored
+historical offsets/passages are not rewritten, so explicit successful
+re-ingestion may leave old citations stale or unresolved. Historical resolution
+remains a known limitation, not a guarantee that an old offset can address a
+newly rendered source.
 
 Deferred: source versions, page images, bounding boxes, cell/block identities,
 stable historical citation identity, canonical structured parsing and UI for

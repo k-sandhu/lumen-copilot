@@ -45,7 +45,6 @@ from sqlalchemy.pool import StaticPool
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 from app.api.deps import get_db_session
 from app.auth import hash_password
-from app.db.base import Base
 from app.db.models import AuditEvent
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
@@ -55,6 +54,7 @@ from app.services.mcp_servers_service import (
     McpClientParams,
     build_transport_client_factory,
 )
+from tests._db_helpers import copy_sqlite_schema
 from tests._mcp_fixture_server import fixture_mcp
 
 _PASSWORD = "devpassword"
@@ -99,7 +99,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
@@ -497,6 +497,7 @@ async def test_get_other_owner_is_404(
     sessionmaker: async_sessionmaker[AsyncSession],
     seeded: _Seeded,
     monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger,
 ) -> None:
     async with _offline(sessionmaker, monkeypatch) as (client, _limiter):
         bob_token = await _login(client, seeded.bob_email)
@@ -509,6 +510,11 @@ async def test_get_other_owner_is_404(
         ):
             resp = await client.get(path, headers=_auth(alice_token))
             assert resp.status_code == 404, (path, resp.text)  # never 403
+        assert [event.metadata["attempted_action"] for event in durable_audit_ledger.events] == [
+            "mcp_server.read",
+            "mcp_server.tools.read",
+        ]
+        assert all(event.resource_id == bob_server_id for event in durable_audit_ledger.events)
 
 
 async def test_mutations_cross_tenant_are_404(

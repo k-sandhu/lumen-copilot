@@ -1,7 +1,8 @@
 # Spec 0017 — Reproducible retained ingestion generations
 
 Tracking: [#632](https://github.com/k-sandhu/lumen-copilot/issues/632). Depends on
-#621 for retained source and metadata; independent of outcomes and diagnostics.
+#621 ([spec 0015](0015-ingestion-source-locations.md)) for retained source and
+metadata; independent of outcomes and diagnostics.
 
 Each newly retained extraction records fingerprint schema version 1, SHA-256 of
 the original bytes, native parser version and implementation SHA-256, installed
@@ -14,15 +15,17 @@ belong in the fingerprint. Native text has no third-party parser dependency.
 Require one nonblank actual model and one positive dimension across all returned
 embeddings, with finite vector elements. Invalid or inconsistent results raise a
 typed ingestion error before any replacement. This validates provenance only;
-embedding compatibility policy and native-dimension enforcement remain #346.
-An empty extraction records absent actual model/dimension, never the configured
-model as an observed result. Legacy fingerprints remain unknown.
+existing embedding compatibility policy and native-dimension enforcement are
+unchanged. An empty extraction records absent actual model/dimension, never the
+configured model as an observed result. Legacy fingerprints remain unknown.
 
 Persist the fingerprint in the same tenant-scoped transaction as retained source,
-location map and replacement chunks. A failed fetch/parse/embed attempt preserves
-the prior generation fingerprint and citation slices. Index synchronization
-failure does not erase the prepared generation fingerprint and does not make it
-a search-readiness assertion. Preserve other ingestion metadata keys.
+location map and replacement chunks, after the attempt-fenced chunk write admits
+the active worker. Superseded workers cannot replace a retained fingerprint.
+A failed fetch/parse/embed attempt preserves the prior generation fingerprint
+and citation slices. Index synchronization failure does not erase the prepared
+generation fingerprint and does not make it a search-readiness assertion.
+Preserve other ingestion metadata keys.
 
 Expose an optional nullable `ingestion_fingerprint` on the existing permissioned
 Document contract. Actual embedding fields may be absent/null for empty text.
@@ -34,7 +37,8 @@ embedding metadata fails before replacement; failed re-ingestion preserves the
 old fingerprint/source/chunks; cross-tenant access remains not found.
 
 Original-byte re-ingestion regenerates fingerprints and changes current chunks
-and offsets atomically. Search reindex copies persisted chunks and does not
-reparse or create a fingerprint. Historical citations retain their original
-stored passage/offsets; this change does not version old source generations or
+and offsets atomically; the existing legacy embedding migration retains
+same-shape chunk IDs and its rollback records. Search reindex copies persisted
+chunks and does not reparse or create a fingerprint. Historical citations retain
+their original stored passage/offsets; this change does not version old source generations or
 silently reinterpret a stored offset against a new extraction.

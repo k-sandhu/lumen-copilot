@@ -1,15 +1,15 @@
 """Retain exact extraction text and source-part maps (#621).
 
-Revision ID: 0044_ingestion_locations
-Revises: 0043_code_run_resolved_packages
+Revision ID: 0047_ingestion_locations
+Revises: 0046_message_source_provenance
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0044_ingestion_locations"
-down_revision: str | None = "0043_code_run_resolved_packages"
+revision: str = "0047_ingestion_locations"
+down_revision: str | None = "0046_message_source_provenance"
 branch_labels: str | None = None
 depends_on: str | None = None
 

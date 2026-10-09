@@ -13,7 +13,10 @@ docker compose up --build
 ```
 
 Brings up Postgres+pgvector, Redis, MinIO, the backend (web), and a Celery
-worker. On boot the backend runs `alembic upgrade head` (enables the `vector`
+worker. The worker image includes pinned FFmpeg/ffprobe for audio validation and
+video-audio extraction. Browser uploads use signed multipart URLs and browser
+media playback uses signed Range GETs, so large file bytes do not pass through
+FastAPI. On boot the backend runs `alembic upgrade head` (enables the `vector`
 extension) then serves. Verify:
 
 - Liveness: `GET http://localhost:47181/health` → `200 {"status":"ok",...}`
@@ -26,11 +29,25 @@ extension) then serves. Verify:
 
 ```bash
 cd backend
-uv venv && uv pip install -e ".[dev]"   # create env + install runtime + dev deps
-uv run ruff check . && uv run ruff format --check .
-uv run mypy app
-uv run pytest                            # unit + API tests (no live stack needed)
+uv sync --locked --extra dev
+uv run --extra dev ruff check app tests
+uv run --extra dev ruff format --check app tests
+uv run --extra dev mypy app
+uv run --extra dev pytest -p no:cacheprovider  # offline, 4 workers, --dist loadfile
 ```
+
+The default uses four workers to bound memory on shared machines. Override with
+`PYTEST_ADDOPTS="-n 2"` to use fewer workers, or `-n 0` for single-process debugging.
+Run one pytest invocation at a time and finish it before running another heavy
+command. Avoid `-n auto` on large shared hosts; more workers multiply memory use.
+`loadfile` keeps module fixtures and ordered tests together. Each invocation
+gets a unique temporary root and xdist gives every worker its own subdirectory;
+on a shared machine pass `--basetemp <unique scratch directory>` explicitly.
+SQLite schema pages are copied from a session template into each test's isolated
+database. Test-only Argon2 cost requires `ENVIRONMENT=test`; deployed cost stays
+unchanged. Live tests remain collected and skipped by their existing opt-ins.
+See [test runtime and CI](../docs/guides/backend-test-runtime.md) for the
+isolation, hashing, warning-cleanup and validation contracts.
 
 The compose `backend`/`worker` images install deps into the *system* env (`uv
 pip install --system`) so the `./backend:/app` bind-mount doesn't shadow them.

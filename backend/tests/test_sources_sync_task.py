@@ -25,14 +25,15 @@ from typing import ClassVar
 
 import pytest
 import pytest_asyncio
+from celery.exceptions import Retry
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.db.session as db_session
 from app.connectors.base import FetchedDoc
 from app.connectors.web.fetch import UrlBlockedError
-from app.core.config import Settings
-from app.db.base import Base
+from app.core.config import Settings, get_settings
+from app.core.errors import DependencyError
 from app.db.repositories import (
     AuditEventRepository,
     ChunkRepository,
@@ -47,7 +48,10 @@ from app.domain.entities import DocumentStatus, Role, Source, SourceStatus
 from app.domain.llm import Embedding
 from app.services.audit import AuditSink
 from app.services.sources_service import SourcesService
-from app.tasks.sync_source import SyncResult, sync_source_async
+from app.tasks.ingest import IngestionResult
+from app.tasks.sync_source import SyncResult, sync_source, sync_source_async
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -141,6 +145,26 @@ class _FakeIndexStore:
     ) -> None:
         type(self).events.append(("delete", document_id))
 
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_generation", document_id))
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        type(self).events.append(("delete_older", document_id))
+
     async def aclose(self) -> None:
         return None
 
@@ -177,7 +201,7 @@ async def sqlite_engine() -> AsyncIterator[None]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
     prev_engine = db_session._engine
     prev_maker = db_session._sessionmaker
     db_session._engine = engine
@@ -205,8 +229,12 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
             owner_id=user.id,
             object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant.id)),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, tenant.id, user.id
+            ),
             request_id="r",
             source_ip="203.0.113.1",
+            embedding_space_fingerprint=get_settings().embedding_space_fingerprint,
         )
         # The after-commit enqueue is a no-op here (no broker / not committed in
         # this scope path); we drive the sync task directly below.
@@ -218,12 +246,12 @@ async def _seed_source(url: str = "http://93.184.216.34/page") -> tuple[uuid.UUI
 def _patch_sync(monkeypatch: pytest.MonkeyPatch, docs: list[FetchedDoc] | Exception) -> None:
     """Replace the web connector's ``sync`` so no network is touched."""
 
-    async def _fake_sync(self: object, source: Source, run: object) -> Iterable[FetchedDoc]:
+    async def _fake_sync(cls: object, source: Source, run: object) -> Iterable[FetchedDoc]:
         if isinstance(docs, Exception):
             raise docs
         return list(docs)
 
-    monkeypatch.setattr("app.connectors.web.connector.WebConnector.sync", _fake_sync)
+    monkeypatch.setattr("app.connectors.web.connector.WebConnector.sync", classmethod(_fake_sync))
 
 
 async def _run(tenant_id: uuid.UUID, source_id: uuid.UUID) -> SyncResult:
@@ -459,6 +487,75 @@ async def test_sync_all_docs_failing_marks_source_error(
         assert docs == []
 
 
+async def test_sync_returned_partial_failure_never_marks_source_ready(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-010: returned Failed is a failure even when no exception escapes."""
+
+    tenant_id, source_id = await _seed_source()
+    body = "connector terminal outcome must be propagated. " * 8
+    _patch_sync(
+        monkeypatch,
+        [
+            FetchedDoc(title="Ready", text=body, url="http://93.184.216.34/ready"),
+            FetchedDoc(title="Failed", text=body, url="http://93.184.216.34/failed"),
+        ],
+    )
+    outcomes = iter((DocumentStatus.READY, DocumentStatus.FAILED))
+
+    async def _returned_outcome(*_args: object, **_kwargs: object) -> IngestionResult:
+        status = next(outcomes)
+        return IngestionResult(
+            document_id=uuid.uuid4(),
+            status=status,
+            chunk_count=1 if status is DocumentStatus.READY else 0,
+            error=None if status is DocumentStatus.READY else "provider rejected vector",
+        )
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _returned_outcome)
+
+    result = await _run(tenant_id, source_id)
+
+    assert result.status is SourceStatus.ERROR
+    assert result.indexed_count == 1
+    assert result.error == "1 of 2 fetched document(s) failed to ingest"
+    async with db_session.session_scope() as session:
+        source = await SourceRepository(session, tenant_id).get(source_id)
+        assert source is not None
+        assert source.status is SourceStatus.ERROR
+        assert source.indexed_count == 1
+        assert source.last_synced_at is None
+
+
+async def test_sync_error_retries_to_ready_only_after_every_document_is_ready(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-010: a later full retry deterministically repairs the source terminal."""
+
+    tenant_id, source_id = await _seed_source()
+    docs = [
+        FetchedDoc(title="One", text="one " * 20, url="http://93.184.216.34/one"),
+        FetchedDoc(title="Two", text="two " * 20, url="http://93.184.216.34/two"),
+    ]
+    _patch_sync(monkeypatch, docs)
+
+    async def _failed(*_args: object, **_kwargs: object) -> IngestionResult:
+        return IngestionResult(uuid.uuid4(), DocumentStatus.FAILED, 0, "failed")
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _failed)
+    first = await _run(tenant_id, source_id)
+    assert first.status is SourceStatus.ERROR
+    assert first.indexed_count == 0
+
+    async def _ready(*_args: object, **_kwargs: object) -> IngestionResult:
+        return IngestionResult(uuid.uuid4(), DocumentStatus.READY, 1)
+
+    monkeypatch.setattr(sync_source_module, "_ingest_one", _ready)
+    second = await _run(tenant_id, source_id)
+    assert second.status is SourceStatus.READY
+    assert second.indexed_count == 2
+
+
 async def test_resync_all_docs_failing_zeroes_stale_indexed_count(
     sqlite_engine: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,6 +650,122 @@ async def test_sync_missing_source_is_noop(
     assert result.error == "source not found"
 
 
+# --- Celery wrapper: contract retry / exhaustion / restored recovery --------
+
+
+_sync_source_wrapper = sync_source.__wrapped__.__func__
+
+
+class _FakeSourceTaskRequest:
+    def __init__(self, retries: int) -> None:
+        self.retries = retries
+        self.id = "source-contract-task"
+
+
+class _FakeSourceTask:
+    def __init__(self, retries: int) -> None:
+        self.request = _FakeSourceTaskRequest(retries)
+        self.retry_calls: list[dict[str, object]] = []
+
+    def retry(self, *, exc: BaseException, countdown: float) -> Retry:
+        self.retry_calls.append({"exc": exc, "countdown": countdown})
+        raise Retry("retrying", exc=exc, when=countdown)
+
+
+def _patch_source_wrapper_adapters(monkeypatch: pytest.MonkeyPatch, *, settings: Settings) -> None:
+    monkeypatch.setattr(sync_source_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(sync_source_module, "ObjectStore", lambda _settings: object())
+    monkeypatch.setattr(sync_source_module, "LLMGateway", lambda _settings: object())
+
+
+def test_source_task_preflight_retries_then_terminalizes_with_safe_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-002: pre-claim DependencyError has bounded retry then durable Error."""
+
+    settings = _settings(
+        OPENROUTER_API_KEY="configured",
+        INGESTION_MAX_RETRIES="2",
+        INGESTION_RETRY_BACKOFF_SECONDS="3",
+    )
+    _patch_source_wrapper_adapters(monkeypatch, settings=settings)
+
+    async def _contract_down(_settings: Settings) -> str:
+        raise DependencyError(
+            "provider payload must never be copied to source state",
+            code="embedding_dimension_mismatch",
+        )
+
+    core_called = False
+
+    async def _must_not_claim(*_args: object, **_kwargs: object) -> SyncResult:
+        nonlocal core_called
+        core_called = True
+        raise AssertionError("source core must not claim before preflight")
+
+    monkeypatch.setattr(sync_source_module, "ensure_embedding_contract", _contract_down)
+    monkeypatch.setattr(sync_source_module, "sync_source_async", _must_not_claim)
+
+    tenant_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    retrying = _FakeSourceTask(retries=0)
+    with pytest.raises(Retry):
+        _sync_source_wrapper(retrying, str(tenant_id), str(source_id))
+    assert retrying.retry_calls[0]["countdown"] == 3
+    assert isinstance(retrying.retry_calls[0]["exc"], DependencyError)
+    assert core_called is False
+
+    terminal_calls: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+
+    async def _terminalize(
+        tid: uuid.UUID, sid: uuid.UUID, reason: str, *, indexed_count: int = 0
+    ) -> SyncResult:
+        terminal_calls.append((tid, sid, reason))
+        return SyncResult(sid, SourceStatus.ERROR, indexed_count, reason)
+
+    monkeypatch.setattr(sync_source_module, "_fail", _terminalize)
+    exhausted = _FakeSourceTask(retries=2)
+    result = _sync_source_wrapper(exhausted, str(tenant_id), str(source_id))
+
+    assert exhausted.retry_calls == []
+    assert result["status"] == SourceStatus.ERROR.value
+    assert terminal_calls == [
+        (
+            tenant_id,
+            source_id,
+            "Embedding contract preflight failed after 2 retries "
+            "(embedding_dimension_mismatch).",
+        )
+    ]
+    assert "provider payload" not in str(result)
+
+
+def test_source_task_recovers_to_ready_after_contract_is_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-002: a later/manual delivery converges Error/Pending work to Ready."""
+
+    settings = _settings(OPENROUTER_API_KEY="configured")
+    _patch_source_wrapper_adapters(monkeypatch, settings=settings)
+
+    async def _contract_ready(active: Settings) -> str:
+        return active.embedding_space_fingerprint
+
+    async def _ready(
+        _tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        **_kwargs: object,
+    ) -> SyncResult:
+        return SyncResult(source_id, SourceStatus.READY, 1)
+
+    monkeypatch.setattr(sync_source_module, "ensure_embedding_contract", _contract_ready)
+    monkeypatch.setattr(sync_source_module, "sync_source_async", _ready)
+
+    result = _sync_source_wrapper(_FakeSourceTask(retries=0), str(uuid.uuid4()), str(uuid.uuid4()))
+    assert result["status"] == SourceStatus.READY.value
+    assert result["indexed_count"] == 1
+
+
 # --- delete cleanup (regression for #139) -----------------------------------
 
 
@@ -565,8 +778,12 @@ async def _delete_source(tenant_id: uuid.UUID, owner_id: uuid.UUID, source_id: u
             owner_id=owner_id,
             object_store=_FakeObjectStore(),  # type: ignore[arg-type]
             audit=AuditSink(AuditEventRepository(session, tenant_id)),
+            denials=denial_context(
+                RecordingDurableAuditTransactions(), session, tenant_id, owner_id
+            ),
             request_id="r",
             source_ip="203.0.113.1",
+            embedding_space_fingerprint=get_settings().embedding_space_fingerprint,
         )
         ok = await svc.delete(source_id)
         await session.commit()

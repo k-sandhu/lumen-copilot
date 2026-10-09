@@ -9,12 +9,34 @@ Redis, or MinIO is required to import the app or hit ``/health``.
 from __future__ import annotations
 
 import asyncio
-import gc
 import os
 import sys
 from collections.abc import Iterator
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
+
+from tests._loop_helpers import LoopTracker
+
+_loop_tracker = LoopTracker()
+_loop_patch = pytest.MonkeyPatch()
+_loop_tracker.install(_loop_patch)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # A unique root per invocation; xdist creates its own gwN children beneath
+    # this root. Respect explicit --basetemp (CI/shared-machine measurements).
+    if config.option.basetemp is None:
+        import tempfile
+
+        config.option.basetemp = str(Path(tempfile.gettempdir()) / f"lumen-pytest-{uuid4().hex}")
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    _loop_tracker.close_idle()
+    _loop_patch.undo()
+
 
 # Windows defaults to the Proactor event loop, whose socket self-pipe transports
 # are GC-finalized late and emit a spurious "unclosed transport" ResourceWarning
@@ -36,7 +58,15 @@ _TEST_ENV = {
     "S3_ACCESS_KEY": "test",
     "S3_SECRET_KEY": "test_secret",
     "S3_BUCKET": "test-bucket",
-    "ENVIRONMENT": "local",
+    "ENVIRONMENT": "test",
+    # Existing non-local credential/OAuth guards still apply in test. These are
+    # synthetic values, not secrets, and do not relax any production validator.
+    "JWT_SECRET": "suite-only-jwt-key",
+    "SECRETS_ENCRYPTION_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    "GDRIVE_OAUTH_CLIENT_ID": "suite-only-google-client",
+    "GDRIVE_OAUTH_CLIENT_SECRET": "suite-only-google-secret",
+    "CONNECTOR_OAUTH_REDIRECT_BASE_URL": "https://api.example.test",
+    "CONNECTOR_OAUTH_FRONTEND_RETURN_URL": "https://app.example.test/sources",
     "LOG_LEVEL": "info",
     "OPENROUTER_API_KEY": "",
     # #416: the post-answer summarize enqueue would attempt a real broker
@@ -58,6 +88,13 @@ def _seed_test_environment() -> None:
     """
     for key, value in _TEST_ENV.items():
         os.environ.setdefault(key, value)
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        from tests._live_helpers import worker_database_url
+
+        for key in ("DATABASE_URL", "AUDIT_DENIAL_LIVE_DATABASE_URL"):
+            url = os.environ.get(key, "")
+            if "/lumentest_" in url:
+                os.environ[key] = worker_database_url(url)
 
 
 # Seed immediately on conftest import, before collection imports any app module.
@@ -91,6 +128,10 @@ def _disable_dotenv_discovery() -> None:
 
 _disable_dotenv_discovery()
 
+# Imports ``app`` and therefore must remain after the hermetic test environment
+# is seeded and dotenv discovery is disabled.
+from tests._audit_helpers import RecordingDurableAuditTransactions  # noqa: E402
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _test_environment() -> None:
@@ -102,35 +143,69 @@ def _test_environment() -> None:
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _sqlite_schema_template(tmp_path_factory: pytest.TempPathFactory) -> None:
+    from tests._db_helpers import build_sqlite_template
+
+    build_sqlite_template(tmp_path_factory.mktemp("schema") / "empty.db")
+
+
+@pytest.fixture
+def durable_audit_ledger() -> RecordingDurableAuditTransactions:
+    """Per-test denial ledger, physically outside every offline SQL Session."""
+    return RecordingDurableAuditTransactions()
+
+
+@pytest.fixture(autouse=True)
+def _wire_offline_durable_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """Keep offline API/task denials off the fake configured Postgres URL.
+
+    The production provider has its own engine/pool; the unit/API suite instead
+    injects this explicit ledger.  It never falls back to the request's
+    StaticPool connection, which is exactly the false-positive R1-001 exposed.
+    """
+    monkeypatch.setattr(
+        "app.api.deps.get_durable_audit_transactions",
+        lambda settings=None: durable_audit_ledger,
+    )
+    monkeypatch.setattr(
+        "app.db.session.get_durable_audit_transactions",
+        lambda settings=None: durable_audit_ledger,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _offline_embedding_contract(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep ordinary unit/API startup offline while preserving an explicit gate.
+
+    Contract/preflight tests override this fixture's patch locally. Production
+    still performs the real DB/index/provider startup validation.
+    """
+
+    from app.core.config import get_settings
+    from app.ingestion.contract import (
+        mark_embedding_contract_valid,
+        reset_embedding_contract_gate,
+    )
+
+    reset_embedding_contract_gate()
+    mark_embedding_contract_valid(get_settings().embedding_space_fingerprint)
+
+    async def _validated_for_test(settings: object) -> str:
+        fingerprint = settings.embedding_space_fingerprint  # type: ignore[attr-defined]
+        mark_embedding_contract_valid(fingerprint)
+        return fingerprint
+
+    monkeypatch.setattr("app.main.provision_embedding_contract", _validated_for_test)
+    yield
+    reset_embedding_contract_gate()
+
+
 @pytest.fixture(autouse=True)
 def _close_orphan_event_loops() -> Iterator[None]:
-    """Close per-test/-fixture asyncio loops eagerly so no socket leaks (#94).
-
-    Each asyncio event loop on Windows (``SelectorEventLoop``, forced above) owns
-    a wakeup **self-pipe socketpair** (two ``127.0.0.1`` loopback sockets). When a
-    loop is dropped without ``close()`` — which pytest-asyncio does for some
-    scoped-fixture loops under ``asyncio_mode = "auto"`` — that socketpair is only
-    released on a *later* cyclic GC pass. If that pass fires mid-test, CPython's
-    unraisable hook raises ``PytestUnraisableExceptionWarning: ResourceWarning:
-    unclosed socket`` against **whatever test is running then** — the rotating,
-    order-dependent flake characterized in issue #94 (every module passes in
-    isolation; only the full suite, and only on whatever happens to run next,
-    fails).
-
-    Closing orphaned (non-running, non-closed) loops in teardown releases those
-    self-pipe sockets at a deterministic point — bounded to this fixture's own
-    teardown window — so the suite is order-independent. ``gc.collect()`` first
-    makes any just-dropped loop reachable for the sweep. This is a test-runtime
-    concern only; production loops are owned by uvicorn. (See also the live-socket
-    leg of #94: the LLM live smokes are skipped by default and close LiteLLM's
-    HTTP clients in their own teardown — ``app.llm.aclose_litellm_clients``.)
-    """
+    """Release tracked idle loops' self-pipe sockets before GC can warn (#94)."""
     yield
-    gc.collect()
-    for obj in gc.get_objects():
-        if isinstance(obj, asyncio.AbstractEventLoop):
-            try:
-                if not obj.is_running() and not obj.is_closed():
-                    obj.close()
-            except Exception:  # noqa: BLE001 — teardown is best-effort
-                pass
+    _loop_tracker.close_idle()

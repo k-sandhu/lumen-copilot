@@ -37,6 +37,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 
 import httpx
@@ -59,19 +60,19 @@ from app.connectors.oauth import OAuthSpec
 from app.core.logging import get_logger
 from app.domain.entities import Source
 
-log = get_logger(__name__)
-
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 
 # Google-native types → the export MIME requested from Drive (ADR-0019 §5).
 # Sheets export as CSV but are *stored* as text/plain — the exported CSV is
 # plain text the ingestion pipeline chunks directly (multi-sheet fidelity is
 # the recorded CSV-flatten limitation, fenced out of v1).
-_EXPORT_MIME = {
-    "application/vnd.google-apps.document": "text/plain",
-    "application/vnd.google-apps.spreadsheet": "text/csv",
-    "application/vnd.google-apps.presentation": "text/plain",
-}
+_EXPORT_MIME = MappingProxyType(
+    {
+        "application/vnd.google-apps.document": "text/plain",
+        "application/vnd.google-apps.spreadsheet": "text/csv",
+        "application/vnd.google-apps.presentation": "text/plain",
+    }
+)
 
 # Binary types passed through to the existing ingestion parsers (#21).
 _PASSTHROUGH_MIMES = frozenset(
@@ -176,6 +177,7 @@ def _parse_modified(value: object) -> datetime | None:
         return None
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class GdriveConnector:
     """The managed Google Drive connector (ADR-0019 §5)."""
 
@@ -183,7 +185,8 @@ class GdriveConnector:
 
     # --- config + OAuth capability ------------------------------------------
 
-    def validate_config(self, config: dict[str, object]) -> dict[str, object]:
+    @classmethod
+    def validate_config(cls, config: dict[str, object]) -> dict[str, object]:
         """Validate the closed mode variants (INV-8; contract GdriveSourceConfig).
 
         ``my_drive`` takes no ids; ``folder`` requires ``folder_id`` (optional
@@ -216,7 +219,8 @@ class GdriveConnector:
             raise ConnectorConfigError("shared_drive mode requires drive_id")
         return {"mode": "shared_drive", "drive_id": drive_id}
 
-    def oauth_spec(self) -> OAuthSpec:
+    @classmethod
+    def oauth_spec(cls) -> OAuthSpec:
         """Google's fixed OAuth endpoints + the pinned host set (ADR-0019 §5).
 
         The client registration is deployment-level config (``core/config`` —
@@ -227,13 +231,16 @@ class GdriveConnector:
         """
         from app.core.config import get_settings
 
-        settings = get_settings()
+        # Read each field directly off the accessor rather than binding the
+        # settings object: connector code never *holds* settings (ADR-0019 §4,
+        # pinned by the conformance kit's sealed settings seam). `get_settings`
+        # is lru_cached, so this is the same object either way.
         return OAuthSpec(
             authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
             token_url="https://oauth2.googleapis.com/token",
             scopes=("https://www.googleapis.com/auth/drive.readonly",),
-            client_id=settings.gdrive_oauth_client_id,
-            client_secret=settings.gdrive_oauth_client_secret,
+            client_id=get_settings().gdrive_oauth_client_id,
+            client_secret=get_settings().gdrive_oauth_client_secret,
             allowed_hosts=(
                 "accounts.google.com",
                 "oauth2.googleapis.com",
@@ -242,7 +249,8 @@ class GdriveConnector:
             extra_authorize_params={"access_type": "offline", "prompt": "consent"},
         )
 
-    async def fetch_account_email(self, http: httpx.AsyncClient) -> str | None:
+    @classmethod
+    async def fetch_account_email(cls, http: httpx.AsyncClient) -> str | None:
         """The provider-verified account identity (ADR-0019 §1: ``about.get``).
 
         Runs over the framework-built guarded client right after the code
@@ -253,13 +261,15 @@ class GdriveConnector:
 
     # --- ACL capability (pure) ----------------------------------------------
 
-    def map_acl(self, raw: Mapping[str, object], ctx: AclMappingContext) -> frozenset[str]:
+    @classmethod
+    def map_acl(cls, raw: Mapping[str, object], ctx: AclMappingContext) -> frozenset[str]:
         """The §2 effective-read mapper — pure, fail-closed (see ``acl.py``)."""
         return _map_acl_impl(raw, ctx)
 
     # --- health --------------------------------------------------------------
 
-    async def health(self, source: Source, run: ConnectorRun) -> ConnectorHealth:
+    @classmethod
+    async def health(cls, source: Source, run: ConnectorRun) -> ConnectorHealth:
         """A bounded token-validity probe (``about.get``), ADR-0019 §5."""
         try:
             email = await api.fetch_about_email(run.http)
@@ -269,7 +279,8 @@ class GdriveConnector:
 
     # --- full sync ------------------------------------------------------------
 
-    async def sync(self, source: Source, run: ConnectorRun) -> FullSyncResult:
+    @classmethod
+    async def sync(cls, source: Source, run: ConnectorRun) -> FullSyncResult:
         """Full enumeration per mode (ADR-0019 §3 bootstrap).
 
         The change-log start token is captured **before** enumeration begins,
@@ -286,14 +297,14 @@ class GdriveConnector:
         baseline = await api.get_start_page_token(run.http, drive_id=cfg.change_log_drive_id)
 
         # 2. Enumerate files + folder topology per mode.
-        files, chains = await self._enumerate(run.http, cfg)
+        files, chains = await cls._enumerate(run.http, cfg)
 
         # 3. Fetch permissions + content per file (fail-closed skips).
         docs: list[FetchedDoc] = []
         skipped = 0
         for file in files:
             try:
-                doc = await self._fetch_doc(
+                doc = await cls._fetch_doc(
                     run.http,
                     file,
                     scope_chain=chains.get(str(file.get("id")), ()),
@@ -310,8 +321,9 @@ class GdriveConnector:
             docs.append(doc)
         return FullSyncResult(docs=tuple(docs), baseline_cursor=baseline, skipped_count=skipped)
 
+    @classmethod
     async def _enumerate(
-        self, http: httpx.AsyncClient, cfg: _ModeConfig
+        cls, http: httpx.AsyncClient, cfg: _ModeConfig
     ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, ...]]]:
         """Enumerate non-folder files + each file's container scope chain.
 
@@ -328,9 +340,9 @@ class GdriveConnector:
             assert cfg.folder_id is not None  # validated shape  # noqa: S101
             # Watch the ancestors ABOVE the sync root too: a permission change
             # to one of them cascades over everything we sync.
-            uppers = await self._walk_up(http, cfg.folder_id)
+            uppers = await cls._walk_up(http, cfg.folder_id)
             root_chain = root_chain + uppers
-            return await self._enumerate_folder_tree(
+            return await cls._enumerate_folder_tree(
                 http, cfg.folder_id, drive_id=cfg.drive_id, root_chain=root_chain
             )
 
@@ -364,8 +376,9 @@ class GdriveConnector:
         chains = {str(f["id"]): chain_of(f) for f in files if "id" in f}
         return files, chains
 
+    @classmethod
     async def _enumerate_folder_tree(
-        self,
+        cls,
         http: httpx.AsyncClient,
         root_folder_id: str,
         *,
@@ -397,8 +410,9 @@ class GdriveConnector:
                 chains[entry_id] = chain
         return files, chains
 
+    @classmethod
     async def _walk_up(
-        self,
+        cls,
         http: httpx.AsyncClient,
         start_id: str,
         *,
@@ -436,7 +450,7 @@ class GdriveConnector:
         ancestors: list[str] = []
         current = start_id
         for _ in range(_MAX_ANCESTOR_DEPTH):
-            parent = await self._parent_of(http, current, memo=ancestry, strict=strict)
+            parent = await cls._parent_of(http, current, memo=ancestry, strict=strict)
             if parent is None:
                 # The ONLY provable terminus: the walk reached a root.
                 return tuple(ancestors)
@@ -466,8 +480,9 @@ class GdriveConnector:
                 raise _AncestryUnknown(current)
         return tuple(ancestors)
 
+    @classmethod
     async def _parent_of(
-        self, http: httpx.AsyncClient, file_id: str, *, memo: _Ancestry, strict: bool
+        cls, http: httpx.AsyncClient, file_id: str, *, memo: _Ancestry, strict: bool
     ) -> str | None:
         """The file's parent id (memoized); ``None`` = **provably** no parent.
 
@@ -496,8 +511,9 @@ class GdriveConnector:
         memo.parents[file_id] = resolved
         return resolved
 
+    @classmethod
     async def _is_within_root(
-        self,
+        cls,
         http: httpx.AsyncClient,
         file: Mapping[str, Any],
         cfg: _ModeConfig,
@@ -526,13 +542,12 @@ class GdriveConnector:
             return False
         if parent == cfg.folder_id:
             return True
-        chain = await self._walk_up(
-            http, parent, memo=memo, strict=True, stop_at=cfg.folder_id
-        )
+        chain = await cls._walk_up(http, parent, memo=memo, strict=True, stop_at=cfg.folder_id)
         return cfg.folder_id in chain
 
+    @classmethod
     async def _container_relation(
-        self,
+        cls,
         http: httpx.AsyncClient,
         container_id: str,
         cfg: _ModeConfig,
@@ -570,7 +585,7 @@ class GdriveConnector:
         # Both walks stop at their target, so neither reads past its own answer.
         inside_unprovable = False
         try:
-            chain = await self._walk_up(
+            chain = await cls._walk_up(
                 http, container_id, memo=memo, strict=True, stop_at=cfg.folder_id
             )
             if cfg.folder_id in chain:
@@ -581,7 +596,7 @@ class GdriveConnector:
         # "Above" walks up from the configured root — a chain we can usually
         # read even when the container's own is broken. Deciding it here rescues
         # exactly the case a first-walk failure would otherwise have doomed.
-        above_chain = await self._walk_up(
+        above_chain = await cls._walk_up(
             http, cfg.folder_id, memo=memo, strict=True, stop_at=container_id
         )
         if container_id in above_chain:
@@ -593,8 +608,9 @@ class GdriveConnector:
             raise _AncestryUnknown(container_id)
         return "outside"
 
+    @classmethod
     async def _fetch_doc(
-        self,
+        cls,
         http: httpx.AsyncClient,
         file: Mapping[str, Any],
         *,
@@ -631,7 +647,7 @@ class GdriveConnector:
             # answers ``None`` without ever being buffered whole.
             payload = await api.export_file(http, file_id, mime_type=export_mime, max_bytes=cap)
             if payload is None:
-                log.info("gdrive.skip_oversize", file_id=file_id)
+                get_logger(__name__).info("gdrive.skip_oversize", file_id=file_id)
                 return None
             text = payload.decode("utf-8", errors="replace")
         elif mime in _PASSTHROUGH_MIMES:
@@ -641,29 +657,40 @@ class GdriveConnector:
             )
             if declared_bytes is not None and declared_bytes > cap:
                 # Cheap pre-check off the metadata: skip without any transfer.
-                log.info("gdrive.skip_oversize", file_id=file_id, size=declared_bytes)
+                get_logger(__name__).info(
+                    "gdrive.skip_oversize", file_id=file_id, size=declared_bytes
+                )
                 return None
             payload = await api.download_file(http, file_id, max_bytes=cap)
             if payload is None:
                 # A missing/lying ``size`` is caught by the streamed cap.
-                log.info("gdrive.skip_oversize", file_id=file_id)
+                get_logger(__name__).info("gdrive.skip_oversize", file_id=file_id)
                 return None
             data = payload
             stored_mime = mime
         else:
-            log.info("gdrive.skip_unsupported", file_id=file_id, mime=mime)
+            get_logger(__name__).info("gdrive.skip_unsupported", file_id=file_id, mime=mime)
             return None
 
         # --- effective permissions (bounded retry; fail closed on exhaustion)
-        permissions = await self._fetch_permissions(http, file_id)
+        permissions = await cls._fetch_permissions(http, file_id)
         if permissions is None:
             raise _AclUnavailable(file_id)
         raw_acl: dict[str, object] = {
             "permissions": permissions,
             "inheritedPermissionsDisabled": file.get("inheritedPermissionsDisabled") is True,
         }
-        effective_ctx = ctx if ctx is not None else _EMPTY_CTX
-        principals = self.map_acl(raw_acl, effective_ctx)
+        # Fail closed without an identity snapshot. Allocate per call rather
+        # than retaining an SDK object whose fields fall outside IMM.
+        effective_ctx = (
+            ctx
+            if ctx is not None
+            else AclMappingContext(
+                email_to_user_id=MappingProxyType({}),
+                evaluated_at=datetime.fromtimestamp(0, tz=UTC),
+            )
+        )
+        principals = cls.map_acl(raw_acl, effective_ctx)
 
         scope_ids = set(scope_chain)
         drive_id = file.get("driveId")
@@ -681,8 +708,9 @@ class GdriveConnector:
             mime_type=stored_mime,
         )
 
+    @classmethod
     async def _fetch_permissions(
-        self, http: httpx.AsyncClient, file_id: str
+        cls, http: httpx.AsyncClient, file_id: str
     ) -> list[dict[str, Any]] | None:
         """The file's permission list with a bounded retry; ``None`` = give up.
 
@@ -694,14 +722,17 @@ class GdriveConnector:
                 return await api.list_permissions(http, file_id)
             except ConnectorError as exc:
                 if attempt == _ACL_FETCH_ATTEMPTS - 1:
-                    log.warning("gdrive.acl_fetch_failed", file_id=file_id, code=exc.code)
+                    get_logger(__name__).warning(
+                        "gdrive.acl_fetch_failed", file_id=file_id, code=exc.code
+                    )
                     return None
         return None  # pragma: no cover — loop always returns
 
     # --- incremental sync -----------------------------------------------------
 
+    @classmethod
     async def fetch_changes(
-        self, source: Source, cursor: str, run: ConnectorRun
+        cls, source: Source, cursor: str, run: ConnectorRun
     ) -> AsyncIterator[SyncPage]:
         """Replay the change log from ``cursor`` as §3 :class:`SyncPage`\\ s.
 
@@ -783,13 +814,15 @@ class GdriveConnector:
                     # descendant events): signal the scope for the framework's
                     # immediate stale-stamp, then re-examine descendants below.
                     try:
-                        relation = await self._container_relation(run.http, file_id, cfg, memo=memo)
+                        relation = await cls._container_relation(run.http, file_id, cfg, memo=memo)
                     except _AncestryUnknown:
                         # We cannot prove whether this container is in scope, so
                         # we cannot prove its cascade is irrelevant either.
                         # Ignoring it would leave descendants' mirrors fresh
                         # after a permission change (fail-open); fail closed.
-                        log.warning("gdrive.container_scope_unprovable", file_id=file_id)
+                        get_logger(__name__).warning(
+                            "gdrive.container_scope_unprovable", file_id=file_id
+                        )
                         incomplete = True
                         continue
                     if relation == "outside":
@@ -798,12 +831,12 @@ class GdriveConnector:
                     refetch_roots.add(file_id if relation == "inside" else str(cfg.folder_id))
                     continue
                 try:
-                    within_root = await self._is_within_root(run.http, file, cfg, memo=memo)
+                    within_root = await cls._is_within_root(run.http, file, cfg, memo=memo)
                 except _AncestryUnknown:
                     # Position unprovable: importing could pull in out-of-scope
                     # content, and "reconcile as deleted" could destroy a
                     # legitimate row. Neither guess is safe — fail closed.
-                    log.warning("gdrive.file_scope_unprovable", file_id=file_id)
+                    get_logger(__name__).warning("gdrive.file_scope_unprovable", file_id=file_id)
                     incomplete = True
                     continue
                 if not within_root:
@@ -811,9 +844,9 @@ class GdriveConnector:
                     # reconcile away a row left behind by a move OUT of scope.
                     deleted.add(file_id)
                     continue
-                chain = await self._change_scope_chain(run.http, file, cfg, memo=memo)
+                chain = await cls._change_scope_chain(run.http, file, cfg, memo=memo)
                 try:
-                    doc = await self._fetch_doc(run.http, file, scope_chain=chain, ctx=ctx, cap=cap)
+                    doc = await cls._fetch_doc(run.http, file, scope_chain=chain, ctx=ctx, cap=cap)
                 except _AclUnavailable:
                     # Ingestible, but its current rights are unknown — the
                     # page's effect on the mirror is unprovable (fail closed).
@@ -831,7 +864,7 @@ class GdriveConnector:
             # stamp denies them immediately; these upserts restore freshness
             # per document as each is re-examined).
             for root_id in sorted(refetch_roots):
-                refetched, used, complete = await self._refetch_scope(
+                refetched, used, complete = await cls._refetch_scope(
                     run.http, root_id, cfg=cfg, ctx=ctx, cap=cap, budget=refetch_budget
                 )
                 refetch_budget -= used
@@ -867,8 +900,9 @@ class GdriveConnector:
         mime = file.get("mimeType")
         return isinstance(mime, str) and (mime in _EXPORT_MIME or mime in _PASSTHROUGH_MIMES)
 
+    @classmethod
     async def _change_scope_chain(
-        self,
+        cls,
         http: httpx.AsyncClient,
         file: Mapping[str, Any],
         cfg: _ModeConfig,
@@ -893,14 +927,15 @@ class GdriveConnector:
         if isinstance(parent, str):
             chain.append(parent)
             try:
-                uppers = await self._walk_up(http, parent, memo=memo)
+                uppers = await cls._walk_up(http, parent, memo=memo)
             except ConnectorError:
                 uppers = ()
             chain.extend(a for a in uppers if a not in chain)
         return tuple(chain)
 
+    @classmethod
     async def _refetch_scope(
-        self,
+        cls,
         http: httpx.AsyncClient,
         root_id: str,
         *,
@@ -922,7 +957,7 @@ class GdriveConnector:
         docs: list[FetchedDoc] = []
         used = 0
         try:
-            files, chains = await self._enumerate_folder_tree(
+            files, chains = await cls._enumerate_folder_tree(
                 http,
                 root_id,
                 drive_id=cfg.change_log_drive_id,
@@ -937,7 +972,7 @@ class GdriveConnector:
                 return docs, used, False
             used += 1
             try:
-                doc = await self._fetch_doc(
+                doc = await cls._fetch_doc(
                     http,
                     file,
                     scope_chain=chains.get(str(file.get("id")), ()),
@@ -952,12 +987,4 @@ class GdriveConnector:
         return docs, used, True
 
 
-# The fail-closed empty identity snapshot (used only if the framework did not
-# supply one — attested-user mapping then admits nobody; `anyone` → tenant
-# still holds because it needs no identity map).
-_EMPTY_CTX = AclMappingContext(
-    email_to_user_id={},
-    evaluated_at=datetime.fromtimestamp(0, tz=UTC),
-)
-
-__all__ = ["GdriveConnector"]
+__all__ = ("GdriveConnector",)

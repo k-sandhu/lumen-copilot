@@ -189,7 +189,7 @@ async def test_failed_reingestion_preserves_previous_fingerprint_source_and_chun
     ]
 
     store.put(str(tenant_id), key, new_source)
-    with pytest.raises(IngestionError, match="could not embed chunks"):
+    with pytest.raises(IngestionError) as failure:
         await ingest_document_async(
             tenant_id,
             document_id,
@@ -197,6 +197,7 @@ async def test_failed_reingestion_preserves_previous_fingerprint_source_and_chun
             object_store=store,  # type: ignore[arg-type]
             gateway=_FakeGateway(fail=True),  # type: ignore[arg-type]
         )
+    assert failure.value.code == "ingestion_embedding_error"
 
     async with db_session.session_scope() as session:
         after = await DocumentRepository(session, tenant_id).get(document_id)

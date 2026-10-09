@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     TenantRepository,
@@ -32,6 +31,7 @@ from app.db.repositories import (
 )
 from app.domain.entities import Role
 from app.domain.llm import StreamEvent
+from tests._db_helpers import copy_sqlite_schema
 from tests.eval.golden import GOLDEN_DOCUMENTS, GOLDEN_QUESTIONS, GoldenQuestion
 from tests.eval.harness import answer_question, grounded_gateway, run_eval, seed_corpus
 from tests.eval.scoring import Thresholds, aggregate, assert_meets, score_item
@@ -71,7 +71,7 @@ async def eval_ctx() -> AsyncIterator[_EvalCtx]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         embedder = DeterministicEmbedder()
         async with factory() as seed:

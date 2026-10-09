@@ -19,6 +19,7 @@ the server. Domain types only (ADR-0004): nothing here leaks ``httpx`` /
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import httpx
@@ -42,6 +43,7 @@ from app.core.config import get_settings
 from app.domain.entities import Source, WebSourceMode
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class WebConnector:
     """The ``web`` connector (zero source-side setup; ADR-0009 §2).
 
@@ -52,7 +54,8 @@ class WebConnector:
 
     name = "web"
 
-    def validate_config(self, config: dict[str, object]) -> dict[str, object]:
+    @classmethod
+    def validate_config(cls, config: dict[str, object]) -> dict[str, object]:
         """Validate the ``{url}`` config; return the normalised ``{url, mode}``.
 
         The URL's scheme + host are validated synchronously (no network) via the
@@ -83,7 +86,8 @@ class WebConnector:
         validate_url_syntactic(normalized)
         return {"url": normalized, "mode": mode_from_url(normalized).value}
 
-    async def sync(self, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
+    @classmethod
+    async def sync(cls, source: Source, run: ConnectorRun) -> Iterable[FetchedDoc]:
         """Fetch the source URL, detect the mode, and yield its documents.
 
         Detection order (ADR-0009 §2): feed → sitemap → single page. For a feed or
@@ -97,21 +101,22 @@ class WebConnector:
             ConnectorError: the root fetch failed — a transport fault or a non-2xx
                 status (``fetch_failed``); the error page is never ingested (#138).
         """
-        url = self._url_of(source)
+        url = cls._url_of(source)
         user_agent = get_settings().web_user_agent
         async with httpx.AsyncClient(follow_redirects=False) as client:
             root = await fetch_url(url, client=client, user_agent=user_agent)
-            docs = await self._expand(root, client, user_agent)
+            docs = await cls._expand(root, client, user_agent)
         return docs
 
-    async def health(self, source: Source, run: ConnectorRun) -> ConnectorHealth:
+    @classmethod
+    async def health(cls, source: Source, run: ConnectorRun) -> ConnectorHealth:
         """Probe the source URL: a successful guarded fetch is healthy.
 
         A cheap reachability/validity check for the connector grid (ADR-0009 §4).
         An SSRF rejection or a fetch fault is reported as unhealthy with the
         reason rather than raised.
         """
-        url = self._url_of(source)
+        url = cls._url_of(source)
         user_agent = get_settings().web_user_agent
         try:
             async with httpx.AsyncClient(follow_redirects=False) as client:
@@ -129,25 +134,27 @@ class WebConnector:
             raise ConnectorConfigError("source config has no usable 'url'", code="invalid_url")
         return url.strip()
 
+    @classmethod
     async def _expand(
-        self, root: FetchResult, client: httpx.AsyncClient, user_agent: str
+        cls, root: FetchResult, client: httpx.AsyncClient, user_agent: str
     ) -> list[FetchedDoc]:
         """Expand a fetched root into one or more :class:`FetchedDoc` by mode."""
         feed = parse_feed(root.text)
         if feed is not None and feed:
-            return await self._docs_from_feed(feed, client, user_agent)
+            return await cls._docs_from_feed(feed, client, user_agent)
 
         sitemap = parse_sitemap(root.text)
         if sitemap is not None and sitemap:
-            return await self._docs_from_urls(sitemap, client, user_agent)
+            return await cls._docs_from_urls(sitemap, client, user_agent)
 
         # Single page.
         page = extract_page_text(root.text, content_type=root.content_type)
         title = page.title or root.final_url
         return [FetchedDoc(title=title, text=page.text, url=root.final_url)]
 
+    @classmethod
     async def _docs_from_feed(
-        self, items: list[FeedItem], client: httpx.AsyncClient, user_agent: str
+        cls, items: list[FeedItem], client: httpx.AsyncClient, user_agent: str
     ) -> list[FetchedDoc]:
         """Fetch each feed item's page (guarded); skip ones that fail."""
         docs: list[FetchedDoc] = []
@@ -164,8 +171,9 @@ class WebConnector:
             docs.append(FetchedDoc(title=title, text=text, url=fetched.final_url))
         return docs
 
+    @classmethod
     async def _docs_from_urls(
-        self, urls: list[str], client: httpx.AsyncClient, user_agent: str
+        cls, urls: list[str], client: httpx.AsyncClient, user_agent: str
     ) -> list[FetchedDoc]:
         """Fetch each sitemap URL's page (guarded); skip ones that fail."""
         docs: list[FetchedDoc] = []
@@ -180,8 +188,8 @@ class WebConnector:
         return docs
 
 
-# Module-level connector instance the registry auto-discovers (ADR-0008 §3).
-CONNECTOR: Connector = WebConnector()
+# Stateless class entry point the registry auto-discovers (ADR-0008 §3).
+CONNECTOR: Connector = WebConnector
 
 
 def detect_mode(text: str, content_type: str) -> WebSourceMode:
@@ -225,4 +233,4 @@ def mode_from_url(url: str) -> WebSourceMode:
     return WebSourceMode.PAGE
 
 
-__all__ = ["CONNECTOR", "WebConnector", "detect_mode", "mode_from_url"]
+__all__ = ("CONNECTOR", "WebConnector", "detect_mode", "mode_from_url")

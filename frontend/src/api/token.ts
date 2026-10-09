@@ -13,7 +13,8 @@
  * notified on change so the UI can react when a silent refresh fails.
  */
 
-type TokenListener = (token: string | null) => void;
+export type TokenChangeReason = 'login' | 'refresh' | 'clear';
+type TokenListener = (token: string | null, reason: TokenChangeReason) => void;
 
 let accessToken: string | null = null;
 const listeners = new Set<TokenListener>();
@@ -29,16 +30,15 @@ export function hasAccessToken(): boolean {
 }
 
 /** Replace the held token and notify subscribers. */
-export function setAccessToken(token: string): void {
+export function setAccessToken(token: string, reason: 'login' | 'refresh' = 'login'): void {
   accessToken = token;
-  notify();
+  notify(reason);
 }
 
 /** Drop the held token (logout / failed refresh) and notify subscribers. */
 export function clearAccessToken(): void {
-  if (accessToken === null) return;
   accessToken = null;
-  notify();
+  notify('clear');
 }
 
 /** Subscribe to token changes. Returns an unsubscribe function. */
@@ -47,6 +47,6 @@ export function subscribeToken(listener: TokenListener): () => void {
   return () => listeners.delete(listener);
 }
 
-function notify(): void {
-  for (const listener of listeners) listener(accessToken);
+function notify(reason: TokenChangeReason): void {
+  for (const listener of listeners) listener(accessToken, reason);
 }

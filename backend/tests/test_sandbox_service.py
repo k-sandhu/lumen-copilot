@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.core.errors import ConflictError, NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -31,6 +30,8 @@ from app.sandbox.service import (
 )
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.storage.keys import build_artifact_key
+from tests._audit_helpers import denial_context_from_session
+from tests._db_helpers import copy_sqlite_schema
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip
@@ -107,7 +108,7 @@ class _FakeRunner:
 
 
 @pytest_asyncio.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def session(durable_audit_ledger) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -115,9 +116,10 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as value:
+            value.info["durable_audit_ledger"] = durable_audit_ledger
             yield value
     finally:
         await engine.dispose()
@@ -432,6 +434,9 @@ async def test_reset_and_close_drive_runner_and_audit(session: AsyncSession) -> 
         owner_id=owner,
         runner=runner,
         settings=sandbox_settings(),
+        denials=denial_context_from_session(
+            session, tenant, owner, request_id="sandbox-request", source_ip="system"
+        ),
     )
     first = await lifecycle.ensure(chat)
     second = await lifecycle.reset(chat)
@@ -460,6 +465,9 @@ async def test_cancel_kills_run_and_advances_generation(session: AsyncSession) -
         owner_id=owner,
         runner=runner,
         settings=sandbox_settings(),
+        denials=denial_context_from_session(
+            session, tenant, owner, request_id="sandbox-request", source_ip="system"
+        ),
     )
     sandbox = await lifecycle.ensure(chat)
     value = await _run(session, tenant, owner, chat)
@@ -502,6 +510,9 @@ async def test_ensured_session_carries_the_configured_output_budget(
         owner_id=owner,
         runner=runner,
         settings=settings,
+        denials=denial_context_from_session(
+            session, tenant, owner, request_id="sandbox-request", source_ip="system"
+        ),
     )
 
     await lifecycle.ensure(chat)
@@ -522,6 +533,9 @@ async def test_cancelling_old_run_does_not_destroy_or_advance_new_generation(
         owner_id=owner,
         runner=runner,
         settings=sandbox_settings(),
+        denials=denial_context_from_session(
+            session, tenant, owner, request_id="sandbox-request", source_ip="system"
+        ),
     )
     first = await lifecycle.ensure(chat)
     value = await _run(session, tenant, owner, chat)
@@ -548,13 +562,27 @@ async def test_cross_tenant_and_non_owner_reads_are_404(session: AsyncSession) -
     run = await _run(session, tenant_a, owner_a, chat_a)
 
     with pytest.raises(NotFoundError):
-        await SandboxReadService(session, tenant_id=tenant_b, owner_id=owner_b).get(run.id)
+        await SandboxReadService(
+            session,
+            tenant_id=tenant_b,
+            owner_id=owner_b,
+            denials=denial_context_from_session(
+                session, tenant_b, owner_b, request_id="sandbox-request", source_ip="system"
+            ),
+        ).get(run.id)
 
     other = await UserRepository(session, tenant_a).create(
         email="mallory@acme.test", password_hash="h", roles=[Role.MEMBER]
     )
     with pytest.raises(NotFoundError):
-        await SandboxReadService(session, tenant_id=tenant_a, owner_id=other.id).get(run.id)
+        await SandboxReadService(
+            session,
+            tenant_id=tenant_a,
+            owner_id=other.id,
+            denials=denial_context_from_session(
+                session, tenant_a, other.id, request_id="sandbox-request", source_ip="system"
+            ),
+        ).get(run.id)
 
 
 # --- #510: a lifecycle refusal must leave a trace ------------------------------
@@ -581,6 +609,9 @@ async def test_a_disabled_lifecycle_refusal_is_audited(
         owner_id=owner,
         runner=_FakeRunner(),
         settings=sandbox_settings(),
+        denials=denial_context_from_session(
+            session, tenant, owner, request_id="sandbox-request", source_ip="system"
+        ),
     )
 
     with pytest.raises(SandboxDisabledError):
@@ -611,7 +642,14 @@ async def test_closing_a_sandbox_is_allowed_even_when_execution_is_disabled(
     await _enable(session, tenant)
     runner = _FakeRunner()
     service = SandboxSessionService(
-        session, tenant_id=tenant, owner_id=owner, runner=runner, settings=sandbox_settings()
+        session,
+        tenant_id=tenant,
+        owner_id=owner,
+        runner=runner,
+        settings=sandbox_settings(),
+        denials=denial_context_from_session(
+            session, tenant, owner, request_id="sandbox-request", source_ip="system"
+        ),
     )
     await service.ensure(chat)
 
