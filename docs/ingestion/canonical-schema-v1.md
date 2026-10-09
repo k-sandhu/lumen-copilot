@@ -35,7 +35,13 @@ heading/table fields, overlapping cells, invalid coordinates or invalid source
 part ranges fail with typed errors. Serialization round trips preserve all fields.
 
 Safety caps for standalone rendering: 32 MiB JSON input, 100000 blocks, 2 million
-rendered code points and 100000 table-intersection comparisons. Exceeding a cap
+rendered code points and 100000 table-origin cells per document. Table overlap
+validation sweeps row start/end events with ordered active column intervals,
+using O(cells log cells) work and O(cells) memory without expanding merged grids.
+Touching edges are legal; overlapping origin rectangles still fail closed.
+This corrects #708: the old pairwise comparison ceiling rejected ordinary valid
+tables above roughly 448 cells, blocking #673's 1,000-row parity fixture.
+Exceeding a cap
 is a typed budget failure, never truncated success. Runtime budgets (#666) add
 cooperative cancellation/deadline checks around format work.
 
