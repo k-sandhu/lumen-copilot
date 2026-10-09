@@ -43,3 +43,5 @@ and human merge. Residual risk: caller budgets and production chunk fidelity.
 
 [x] 2026-10-09: integrated the updated HTML dependency; EPUB/HTML Rust
 regressions pass (8 tests), including binary saved-page root rejection.
+
+The candidate routing controls `native_epub_enabled`, `native_epub_shadow` are explicitly classified as nonsecret deployment configuration in the connector conformance policy. The settings completeness guard verifies this classification; infrastructure credentials and test-only password hashing remain forbidden.
