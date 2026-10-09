@@ -1,4 +1,4 @@
-"""ADR-0026 / #663: optional bridge, panic containment and GIL handshake."""
+"""ADR-0027 / #663: optional bridge, panic containment and GIL handshake."""
 
 from __future__ import annotations
 
