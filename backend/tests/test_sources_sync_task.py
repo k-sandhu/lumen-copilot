@@ -34,7 +34,6 @@ from app.connectors.base import FetchedDoc
 from app.connectors.web.fetch import UrlBlockedError
 from app.core.config import Settings, get_settings
 from app.core.errors import DependencyError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkRepository,
@@ -52,6 +51,7 @@ from app.services.sources_service import SourcesService
 from app.tasks.ingest import IngestionResult
 from app.tasks.sync_source import SyncResult, sync_source, sync_source_async
 from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -201,7 +201,7 @@ async def sqlite_engine() -> AsyncIterator[None]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
     prev_engine = db_session._engine
     prev_maker = db_session._sessionmaker
     db_session._engine = engine
