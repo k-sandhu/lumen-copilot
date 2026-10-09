@@ -1010,6 +1010,7 @@ class Settings(PasswordHashingSettings):
         from app.ingestion.candidates import upload_types
 
         return upload_types(self)
+
     native_ingestion_max_documents: int = Field(default=1, ge=1, le=128)
     native_ingestion_max_memory_bytes: int = Field(default=128 * 1024 * 1024, ge=1)
     native_ingestion_max_input_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
