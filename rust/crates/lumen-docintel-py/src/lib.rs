@@ -57,6 +57,39 @@ fn core_version() -> &'static str {
 }
 
 #[pyfunction]
+fn extract_text(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        use lumen_docintel_core::formats::text::{Mode, parse};
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let mode = match mime.as_str() {
+            "text/markdown" => Mode::Markdown,
+            "text/plain" => Mode::Text,
+            "text/x-python" => Mode::Code("python"),
+            "text/x-rust" => Mode::Code("rust"),
+            "text/javascript" => Mode::Code("javascript"),
+            "text/typescript" => Mode::Code("typescript"),
+            "text/x-c" => Mode::Code("c"),
+            "text/x-c++src" => Mode::Code("cpp"),
+            "text/x-java-source" => Mode::Code("java"),
+            "text/x-go" => Mode::Code("go"),
+            "text/x-sh" => Mode::Code("shell"),
+            "text/x-sql" => Mode::Code("sql"),
+            _ => return Err(CoreError::Unsupported),
+        };
+        let document = parse(bytes, budget.into(), mode)?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
 fn _test_error(py: Python<'_>) -> PyResult<()> {
     compute(py, || Err(CoreError::InvalidInput))
 }
@@ -260,6 +293,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DocumentSession>()?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_text, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(_test_panic, m)?)?;
     m.add_function(wrap_pyfunction!(_test_wait, m)?)?;

@@ -22,6 +22,8 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 cfb = "=0.15.0"
 
 rayon = "=1.12.0"
+sha2 = "=0.11.0"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 
 [profile.release]
 panic = "unwind"
