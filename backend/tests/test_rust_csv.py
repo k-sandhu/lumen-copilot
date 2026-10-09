@@ -52,3 +52,20 @@ def test_csv_cutover_and_content_mismatch(monkeypatch: pytest.MonkeyPatch) -> No
 def test_csv_shadow_alone_does_not_admit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(native, "native_available", lambda: True)
     assert "text/csv" not in Settings(native_csv_shadow=True).effective_upload_content_types
+
+
+def test_native_csv_fixture_fidelity() -> None:
+    pytest.importorskip("lumen_docintel")
+    from tests.eval.docintel.fixtures import corpus
+    from tests.eval.docintel.metrics import evaluate
+
+    for fixture in corpus():
+        if fixture.format not in {"csv", "tsv"}:
+            continue
+        doc = native.extract_candidate(fixture.data, family="csv", mime=fixture.mime)
+        spans = tuple(
+            (s.char_start, s.char_end, b.text) for s, b in zip(doc.spans, doc.blocks, strict=True)
+        )
+        score = evaluate(doc.rendered_text, fixture.gold, spans=spans)
+        assert score.fact_coverage == score.table_association == score.reading_order == 1
+        assert score.exact_offsets == 1

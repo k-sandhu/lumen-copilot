@@ -59,6 +59,8 @@ def configured_parse(data: bytes, mime: str, settings: Settings, baseline: str |
         if not enabled and not shadow:
             break
         try:
+            if not native.native_available():
+                raise native.NativeUnavailableError("native ingestion extension is unavailable")
             detected = native.detect_content(data, declared_mime=mime)
             if detected.format not in candidate.formats:
                 raise DocumentParseError("content does not match candidate format")
