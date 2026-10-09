@@ -424,15 +424,29 @@ pub fn extract_with_context(
     Ok(document)
 }
 pub fn extract_json(bytes: &[u8], ctx: &Context, runtime: &Runtime) -> Result<String, CoreError> {
-    let document = extract_with_context(bytes, ctx, runtime)?;
+    let mut document = extract_with_context(bytes, ctx, runtime)?;
     let size = document
         .blocks
         .iter()
-        .map(|b| b.text.len() * 16 + 4096)
+        .map(|b| {
+            b.text.len() * 16
+                + 4096
+                + b.table.as_ref().map_or(0, |t| {
+                    t.cells
+                        .iter()
+                        .map(|c| c.text.len() * 16 + 2048)
+                        .sum::<usize>()
+                })
+        })
         .sum::<usize>()
         + document.source_parts.len() * 2048
         + bytes.len() * 2;
-    let _json = ctx.reserve(size)?;
+    // Covers the retained domain model, rendered clone, serde growth and JSON.
+    let _json = ctx.reserve(size.checked_mul(4).ok_or(CoreError::Budget)?)?;
+    if let Some(diagnostics) = document.generation.diagnostics.as_mut() {
+        diagnostics["runtime"] =
+            serde_json::to_value(ctx.stats()).map_err(|_| CoreError::Internal)?;
+    }
     let rendered = canonical::render(document)?;
     let result = serde_json::to_string(&rendered).map_err(|_| CoreError::Internal)?;
     ctx.checkpoint()?;

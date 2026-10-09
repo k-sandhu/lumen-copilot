@@ -5,6 +5,29 @@ use lumen_docintel_core::{
     runtime::Budget,
 };
 use pdf_support::{pdf_bytes, text};
+
+#[test]
+fn sparse_table_serialization_is_charged_even_when_visible_text_is_small() {
+    use lumen_docintel_core::CoreError;
+    use lumen_docintel_core::runtime::{Cancellation, Context, Runtime};
+    let xs: Vec<_> = (0..=10).map(|i| 40 + i * 40).collect();
+    let ys: Vec<_> = (0..=10).map(|i| 750 - i * 30).collect();
+    let content = grid(&xs, &ys) + &text(50, 730, 12, "X");
+    let input = pdf_bytes(&[content.as_bytes()], 0);
+    let runtime = Runtime::new(2, 1).unwrap();
+    let ctx = Context::new(Budget::default(), Cancellation::default()).unwrap();
+    let doc = pdf::extract_with_context(&input, &ctx, &runtime).unwrap();
+    assert_eq!(doc.blocks[0].table.as_ref().unwrap().cells.len(), 100);
+    let budget = Budget {
+        max_memory_bytes: ctx.stats().peak_accounted_bytes + 1024,
+        ..Budget::default()
+    };
+    let ctx = Context::new(budget, Cancellation::default()).unwrap();
+    assert!(matches!(
+        pdf::extract_json(&input, &ctx, &runtime),
+        Err(CoreError::Budget)
+    ));
+}
 fn grid(xs: &[i32], ys: &[i32]) -> String {
     let mut lines = String::new();
     for x in xs {
@@ -70,6 +93,33 @@ fn bordered_cells_headers_values_and_boxes() {
             .collect();
         assert_eq!(slice, b.text);
     }
+}
+
+#[test]
+fn table_insertion_keeps_surrounding_column_reading_order() {
+    let content = text(40, 770, 22, "Title")
+        + "\n"
+        + &grid(&[40, 240, 440], &[730, 700, 670])
+        + &body(710, &[("Region", "Mass"), ("North", "-120 kg")])
+        + "\n"
+        + &text(40, 600, 12, "LeftOne")
+        + "\n"
+        + &text(280, 600, 12, "RightOne")
+        + "\n"
+        + &text(40, 580, 12, "LeftTwo")
+        + "\n"
+        + &text(280, 580, 12, "RightTwo");
+    let rendered = canonical::render(
+        pdf::extract(&pdf_bytes(&[content.as_bytes()], 0), Budget::default()).unwrap(),
+    )
+    .unwrap();
+    let positions: Vec<_> = [
+        "Title", "[Table]", "LeftOne", "LeftTwo", "RightOne", "RightTwo",
+    ]
+    .iter()
+    .map(|s| rendered.rendered_text.find(s).unwrap())
+    .collect();
+    assert!(positions.windows(2).all(|p| p[0] < p[1]));
 }
 #[test]
 fn borderless_alignment_does_not_force_prose_columns_into_tables() {

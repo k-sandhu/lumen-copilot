@@ -26,6 +26,8 @@ Acceptance:
   headings, sidebars, footnotes and margin furniture remain in source page order.
 - Work/memory/output/deadline checks use the same Context as PDF extraction.
   Path depth, Cartesian grid size and assignment work are charged before growth.
+  Sparse cell metadata, retained model copies and JSON serialization are reserved
+  independently of visible text length before rendering/serialization grows.
   Scanned tables stay typed needs-OCR; no image decoder or network is added.
 - Generated bordered, borderless, spanned and multi-page gold fixtures must pass
   cell/header association and exact provenance checks. Negative prose-column

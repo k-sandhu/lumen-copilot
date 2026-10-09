@@ -670,9 +670,10 @@ fn interpret(
                 "S" | "s" | "n" | "f" | "f*" | "F" | "B" | "B*" | "b" | "b*" => {
                     numbers(&args, 0)?;
                     if matches!(op.as_str(), "s" | "b" | "b*")
-                        && let Some((first, last)) = path.first().zip(path.last()) {
-                            m.reserve(64)?;
-                            pending_lines.push([last.0, last.1, first.0, first.1]);
+                        && let Some((first, last)) = path.first().zip(path.last())
+                    {
+                        m.reserve(64)?;
+                        pending_lines.push([last.0, last.1, first.0, first.1]);
                     }
                     if matches!(op.as_str(), "S" | "s" | "B" | "B*" | "b" | "b*") {
                         m.reserve(pending_lines.len() * 64)?;

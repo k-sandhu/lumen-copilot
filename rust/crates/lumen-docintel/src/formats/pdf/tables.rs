@@ -64,11 +64,8 @@ fn cell_text(text: &PageText, b: &BoundingBox, ctx: &Context) -> Result<String, 
         .collect::<Vec<_>>()
         .join("\n"))
 }
-type PageSegment = (usize,usize,usize);
-fn render_table(
-    table: &Table,
-    ctx: &Context,
-) -> Result<(String, Vec<PageSegment>), CoreError> {
+type PageSegment = (usize, usize, usize);
+fn render_table(table: &Table, ctx: &Context) -> Result<(String, Vec<PageSegment>), CoreError> {
     ctx.work(
         table
             .rows
