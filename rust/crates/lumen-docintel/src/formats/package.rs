@@ -475,11 +475,30 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
 }
 
 pub fn generation(bytes: &[u8], parser: &str, source: &str) -> Generation {
+    // Include every shared computation layer and the pinned dependency graph.
+    // A package-reader or renderer repair must invalidate previous generations.
+    let mut build = Sha256::new();
+    for component in [
+        source,
+        include_str!("package.rs"),
+        include_str!("../canonical.rs"),
+        include_str!("../runtime.rs"),
+        include_str!("../../../../Cargo.lock"),
+    ] {
+        build.update((component.len() as u64).to_le_bytes());
+        build.update(component.as_bytes());
+    }
     Generation {
         source_sha256: Some(sha256(bytes)),
         parser_id: Some(parser.to_owned()),
         parser_version: Some("1".to_owned()),
-        build_id: Some(sha256(source.as_bytes())),
+        build_id: Some(
+            build
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        ),
         dependency_versions: [
             ("zip".to_owned(), "8.6.0".to_owned()),
             ("quick-xml".to_owned(), "0.42.0".to_owned()),

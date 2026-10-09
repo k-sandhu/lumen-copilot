@@ -25,6 +25,8 @@ top-left origin when known. Unknown inherited layout geometry stays unknown.
 ZIP inflation/entry/part/ratio/traversal limits, corrupt packages/XML and DTD or
 entity expansion fail closed with typed errors and the runtime Context deadline.
 Oversized media fails the package part budget; no media decoding is attempted.
+Generation build identities include format code, shared package/canonical/runtime
+code and the pinned dependency graph, so shared repairs invalidate prior output.
 
 Generated fixtures, Unicode/provenance properties and paired Python comparison
 precede the #670 held-out evaluation and #687 per-format cutover. Production
@@ -39,8 +41,8 @@ fixtures, explicit point boxes and position order, ODP mixed text and blank maps
 typed package/media/DTD/cancellation negatives. Clippy all targets, touched Ruff,
 formatting and offline cargo-deny licenses/advisories pass.
 
-[~] 2026-10-08: #708's canonical table comparison ceiling still affects large
-slide tables. Residual risk: successful extraction may not finish rendering.
+Separate dependency #708 / PR #712 repairs large canonical table validation;
+its four regression/property tests pass alongside this format's tests.
 [~] 2026-10-08: inherited layout transforms, rotated/visual-language reading
 order, full ODP style/chart inheritance and uncached external chart values need
 qualification. Residual risk: these candidate features are not a full visual
