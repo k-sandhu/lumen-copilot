@@ -1,6 +1,6 @@
 # Rust ingestion foundation
 
-ADR-0026 owns the boundary and merge gates. No production format is cut over.
+ADR-0027 owns the boundary and merge gates. No production format is cut over.
 
 From the repo root on Windows (MSVC + Visual Studio Build Tools), macOS (Xcode
 command-line tools) or Linux (C linker and Python development headers):
