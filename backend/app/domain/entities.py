@@ -1062,6 +1062,10 @@ class Chunk:
     speaker_id: str | None = None
     speaker_name: str | None = None
     embedding_fingerprint: str | None = None
+    context_text: str = ""
+    generated_context: str | None = None
+    context_fingerprint: str | None = None
+    context_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

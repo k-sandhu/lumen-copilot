@@ -93,6 +93,10 @@ class IndexedChunk:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    context_text: str = ""
+    generated_context: str | None = None
+    context_fingerprint: str | None = None
+    context_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +130,15 @@ def _acl_mapping_properties() -> dict[str, Any]:
         "acl_principals": {"type": "keyword"},
         "acl_synced_at": {"type": "date"},
         "acl_scope_ids": {"type": "keyword"},
+    }
+
+
+def _context_mapping_properties() -> dict[str, Any]:
+    return {
+        "context_text": {"type": "text", "analyzer": "english"},
+        "generated_context": {"type": "text", "analyzer": "english"},
+        "context_fingerprint": {"type": "keyword"},
+        "context_metadata": {"type": "object", "enabled": False},
     }
 
 
@@ -175,6 +188,7 @@ def _index_body(dimensions: int, embedding_fingerprint: str) -> dict[str, Any]:
                 "char_start": {"type": "integer"},
                 "char_end": {"type": "integer"},
                 **_media_mapping_properties(),
+                **_context_mapping_properties(),
                 "ingestion_attempt": {"type": "long"},
                 "embedding_fingerprint": {"type": "keyword"},
                 # Mirrored source ACL (ADR-0019 §2) — the engine half of the
@@ -535,6 +549,7 @@ class OpenSearchStore:
                 "properties": {
                     **_acl_mapping_properties(),
                     **_media_mapping_properties(),
+                    **_context_mapping_properties(),
                 }
             },
         )
@@ -675,6 +690,10 @@ class OpenSearchStore:
                 "collection_id": str(chunk.collection_id),
                 "ord": chunk.ord,
                 "text": chunk.text,
+                "context_text": chunk.context_text,
+                "generated_context": chunk.generated_context,
+                "context_fingerprint": chunk.context_fingerprint,
+                "context_metadata": chunk.context_metadata,
                 "char_start": chunk.char_start,
                 "char_end": chunk.char_end,
                 "ingestion_attempt": chunk.ingestion_attempt,

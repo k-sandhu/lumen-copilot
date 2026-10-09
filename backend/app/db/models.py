@@ -460,6 +460,10 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     )
     ord: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    context_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    generated_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    context_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(
         Embedding(CANONICAL_EMBEDDING_DIMENSIONS), nullable=True
     )

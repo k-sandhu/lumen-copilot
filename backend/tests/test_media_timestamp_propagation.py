@@ -161,6 +161,8 @@ def test_index_sync_projection_carries_media_fields() -> None:
     segment_id = uuid.uuid4()
     document = SimpleNamespace(
         ingestion_attempts=1,
+        filename="fixture.mp4",
+        mime_type="video/mp4",
         owner_id=uuid.uuid4(),
         collection_id=uuid.uuid4(),
         acl_enforced=False,
@@ -174,6 +176,10 @@ def test_index_sync_projection_carries_media_fields() -> None:
         document_id=uuid.uuid4(),
         ord=0,
         text="Hello, my name is John.",
+        context_text="",
+        generated_context=None,
+        context_fingerprint=None,
+        context_metadata=None,
         embedding=[0.25] * get_settings().llm_embedding_dimensions,
         embedding_fingerprint=get_settings().embedding_space_fingerprint,
         char_start=0,
@@ -193,6 +199,13 @@ def test_index_sync_projection_carries_media_fields() -> None:
     assert indexed.time_end_ms == 3_000
     assert indexed.transcript_segment_id == segment_id
     assert indexed.speaker_name == "John"
+
+    assert indexed.text == chunk.text
+    assert (
+        indexed.context_text
+        == "Title: fixture.mp4\nDocument type: unknown\nSource format: video/mp4"
+    )
+    assert indexed.generated_context is None
 
 
 def test_relational_hydration_selects_authoritative_media_provenance() -> None:

@@ -87,6 +87,14 @@ def _to_indexed(
             collection_id=document.collection_id,
             ord=chunk.ord,
             text=chunk.text,
+            context_text=chunk.context_text
+            or (
+                f"Title: {document.filename}\nDocument type: unknown\n"
+                f"Source format: {document.mime_type}"
+            ),
+            generated_context=chunk.generated_context,
+            context_fingerprint=chunk.context_fingerprint,
+            context_metadata=chunk.context_metadata,
             embedding=chunk.embedding,
             char_start=chunk.char_start,
             char_end=chunk.char_end,

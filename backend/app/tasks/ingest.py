@@ -43,6 +43,7 @@ it threads the system actor only where an audit event is appropriate.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -67,6 +68,7 @@ from app.db.repositories import (
 )
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
+from app.domain.chunk_enrichment import ContextInput
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document
@@ -90,6 +92,7 @@ from app.ingestion.media import (
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
+from app.services.chunk_enrichment import enrich_chunks
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import sync_document_index_async
@@ -230,6 +233,7 @@ async def ingest_document_async(
                 return await _current_ingestion_result(tenant_id, document_id)
             storage_key = document.storage_key
             mime_type = document.mime_type
+            title = document.filename
             attempt = document.ingestion_attempts
     except SQLAlchemyError as exc:
         raise IngestionError(
@@ -280,6 +284,7 @@ async def ingest_document_async(
             document_id,
             storage_key=storage_key,
             mime_type=mime_type,
+            title=title,
             attempt=attempt,
             settings=settings,
             object_store=object_store,
@@ -355,6 +360,7 @@ async def _ingest_claimed_document(
     *,
     storage_key: str,
     mime_type: str,
+    title: str,
     attempt: int,
     settings: Settings,
     object_store: ObjectStore,
@@ -423,6 +429,20 @@ async def _ingest_claimed_document(
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         return IngestionResult(document_id, DocumentStatus.READY, 0)
 
+    contexts = await enrich_chunks(
+        source=text,
+        chunks=tuple(ContextInput(c.text, c.char_start, c.char_end) for c in chunks),
+        title=title,
+        document_type=None,
+        source_format=mime_type,
+        source_fingerprint=hashlib.sha256(data).hexdigest(),
+        tenant_id=tenant_id,
+        document_id=document_id,
+        settings=settings,
+        gateway=None,
+        cache=None,
+    )
+
     try:
         embeddings = await _embed_in_batches(
             gateway,
@@ -449,12 +469,16 @@ async def _ingest_claimed_document(
     chunk_inputs = [
         ChunkInput(
             text=chunk.text,
+            context_text=context.deterministic_text,
+            generated_context=context.generated_text,
+            context_fingerprint=context.fingerprint,
+            context_metadata=context.metadata,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
             embedding=embedding.vector,
             embedding_fingerprint=settings.embedding_space_fingerprint,
         )
-        for chunk, embedding in zip(chunks, embeddings, strict=True)
+        for chunk, embedding, context in zip(chunks, embeddings, contexts, strict=True)
     ]
     try:
         async with tenant_session_scope(tenant_id) as session:

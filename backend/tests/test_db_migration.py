@@ -136,7 +136,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0046_message_source_provenance"]
+    assert list(script.get_heads()) == ["0047_chunk_context"]
     provenance = script.get_revision("0046_message_source_provenance")
     assert provenance is not None
     assert provenance.down_revision == "0045_embedding_contract"
@@ -2136,3 +2136,15 @@ def test_offline_direct_media_upload_migration_round_trips(
     assert "alter table citations drop column time_end_ms" in down
     assert "drop constraint fk_chunks_transcript_segment_document" in down
     assert "drop constraint fk_citations_chunk_transcript_segment" in down
+
+
+def test_offline_context_migration_round_trips(capsys):
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0046_message_source_provenance:0047_chunk_context", sql=True)
+    sql = capsys.readouterr().out.lower()
+    assert "add column context_text" in sql and "add column generated_context" in sql
+    command.downgrade(cfg, "0047_chunk_context:0046_message_source_provenance", sql=True)
+    sql = capsys.readouterr().out.lower()
+    assert "drop column context_text" in sql
