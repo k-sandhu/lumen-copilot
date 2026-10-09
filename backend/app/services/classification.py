@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from app.classification.taxonomy import _nodes
+from app.domain.classification import PROMPT_VERSION
 from app.domain.classification_features import ClassificationFeatures
 from app.domain.decisions import (
     ChoiceAnswer,
@@ -21,8 +22,6 @@ from app.domain.decisions import (
     PredicateQuestion,
 )
 from app.llm.decisions import DecisionError
-
-PROMPT_VERSION = "classification-1"
 
 
 class ClassifierGateway(Protocol):
@@ -99,6 +98,21 @@ async def classify(
     marginal = 1.0
     depth = 1
     while siblings:
+        singleton = len(siblings) == 1
+        if singleton and depth != 3:
+            selected = siblings[0]["id"]
+            result["levels"].append(
+                {
+                    "path": selected,
+                    "probabilities": {selected: 1.0},
+                    "confidence": 1.0,
+                    "conditional": True,
+                }
+            )
+            result.update(path=selected, confidence=marginal)
+            siblings = siblings[0].get("children", [])
+            depth += 1
+            continue
         question = ChoiceQuestion(
             "document_type",
             "Choose the document's business type from these siblings. "
@@ -109,7 +123,7 @@ async def classify(
                 for n in siblings
             ),
         )
-        questions: list[DecisionQuestion] = [question]
+        questions: list[DecisionQuestion] = [] if singleton else [question]
         # Facets are independent; ask all in a single request with the type level.
         if depth == 3:
             questions.extend(
@@ -131,7 +145,11 @@ async def classify(
                 total_cost_usd=None,
             )
             return result
-        answer = decision.answers["document_type"]
+        answer = (
+            ChoiceAnswer(siblings[0]["id"], {siblings[0]["id"]: 1.0}, 1.0)
+            if singleton
+            else decision.answers["document_type"]
+        )
         if not isinstance(answer, ChoiceAnswer) or answer.choice not in {n["id"] for n in siblings}:
             raise ValueError("invalid classifier answer")
         result["levels"].append(
