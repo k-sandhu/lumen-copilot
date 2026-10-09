@@ -23,6 +23,8 @@ def test_wrong_sign_or_value_does_not_count_as_covered_fact() -> None:
     assert score.fact_coverage == 2 / 3
     score = evaluate("North -120 kg", Gold(facts=("North", "120", "kg")))
     assert score.fact_coverage == 2 / 3
+    score = evaluate("North −120 kg", Gold(facts=("North", "120", "kg")))
+    assert score.fact_coverage == 2 / 3
 
 
 def test_corrupt_offsets_and_failed_documents_cannot_pass() -> None:

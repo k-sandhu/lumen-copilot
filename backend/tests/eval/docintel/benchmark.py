@@ -307,7 +307,7 @@ def run(*, external: Path | None = None, model_control: bool = False) -> dict[st
     parser = root / "app/ingestion/parsers.py"
     try:
         commit = subprocess.check_output(
-            ["git", "rev-parse", "origin/main"], cwd=root, text=True
+            ["git", "merge-base", "origin/main", "HEAD"], cwd=root, text=True
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         commit = "unavailable"

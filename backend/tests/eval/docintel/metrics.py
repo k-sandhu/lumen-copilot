@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_TOKEN = re.compile(r"[+-]?\d+(?:[.,]\d+)*|[^\W\d_]+|[^\s]", re.UNICODE)
+_TOKEN = re.compile(r"[+\-−]?\d+(?:[.,]\d+)*|[^\W\d_]+|[^\s]", re.UNICODE)
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class Score:
 
 
 def _tokens(text: str) -> tuple[str, ...]:
-    return tuple(_TOKEN.findall(text))
+    return tuple(token.replace("−", "-") for token in _TOKEN.findall(text))
 
 
 def _find(haystack: tuple[str, ...], needle: tuple[str, ...]) -> int:
