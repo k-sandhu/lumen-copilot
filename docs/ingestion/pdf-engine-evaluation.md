@@ -102,3 +102,23 @@ format coverage, script/font order and heuristic boxes may fail enterprise PDFs.
 Broader engine coverage/containment is tracked separately in #722. Owner chooses
 production budgets, evaluation thresholds and broader-engine strategy.
 Merge gate: hold until measured against the baseline evaluation; a human merges.
+
+
+## PDFium follow-up (#722)
+
+The candidate uses pinned PDFium through isolated process slots as described in
+[pdfium-engine-v1.md](pdfium-engine-v1.md). The interpreter remains an explicit
+baseline and Python remains live. The generated expanded report is
+[pdfium-generated-benchmark.json](pdfium-generated-benchmark.json); private-corpus
+numbers appear only as aggregate tables in the draft PR. Seven modern construct
+fixtures recover expected text with PDFium and pypdf; the interpreter recovers
+four, rejects object/xref streams and incremental updates, and reverses RTL.
+Existing layout/table gold remains green, including four non-table negatives.
+Scan/blank/mixed outcomes remain typed rather than promoted to empty success.
+These measurements do not establish production parity or approve cutover.
+
+[~] 2026-10-09: macOS native extraction fails closed before input because the
+required OS memory cap is unavailable on tested runners. Pinned macOS wheel
+artifact verification is separate from untrusted extraction. Residual risk:
+macOS developers must use Python until [#738](https://github.com/k-sandhu/lumen-copilot/issues/738)
+provides an owner-approved enforceable isolation mechanism.
