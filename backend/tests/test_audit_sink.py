@@ -35,7 +35,6 @@ from app.db.audit_transactions import (
     DurableAuditTransactions,
     UnsafeAuditTransactionTopology,
 )
-from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction, AuditActor, AuditEnvelopeError
 from app.domain.entities import AuditEvent, AuditOutcome
@@ -46,6 +45,7 @@ from app.services.audit import (
     emit_permission_denied,
 )
 from tests._audit_helpers import RecordingDurableAuditTransactions, denial_recorder
+from tests._db_helpers import copy_sqlite_schema
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -61,7 +61,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
             yield sess
@@ -337,7 +337,7 @@ async def test_connection_bound_caller_accepts_an_independent_owned_provider() -
     transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=1)
     try:
         async with caller_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         caller_factory = async_sessionmaker(caller_engine, expire_on_commit=False)
         async with caller_factory() as seed:
             tenant = await TenantRepository(seed).create(name="connection-bound")
@@ -526,7 +526,7 @@ async def test_timed_out_sink_releases_size_one_audit_capacity(
     )
     try:
         async with audit_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         audit_factory = async_sessionmaker(audit_engine, expire_on_commit=False)
         async with audit_factory() as seed:
             tenant = await TenantRepository(seed).create(name="bounded audit")
@@ -615,7 +615,7 @@ async def test_transient_pre_persistence_timeout_retries_the_same_event_identity
     transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=10)
     try:
         async with audit_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         audit_factory = async_sessionmaker(audit_engine, expire_on_commit=False)
         async with audit_factory() as seed:
             tenant = await TenantRepository(seed).create(name="retry audit")
@@ -685,7 +685,7 @@ async def test_second_pre_persistence_timeout_fails_closed_after_one_retry(
     transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=10)
     try:
         async with audit_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         audit_factory = async_sessionmaker(audit_engine, expire_on_commit=False)
         async with audit_factory() as seed:
             tenant = await TenantRepository(seed).create(name="double timeout audit")
@@ -763,7 +763,7 @@ async def test_post_commit_lost_ack_reconciles_exactly_once_and_leaves_no_commit
     transactions = DurableAuditTransactions(audit_engine, operation_timeout_seconds=10)
     try:
         async with audit_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         audit_factory = async_sessionmaker(audit_engine, expire_on_commit=False)
         async with audit_factory() as seed:
             tenant = await TenantRepository(seed).create(name="lost ack audit")
@@ -865,7 +865,7 @@ async def test_explicit_audit_identity_is_concurrency_safe_for_equal_payloads() 
     )
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as seed:
             tenant = await TenantRepository(seed).create(name="concurrent audit")
@@ -926,7 +926,7 @@ async def test_explicit_audit_identity_rejects_conflicting_payload(
     )
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
             tenant = await TenantRepository(session).create(name="conflict audit")
@@ -980,7 +980,7 @@ async def test_explicit_audit_identity_foreign_tenant_collision_fails_closed() -
     )
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         event_id = uuid.uuid4()
         async with factory() as session:
@@ -1066,7 +1066,7 @@ async def test_durable_audit_commit_failure_leaves_no_partial_or_duplicate_event
     try:
         for engine in (audit_engine, caller_engine):
             async with engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
+                await connection.run_sync(copy_sqlite_schema)
         audit_factory = async_sessionmaker(audit_engine, expire_on_commit=False)
         caller_factory = async_sessionmaker(caller_engine, expire_on_commit=False)
         async with audit_factory() as seed:

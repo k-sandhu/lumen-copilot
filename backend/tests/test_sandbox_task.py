@@ -79,9 +79,7 @@ def test_enqueue_swallows_broker_outage(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(celery_app, "connection_for_write", lambda: conn)
 
     published: list[object] = []
-    monkeypatch.setattr(
-        run_sandbox, "apply_async", lambda *a, **k: published.append((a, k))
-    )
+    monkeypatch.setattr(run_sandbox, "apply_async", lambda *a, **k: published.append((a, k)))
 
     # Must not raise; nothing is published on the unreachable broker.
     enqueue_code_run(uuid.uuid4(), uuid.uuid4())

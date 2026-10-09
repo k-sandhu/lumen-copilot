@@ -84,9 +84,7 @@ def test_cipher_is_imported_only_by_the_secrets_service() -> None:
     service and config imports the cipher.
     """
     allowed = {"app.services.secrets_service", "app.core.config", "app.core.crypto"}
-    importers = {
-        _module_name(p) for p in _app_py_files() if _imports_module(p, "app.core.crypto")
-    }
+    importers = {_module_name(p) for p in _app_py_files() if _imports_module(p, "app.core.crypto")}
     unexpected = importers - allowed
     assert unexpected == set(), (
         "app.core.crypto (the cipher) must be imported only by the secrets service "
@@ -122,9 +120,9 @@ def test_no_api_module_references_get_secret_plaintext() -> None:
     offenders = [
         _module_name(p) for p in _api_py_files() if _references_name(p, "get_secret_plaintext")
     ]
-    assert offenders == [], (
-        f"an app.api module references get_secret_plaintext (internal-only): {offenders}"
-    )
+    assert (
+        offenders == []
+    ), f"an app.api module references get_secret_plaintext (internal-only): {offenders}"
 
 
 def test_secret_ref_wire_shape_carries_no_value() -> None:
