@@ -94,3 +94,12 @@ with the chat citations UI, not here.
 Contract-true against focused tests. Live integration must confirm multipart CORS
 exposes ETag without credentials, completion returns one pending `Document`, signed
 media GETs support byte ranges, and transcript cursors/timestamps stay player-relative.
+
+## Extraction inspection
+
+Spec [0016](../../../../docs/specs/0016-extraction-diagnostics.md) adds administrator
+inspection in the document drawer. Render only diagnostics supplied by the
+permissioned API; frontend roles never grant document visibility. Counts describe
+the latest extraction attempt and may outlive a subsequent embedding failure.
+Blank parts are not classified as scans. Unknown table coverage stays unknown;
+native cell text presence does not prove row/column fidelity or visual completeness.

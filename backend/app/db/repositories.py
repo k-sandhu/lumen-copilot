@@ -2323,22 +2323,61 @@ class DocumentRepository(_TenantScopedRepository):
     async def set_extraction(
         self, document_id: UUID, *, text: str, locations: Sequence[SourceLocation]
     ) -> Document | None:
-        """Replace retained extraction metadata, scoped like the owning document."""
-        stmt = select(models.Document).where(
-            models.Document.tenant_id == self._tenant_id,
-            models.Document.id == document_id,
+        """Set exact retained source/map, preserving this attempt's other metadata."""
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+            )
+            .values(
+                source_text=text,
+                ingestion_metadata=self._merged_ingestion_metadata(
+                    {"source_locations": [location.to_dict() for location in locations]}
+                ),
+            )
+            .returning(models.Document)
+            .execution_options(populate_existing=True)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
-        if row is None:
-            return None
-        row.source_text = text
-        row.ingestion_metadata = {
-            **(row.ingestion_metadata or {}),
-            "source_locations": [location.to_dict() for location in locations],
-        }
         await self._session.flush()
-        await self._session.refresh(row)
-        return to_document(row)
+        return to_document(row) if row is not None else None
+
+    def _merged_ingestion_metadata(
+        self, values: dict[str, object]
+    ) -> ColumnElement[dict[str, object]]:
+        """Merge against the database's current JSON, never an ORM snapshot."""
+        if self._session.get_bind().dialect.name == "postgresql":
+            expression: ColumnElement[dict[str, object]] = func.coalesce(
+                models.Document.ingestion_metadata, cast({}, JSONB)
+            ).op("||")(cast(values, JSONB))
+            return expression
+        # SQLite's json_patch deletes null-valued keys. json_set preserves the
+        # explicit null that marks unknown diagnostics after a new attempt.
+        expression = func.coalesce(models.Document.ingestion_metadata, "{}")
+        for key, value in values.items():
+            expression = func.json_set(
+                expression, f"$.{json.dumps(key)}", func.json(json.dumps(value))
+            )
+        return expression
+
+    async def update_ingestion_metadata(
+        self, document_id: UUID, values: dict[str, object]
+    ) -> Document | None:
+        """Merge one attempt's metadata without losing its retained source map."""
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+            )
+            .values(ingestion_metadata=self._merged_ingestion_metadata(values))
+            .returning(models.Document)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        await self._session.flush()
+        return to_document(row) if row is not None else None
 
     async def claim_ingestion(
         self,

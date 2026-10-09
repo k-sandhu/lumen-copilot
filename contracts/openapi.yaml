@@ -3581,6 +3581,25 @@ components:
         char_start: { type: integer, minimum: 0 }
         char_end: { type: integer, minimum: 0 }
 
+    ExtractionDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [character_count, replacement_characters, suspicious_controls, blank_parts, table_probe, warnings]
+      description: Most recent native extraction attempt measurements and qualified text-presence heuristics; not proof of activated chunks or complete visual/table fidelity. Unknown coverage fields may be absent or null. Administrator-only within existing document visibility.
+      properties:
+        character_count: { type: integer, minimum: 0 }
+        replacement_characters: { type: integer, minimum: 0 }
+        suspicious_controls: { type: integer, minimum: 0 }
+        source_part_kind: { type: [string, "null"], enum: [page, slide, sheet, null] }
+        total_parts: { type: [integer, "null"], minimum: 0 }
+        parts_with_text: { type: [integer, "null"], minimum: 0 }
+        blank_parts: { type: array, items: { type: integer, minimum: 1 } }
+        table_probe: { type: string, enum: [native_tables, sheet_cells, unavailable] }
+        table_regions: { type: [integer, "null"], minimum: 0 }
+        table_cells: { type: [integer, "null"], minimum: 0 }
+        missing_table_cells: { type: [integer, "null"], minimum: 0 }
+        warnings: { type: array, items: { type: string } }
+
     DocumentKind:
       type: string
       description: Processing/viewer family derived from the validated MIME type.
@@ -3609,6 +3628,11 @@ components:
           type: array
           description: Permissioned source-part map. Empty or absent means unknown until re-ingestion; never inferred for legacy documents.
           items: { $ref: "#/components/schemas/SourceLocation" }
+        extraction_diagnostics:
+          oneOf:
+            - { $ref: "#/components/schemas/ExtractionDiagnostics" }
+            - { type: "null" }
+          description: Null for members or unknown legacy metadata; only visible administrators receive diagnostics. Administrator role does not widen document permissions.
         error:
           type: [string, "null"]
           description: Failure reason when status is failed.

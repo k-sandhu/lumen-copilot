@@ -18,6 +18,7 @@ import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
 import { SourceInspector, StatusDot, type SourcePassage } from '@/ui';
 import { useFocusTrap } from '@/lib/useFocusTrap';
 import { formatBytes, fileKind, ingestSteps, type IngestStep } from '../model/presentation';
+import { DocumentDiagnostics } from './DocumentDiagnostics';
 
 interface DocumentViewerProps {
   doc: Document;
@@ -118,6 +119,10 @@ export function DocumentViewer({ doc, citedPassage, onClose }: DocumentViewerPro
               </p>
             )}
           </section>
+
+          {doc.extraction_diagnostics && (
+            <DocumentDiagnostics diagnostics={doc.extraction_diagnostics} />
+          )}
 
           {/* Cited passage, when opened from a citation */}
           {citedPassage && (

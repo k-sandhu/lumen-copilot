@@ -71,6 +71,7 @@ from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, Tran
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
+from app.ingestion.diagnostics import build_extraction_diagnostics
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
     VIDEO_MIME_TYPES,
@@ -231,6 +232,7 @@ async def ingest_document_async(
             storage_key = document.storage_key
             mime_type = document.mime_type
             attempt = document.ingestion_attempts
+            await documents.update_ingestion_metadata(document_id, {"extraction_diagnostics": None})
     except SQLAlchemyError as exc:
         raise IngestionError(
             "Document ingestion could not claim the database row.",
@@ -375,6 +377,7 @@ async def _ingest_claimed_document(
     try:
         parsed = parse_document_with_locations(data, mime_type=mime_type)
         text = parsed.text
+        diagnostics = build_extraction_diagnostics(data, mime_type=mime_type, parsed=parsed)
     except DocumentParseError as exc:
         return await _finalize_failure(
             tenant_id,
@@ -383,6 +386,13 @@ async def _ingest_claimed_document(
             expected_attempt=attempt,
             code="document_parse_error",
             correlation_id=correlation_id,
+        )
+
+    # Inspection survives a later model/index fault; retain text/maps only with
+    # replacement chunks, so historical exact slices cannot be retargeted here.
+    async with tenant_session_scope(tenant_id) as session:
+        await DocumentRepository(session, tenant_id).update_ingestion_metadata(
+            document_id, {"extraction_diagnostics": diagnostics.to_dict()}
         )
 
     chunks = chunk_text(

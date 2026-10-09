@@ -63,6 +63,23 @@ class SourceLocationResponse(BaseModel):
     char_end: int = Field(ge=0)
 
 
+class ExtractionDiagnosticsResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    character_count: int = Field(ge=0)
+    replacement_characters: int = Field(ge=0)
+    suspicious_controls: int = Field(ge=0)
+    source_part_kind: Literal["page", "slide", "sheet"] | None = None
+    total_parts: int | None = Field(default=None, ge=0)
+    parts_with_text: int | None = Field(default=None, ge=0)
+    blank_parts: list[int]
+    table_probe: Literal["native_tables", "sheet_cells", "unavailable"]
+    table_regions: int | None = Field(default=None, ge=0)
+    table_cells: int | None = Field(default=None, ge=0)
+    missing_table_cells: int | None = Field(default=None, ge=0)
+    warnings: list[str]
+
+
 class DocumentResponse(BaseModel):
     """``#/components/schemas/Document`` — the wire projection of a document."""
 
@@ -82,6 +99,7 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     source_locations: list[SourceLocationResponse] = Field(default_factory=list)
+    extraction_diagnostics: ExtractionDiagnosticsResponse | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -132,6 +150,11 @@ def _to_response(view: DocumentView) -> DocumentResponse:
             )
             for location in d.source_locations
         ],
+        extraction_diagnostics=(
+            ExtractionDiagnosticsResponse.model_validate(view.extraction_diagnostics.to_dict())
+            if view.extraction_diagnostics is not None
+            else None
+        ),
     )
 
 
@@ -162,6 +185,7 @@ def _build_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
+        roles=principal.roles,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
         denials=authenticated_denial_context(
@@ -215,6 +239,7 @@ async def list_documents(
         status=status_filter,
         filename_query=q,
     )
+    await session.commit()
     return _to_list_response(page)
 
 
@@ -249,6 +274,7 @@ async def get_document(
     view = await service.get(document_id)
     if view is None:
         raise NotFoundError("Document not found.")
+    await session.commit()
     return _to_response(view)
 
 

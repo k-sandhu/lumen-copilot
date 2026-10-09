@@ -19,6 +19,7 @@ from app.db.repositories import (
 from app.db.session import dispose_engine, session_scope, tenant_session_scope
 from app.domain.entities import Role
 from app.domain.llm import Embedding
+from app.ingestion.diagnostics import build_extraction_diagnostics
 from app.ingestion.parsers import parse_document_with_locations
 from app.tasks.ingest import ingest_document_async
 from tests.test_ingestion_locations import _make_pdf_pages_with_blank_middle, _NoopIndexStore
@@ -89,6 +90,12 @@ async def test_postgres_provenance_round_trip_is_tenant_scoped() -> None:
             assert retained is not None
             assert retained.source_text == parsed.text
             assert retained.source_locations == parsed.locations
+            expected = build_extraction_diagnostics(
+                data, mime_type="application/pdf", parsed=parsed
+            )
+            assert (retained.ingestion_metadata or {}).get(
+                "extraction_diagnostics"
+            ) == expected.to_dict()
             chunks = await ChunkRepository(session, tenant.id).list_for_document(document.id)
             assert chunks
             for chunk in chunks:
