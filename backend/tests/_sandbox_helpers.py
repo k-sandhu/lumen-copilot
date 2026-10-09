@@ -7,6 +7,7 @@ from app.core.config import Settings
 
 def sandbox_settings(**overrides: object) -> Settings:
     base: dict[str, object] = {
+        "ENVIRONMENT": "local",
         "DATABASE_URL": "sqlite+aiosqlite://",
         "REDIS_URL": "redis://localhost:6379/0",
         "CELERY_BROKER_URL": "redis://localhost:6379/1",

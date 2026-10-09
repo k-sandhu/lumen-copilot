@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.db import session as db_session
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -35,6 +34,7 @@ from app.db.repositories import (
 )
 from app.domain.entities import MessageRole, Role
 from app.domain.llm import ChatMessage, Completion, TokenUsage
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -64,7 +64,7 @@ async def ctx() -> AsyncIterator[_Ctx]:
     prev_maker = db_session._sessionmaker  # noqa: SLF001 — the task-test seam
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         # The summarize task opens sessions via the module-global maker
         # (``tenant_session_scope``); point it at this test's SQLite.
@@ -702,7 +702,7 @@ async def six_message_ctx() -> AsyncIterator[_Ctx]:
     prev_maker = db_session._sessionmaker  # noqa: SLF001
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         db_session._sessionmaker = factory  # noqa: SLF001
         async with factory() as seed:
@@ -854,7 +854,7 @@ async def test_a_completion_over_the_floor_but_tiny_for_many_turns_is_refused(
     from app.tasks import summarize as task_module
 
     class _Terse(_GarbageGateway):
-        payload = "Talked about stuff"  # 18 chars: over the 16 floor, under the 32 multi-turn bar
+        payload = "Talked about stuf"  # 18 chars: over the 16 floor, under the 32 multi-turn bar
 
     monkeypatch.setattr(task_module, "LLMGateway", _Terse)
     monkeypatch.setattr(task_module, "get_settings", lambda: _summary_settings(keep=4, min_batch=4))

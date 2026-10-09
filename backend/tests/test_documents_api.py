@@ -45,7 +45,6 @@ from app.api.deps import get_db_session, get_object_store_dep, get_settings_dep
 from app.auth import hash_password
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkInput,
@@ -62,6 +61,7 @@ from app.main import create_app
 from app.services.document_service import reassemble_chunk_texts
 from app.storage.keys import assert_key_owned_by, build_key
 from app.storage.object_store import StoredObject
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -146,7 +146,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")

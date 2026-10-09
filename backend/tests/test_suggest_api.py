@@ -29,7 +29,6 @@ from sqlalchemy.pool import StaticPool
 import app.api.v1.search as search_module
 from app.api.deps import get_db_session
 from app.auth import hash_password
-from app.db.base import Base
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
@@ -40,6 +39,7 @@ from app.db.repositories import (
 from app.domain.entities import DocumentStatus, Role
 from app.domain.retrieval import RetrievedPassage
 from app.main import create_app
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models as models  # noqa: E402  isort: skip
 
@@ -82,7 +82,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
