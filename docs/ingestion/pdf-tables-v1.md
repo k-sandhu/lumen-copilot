@@ -1,6 +1,6 @@
 # PDF table candidate — issue #672
 
-Builds on the bounded PDF engine in #671 / PR #724 and ADR-0026. It adds no
+Builds on the bounded PDF engine in #671 / PR #724 and ADR-0027. It adds no
 production cutover. Canonical table roles and geometry remain heuristic.
 
 Acceptance:
