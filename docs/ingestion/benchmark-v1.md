@@ -8,7 +8,9 @@ baseline revision, timing, throughput and process peak RSS. Runtime accounted-me
 remain separate from these process measurements.
 Each parser run is isolated in a subprocess for per-document peak RSS. Output
 contains metrics and safe codes, not source text. `--external PATH/manifest.json` accepts
-an authorized corpus manifest with annotations; never commits its bytes.
+an authorized corpus manifest with annotations; never commits its bytes. Paths must
+resolve inside the manifest directory. The reader loads one fixture at a time and
+hashes the same streamed bytes used for measurement.
 Files above the 32 MiB in-memory benchmark profile are streamed for checksums and
 reported budget failures rather than loaded wholly. Larger streaming profiles
 require a landed parser and independently configured runtime limits.

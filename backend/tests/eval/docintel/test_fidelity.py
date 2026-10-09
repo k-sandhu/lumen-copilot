@@ -157,3 +157,37 @@ def test_wrong_native_page_identity_cannot_pass_with_a_perfect_count() -> None:
         require_fidelity(
             evaluate(text, gold, source_parts=(("page", 1, None, 0, 100),)), format_name="pdf"
         )
+
+
+def test_external_corpus_is_lazy_and_rejects_escape(tmp_path, monkeypatch) -> None:
+    import json
+    from pathlib import Path
+
+    from tests.eval.docintel.benchmark import _external
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "first.txt").write_text("Intro", encoding="utf-8")
+    (root / "second.txt").write_text("PageTwo", encoding="utf-8")
+    manifest = root / "manifest.json"
+    rows = [
+        {"path": name, "format": "text", "mime": "text/plain", "gold": {}}
+        for name in ("first.txt", "second.txt")
+    ]
+    manifest.write_text(json.dumps(rows), encoding="utf-8")
+    opened = []
+    real_open = Path.open
+
+    def observed(path, *args, **kwargs):
+        opened.append(path.name)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observed)
+    iterator = iter(_external(manifest))
+    assert next(iterator).data == b"Intro"
+    assert "second.txt" not in opened
+    (tmp_path / "outside.txt").write_text("private", encoding="utf-8")
+    rows[0]["path"] = "../outside.txt"
+    manifest.write_text(json.dumps(rows[:1]), encoding="utf-8")
+    with pytest.raises(ValueError):
+        list(_external(manifest))

@@ -10,7 +10,9 @@ import platform
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -187,60 +189,67 @@ def _isolated(fixture: Fixture, arm: str, *, threads: int | None = None) -> dict
     }
 
 
-def _external(manifest: Path) -> list[Fixture]:
-    # Caller supplies only authorized local files and annotations. Report never includes paths/text.
+def _external(manifest: Path) -> Iterator[Fixture]:
+    # Caller supplies authorized files; reports never include paths/text.
+    manifest = manifest.resolve()
+    root = manifest.parent
     if manifest.stat().st_size > 4 * 1024 * 1024:
         raise ValueError("external manifest exceeds 4 MiB annotation budget")
     rows = json.loads(manifest.read_text(encoding="utf-8"))
-    result = []
+    if not isinstance(rows, list):
+        raise ValueError("external manifest must contain a fixture list")
     for row in rows:
-        if not {"path", "format", "mime", "gold"} <= row.keys():
+        if not isinstance(row, dict) or not {"path", "format", "mime", "gold"} <= row.keys():
             raise ValueError("external fixtures require path, format, mime and gold annotations")
-        path = manifest.parent / row["path"]
+        path = (root / row["path"]).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise ValueError("external fixture must be a file inside the corpus directory")
         digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        size = 0
         with path.open("rb") as stream:
             while block := stream.read(1024 * 1024):
                 digest.update(block)
+                size += len(block)
+                if size <= _MAX_INPUT:
+                    chunks.append(block)
+                else:
+                    chunks.clear()
         ident = "external-" + digest.hexdigest()
-        if path.stat().st_size > _MAX_INPUT:
+        if size > _MAX_INPUT:
             # Budget rows are kept without reading oversized files into memory.
-            result.append(
-                Fixture(
-                    ident,
-                    row["format"],
-                    row["mime"],
-                    b"",
-                    Gold(),
-                    case="external-input-budget",
-                    expected="failed",
-                    fidelity_eligible=False,
-                )
+            yield Fixture(
+                ident,
+                row["format"],
+                row["mime"],
+                b"",
+                Gold(),
+                case="external-input-budget",
+                expected="failed",
+                fidelity_eligible=False,
             )
         else:
             g = row["gold"]
-            result.append(
-                Fixture(
-                    ident,
-                    row["format"],
-                    row["mime"],
-                    path.read_bytes(),
-                    Gold(
-                        tuple(g.get("facts", ())),
-                        tuple(tuple(v) for v in g.get("associations", ())),
-                        tuple(g.get("order", ())),
-                        g.get("native_regions", 0),
-                        tuple(tuple(pair) for pair in g.get("headers", ())),
-                        tuple(tuple(region) for region in g.get("regions", ())),
-                    ),
-                    language=row.get("language", "unknown"),
-                    case="external",
-                )
+            yield Fixture(
+                ident,
+                row["format"],
+                row["mime"],
+                b"".join(chunks),
+                Gold(
+                    tuple(g.get("facts", ())),
+                    tuple(tuple(v) for v in g.get("associations", ())),
+                    tuple(g.get("order", ())),
+                    g.get("native_regions", 0),
+                    tuple(tuple(pair) for pair in g.get("headers", ())),
+                    tuple(tuple(region) for region in g.get("regions", ())),
+                ),
+                language=row.get("language", "unknown"),
+                case="external",
             )
-    return result
 
 
 def run(*, external: Path | None = None, model_control: bool = False) -> dict[str, Any]:
-    fixtures = corpus() + (_external(external) if external else [])
+    fixtures = chain(corpus(), _external(external) if external else ())
     rows = []
     for fixture in fixtures:
         for arm in ("python-baseline", "native-extraction"):
