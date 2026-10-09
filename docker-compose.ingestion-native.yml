@@ -1,0 +1,8 @@
+# Opt-in worker resource profile; no parser cutover is enabled here (#666).
+# Use only after measured admission sizing; never multiply Celery and rayon pools.
+services:
+  worker:
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--queues=celery", "--concurrency=${INGESTION_WORKER_CONCURRENCY:-1}"]
+    environment:
+      NATIVE_INGESTION_THREADS: ${NATIVE_INGESTION_THREADS:-2}
+      NATIVE_INGESTION_MAX_DOCUMENTS: ${NATIVE_INGESTION_MAX_DOCUMENTS:-1}

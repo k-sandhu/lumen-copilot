@@ -157,7 +157,8 @@ services:
 
   backend:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     environment:
       # Always prefer the host's OPENROUTER_API_KEY (so an exported/User env var
@@ -307,7 +308,8 @@ services:
 
   worker:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     # General tasks only. Media is isolated below so FFmpeg/provider work cannot
     # consume every slot needed by chat runs, connector sync, and maintenance.
@@ -353,7 +355,8 @@ services:
   # raise the cap explicitly after sizing those resources.
   media-worker:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     command:
       - "celery"
@@ -388,7 +391,8 @@ services:
   # A single beat process is correct (RedBeat holds a Redis leader lock).
   beat:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     command:
       - "celery"

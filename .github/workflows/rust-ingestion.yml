@@ -1,0 +1,111 @@
+name: Rust ingestion foundation
+on:
+  pull_request:
+    paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+  push:
+    paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+concurrency:
+  group: rust-ingestion-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUSTUP_TOOLCHAIN: '1.99.0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned tools
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          python -m pip install uv==0.11.18 maturin==1.15.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cargo-target
+            ~/.cache/uv
+            ~/AppData/Local/uv/cache
+          key: rust-${{ runner.os }}-1.99-py312-${{ hashFiles('rust/Cargo.lock', 'backend/pyproject.toml') }}
+      - name: Rust fast gates
+        working-directory: rust
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+      - name: License and advisory gate
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo deny --config deny.toml check licenses advisories
+      - name: Build and exercise wheel
+        run: |
+          uv sync --project backend --extra dev --extra native
+          uv run --project backend --extra dev --extra native python -c "import lumen_docintel; assert lumen_docintel.core_version() == '0.1.0'"
+          uv run --project backend --extra dev --extra native python -c "import glob,pytest; raise SystemExit(pytest.main(glob.glob('backend/tests/test_native_*.py') + ['backend/tests/test_connector_conformance.py::test_settings_classification_is_complete', 'backend/tests/test_connector_conformance.py::test_settings_completeness_guard_bites_on_an_unclassified_field', '-m', 'not live']))"
+      - name: Release wheel
+        run: maturin build --release --locked --manifest-path rust/crates/lumen-docintel-py/Cargo.toml --interpreter python --out wheelhouse
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ runner.os }}
+          path: wheelhouse/*.whl
+
+  fidelity-benchmark:
+    needs: native
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned tools
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          python -m pip install uv==0.11.18
+      - name: Synthetic fidelity gate and isolated baseline report
+        working-directory: backend
+        env:
+          CARGO_BUILD_JOBS: '2'
+          RUSTUP_TOOLCHAIN: '1.99.0'
+          RUN_LIVE: '0'
+          OPENROUTER_API_KEY: ''
+        run: |
+          uv sync --extra dev --extra native
+          uv run --extra dev --extra native ruff check tests/eval/docintel
+          uv run --extra dev --extra native pytest tests/eval/docintel -m "not live"
+          uv run --extra dev --extra native python -m tests.eval.docintel.benchmark --report docintel-report.json --model-control
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docintel-fidelity-report
+          path: backend/docintel-report.json
+
+  docker-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build on isolated runner with sufficient RAM
+        run: |
+          available_mib=$(awk '/MemAvailable/ {print int($2 / 1024)}' /proc/meminfo)
+          echo "Available MiB: ${available_mib}"
+          if [ "${available_mib}" -lt 6000 ]; then
+            echo 'Docker packaging not verified: below 6000 MiB available RAM.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          docker build --file backend/Dockerfile --tag lumen-docintel-ci:local .
