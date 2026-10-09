@@ -57,6 +57,19 @@ fn core_version() -> &'static str {
 }
 
 #[pyfunction]
+fn extract_open_document(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    format_name: String,
+    budget_json: String,
+) -> PyResult<String> {
+    let bytes = data.as_bytes();
+    compute(py, || {
+        lumen_docintel_core::formats::extract_open_document_json(bytes, &format_name, &budget_json)
+    })
+}
+
+#[pyfunction]
 fn _test_error(py: Python<'_>) -> PyResult<()> {
     compute(py, || Err(CoreError::InvalidInput))
 }
@@ -297,6 +310,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DocumentSession>()?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_open_document, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(_test_panic, m)?)?;
     m.add_function(wrap_pyfunction!(_test_wait, m)?)?;

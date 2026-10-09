@@ -80,6 +80,76 @@ class CancellationHandle:
 _DEFAULT_BUDGET = RuntimeBudget()
 
 
+class NativeFormatDisabledError(ValueError):
+    """A new candidate format has not been accepted in configuration."""
+
+
+def open_document_route(format_name: str, *, settings: Settings) -> str:
+    """Candidate switches cannot promote an unevaluated format to live parsing."""
+    if format_name == "odt":
+        accepted, shadow, cutover = (
+            settings.native_odt_accept,
+            settings.native_odt_shadow,
+            settings.native_odt_cutover,
+        )
+    elif format_name == "rtf":
+        accepted, shadow, cutover = (
+            settings.native_rtf_accept,
+            settings.native_rtf_shadow,
+            settings.native_rtf_cutover,
+        )
+    else:
+        return "unsupported"
+    if not accepted:
+        return "unsupported"
+    if cutover:
+        return "promotion_pending"
+    return "native_shadow" if shadow else "candidate_only"
+
+
+def extract_open_document(
+    data: bytes,
+    *,
+    format_name: str,
+    settings: Settings,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+) -> CanonicalDocument:
+    """Explicit evaluation entry; immutable domain output, no activation."""
+    if open_document_route(format_name, settings=settings) == "unsupported":
+        raise NativeFormatDisabledError("native candidate format is disabled")
+    extension = _extension()
+    if extension is None or not callable(getattr(extension, "extract_open_document", None)):
+        raise NativeUnavailableError("native candidate extension is unavailable")
+    return CanonicalDocument.from_render_json(
+        extension.extract_open_document(data, format_name, json.dumps(asdict(budget)))
+    )
+
+
+def shadow_open_document(
+    data: bytes,
+    *,
+    format_name: str,
+    python_text: str,
+    settings: Settings,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+) -> tuple[str, dict[str, object]]:
+    """Return Python evidence unchanged and bounded content-free comparison."""
+    if open_document_route(format_name, settings=settings) != "native_shadow":
+        return python_text, {"format": format_name, "candidate_outcome": "disabled"}
+    try:
+        candidate = extract_open_document(
+            data, format_name=format_name, settings=settings, budget=budget
+        )
+    except Exception:  # noqa: BLE001 — shadow failures cannot alter live evidence
+        return python_text, {"format": format_name, "candidate_outcome": "error"}
+    return python_text, {
+        "format": format_name,
+        "candidate_outcome": "computed",
+        "text_equal": candidate.rendered_text == python_text,
+        "candidate_chars": len(candidate.rendered_text),
+    }
+
+
 class NativeExecutor:
     """Create lazily AFTER Celery forks; reuse one executor per worker child."""
 

@@ -26,6 +26,7 @@ tokenizers = { version = "=0.23.2", default-features = false, features = ["fancy
 sha2 = "=0.10.9"
 unicode-normalization = "=0.1.25"
 whatlang = { version = "=0.18.0", default-features = false }
+quick-xml = "=0.42.0"
 
 [profile.release]
 panic = "unwind"

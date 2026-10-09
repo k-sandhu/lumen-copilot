@@ -23,6 +23,7 @@ tokenizers.workspace = true
 sha2.workspace = true
 unicode-normalization.workspace = true
 whatlang.workspace = true
+quick-xml.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
