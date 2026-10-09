@@ -1,6 +1,6 @@
 # DOCX candidate extraction v1
 
-Tracking: #673. Depends on ADR-0026 and canonical schema v1. This pure candidate
+Tracking: #673. Depends on ADR-0027 and canonical schema v1. This pure candidate
 does not change Python parsing, upload admission, persistence or cutover flags.
 
 Acceptance follows issue #673 and spec 0010: body order, sparse and merged grid
