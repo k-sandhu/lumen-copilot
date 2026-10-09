@@ -2,7 +2,7 @@
 use crate::CoreError;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
+use std::cell::Cell as ScalarCounter;
 use std::collections::{BTreeMap, HashMap};
 
 pub const MAX_JSON_BYTES: usize = 32 * 1024 * 1024;
@@ -374,12 +374,12 @@ fn check_json_shape(input: &str) -> Result<(), CoreError> {
         .checked_sub(32 * 1024 * 1024 + input.len().saturating_mul(2))
         .ok_or(CoreError::Budget)?;
     let max_nodes = (remaining / 512).min(100_000);
-    let count = Cell::new(0usize);
-    let exhausted = Cell::new(false);
+    let count = ScalarCounter::new(0usize);
+    let exhausted = ScalarCounter::new(false);
     #[derive(Clone, Copy)]
     struct Shape<'a> {
-        count: &'a Cell<usize>,
-        exhausted: &'a Cell<bool>,
+        count: &'a ScalarCounter<usize>,
+        exhausted: &'a ScalarCounter<bool>,
         limit: usize,
     }
     impl<'de> DeserializeSeed<'de> for Shape<'_> {
