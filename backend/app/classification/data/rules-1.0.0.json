@@ -1,0 +1,7 @@
+{
+  "taxonomy_version": "1.0.0",
+  "rules_version": "1",
+  "rules": [
+    {"id": "safety-sheet-heading-v1", "path": "safety/hazards/safety_data_sheet", "all_signatures": ["safety data sheet", "hazard identification", "first-aid measures", "accidental release measures"]}
+  ]
+}
