@@ -1,6 +1,6 @@
 # Document taxonomy releases
 
-ADR-0027 / #689 owns this backend reference data; #693 will define its API surface.
+ADR-0028 / #689 owns this backend reference data; #693 will define its API surface.
 Version 1.0.0 contains 17 domains (including `other`), three-level families/types,
 an optional NDA subtype decision and 10 independent evidence facets. Select by
 primary business purpose, not filename extension. More specific domains take

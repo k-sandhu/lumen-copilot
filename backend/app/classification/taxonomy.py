@@ -1,4 +1,4 @@
-"""ADR-0027 taxonomy loader and release compatibility validation."""
+"""ADR-0028 taxonomy loader and release compatibility validation."""
 
 from __future__ import annotations
 

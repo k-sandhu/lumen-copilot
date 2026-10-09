@@ -1,4 +1,4 @@
-"""ADR-0027 / #689: hierarchy, safe unknowns and immutable ID history."""
+"""ADR-0028 / #689: hierarchy, safe unknowns and immutable ID history."""
 
 import copy
 
