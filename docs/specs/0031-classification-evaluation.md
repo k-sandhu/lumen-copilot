@@ -11,6 +11,8 @@ Metric definitions proposed for owner approval:
   with that depth. Abstentions and missing deeper levels remain incorrect in the
   denominator; wrong-parent errors propagate. Report sibling-conditional confidence
   calibration separately from the product confidence for the complete path.
+  Conditional ECE includes deeper predictions only when their parent is correct;
+  coverage exposes the excluded wrong-parent/abstaining examples.
 - Facet positive-class F1 is macro-averaged across supported labels with nonzero
   TP/FP/FN denominator. Unknown gold is excluded; unknown predictions on positive
   gold are false negatives. Report unknown prediction rate/coverage and unsupported
@@ -27,6 +29,9 @@ Metric definitions proposed for owner approval:
 The baseline gate requires an explicit top-level accuracy tolerance and matching
 corpus fingerprint, metric definition/bin count, taxonomy and sample count. A drop
 greater than the tolerance fails. No default tolerance exists.
+The corpus fingerprint covers labels and bounded input evidence, excluding response
+recordings so that changed predictions remain comparable. Recording hashes are
+separate provenance. Mode/model/method/prompt/rule versions remain in the report.
 
 Calibration requires an owner-approved configuration (identity/date, corpus hash,
 bin count, regression tolerance, review error target, minimum support and confidence

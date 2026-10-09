@@ -21,6 +21,14 @@
             "regions": [],
             "role": "representative",
             "text": "Synthetic invoice INV-001. Supplier: Example Co. Item A quantity 2 unit price 10 total 20. Amount due 20."
+          },
+          {
+            "block_id": "t1",
+            "char_end": 168,
+            "char_start": 107,
+            "regions": [],
+            "role": "table_headers",
+            "text": "Item | Quantity | Unit price | Amount\nExample A | 2 | 10 | 20"
           }
         ],
         "extraction_id": null,
@@ -36,9 +44,9 @@
         "schema_version": 1,
         "signatures": [],
         "source_sha256": null,
-        "table_density": 0.0,
+        "table_density": 0.5,
         "taxonomy_version": "1.0.0",
-        "token_count": 25
+        "token_count": 41
       },
       "recordings": {
         "decisions": {
@@ -1590,32 +1598,6 @@
               },
               {
                 "answers": {
-                  "document_type": {
-                    "choice": "other/other",
-                    "probabilities": {
-                      "other/other": 0.65
-                    },
-                    "confidence": 0.65,
-                    "type": "choice"
-                  }
-                },
-                "model": "synthetic-recording",
-                "usage": {
-                  "input_tokens": 40,
-                  "output_tokens": 20,
-                  "cost": 1e-05
-                }
-              },
-              {
-                "answers": {
-                  "document_type": {
-                    "choice": "other/other/other",
-                    "probabilities": {
-                      "other/other/other": 0.65
-                    },
-                    "confidence": 0.65,
-                    "type": "choice"
-                  },
                   "scanned": {
                     "noul": 0.5,
                     "type": "noul"
@@ -1726,14 +1708,6 @@
               },
               {
                 "answers": {
-                  "document_type": {
-                    "choice": "financial/other/other",
-                    "probabilities": {
-                      "financial/other/other": 0.65
-                    },
-                    "confidence": 0.65,
-                    "type": "choice"
-                  },
                   "scanned": {
                     "noul": 0.5,
                     "type": "noul"
@@ -1824,30 +1798,6 @@
               },
               {
                 "answers": {
-                  "document_type": {
-                    "choice": "other/other",
-                    "probabilities": {
-                      "other/other": 0.65
-                    },
-                    "confidence": 0.65
-                  }
-                },
-                "model": "synthetic-recording",
-                "usage": {
-                  "input_tokens": 40,
-                  "output_tokens": 20,
-                  "cost": 1e-05
-                }
-              },
-              {
-                "answers": {
-                  "document_type": {
-                    "choice": "other/other/other",
-                    "probabilities": {
-                      "other/other/other": 0.65
-                    },
-                    "confidence": 0.65
-                  },
                   "scanned": {
                     "probability": 0.5
                   },
@@ -1926,30 +1876,6 @@
               },
               {
                 "answers": {
-                  "document_type": {
-                    "choice": "other/other",
-                    "probabilities": {
-                      "other/other": 0.65
-                    },
-                    "confidence": 0.65
-                  }
-                },
-                "model": "synthetic-recording",
-                "usage": {
-                  "input_tokens": 40,
-                  "output_tokens": 20,
-                  "cost": 1e-05
-                }
-              },
-              {
-                "answers": {
-                  "document_type": {
-                    "choice": "other/other/other",
-                    "probabilities": {
-                      "other/other/other": 0.65
-                    },
-                    "confidence": 0.65
-                  },
                   "scanned": {
                     "probability": 0.5
                   },

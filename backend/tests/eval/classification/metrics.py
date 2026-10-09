@@ -71,9 +71,17 @@ def score(samples: list[Sample], *, bins: int) -> dict[str, Any]:
         accuracy.append(mean(correct))
         denominators.append(len(relevant))
         confidence_values = []
+        # These are sibling-conditional probabilities: condition on a correct parent.
         for s, ok in zip(relevant, correct, strict=True):
             levels = s.result.get("levels", [])
-            if len(levels) >= level and levels[level - 1].get("confidence") is not None:
+            parent_correct = level == 1 or _prefix(s.result.get("path"), level - 1) == _prefix(
+                s.gold_path, level - 1
+            )
+            if (
+                parent_correct
+                and len(levels) >= level
+                and levels[level - 1].get("confidence") is not None
+            ):
                 confidence_values.append((_probability(levels[level - 1]["confidence"]), ok))
         level_ece.append(_ece(confidence_values, bins))
         level_coverage.append(len(confidence_values) / len(relevant))
@@ -121,7 +129,15 @@ def score(samples: list[Sample], *, bins: int) -> dict[str, Any]:
     if any(not math.isfinite(value) or value < 0 for value in latencies):
         raise ValueError("invalid latency")
     costs = [_cost(s.result.get("total_cost_usd")) for s in samples]
-    known_cost = sum((c for c in costs if c is not None), Decimal(0))
+    known_cost = sum(
+        (
+            _cost(s.result.get("evaluation_known_cost_usd"))
+            if s.result.get("evaluation_known_cost_usd") is not None
+            else c or Decimal(0)
+            for s, c in zip(samples, costs, strict=True)
+        ),
+        Decimal(0),
+    )
     f1_values = [value for value in facets.values() if value is not None]
     return {
         "metric_definition": "classification-eval-1",
@@ -147,6 +163,9 @@ def score(samples: list[Sample], *, bins: int) -> dict[str, Any]:
         "latency_p95_ms": latencies[math.ceil(0.95 * len(latencies)) - 1] if latencies else None,
         "known_cost_usd": str(known_cost),
         "unknown_cost_documents": costs.count(None),
+        "unknown_cost_attempts": sum(
+            s.result.get("evaluation_unknown_cost_attempts", 0) for s in samples
+        ),
         "cost_usd": str(known_cost) if None not in costs else None,
     }
 
@@ -154,7 +173,7 @@ def score(samples: list[Sample], *, bins: int) -> dict[str, Any]:
 def baseline_gate(current: dict[str, Any], previous: dict[str, Any], *, tolerance: float) -> None:
     _probability(tolerance)
     for key in ("corpus_sha256", "taxonomy_version", "bins", "sample_count", "metric_definition"):
-        if current.get(key) != previous.get(key):
+        if current.get(key) is None or previous.get(key) is None or current[key] != previous[key]:
             raise ValueError(f"baseline {key} mismatch")
     candidate = _probability(current["per_level_accuracy"][0])
     baseline = _probability(previous["per_level_accuracy"][0])
@@ -193,17 +212,27 @@ def calibration(
         raise ValueError("invalid calibration configuration")
     if any(s.source != "authorized_private" for s in samples):
         raise ValueError("synthetic diagnostics cannot approve release calibration")
+    if any(s.result.get("taxonomy_version") != taxonomy_version for s in samples):
+        raise ValueError("calibration taxonomy mismatch")
     if len({s.case_id for s in samples}) != len(samples):
         raise ValueError("calibration and held-out examples must be distinct")
     score(samples, bins=config["bins"])
-    groups = {(s.result.get("method"), s.result.get("requested_model")) for s in samples}
+
+    def identity(sample: Sample):
+        result = sample.result
+        return (
+            result.get("method"),
+            result.get("requested_model"),
+            tuple(sorted(set(result.get("reported_models", [])))),
+            result.get("prompt_version"),
+            result.get("rules_version"),
+        )
+
+    groups = {identity(s) for s in samples}
     thresholds = []
-    for method, model in sorted(groups, key=str):
-        group = [
-            s
-            for s in samples
-            if (s.result.get("method"), s.result.get("requested_model")) == (method, model)
-        ]
+    for group_id in sorted(groups, key=str):
+        method, model, reported_models, prompt_version, rules_version = group_id
+        group = [s for s in samples if identity(s) == group_id]
         train = [
             s for s in group if s.split == "calibration" and s.result.get("confidence") is not None
         ]
@@ -239,6 +268,9 @@ def calibration(
             {
                 "method": method,
                 "model": model,
+                "reported_models": reported_models,
+                "prompt_version": prompt_version,
+                "rules_version": rules_version,
                 "threshold": threshold if validated else None,
                 "calibration_count": count,
                 "calibration_upper_error": bound,

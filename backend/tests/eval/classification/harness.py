@@ -29,6 +29,21 @@ TENANT = UUID("00000000-0000-0000-0000-000000000694")
 MODEL = "openai/gpt-6-luna-decisions"
 
 
+def corpus_fingerprint(corpus: dict[str, Any]) -> str:
+    # Predictions must be able to change without changing the comparison corpus.
+    value = {
+        "taxonomy_version": corpus["taxonomy_version"],
+        "source": corpus["source"],
+        "cases": [
+            {key: case[key] for key in ("id", "gold_path", "gold_facets", "features", "split")}
+            for case in sorted(corpus["cases"], key=lambda c: c["id"])
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+
+
 class EvaluationLedger:
     """Serial evaluation admission; unknown outcomes retain their ceiling."""
 
@@ -44,6 +59,7 @@ class EvaluationLedger:
         if (
             self.calls >= self.max_calls
             or policy.tenant_id != self.tenant_id
+            or attempt.tenant_id != self.tenant_id
             or sum(self.held.values(), Decimal(0)) + policy.per_call_ceiling_usd > self.budget
         ):
             raise DecisionError("decision_budget_exceeded")
@@ -114,14 +130,16 @@ class Replay:
 
     def http(self, request: httpx.Request) -> httpx.Response:
         wire = json.loads(request.content)
-        self.orders.append(list(wire["questions"]["document_type"]["criteria"]))
+        choice = wire["questions"].get("document_type")
+        self.orders.append(list(choice["criteria"]) if choice is not None else [])
         if self.mode == "structured_output":
             return httpx.Response(503)  # unknown primary spend must survive fallback
         response = self.recording["responses"][self.position]
         assert set(response["answers"]) == set(wire["questions"])
-        assert set(response["answers"]["document_type"]["probabilities"]) == set(
-            wire["questions"]["document_type"]["criteria"]
-        )
+        if choice is not None:
+            assert set(response["answers"]["document_type"]["probabilities"]) == set(
+                choice["criteria"]
+            )
         self.position += 1
         return httpx.Response(200, json=response)
 
@@ -152,9 +170,11 @@ async def replay_case(case: dict[str, Any], mode: str, order: str) -> tuple[dict
     evidence = ClassificationFeatures.from_json(json.dumps(features))
     policy = DecisionPolicy(TENANT, True, MODEL, Decimal(".005"), Decimal("1"))
     if mode == "rules":
-        return await classify(
+        result = await classify(
             evidence, load_taxonomy(), NoModel(), tenant_id=TENANT, policy=policy
-        ), 0.0
+        )
+        result["total_cost_usd"] = "0"  # NoModel never dispatches; known zero inference spend.
+        return result, 0.0
     recording = case["recordings"][mode][order]
     replay = Replay(recording, mode)
     ledger = EvaluationLedger(max_calls=10, budget=Decimal("1"))
@@ -169,8 +189,20 @@ async def replay_case(case: dict[str, Any], mode: str, order: str) -> tuple[dict
             eval_settings(order=order), ledger=ledger, http_client=client, chat_gateway=replay
         )
         result = await classify(evidence, load_taxonomy(), gateway, tenant_id=TENANT, policy=policy)
-    assert replay.position == len(recording["responses"]), f"unused recording: {result.get('reason')}"
+    assert replay.position == len(
+        recording["responses"]
+    ), f"unused recording: {result.get('reason')}"
     result["evaluation_orders"] = replay.orders
+    terminals = [event for event in ledger.events if event["kind"] == "terminal"]
+    result["evaluation_known_cost_usd"] = str(
+        sum(
+            (Decimal(event["cost_usd"]) for event in terminals if event["cost_usd"] is not None),
+            Decimal(0),
+        )
+    )
+    result["evaluation_unknown_cost_attempts"] = sum(
+        event["cost_usd"] is None for event in terminals
+    )
     return result, recording["simulated_latency_ms"]
 
 
@@ -202,13 +234,23 @@ async def offline(
             )
         report = score(samples, bins=bins)
         report.update(
-            corpus_sha256=hashlib.sha256(raw).hexdigest(),
+            corpus_sha256=corpus_fingerprint(corpus),
+            recordings_sha256=hashlib.sha256(raw).hexdigest(),
             taxonomy_version=corpus["taxonomy_version"],
             mode=mode,
             latency_source="scripted_fixture",
             replay_elapsed_ms=(time.perf_counter() - start) * 1000,
         )
         reports[mode], all_samples[mode] = report, samples
+        report.update(
+            requested_models=sorted({s.result.get("requested_model") for s in samples}),
+            reported_models=sorted(
+                {model for s in samples for model in s.result.get("reported_models", [])}
+            ),
+            methods=sorted({s.result.get("method") or "unclassified" for s in samples}),
+            prompt_versions=sorted({s.result.get("prompt_version") for s in samples}),
+            rules_versions=sorted({s.result.get("rules_version") for s in samples}),
+        )
     return {
         "source": corpus["source"],
         "release_calibration": None,
@@ -216,7 +258,7 @@ async def offline(
     }, all_samples
 
 
-async def live_invoice() -> dict[str, Any]:
+async def live_invoice(*, bins: int) -> dict[str, Any]:
     """Only this bundled synthetic case may leave the process; no external corpus input."""
     from app.ingestion.native import classification_token_count
     from app.ingestion.tokenizer_artifact import load_tokenizer_artifact
@@ -271,12 +313,25 @@ async def live_invoice() -> dict[str, Any]:
                 },
             }
         )
+    latency = (time.perf_counter() - start) * 1000
+    result["evaluation_known_cost_usd"] = str(
+        sum(
+            (Decimal(event["cost_usd"]) for event in terminal if event["cost_usd"] is not None),
+            Decimal(0),
+        )
+    )
+    result["evaluation_unknown_cost_attempts"] = sum(
+        event["cost_usd"] is None for event in terminal
+    )
     return {
         "source": "synthetic_live",
         "case_id": "invoice",
         "taxonomy_version": "1.0.0",
         "result": result,
-        "latency_ms": (time.perf_counter() - start) * 1000,
+        "latency_ms": latency,
+        "metrics": score(
+            [Sample(case["id"], case["gold_path"], case["gold_facets"], result, latency)], bins=bins
+        ),
         "calls": ledger.calls,
         "held_spend_usd": str(sum(ledger.held.values(), Decimal(0))),
         "events": ledger.events,
@@ -297,8 +352,20 @@ def main() -> None:
     if args.live:
         if args.data != DATA or args.baseline or args.approval:
             parser.error("live mode is restricted to the bundled synthetic invoice")
-        report = asyncio.run(live_invoice())
+        report = asyncio.run(live_invoice(bins=args.bins))
     else:
+        config = json.loads(args.approval.read_text("utf-8")) if args.approval else None
+        if config is not None:
+            if not config.get("approved_by") or not config.get("approved_at"):
+                parser.error("owner-approved configuration is required before release scoring")
+            if config["bins"] != args.bins:
+                parser.error("bin count differs from approval")
+            if config["corpus_sha256"] != corpus_fingerprint(
+                json.loads(args.data.read_text("utf-8"))
+            ):
+                parser.error("corpus differs from approval")
+            if args.baseline and config["top_level_tolerance"] != args.tolerance:
+                parser.error("baseline tolerance differs from approval")
         report, samples = asyncio.run(offline(bins=args.bins, data=args.data))
         if args.baseline:
             if args.tolerance is None:
@@ -307,10 +374,7 @@ def main() -> None:
             for mode, current in report["reports"].items():
                 baseline_gate(current, previous["reports"][mode], tolerance=args.tolerance)
             report["baseline_gate"] = "passed"
-        if args.approval:
-            config = json.loads(args.approval.read_text("utf-8"))
-            if config["bins"] != args.bins:
-                parser.error("bin count differs from approval")
+        if config is not None:
             report["release_calibration"] = [
                 calibration(
                     values,
@@ -326,7 +390,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, DecisionError):
+    except Exception:  # noqa: BLE001 — CLI errors must never reveal config/credentials
         # No raw provider/config exceptions (which may contain secrets or content).
         raise SystemExit(
             "classification evaluation failed; check approved configuration and fixtures"

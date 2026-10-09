@@ -35,6 +35,10 @@ def sample(
             "total_cost_usd": None,
             "method": "decisions",
             "requested_model": "fixture",
+            "reported_models": ["fixture"],
+            "taxonomy_version": "1.0.0",
+            "prompt_version": "classification-1.1",
+            "rules_version": "1",
         },
         30.0,
         None,
@@ -75,6 +79,7 @@ def test_baseline_gate_fails_regression_and_mismatched_corpus():
         "bins": 10,
         "sample_count": 4,
         "per_level_accuracy": [0.5],
+        "metric_definition": "classification-eval-1",
     }
     previous = {**current, "per_level_accuracy": [0.9]}
     with pytest.raises(ValueError, match="regression"):
@@ -122,3 +127,32 @@ def test_unknown_cost_is_not_zero_and_bad_measurements_rejected():
         score([], bins=10)
     with pytest.raises(ValueError):
         score([sample()], bins=0)
+
+
+def test_conditional_level_calibration_excludes_wrong_parent():
+    result = score([sample("legal/agreements/contract")], bins=10)
+    assert result["per_level_accuracy"] == [0, 0, 0]
+    assert result["per_level_ece"][0] == pytest.approx(0.9)
+    assert result["per_level_ece"][1:] == [None, None]
+
+
+def test_held_out_failure_or_reused_identity_cannot_approve_threshold():
+    config = {
+        "approved_by": "owner",
+        "approved_at": "2026-10-09",
+        "corpus_sha256": "a",
+        "review_error_target": 0.1,
+        "minimum_support": 10,
+        "confidence_level": 0.95,
+        "top_level_tolerance": 0.02,
+        "bins": 10,
+    }
+    values = [sample(source="authorized_private", split="calibration") for _ in range(100)]
+    values += [sample("legal/agreements/contract", source="authorized_private") for _ in range(50)]
+    for i, value in enumerate(values):
+        value.case_id = str(i)
+    artifact = calibration(values, config=config, taxonomy_version="1.0.0", corpus_sha256="a")
+    assert artifact["thresholds"][0]["threshold"] is None
+    values[-1].case_id = values[0].case_id
+    with pytest.raises(ValueError, match="distinct"):
+        calibration(values, config=config, taxonomy_version="1.0.0", corpus_sha256="a")
