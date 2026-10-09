@@ -89,7 +89,19 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
         let mut high_surrogate: Option<u16> = None;
         for ch in text.chars().iter() {
             ctx.work(1)?;
-            let raw = ch.unicode_value();
+            // PDFium's synthetic breaks can have no Unicode mapping. They are
+            // layout artifacts, not evidence of an unmapped source glyph.
+            if ch.is_generated().map_err(error)? {
+                continue;
+            }
+            // PDFium replaces recognized line-end hyphens with U+0002.
+            // Restore an explicit hyphen before our conservative dehyphenation
+            // policy, preserving identifiers such as AB- / 123.
+            let raw = if ch.unicode_value() == 2 && ch.is_hyphen().map_err(error)? {
+                '-' as u32
+            } else {
+                ch.unicode_value()
+            };
             // PDFium may expose a supplementary scalar as two UTF-16 entries.
             if (0xd800..=0xdbff).contains(&raw) {
                 high_surrogate = Some(raw as u16);
@@ -121,10 +133,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
                 }
                 continue;
             }
-            // Synthetic breaks are reconstructed by layout. Page text excludes annotation appearances.
-            if ch.is_generated().map_err(error)? {
-                continue;
-            }
+            // Page text excludes annotation appearances.
             let _object = ch.text_object().map_err(error)?;
             let rect = ch.loose_bounds().map_err(error)?;
             let size = ch.scaled_font_size().value as f64;

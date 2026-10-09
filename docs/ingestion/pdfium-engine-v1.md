@@ -29,6 +29,9 @@ boxes and painted path segments to the existing layout/table reconstruction.
 Coordinates remain unrotated PDF points, bottom-left; display rotation is retained.
 Reading order and roles remain heuristic. RTL lines preserve PDFium's logical
 character order; CJK has no synthetic spaces between adjacent ideographs.
+Recognized PDFium line-end hyphen markers are restored to `-` before layout;
+identifier hyphens are retained. Generated breaks are excluded before testing
+Unicode usability.
 Pages with no usable text or any unmapped/replacement glyphs are `needs_ocr`;
 mixed documents are partial and cannot become successful native extraction.
 Metadata and outline are inert supplied text. Annotation and widget appearance

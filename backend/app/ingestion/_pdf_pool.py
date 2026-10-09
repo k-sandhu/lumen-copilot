@@ -88,7 +88,9 @@ class PdfProcessPool:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 env=environment,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if sys.platform == "win32"
+                else 0,
             )
             assert process.stdin is not None and process.stdout is not None
             # Reserve a small control-frame allowance even with a tiny document

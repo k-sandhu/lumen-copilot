@@ -242,3 +242,53 @@ def test_hostile_recursive_form_is_bounded_and_never_empty_success() -> None:
         assert error.code in {"budget", "parse_error", "timed_out", "worker_crashed"}
     else:
         assert json.loads(result.generation_json)["outcome"] == "needs_ocr"
+
+
+def test_repeated_furniture_keeps_identifier_text() -> None:
+    from app.ingestion.native import PdfiumExecutor
+    from tests.eval.docintel.pdf_fixtures import corpus
+
+    result = PdfiumExecutor().extract_pdf(corpus()[2].data)
+    assert "AB-" in result.rendered_text
+    assert "123" in result.rendered_text
+    assert json.loads(result.generation_json)["outcome"] == "indexed"
+
+
+def test_metadata_outline_and_unrotated_page_geometry() -> None:
+    from pypdf import PdfReader, PdfWriter
+
+    from app.ingestion.native import PdfiumExecutor
+
+    writer = PdfWriter()
+    writer.append(PdfReader(io.BytesIO(cid("漢字", rotation=90))))
+    writer.add_metadata({"/Title": "Generated metadata", "/Author": "Fixture author"})
+    writer.add_outline_item("Generated outline", 0)
+    data = io.BytesIO()
+    writer.write(data)
+    result = PdfiumExecutor().extract_pdf(data.getvalue())
+    diagnostics = json.loads(result.generation_json)["diagnostics"]
+    assert diagnostics["metadata"]["Title"] == "Generated metadata"
+    assert diagnostics["outline"][0]["title"] == "Generated outline"
+    assert diagnostics["outline"][0]["destination_page"] == 1
+    page = diagnostics["pages"][0]
+    assert (page["width"], page["height"], page["rotation"]) == (612, 792, 90)
+    for block in result.blocks:
+        for region in block.regions:
+            assert region.bbox is not None
+            assert 0 <= region.bbox.x0 <= region.bbox.x1 <= page["width"]
+            assert 0 <= region.bbox.y0 <= region.bbox.y1 <= page["height"]
+
+
+def test_two_process_slots_extract_parallel_documents() -> None:
+    from app.ingestion.native import PdfiumExecutor
+
+    executor = PdfiumExecutor(workers=2)
+    with ThreadPoolExecutor(max_workers=2) as threads:
+        results = list(
+            threads.map(
+                executor.extract_pdf,
+                [object_stream(), cid("A😀B")],
+            )
+        )
+    assert "Object stream text" in results[0].rendered_text
+    assert "A😀B" in results[1].rendered_text
