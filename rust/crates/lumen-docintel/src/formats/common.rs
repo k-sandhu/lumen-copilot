@@ -74,17 +74,23 @@ impl Session {
         Ok(())
     }
 }
-pub fn decoded(bytes: &[u8], s: &mut Session) -> Result<DecodedText, CoreError> {
-    s.ctx.checkpoint()?;
-    // Reserve the bounded decoder/detection workspace before dependency calls.
+pub fn reject_binary(bytes: &[u8]) -> Result<(), CoreError> {
     if bytes.starts_with(b"%PDF-")
-        || bytes.starts_with(b"PK")
+        || [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"]
+            .iter()
+            .any(|magic| bytes.starts_with(*magic))
         || bytes.starts_with(b"\xd0\xcf\x11\xe0")
         || bytes.starts_with(b"\x1f\x8b")
         || infer::get(bytes).is_some_and(|kind| kind.mime_type().starts_with("image/"))
     {
         return Err(CoreError::Unsupported);
     }
+    Ok(())
+}
+pub fn decoded(bytes: &[u8], s: &mut Session) -> Result<DecodedText, CoreError> {
+    s.ctx.checkpoint()?;
+    // Reserve the bounded decoder/detection workspace before dependency calls.
+    reject_binary(bytes)?;
     let decoded = decode_text(bytes)?;
     let controls = decoded
         .text

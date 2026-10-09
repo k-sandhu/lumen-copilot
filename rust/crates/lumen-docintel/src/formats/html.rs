@@ -6,7 +6,7 @@ use crate::{
     canonical::{
         Block, BlockKind, Cell, CellRange, Document, HeaderRole, Origin, SourceRegion, Table,
     },
-    detection::{DecodedText, decode_text},
+    detection::DecodedText,
 };
 use encoding_rs::{DecoderResult, Encoding};
 use mailparse::{MailHeaderMap, ParsedMail};
@@ -17,8 +17,9 @@ fn selector(value: &str) -> Result<Selector, CoreError> {
     Selector::parse(value).map_err(|_| CoreError::Internal)
 }
 fn charset(bytes: &[u8], hint: Option<&str>, s: &mut Session) -> Result<DecodedText, CoreError> {
+    super::common::reject_binary(bytes)?;
     let Some(label) = hint else {
-        return decode_text(bytes);
+        return super::common::decoded(bytes, s);
     };
     let encoding = Encoding::for_label(label.trim().as_bytes()).ok_or(CoreError::Unsupported)?;
     let mut decoder = encoding.new_decoder_with_bom_removal();

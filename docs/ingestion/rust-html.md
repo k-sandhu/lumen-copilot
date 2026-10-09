@@ -40,3 +40,7 @@ all score 100% facts, association, order and exact offsets; Python is unsupporte
   canonical pipeline persistence (#667–#669) remain gated; residual risk: candidate
   accounting alone cannot qualify production recognition or provenance retention.
 - [s] 2026-10-09: live checks excluded by task; residual risk: no deployed round-trip.
+
+[x] 2026-10-09: binary HTML/MHTML-root regression failed before correction;
+6 Rust HTML tests and 3 installed HTML Python tests passed after. Clippy/all-targets
+passed. Binary signatures are rejected before explicit charset decoding too.
