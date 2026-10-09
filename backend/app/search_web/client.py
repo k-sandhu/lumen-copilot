@@ -178,9 +178,7 @@ class SearxngClient:
                     f"search provider request failed: {type(exc).__name__}"
                 ) from exc
             if response.status_code // 100 != 2:
-                raise WebSearchUnavailable(
-                    f"search provider returned HTTP {response.status_code}"
-                )
+                raise WebSearchUnavailable(f"search provider returned HTTP {response.status_code}")
             try:
                 payload = response.json()
             except ValueError as exc:
