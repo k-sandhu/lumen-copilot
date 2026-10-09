@@ -274,3 +274,12 @@ fn preserves_body_order_unicode_and_table_labels() {
         );
     }
 }
+
+#[test]
+fn build_identity_covers_shared_extraction_dependencies() {
+    use lumen_docintel_core::formats::package::{generation, sha256};
+    let first = generation(b"same input", "rust-docx", "format source v1");
+    assert_ne!(first.build_id.as_deref(), Some(sha256(b"format source v1").as_str()));
+    assert_eq!(first, generation(b"same input", "rust-docx", "format source v1"));
+    assert_ne!(first.build_id, generation(b"same input", "rust-docx", "format source v2").build_id);
+}
