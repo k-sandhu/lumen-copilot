@@ -11,6 +11,8 @@ physical starting lines are distinct. Unicode renderer spans must round-trip.
 `NATIVE_CSV_ENABLED` gates upload admission and cutover. `NATIVE_CSV_SHADOW`
 permits offline comparison only; no Python CSV parser exists. Both default false.
 An unavailable extension cannot admit this format. Python parsers remain live.
+The two non-secret deployment switches are explicitly listed in the connector
+conformance config classification; provider credentials remain forbidden.
 
 Acceptance: four delimiters and quoted newlines; labelled rows and row/line
 locations; inert formula payloads; ragged/decoding diagnostics; input, work,
