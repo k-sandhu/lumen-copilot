@@ -43,6 +43,9 @@ formatting and offline cargo-deny licenses/advisories pass.
 
 Separate dependency #708 / PR #712 repairs large canonical table validation;
 its four regression/property tests pass alongside this format's tests.
+Joint Office checkout: all 32 core Rust tests and Clippy all targets pass offline.
+Dependency #713 / PR #714 pins the existing local bridge dependency; complete
+cargo-deny checks (advisories, bans, licenses, sources) pass without policy changes.
 [~] 2026-10-08: inherited layout transforms, rotated/visual-language reading
 order, full ODP style/chart inheritance and uncached external chart values need
 qualification. Residual risk: these candidate features are not a full visual
