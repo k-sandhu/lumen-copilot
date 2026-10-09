@@ -293,7 +293,10 @@ pub struct Node {
     pub content: Vec<Content>,
 }
 #[derive(Debug)]
-pub enum Content { Text(String), Child(usize) }
+pub enum Content {
+    Text(String),
+    Child(usize),
+}
 impl Node {
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.attrs.get(name).map(String::as_str)
@@ -327,8 +330,13 @@ impl Node {
         self.find(name).and_then(|n| n.attr("val"))
     }
     pub fn full_text(&self) -> String {
-        let mut text=String::new();
-        for content in &self.content {match content {Content::Text(s)=>text.push_str(s),Content::Child(i)=>text.push_str(&self.children[*i].full_text())}}
+        let mut text = String::new();
+        for content in &self.content {
+            match content {
+                Content::Text(s) => text.push_str(s),
+                Content::Child(i) => text.push_str(&self.children[*i].full_text()),
+            }
+        }
         text
     }
 }
@@ -393,7 +401,7 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
             Event::Text(e) => {
                 let text = e.xml10_content();
                 if let Some(parent) = stack.last_mut() {
-                    s.reserve(text.len() * 8+128)?;
+                    s.reserve(text.len() * 8 + 128)?;
                     parent.text.push_str(&text);
                     parent.content.push(Content::Text(text.into_owned()));
                 } else if !text.trim().is_empty() {
@@ -403,7 +411,7 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
             Event::CData(e) => {
                 let text = e.xml10_content();
                 let parent = stack.last_mut().ok_or(CoreError::Parse)?;
-                s.reserve(text.len() * 8+128)?;
+                s.reserve(text.len() * 8 + 128)?;
                 parent.text.push_str(&text);
                 parent.content.push(Content::Text(text.into_owned()));
             }
@@ -411,8 +419,8 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
                 let reference = e.xml10_content();
                 let escaped = format!("&{reference};");
                 let text = quick_xml::escape::unescape(&escaped).map_err(|_| CoreError::Parse)?;
-                s.reserve(text.len() * 8+128)?;
-                let parent=stack.last_mut().ok_or(CoreError::Parse)?;
+                s.reserve(text.len() * 8 + 128)?;
+                let parent = stack.last_mut().ok_or(CoreError::Parse)?;
                 parent.text.push_str(&text);
                 parent.content.push(Content::Text(text.into_owned()));
             }

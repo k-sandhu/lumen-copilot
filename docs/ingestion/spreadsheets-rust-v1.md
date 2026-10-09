@@ -28,3 +28,28 @@ blocks with two newlines, matching the Python sheet separator.
 The #670 evaluation and #687 promotion remain owner merge gates. Production
 budgets, resource measurements and dependency interruption/isolation need
 qualification before adoption; accounting is not a process RSS guarantee.
+
+Measured 2026-10-08: all 51 generated Python workbook cases pass with exact
+rendered text equality; the additional hidden-row/date/percent/currency fixture
+also passes. The paired targeted run passes 103 nodes. Rust tests pass generated
+ODS typed/mixed-content/repeat/budget cases, a generated compound BIFF8 XLS and
+256 Unicode/native-coordinate properties. Complex Excel display formats remain
+unknown; simple percent/currency display annotations are explicitly derived.
+
+[~] 2026-10-08: large canonical tables remain blocked by #708's pairwise overlap
+validation budget. Residual risk: successful extraction may fail canonical render.
+[~] 2026-10-08: XLS preserves calamine values/formulas/merges, but custom BIFF
+formats and legacy hidden-row metadata require further fixtures/qualification.
+ODS style/number-format inheritance also needs qualification. Residual risk:
+these new-format arms are not full-fidelity replacements and have no Python
+baseline to claim a relative win against.
+[~] 2026-10-08: XLSX cell values stream through calamine but the metadata scan
+currently retains a bounded per-part XML tree. Legacy oversized rectangles
+produce an explicit partial outcome before calamine allocation, with no retained
+prefix. Dependency operations are not cooperatively cancellable internally.
+Residual risk: large-workbook streaming, hard RSS and interruption need measured
+qualification/isolation before production use.
+[~] 2026-10-08: full backend suite deferred below 4000 MiB available RAM; live
+gates/cross-platform wheels/held-out evaluation/RSS/scaling are unverified.
+Residual risk: targeted offline fixtures do not prove production capacity or
+fidelity. Containers remain untouched.

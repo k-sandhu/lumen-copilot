@@ -1,10 +1,12 @@
 """Replay every generated workbook baseline case through the optional Rust driver."""
+
 from __future__ import annotations
 
 import itertools
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -60,3 +62,41 @@ def test_python_workbook_fixture_parity(
 
     monkeypatch.setattr(fixtures, "parse_document", compare)
     getattr(fixtures, case)(**kwargs)
+
+
+def test_typed_display_annotations_keep_original_evidence(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+
+    driver = os.environ.get("DOCINTEL_WORKBOOK_DRIVER")
+    if not driver:
+        pytest.skip("build workbook_extract and set DOCINTEL_WORKBOOK_DRIVER")
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Date", "Percent", "Currency"])
+    sheet.append([datetime(2026, 1, 2), 0.25, 12.5])
+    for coordinate, number_format in [("A2", "yyyy-mm-dd"), ("B2", "0.00%"), ("C2", "$0.00")]:
+        sheet[coordinate].number_format = number_format
+    sheet.row_dimensions[2].hidden = True
+    source = tmp_path / "typed.xlsx"
+    source.write_bytes(fixtures._serialize(workbook))
+    result = subprocess.run(
+        [driver, str(source)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=40,
+    )
+    rendered = json.loads(result.stdout)
+    assert rendered["rendered_text"] == parse_document(
+        source.read_bytes(), mime_type=fixtures._XLSX
+    )
+    annotations = rendered["document"]["generation"]["diagnostics"]["annotations"]
+    displays = {
+        a["column"]: a["derived_display"]
+        for a in annotations
+        if a["kind"] == "cell_span" and a["row"] == 2
+    }
+    assert displays[2] == "25.00%"
+    assert displays[3] == "$12.50"
+    assert any(a.get("hidden_rows") == [2] for a in annotations)

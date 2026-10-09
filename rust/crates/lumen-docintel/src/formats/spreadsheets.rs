@@ -235,10 +235,21 @@ fn insert(
     total: &mut usize,
 ) -> Result<(), CoreError> {
     s.ctx.work(1)?;
-    if cell.row_span==0 || cell.column_span==0 {return Err(CoreError::Parse);}
-    let end_row=cell.row.checked_add(cell.row_span-1).ok_or(CoreError::Budget)?;
-    let end_column=cell.column.checked_add(cell.column_span-1).ok_or(CoreError::Budget)?;
-    if end_row>limits.max_rows || end_column>limits.max_cells {sheet.partial=true;return Ok(());}
+    if cell.row_span == 0 || cell.column_span == 0 {
+        return Err(CoreError::Parse);
+    }
+    let end_row = cell
+        .row
+        .checked_add(cell.row_span - 1)
+        .ok_or(CoreError::Budget)?;
+    let end_column = cell
+        .column
+        .checked_add(cell.column_span - 1)
+        .ok_or(CoreError::Budget)?;
+    if end_row > limits.max_rows || end_column > limits.max_cells {
+        sheet.partial = true;
+        return Ok(());
+    }
     if cell.row > limits.max_rows || *total >= limits.max_cells || cell.column > limits.max_cells {
         sheet.partial = true;
         return Ok(());
@@ -466,8 +477,12 @@ fn xlsx(
     Ok(sheets)
 }
 fn odf_text(n: &Node) -> String {
-    let paragraphs:Vec<String>=n.children_named("p").map(Node::full_text).collect();
-    if paragraphs.is_empty() {n.full_text()} else {paragraphs.join("\n")}
+    let paragraphs: Vec<String> = n.children_named("p").map(Node::full_text).collect();
+    if paragraphs.is_empty() {
+        n.full_text()
+    } else {
+        paragraphs.join("\n")
+    }
 }
 fn ods(
     mut package: Package<'_>,
@@ -650,7 +665,7 @@ fn xls(bytes: &[u8], s: &mut Session, limits: WorkbookLimits) -> Result<Vec<Shee
     let stream = compound.open_stream(name).map_err(|_| CoreError::Parse)?;
     let mut raw = Vec::new();
     stream
-        .take(s.limits.max_part_bytes as u64 + 1)
+        .take((s.limits.max_part_bytes as u64).saturating_add(1))
         .read_to_end(&mut raw)
         .map_err(|_| CoreError::Parse)?;
     if raw.len() > s.limits.max_part_bytes {
@@ -668,18 +683,35 @@ fn xls(bytes: &[u8], s: &mut Session, limits: WorkbookLimits) -> Result<Vec<Shee
         if kind == 0x002f {
             return Err(CoreError::Unsupported);
         }
-        if kind==0x00fc {
-            if data.len()<8 {return Err(CoreError::Parse);}
-            let unique=u32::from_le_bytes(data[4..8].try_into().map_err(|_|CoreError::Parse)?) as usize;
-            if unique>limits.max_cells || unique>raw.len() {return Err(CoreError::Budget);}
+        if kind == 0x00fc {
+            if data.len() < 8 {
+                return Err(CoreError::Parse);
+            }
+            let unique =
+                u32::from_le_bytes(data[4..8].try_into().map_err(|_| CoreError::Parse)?) as usize;
+            if unique > limits.max_cells || unique > raw.len() {
+                return Err(CoreError::Budget);
+            }
         }
-        if matches!(kind,0x0203|0x0204|0x0205|0x00fd|0x027e|0x0006|0x00bd) {
-            if data.len()<6 {return Err(CoreError::Parse);}
-            let row=usize::from(u16::from_le_bytes([data[0],data[1]]))+1;
-            let column=usize::from(u16::from_le_bytes([data[2],data[3]]))+1;
-            let rectangle=row.checked_mul(column).ok_or(CoreError::Budget)?;
-            max_cells=max_cells.max(rectangle);
-            if row>limits.max_rows || rectangle>limits.max_cells {return Ok(vec![Sheet {name:"Workbook".to_owned(),number:1,partial:true,..Sheet::default()}]);}
+        if matches!(
+            kind,
+            0x0203 | 0x0204 | 0x0205 | 0x00fd | 0x027e | 0x0006 | 0x00bd
+        ) {
+            if data.len() < 6 {
+                return Err(CoreError::Parse);
+            }
+            let row = usize::from(u16::from_le_bytes([data[0], data[1]])) + 1;
+            let column = usize::from(u16::from_le_bytes([data[2], data[3]])) + 1;
+            let rectangle = row.checked_mul(column).ok_or(CoreError::Budget)?;
+            max_cells = max_cells.max(rectangle);
+            if row > limits.max_rows || rectangle > limits.max_cells {
+                return Ok(vec![Sheet {
+                    name: "Workbook".to_owned(),
+                    number: 1,
+                    partial: true,
+                    ..Sheet::default()
+                }]);
+            }
         }
         if kind == 0x0200 && data.len() >= 12 {
             let re =
@@ -756,6 +788,29 @@ fn xls(bytes: &[u8], s: &mut Session, limits: WorkbookLimits) -> Result<Vec<Shee
     }
     Ok(sheets)
 }
+fn display(cell: &Cell) -> Option<String> {
+    let format = cell.format.as_deref()?;
+    let number = cell.cached_value.as_ref()?.as_f64()?;
+    // Small explicitly supported display subset. Complex formats stay unknown.
+    let simple = format.replace('"', "");
+    if simple.contains([';', '[', ']', '\\', '_', '*']) {
+        return None;
+    }
+    let precision = simple
+        .split('.')
+        .nth(1)
+        .map(|s| s.chars().take_while(|c| *c == '0').count())
+        .unwrap_or(0)
+        .min(12);
+    if simple.ends_with('%') {
+        return Some(format!("{:.*}%", precision, number * 100.0));
+    }
+    let currency = simple
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '$' | '€' | '£' | '¥'))?;
+    Some(format!("{currency}{number:.precision$}"))
+}
 fn render_sheets(sheets: Vec<Sheet>, bytes: &[u8], s: &mut Session) -> Result<Document, CoreError> {
     let mut doc = Document {
         generation: generation(bytes, "rust-workbook", include_str!("spreadsheets.rs")),
@@ -773,8 +828,8 @@ fn render_sheets(sheets: Vec<Sheet>, bytes: &[u8], s: &mut Session) -> Result<Do
         let mut text = String::new();
         let mut headers = Vec::new();
         let mut first_row = None;
-        let mut chars=0usize;
-        let mut last_byte=0usize;
+        let mut chars = 0usize;
+        let mut last_byte = 0usize;
         let nonblank: Vec<usize> = sheet
             .cells
             .iter()
@@ -832,10 +887,12 @@ fn render_sheets(sheets: Vec<Sheet>, bytes: &[u8], s: &mut Session) -> Result<Do
                     };
                     s.emit(&mut text, &format!("{}{label}=", coordinate(row, column)))?;
                     if let Some(cell) = sheet.cells.get(&(row, column)) {
-                        chars+=text[last_byte..].chars().count();last_byte=text.len();
+                        chars += text[last_byte..].chars().count();
+                        last_byte = text.len();
                         let start = chars;
                         s.emit(&mut text, &cell.text)?;
-                        chars+=text[last_byte..].chars().count();last_byte=text.len();
+                        chars += text[last_byte..].chars().count();
+                        last_byte = text.len();
                         let end = chars;
                         if cell.cached_value.is_some()
                             && let Some(format) = &cell.format
@@ -850,7 +907,7 @@ fn render_sheets(sheets: Vec<Sheet>, bytes: &[u8], s: &mut Session) -> Result<Do
                             };
                             s.emit(&mut text, &format!(" [formula={expression}; {cache}]"))?;
                         }
-                        annotations.push(json!({"kind":"cell_span","block":id,"sheet":sheet.name,"row":row,"column":column,"char_start":start,"char_end":end,"typed_value":cell.cached_value}));
+                        annotations.push(json!({"kind":"cell_span","block":id,"sheet":sheet.name,"row":row,"column":column,"char_start":start,"char_end":end,"typed_value":cell.cached_value,"derived_display":display(cell),"display_origin":"derived"}));
                     }
                 }
             }
@@ -936,10 +993,17 @@ fn extract_session(
     if limits.max_rows == 0 || limits.max_cells == 0 {
         return Err(CoreError::InvalidInput);
     }
+    let mut chart_parts: Vec<String> = Vec::new();
     let sheets = if bytes.starts_with(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") {
         xls(bytes, &mut s, limits)?
     } else {
         let mut package = Package::open(bytes, &mut s)?;
+        chart_parts = package
+            .names
+            .iter()
+            .filter(|n| n.starts_with("xl/charts/") && n.ends_with(".xml"))
+            .cloned()
+            .collect();
         if package.names.contains("xl/workbook.xml") {
             xlsx(bytes, package, &mut s, limits)?
         } else if package.names.contains("mimetype")
@@ -951,5 +1015,9 @@ fn extract_session(
             return Err(CoreError::Unsupported);
         }
     };
-    render_sheets(sheets, bytes, &mut s)
+    let mut doc = render_sheets(sheets, bytes, &mut s)?;
+    if let Some(diagnostics) = doc.generation.diagnostics.as_mut() {
+        diagnostics["chart_placeholders"] = json!(chart_parts);
+    }
+    Ok(doc)
 }
