@@ -25,7 +25,7 @@ A panic in an individual unit is contained and translated; the pool remains usab
 
 Memory counters bound accounted Rust allocations, not process RSS, Python
 objects or an uninstrumented dependency. Non-cooperative native engines still
-need isolated processes and hard supervisors before adoption (ADR-0026).
+need isolated processes and hard supervisors before adoption (ADR-0027).
 Cooperative cancellation targets <=100 ms with <=10 ms/bounded-unit checkpoints;
 handshake tests establish cancellation at the next checkpoint without a timing
 race. Benchmark reports distinguish executor scaling from format extraction,
