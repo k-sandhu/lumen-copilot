@@ -1,10 +1,9 @@
-# ADR-0027 — Hierarchical document classification
+# ADR-0028 — Hierarchical document classification
 
 Status: **Proposed — implementation drafts authorized for evaluation; human adoption required.**
 Date: 2026-10-08. Tracking: [#688](https://github.com/k-sandhu/lumen-copilot/issues/688), epic #661.
-Builds on ADR-0004, ADR-0006, ADR-0025 and spec 0004. Number 0027 was free on
-origin/main when checked; 0026 is reserved for the parallel Rust-core proposal.
-This proposal may be renumbered before adoption.
+Builds on ADR-0004, ADR-0006, ADR-0025 and spec 0004. ADR-0026 records continuous integration; ADR-0027 is reserved for the Rust-core
+proposal. ADR-0028 was free on origin/main when checked on 2026-10-09.
 
 ## Context
 

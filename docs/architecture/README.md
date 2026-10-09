@@ -11,7 +11,7 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 
 | ADR | Title | Status |
 |---|---|---|
-| [0027](0027-hierarchical-document-classification.md) | Hierarchical document classification | Proposed — evaluation gated |
+| [0028](0028-hierarchical-document-classification.md) | Hierarchical document classification | Proposed — evaluation gated |
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
 | [0002](0002-multi-harness-agent-roles.md) | Multi-harness agent role model | Accepted |
 | [0003](0003-application-stack.md) | Application stack (closes OD-2) | Accepted |
