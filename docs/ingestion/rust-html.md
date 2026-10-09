@@ -44,3 +44,5 @@ all score 100% facts, association, order and exact offsets; Python is unsupporte
 [x] 2026-10-09: binary HTML/MHTML-root regression failed before correction;
 6 Rust HTML tests and 3 installed HTML Python tests passed after. Clippy/all-targets
 passed. Binary signatures are rejected before explicit charset decoding too.
+
+The candidate routing controls `native_html_enabled`, `native_html_shadow` are explicitly classified as nonsecret deployment configuration in the connector conformance policy. The settings completeness guard verifies this classification; infrastructure credentials and test-only password hashing remain forbidden.
