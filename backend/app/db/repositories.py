@@ -128,6 +128,7 @@ from app.domain.entities import (
     UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
+from app.domain.ingestion_shadow import NativeEvidenceLocked, source_format
 from app.domain.recall import MAX_RECALL_TURN_CHARS, clip_recall_text
 from app.domain.scheduling import Cadence, StructuredCadence
 
@@ -264,6 +265,7 @@ def to_document(row: models.Document) -> Document:
         duration_ms=row.duration_ms,
         transcript_language=row.transcript_language,
         transcription_model=row.transcription_model,
+        native_evidence_locked=row.native_evidence_locked,
     )
 
 
@@ -2428,6 +2430,55 @@ class DocumentRepository(_TenantScopedRepository):
         await self._session.flush()
         return row_id is not None
 
+    async def guard_native_ingestion(
+        self, document_id: UUID, *, native_formats: frozenset[str]
+    ) -> None:
+        """Hold the parent lock through claim; publication and guard cannot race."""
+        row = await self._session.scalar(
+            select(models.Document)
+            .where(models.Document.tenant_id == self._tenant_id, models.Document.id == document_id)
+            .with_for_update()
+        )
+        if row is None:
+            return
+        if row.native_evidence_locked:
+            raise NativeEvidenceLocked()
+        if source_format(row.mime_type) not in native_formats or not await self.count_chunks(
+            document_id
+        ):
+            return
+        cached = await self._session.scalar(
+            select(models.IngestionStageOutput).where(
+                models.IngestionStageOutput.tenant_id == self._tenant_id,
+                models.IngestionStageOutput.document_id == document_id,
+                models.IngestionStageOutput.stage == "extract",
+            )
+        )
+        cited = await self._session.scalar(
+            select(func.count())
+            .select_from(models.Citation)
+            .join(models.Chunk, models.Citation.chunk_id == models.Chunk.id)
+            .where(
+                models.Citation.tenant_id == self._tenant_id,
+                models.Chunk.tenant_id == self._tenant_id,
+                models.Chunk.document_id == document_id,
+            )
+        )
+        if row.status == DocumentStatus.READY.value or cited or cached is None:
+            raise NativeEvidenceLocked()
+        payload = cached.payload_json.encode()
+        if (
+            len(payload) > 32 * 1024 * 1024
+            or hashlib.sha256(payload).hexdigest() != cached.output_sha256
+        ):
+            raise NativeEvidenceLocked()
+        try:
+            native = isinstance(json.loads(payload).get("canonical_document"), str)
+        except (ValueError, AttributeError):
+            native = False
+        if not native:
+            raise NativeEvidenceLocked()
+
     async def begin_ingestion(
         self,
         document_id: UUID,
@@ -2516,6 +2567,7 @@ class DocumentRepository(_TenantScopedRepository):
         document_id: UUID,
         *,
         expected_attempt: int,
+        native: bool = False,
     ) -> Document | None:
         """Publish ``ready`` only for the still-owning processing attempt."""
 
@@ -2532,6 +2584,8 @@ class DocumentRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
+        if native:
+            row.native_evidence_locked = True
         row.status = DocumentStatus.READY.value
         row.error = None
         row.ingestion_failure = None

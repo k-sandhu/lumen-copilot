@@ -78,6 +78,12 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
+from app.domain.ingestion_shadow import (
+    CandidateExtraction,
+    NativeEvidenceLocked,
+    ShadowComparison,
+    source_format,
+)
 from app.domain.ingestion_stages import StageOutputInvalid, StageOwnershipLost
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document
@@ -99,11 +105,14 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
+from app.ingestion.native import candidate_identity, extract_format_candidate
 from app.ingestion.stage_identity import parser_identity
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
+from app.services.ingestion_shadow import extract_with_mode
 from app.services.ingestion_stages import CheckpointPipeline
+from app.services.shadow_diagnostics import record_comparison
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import sync_document_index_async
@@ -236,6 +245,12 @@ async def ingest_document_async(
     try:
         async with tenant_session_scope(tenant_id) as session:
             documents = DocumentRepository(session, tenant_id)
+            await documents.guard_native_ingestion(
+                document_id,
+                native_formats=frozenset(
+                    fmt for fmt, mode in settings.ingestion_format_modes.items() if mode == "native"
+                ),
+            )
             document = await documents.begin_ingestion(
                 document_id, ingestion_run_id=run_id, stale_before=stale_before
             )
@@ -246,6 +261,11 @@ async def ingest_document_async(
             storage_key = document.storage_key
             mime_type = document.mime_type
             attempt = document.ingestion_attempts
+    except NativeEvidenceLocked:
+        current = await _current_ingestion_result(tenant_id, document_id)
+        return IngestionResult(
+            document_id, current.status, current.chunk_count, "immutable_generation_policy_required"
+        )
     except SQLAlchemyError as exc:
         raise IngestionError(
             "Document ingestion could not claim the database row.",
@@ -415,14 +435,61 @@ async def _ingest_claimed_document(
         compute=detect_stage,
     )
 
+    format_name = source_format(mime_type)
+    mode = settings.ingestion_format_modes.get(format_name, "python")
+    route_identity = {"mode": mode, "format": format_name, **parser_identity(mime_type)}
+    if mode != "python":
+        try:
+            route_identity["candidate"] = candidate_identity(settings)
+        except Exception:
+            if mode == "native":
+                raise DocumentParseError("Native candidate identity is unavailable.") from None
+            route_identity["candidate"] = {"identity": "unavailable"}
+    comparison_fingerprint = hashlib.sha256(
+        (source_sha256 + json.dumps(route_identity, sort_keys=True)).encode()
+    ).hexdigest()
+
     async def extract_stage() -> dict[str, object]:
-        return {"text": parse_document(data, mime_type=mime_type), "source_sha256": source_sha256}
+        async def baseline() -> str:
+            return parse_document(data, mime_type=mime_type)
+
+        async def candidate() -> CandidateExtraction:
+            return await extract_format_candidate(data, mime_type=mime_type, settings=settings)
+
+        async def record(comparison: ShadowComparison) -> None:
+            await record_comparison(
+                tenant_id,
+                document_id,
+                fingerprint=comparison_fingerprint,
+                comparison=comparison,
+                attempt=attempt,
+            )
+
+        try:
+            result = await extract_with_mode(
+                mode=mode,
+                source_format=format_name,
+                baseline=baseline,
+                candidate=candidate,
+                record=record,
+                max_chars=settings.native_ingestion_max_output_chars,
+            )
+        except DocumentParseError:
+            raise
+        except Exception:
+            raise DocumentParseError(
+                "Native candidate unavailable, invalid or incomplete."
+            ) from None
+        payload: dict[str, object] = {"text": result.text, "source_sha256": source_sha256}
+        if result.canonical is not None:
+            payload["canonical_document"] = result.canonical.document_json
+        return payload
 
     try:
         extracted = await stages.run(
             "extract",
             upstream=detected.output_sha256,
-            config=parser_identity(mime_type),
+            config=route_identity,
             compute=extract_stage,
         )
         text = str(json.loads(extracted.payload_json)["text"])
@@ -534,7 +601,7 @@ async def _ingest_claimed_document(
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         async with tenant_session_scope(tenant_id) as session:
             ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-                document_id, expected_attempt=attempt
+                document_id, expected_attempt=attempt, native=mode == "native"
             )
         if ready is None:
             await _discard_generation(
@@ -645,7 +712,7 @@ async def _ingest_claimed_document(
         return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     async with tenant_session_scope(tenant_id) as session:
         ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-            document_id, expected_attempt=attempt
+            document_id, expected_attempt=attempt, native=mode == "native"
         )
     if ready is None:
         await _discard_generation(

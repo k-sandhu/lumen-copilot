@@ -48,6 +48,9 @@ struct Counters {
     work: AtomicUsize,
     output: AtomicUsize,
     input: AtomicUsize,
+    pages: AtomicUsize,
+    glyphs: AtomicUsize,
+    rulings: AtomicUsize,
     reason: AtomicU8,
 }
 #[derive(Debug)]
@@ -94,7 +97,17 @@ pub struct Stats {
     pub work_units: usize,
     pub output_chars: usize,
     pub source_input_bytes: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub pages: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub glyphs: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub max_page_rulings: usize,
     pub limit: Option<&'static str>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<usize, CoreError> {
@@ -106,6 +119,25 @@ fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<usize, C
         .map_err(|_| CoreError::Budget)
 }
 impl Context {
+    /// Safe progress counters, including on a failed document; no source identities.
+    pub fn pdf_page(&self) {
+        self.counters.pages.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn pdf_glyph(&self) {
+        self.counters.glyphs.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn pdf_rulings(&self, count: usize) {
+        self.counters.rulings.fetch_max(count, Ordering::AcqRel);
+    }
+    pub fn pdf_ruling_limit(&self) -> CoreError {
+        self.failure(10, CoreError::Budget)
+    }
+    pub fn pdf_cell_limit(&self) -> CoreError {
+        self.failure(11, CoreError::Budget)
+    }
+    pub fn structural_limit(&self) -> CoreError {
+        self.failure(9, CoreError::Budget)
+    }
     pub fn new(budget: Budget, token: Cancellation) -> Result<Self, CoreError> {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(budget.timeout_ms))
@@ -186,6 +218,9 @@ impl Context {
             work_units: self.counters.work.load(Ordering::Acquire),
             output_chars: self.counters.output.load(Ordering::Acquire),
             source_input_bytes: self.counters.input.load(Ordering::Acquire),
+            pages: self.counters.pages.load(Ordering::Acquire),
+            glyphs: self.counters.glyphs.load(Ordering::Acquire),
+            max_page_rulings: self.counters.rulings.load(Ordering::Acquire),
             limit: match self.counters.reason.load(Ordering::Acquire) {
                 1 => Some("memory"),
                 2 => Some("time"),
@@ -195,6 +230,9 @@ impl Context {
                 6 => Some("admission"),
                 7 => Some("cancelled"),
                 8 => Some("panic"),
+                9 => Some("structure"),
+                10 => Some("table_rulings"),
+                11 => Some("table_cells"),
                 _ => None,
             },
         }

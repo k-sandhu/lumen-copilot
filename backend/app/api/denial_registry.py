@@ -43,6 +43,10 @@ RETIRED_RESOURCE_ROUTES = {
 
 # Non-route target seams added by the media lifecycle also use the same helper.
 DIRECT_RESOURCE_SERVICE_GUARDS = (
+    ("IngestionAdminService", "report", "ingestion.shadow.report"),
+    ("IngestionAdminService", "preview", "ingestion.reingestion.preview"),
+    ("IngestionAdminService", "replay", "ingestion.original.replay"),
+    ("IngestionAdminService", "execute_generation", "ingestion.reingestion.execute"),
     ("DocumentUploadService", "expire_if_needed", "document_upload.expire"),
     ("DocumentUploadService", "recover_completing", "document_upload.recover"),
 )

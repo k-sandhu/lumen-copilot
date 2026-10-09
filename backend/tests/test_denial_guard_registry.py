@@ -35,6 +35,7 @@ from app.services.connector_oauth_service import ConnectorOAuthService
 from app.services.document_service import DocumentService
 from app.services.document_upload_service import DocumentAccessService, DocumentUploadService
 from app.services.groups_service import GroupsService
+from app.services.ingestion_admin import IngestionAdminService
 from app.services.llm_providers_service import LlmProviderService
 from app.services.mcp_servers_service import McpServersService
 from app.services.run_delivery_service import RunDeliveryService
@@ -44,6 +45,7 @@ from app.services.schedules_service import SchedulesService
 from app.services.sources_service import SourcesService
 
 _OWNER_SEAMS = {
+    "IngestionAdminService": IngestionAdminService,
     "AssistantsService": AssistantsService,
     "AssistantGovernanceService": AssistantGovernanceService,
     "AssistantTestService": AssistantTestService,
@@ -110,9 +112,11 @@ def test_direct_resource_guard_manifest_matches_the_registered_api() -> None:
         set(manifest) == governed_registered
     ), f"missing={governed_registered - set(manifest)}, extra={set(manifest) - governed_registered}"
     assert set(manifest) <= registered
-    assert {entry.owner for entry in manifest.values()} | {"enqueue_manual_run"} == set(
-        _OWNER_SEAMS
-    )
+    assert (
+        {entry.owner for entry in manifest.values()}
+        | {owner for owner, _method, _action in DIRECT_RESOURCE_SERVICE_GUARDS}
+        | {"enqueue_manual_run"}
+    ) == set(_OWNER_SEAMS)
 
 
 def test_retired_routes_have_only_unconditional_gone_outcomes() -> None:
