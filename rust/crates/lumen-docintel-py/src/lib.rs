@@ -135,6 +135,20 @@ fn render_document(py: Python<'_>, document_json: String) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn normalize_document(
+    py: Python<'_>,
+    document_json: String,
+    budget_json: String,
+    token: &CancellationToken,
+) -> PyResult<String> {
+    let cancellation = token.0.clone();
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+        lumen_docintel_core::normalization::normalize_json(&document_json, &ctx)
+    })
+}
+
+#[pyfunction]
 fn chunk_document(
     py: Python<'_>,
     document_json: String,
@@ -275,6 +289,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<DocIntelPanicError>(),
     )?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_document, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(wrap_pyfunction!(detect_format, m)?)?;
     m.add_class::<CancellationToken>()?;
