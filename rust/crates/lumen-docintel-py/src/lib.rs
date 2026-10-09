@@ -90,6 +90,23 @@ fn extract_text(
 }
 
 #[pyfunction]
+fn extract_notebook(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let document = lumen_docintel_core::formats::notebook::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
 fn _test_error(py: Python<'_>) -> PyResult<()> {
     compute(py, || Err(CoreError::InvalidInput))
 }
@@ -294,6 +311,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(extract_text, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_notebook, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(_test_panic, m)?)?;
     m.add_function(wrap_pyfunction!(_test_wait, m)?)?;
