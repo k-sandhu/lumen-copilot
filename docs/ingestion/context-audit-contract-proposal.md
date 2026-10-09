@@ -13,4 +13,5 @@ source text, enrichment text or provider secrets. Audit failure blocks dispatch.
 
 Generated context remains disabled by default. Existing event values remain valid.
 After owner review, regenerate the client, validate contract/backend enum parity,
-and run citation exclusion and audit rollback tests before the draft PR opens.
+and run citation exclusion and audit rollback tests before operational generation
+is enabled. The draft PR preserves deterministic context while this is reviewed.
