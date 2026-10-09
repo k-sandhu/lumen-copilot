@@ -24,6 +24,7 @@ def safe_counters(raw: object) -> dict[str, int | str | None]:
         "work_units",
         "output_chars",
         "source_input_bytes",
+        "max_page_rulings",
     ):
         value = raw.get(key, 0)
         if type(value) is int and 0 <= value <= 2**63 - 1:
@@ -43,6 +44,8 @@ def safe_counters(raw: object) -> dict[str, int | str | None]:
             "cancelled",
             "panic",
             "admission",
+            "table_rulings",
+            "table_cells",
         }
         else None
     )

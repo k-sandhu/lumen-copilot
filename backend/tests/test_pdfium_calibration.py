@@ -13,8 +13,15 @@ from tests.eval.docintel.pdf_fixtures import document, text
 def test_counter_allowlist_rejects_payloads_and_wrong_types() -> None:
     from app.ingestion._pdf_worker import safe_counters
 
-    result = safe_counters({"pages": "secret", "glyphs": True, "limit": ["memory"],
-                            "content": "PrivateSentinel", "path": "private"})
+    result = safe_counters(
+        {
+            "pages": "secret",
+            "glyphs": True,
+            "limit": ["memory"],
+            "content": "PrivateSentinel",
+            "path": "private",
+        }
+    )
     assert "pages" not in result and "glyphs" not in result
     assert result["limit"] is None
     assert "PrivateSentinel" not in json.dumps(result)
@@ -52,6 +59,7 @@ def test_worker_failure_preserves_only_safe_budget_counters(
         "work_units",
         "output_chars",
         "source_input_bytes",
+        "max_page_rulings",
     }
 
 
@@ -68,3 +76,21 @@ def test_long_document_does_not_charge_dead_page_scratch_as_retained_memory() ->
     )
     assert json.loads(result.generation_json)["outcome"] == "indexed"
     assert len(json.loads(result.document_json)["source_parts"]) == 100
+
+
+@pytest.mark.parametrize(("rulings", "accepted"), [(600, True), (2100, False)])
+def test_calibrated_ruling_ceiling_remains_bounded(rulings: int, accepted: bool) -> None:
+    pytest.importorskip("lumen_docintel")
+    from app.ingestion.native import PdfiumExecutor, PdfWorkerError
+
+    paths = b"\n".join(f"0 {row / 4} m 600 {row / 4} l S".encode() for row in range(rulings))
+    data = document([text(40, 700, 12, "Evidence") + b"\n" + paths])
+    executor = PdfiumExecutor()
+    budget = RuntimeBudget(max_work_units=5_000_000)
+    if accepted:
+        assert executor.extract_pdf(data, budget=budget).rendered_text == "Evidence"
+    else:
+        with pytest.raises(PdfWorkerError) as caught:
+            executor.extract_pdf(data, budget=budget)
+        assert caught.value.code == "budget"
+        assert caught.value.diagnostics["limit"] == "table_rulings"

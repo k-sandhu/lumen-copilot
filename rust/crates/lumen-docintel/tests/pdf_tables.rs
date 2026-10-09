@@ -23,6 +23,20 @@ fn sparse_table_serialization_is_charged_even_when_visible_text_is_small() {
         ..Budget::default()
     };
     let ctx = Context::new(budget, Cancellation::default()).unwrap();
+    // Page scratch can now exceed measured serialization memory. A budget just
+    // above extraction peak may legitimately suffice; JSON still consumes the
+    // memory budget even though this table's visible evidence is tiny.
+    let json = pdf::extract_json(&input, &ctx, &runtime).unwrap();
+    assert!(json.len() > doc.blocks[0].text.len());
+    assert!(ctx.stats().peak_accounted_bytes >= json.len() * 2);
+    let ctx = Context::new(
+        Budget {
+            max_memory_bytes: json.len() / 2,
+            ..Budget::default()
+        },
+        Cancellation::default(),
+    )
+    .unwrap();
     assert!(matches!(
         pdf::extract_json(&input, &ctx, &runtime),
         Err(CoreError::Budget)

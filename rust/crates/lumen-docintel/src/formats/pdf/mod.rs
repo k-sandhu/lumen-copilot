@@ -343,7 +343,7 @@ fn assemble_page(
             .unwrap_or(blocks.len());
         blocks.insert(index, candidate.block);
     }
-    let diagnostic = json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if page_text.needs_ocr || blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}});
+    let diagnostic = json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"ocr_reason":if page_text.needs_ocr {Some("unusable_glyphs")} else if blocks.is_empty() {Some(if page_text.has_images {"image_only"} else {"blank_or_empty"})} else {None},"tables":summaries,"outcome":if page_text.needs_ocr || blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}});
     Ok((blocks, diagnostic))
 }
 
@@ -546,8 +546,48 @@ fn serialize(mut document: Document, ctx: &Context) -> Result<String, CoreError>
         .sum::<usize>()
         + document.source_parts.len() * 2048;
     // Original bytes are retained/charged by extraction, never serialized here.
-    // Covers the retained domain model, rendered clone, serde growth and JSON.
-    let _json = ctx.reserve(size.checked_mul(4).ok_or(CoreError::Budget)?)?;
+    // Covers model/rendering scratch. Measure the actual JSON rather than
+    // multiplying every tiny block's pessimistic fixed allowance by four.
+    let _model = ctx.reserve(size)?;
+    let rendered = canonical::render(document.clone())?;
+    struct Counter<'a> {
+        bytes: usize,
+        ctx: &'a Context,
+    }
+    impl std::io::Write for Counter<'_> {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.ctx
+                .work(buffer.len() / 1024 + 1)
+                .map_err(std::io::Error::other)?;
+            self.bytes = self
+                .bytes
+                .checked_add(buffer.len())
+                .filter(|n| *n <= canonical::MAX_JSON_BYTES)
+                .ok_or_else(|| std::io::Error::other(self.ctx.structural_limit()))?;
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { bytes: 0, ctx };
+    serde_json::to_writer(&mut counter, &rendered).map_err(|_| {
+        if ctx.stats().limit.is_some() {
+            CoreError::Budget
+        } else {
+            CoreError::Internal
+        }
+    })?;
+    drop(rendered);
+    // Two times measured size bounds serde String growth; an extra KiB covers
+    // the updated numeric runtime counters. Reserve before serialization.
+    let _json = ctx.reserve(
+        counter
+            .bytes
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1024))
+            .ok_or(CoreError::Budget)?,
+    )?;
     if let Some(diagnostics) = document.generation.diagnostics.as_mut() {
         diagnostics["runtime"] =
             serde_json::to_value(ctx.stats()).map_err(|_| CoreError::Internal)?;

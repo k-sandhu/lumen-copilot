@@ -50,6 +50,7 @@ struct Counters {
     input: AtomicUsize,
     pages: AtomicUsize,
     glyphs: AtomicUsize,
+    rulings: AtomicUsize,
     reason: AtomicU8,
 }
 #[derive(Debug)]
@@ -100,6 +101,8 @@ pub struct Stats {
     pub pages: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub glyphs: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub max_page_rulings: usize,
     pub limit: Option<&'static str>,
 }
 
@@ -122,6 +125,15 @@ impl Context {
     }
     pub fn pdf_glyph(&self) {
         self.counters.glyphs.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn pdf_rulings(&self, count: usize) {
+        self.counters.rulings.fetch_max(count, Ordering::AcqRel);
+    }
+    pub fn pdf_ruling_limit(&self) -> CoreError {
+        self.failure(10, CoreError::Budget)
+    }
+    pub fn pdf_cell_limit(&self) -> CoreError {
+        self.failure(11, CoreError::Budget)
     }
     pub fn structural_limit(&self) -> CoreError {
         self.failure(9, CoreError::Budget)
@@ -208,6 +220,7 @@ impl Context {
             source_input_bytes: self.counters.input.load(Ordering::Acquire),
             pages: self.counters.pages.load(Ordering::Acquire),
             glyphs: self.counters.glyphs.load(Ordering::Acquire),
+            max_page_rulings: self.counters.rulings.load(Ordering::Acquire),
             limit: match self.counters.reason.load(Ordering::Acquire) {
                 1 => Some("memory"),
                 2 => Some("time"),
@@ -218,6 +231,8 @@ impl Context {
                 7 => Some("cancelled"),
                 8 => Some("panic"),
                 9 => Some("structure"),
+                10 => Some("table_rulings"),
+                11 => Some("table_cells"),
                 _ => None,
             },
         }
