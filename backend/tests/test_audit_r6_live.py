@@ -34,8 +34,12 @@ from app.domain.audit import AuditActor
 from app.domain.entities import AuditOutcome, DocumentStatus, Role
 from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDeniedRecorder
 from app.services.collections_service import CollectionsService
+from tests._live_helpers import isolated_live_url, worker_database_name
 
 _LIVE_URL = os.environ.get("AUDIT_DENIAL_LIVE_DATABASE_URL")
+if _LIVE_URL is not None:
+    _LIVE_URL = isolated_live_url(_LIVE_URL, "AUDIT_DENIAL_LIVE_DATABASE_URL")
+_LIVE_DB = worker_database_name((_LIVE_URL or "lumentest_pr604").rsplit("/", 1)[-1])
 pytestmark = pytest.mark.skipif(_LIVE_URL is None, reason="Targeted PostgreSQL opt-in required")
 
 
@@ -73,7 +77,7 @@ class _Live:
 async def live(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Live]:
     assert _LIVE_URL is not None
     parsed = urlparse(_LIVE_URL)
-    assert parsed.path == "/lumentest_pr604"
+    assert parsed.path == f"/{_LIVE_DB}"
     assert os.environ["DATABASE_URL"] == _LIVE_URL
     admin_url = urlunparse(parsed._replace(path="/postgres"))
     admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
@@ -87,8 +91,8 @@ async def live(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Live]:
     monkeypatch.setattr("app.tasks.enqueue_index_sync", lambda *args: None)
     try:
         async with admin.connect() as conn:
-            await conn.execute(text("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)"))
-            await conn.execute(text("CREATE DATABASE lumentest_pr604"))
+            await conn.execute(text(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)"))
+            await conn.execute(text(f"CREATE DATABASE {_LIVE_DB}"))
             await conn.execute(
                 text(f"CREATE ROLE {role} LOGIN PASSWORD 'r6_disposable' NOSUPERUSER NOBYPASSRLS")
             )
@@ -148,7 +152,7 @@ async def live(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Live]:
         if owner_engine is not None:
             await owner_engine.dispose()
         async with admin.connect() as conn:
-            await conn.execute(text("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)"))
+            await conn.execute(text(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)"))
             await conn.execute(text(f"DROP ROLE IF EXISTS {role}"))
         await admin.dispose()
         get_settings.cache_clear()

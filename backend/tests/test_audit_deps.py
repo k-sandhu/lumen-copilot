@@ -20,11 +20,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import make_audit_sink_factory
 from app.db.audit_transactions import DurableAuditTransactions
-from app.db.base import Base
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome
 from app.services.audit import AuditSink
 from tests._audit_helpers import RecordingDurableAuditTransactions
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -38,7 +38,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
             yield sess

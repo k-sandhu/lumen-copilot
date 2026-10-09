@@ -59,9 +59,7 @@ class UserPreferencesUpdate(BaseModel):
     model_config = {"extra": "forbid"}
 
     default_model_id: str | None = None
-    custom_instructions: str | None = Field(
-        default=None, max_length=MAX_CUSTOM_INSTRUCTIONS_CHARS
-    )
+    custom_instructions: str | None = Field(default=None, max_length=MAX_CUSTOM_INSTRUCTIONS_CHARS)
 
     @model_validator(mode="after")
     def _require_at_least_one_field(self) -> UserPreferencesUpdate:
@@ -105,12 +103,8 @@ async def update_preferences(
     )
     sent = body.__pydantic_fields_set__
     view = await service.update(
-        default_model_id=(
-            body.default_model_id if "default_model_id" in sent else _UNSET
-        ),
-        custom_instructions=(
-            body.custom_instructions if "custom_instructions" in sent else _UNSET
-        ),
+        default_model_id=(body.default_model_id if "default_model_id" in sent else _UNSET),
+        custom_instructions=(body.custom_instructions if "custom_instructions" in sent else _UNSET),
     )
     await session.commit()
     return _to_response(view)

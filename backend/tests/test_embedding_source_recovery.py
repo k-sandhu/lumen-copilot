@@ -34,7 +34,6 @@ from app.connectors.base import FullSyncResult
 from app.core.config import Settings, get_settings
 from app.core.errors import DependencyError
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     ChunkRepository,
     CollectionRepository,
@@ -46,13 +45,18 @@ from app.db.repositories import (
 from app.db.tenant_context import bind_tenant
 from app.domain.entities import DocumentStatus, Role, SourceStatus
 from app.domain.llm import Embedding
+from tests._db_helpers import copy_sqlite_schema
+from tests._live_helpers import isolated_live_url, worker_database_name
 from tests.test_gdrive_sync_task import FakeAclConnector, _doc
 from tests.test_sources_sync_task import _FakeIndexStore, _FakeObjectStore
 
 sync_module = import_module("app.tasks.sync_source")
 _wrapper = sync_module.sync_source.__wrapped__.__func__
 _BACKEND = Path(__file__).resolve().parents[1]
-_LIVE_URL = "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr605"
+_LIVE_URL = isolated_live_url(
+    "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr605"
+)
+_LIVE_DB = worker_database_name(_LIVE_URL.rsplit("/", 1)[-1])
 
 
 def _migration_config() -> Config:
@@ -91,12 +95,12 @@ async def source_db(
         )
         password = uuid4().hex
         async with admin.connect() as conn:
-            await conn.execute(text("DROP DATABASE IF EXISTS lumentest_pr605 WITH (FORCE)"))
-            await conn.execute(text("CREATE DATABASE lumentest_pr605"))
+            await conn.execute(text(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)"))
+            await conn.execute(text(f"CREATE DATABASE {_LIVE_DB}"))
             await conn.execute(
                 text(f"CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS")
             )
-            await conn.execute(text(f"ALTER DATABASE lumentest_pr605 OWNER TO {role}"))
+            await conn.execute(text(f"ALTER DATABASE {_LIVE_DB} OWNER TO {role}"))
         provisioner = create_async_engine(_LIVE_URL)
         try:
             async with provisioner.begin() as conn:
@@ -132,7 +136,7 @@ async def source_db(
                 assert flags == (False, False)
         else:
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(copy_sqlite_schema)
         yield live
     finally:
         await engine.dispose()
@@ -140,7 +144,7 @@ async def source_db(
         get_settings.cache_clear()
         if admin is not None:
             async with admin.connect() as conn:
-                await conn.execute(text("DROP DATABASE IF EXISTS lumentest_pr605 WITH (FORCE)"))
+                await conn.execute(text(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)"))
                 await conn.execute(text(f"DROP ROLE {role}"))
             await admin.dispose()
 
