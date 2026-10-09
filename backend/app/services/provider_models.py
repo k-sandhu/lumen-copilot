@@ -191,9 +191,7 @@ async def resolve_provider_model(
     )
 
 
-async def is_allowed_provider_model(
-    model_id: str, providers: LlmProviderRepository
-) -> bool:
+async def is_allowed_provider_model(model_id: str, providers: LlmProviderRepository) -> bool:
     """Whether a namespaced provider-model id is valid for this tenant (allow-list).
 
     ``True`` iff :func:`resolve_provider_model` resolves it (provider in tenant +

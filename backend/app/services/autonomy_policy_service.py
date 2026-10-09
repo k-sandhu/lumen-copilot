@@ -114,9 +114,7 @@ class AutonomyPolicyService:
         The wire model constrains ``max_autonomy`` to the enum, so no invalid value can
         reach here.
         """
-        stored = await self._policies.upsert(
-            max_autonomy=max_autonomy, updated_by=actor_id
-        )
+        stored = await self._policies.upsert(max_autonomy=max_autonomy, updated_by=actor_id)
         # Audit the governance write (INV-6 / mission filter #4) — who set the tenant's
         # autonomy ceiling to what, so the cap the publish path and the run-time gate
         # consult is attributable after the fact.
@@ -159,9 +157,7 @@ class AutonomyPolicyReader:
         assistant past its own configured level.
         """
         try:
-            cap = await TenantAutonomyPolicyRepository(
-                self._session, self._tenant_id
-            ).get()
+            cap = await TenantAutonomyPolicyRepository(self._session, self._tenant_id).get()
         except Exception:  # noqa: BLE001 — an unreadable cap must not raise the effective level
             return _NO_CAP_DEFAULT
         return cap.max_autonomy if cap is not None else _NO_CAP_DEFAULT
