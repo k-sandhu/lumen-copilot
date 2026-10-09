@@ -13,7 +13,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
-from app.domain.classification import ClassificationWork
+from app.domain.classification import PROMPT_VERSION, ClassificationWork
 from app.domain.decisions import DecisionAttempt, DecisionUsage
 
 
@@ -114,7 +114,7 @@ class ClassificationRepository:
                     "extraction": extraction_id,
                     "taxonomy": taxonomy_version,
                     "controls": controls,
-                    "prompt": "classification-1",
+                    "prompt": PROMPT_VERSION,
                     "rules": "1",
                 },
                 sort_keys=True,
