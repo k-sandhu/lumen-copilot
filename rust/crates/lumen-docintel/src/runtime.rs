@@ -99,7 +99,7 @@ pub struct Stats {
 
 fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<usize, CoreError> {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             n.checked_add(amount).filter(|v| *v <= limit)
         })
         .map(|prior| prior + amount)
