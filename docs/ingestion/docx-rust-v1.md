@@ -31,3 +31,23 @@ embedding and persistence identities remain Python's responsibility. Local cell
 span annotations distinguish source evidence from repeated derived labels.
 Full baseline evaluation, resource measurements and production cutover remain
 human merge gates (#670/#687); generated fixtures alone do not authorize them.
+
+Verification on 2026-10-08: focused Rust suite passed (5 tests, including 256
+Unicode/table property cases); clippy all targets passed; cargo-deny 0.20.2
+licenses/advisories passed offline. Existing Python fixtures are replayed through
+`backend/tests/test_rust_docx_parity.py` with the `docx_extract` example driver.
+13 of 14 comparisons pass exactly after projecting canonical block separators
+back to the baseline. The 1,000-row vertical-merge extraction succeeds but
+canonical rendering hits the foundation's quadratic comparison ceiling (#708).
+The combined Python regression/parity run has 48 passing nodes and that failure.
+
+[~] 2026-10-08: #708 blocks long-table canonical render parity. Residual risk:
+valid medium/large tables cannot yet complete rendering. No promotion permitted.
+[~] 2026-10-08: full offline backend suite deferred because available RAM was
+below 4000 MiB. Residual risk: unrelated regressions are not exhaustively checked.
+[~] 2026-10-08: live gates, held-out fidelity, RSS/throughput and cross-platform
+wheels unverified under this task's stack restrictions. Residual risk: generated
+fixture results do not establish production fidelity or capacity. UTF-16 XML,
+ZIP64 and unsupported embedded content need further fixtures before promotion.
+The bounded XML event reader currently retains a per-part tree; memory accounting
+is conservative and is not a process RSS or hard native interruption guarantee.
