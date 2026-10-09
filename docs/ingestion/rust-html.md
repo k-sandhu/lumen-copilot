@@ -24,3 +24,19 @@ Dependencies: html5ever 0.35.0 and markup5ever_rcdom 0.35.0+unofficial
 0BSD is reviewed as a permissive grant without attribution/copyleft obligations;
 the policy adds only that SPDX identifier. CSS selectors and their copyleft or
 unmaintained dependencies are absent. All four cargo-deny gates pass.
+
+## Verification (2026-10-09)
+
+Four Rust tests including Unicode/element-path and cell-location properties pass,
+as do clippy, fmt and all cargo-deny gates. Installed wheel: 19 targeted Python
+checks pass; a partial-live-success regression was red before its fix. Ruff and
+strict backend-configured mypy pass (9 changed files). Generated HTML/XHTML/MHTML
+all score 100% facts, association, order and exact offsets; Python is unsupported.
+[Measured rows](reports/html.json). These tiny cold-import arms establish no speed target.
+
+- [~] 2026-10-09: full backend suite deferred at 3156 MiB (<4000); residual risk:
+  unrelated regressions await CI.
+- [~] 2026-10-09: recognition budgets (#728), held-out evaluation, hard RSS and
+  canonical pipeline persistence (#667–#669) remain gated; residual risk: candidate
+  accounting alone cannot qualify production recognition or provenance retention.
+- [s] 2026-10-09: live checks excluded by task; residual risk: no deployed round-trip.

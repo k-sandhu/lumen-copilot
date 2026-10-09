@@ -1,5 +1,7 @@
 """Offline opt-in saved-page routing and generated fidelity (#679)."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.core.config import Settings
@@ -33,3 +35,20 @@ def test_native_html_fixture_fidelity() -> None:
         score = evaluate(doc.rendered_text, fixture.gold, spans=spans)
         assert score.fact_coverage == score.table_association == score.reading_order == 1
         assert score.exact_offsets == 1
+
+
+def test_partial_candidate_is_not_live_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(native, "native_available", lambda: True)
+    monkeypatch.setattr(native, "candidate_available", lambda family: True)
+    monkeypatch.setattr(native, "detect_content", lambda *a, **k: SimpleNamespace(format="html"))
+    monkeypatch.setattr(
+        native,
+        "extract_candidate",
+        lambda *a, **k: SimpleNamespace(
+            rendered_text="prefix", generation_json='{"outcome":"partial"}'
+        ),
+    )
+    with pytest.raises(DocumentParseError):
+        parse_document(
+            b"<p>prefix</p>", mime_type="text/html", settings=Settings(native_html_enabled=True)
+        )

@@ -378,13 +378,14 @@ fn walk(
         e.value().attr("class").unwrap_or(""),
         e.value().attr("id").unwrap_or("")
     );
-    let boilerplate = matches!(name, "nav" | "footer" | "aside")
+    let footnote = e.value().attr("epub:type").or(e.value().attr("type")) == Some("footnote")
+        || e.value().attr("role") == Some("doc-footnote");
+    let boilerplate = !footnote && matches!(name, "nav" | "footer" | "aside")
         || e.value().attr("role") == Some("navigation")
         || classes.contains("cookie-banner")
         || classes.contains("cookie-consent");
-    let protects_table = boilerplate
-        && inside
-        && (name == "table" || e.select(&selector("table")?).next().is_some());
+    let protects_table =
+        boilerplate && (name == "table" || e.select(&selector("table")?).next().is_some());
     if boilerplate && !protects_table {
         w.removed.push(path.into());
         return Ok(());
@@ -392,6 +393,7 @@ fn walk(
     if inside {
         let kind = match name {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(BlockKind::Heading),
+            _ if footnote => Some(BlockKind::Footnote),
             "p" => Some(BlockKind::Paragraph),
             "li" => Some(BlockKind::List),
             "pre" => Some(BlockKind::Code),
@@ -549,7 +551,11 @@ fn mime_root<'a>(
 pub fn parse(bytes: &[u8], limits: Limits) -> Result<Document, CoreError> {
     let mut s = Session::new(bytes, limits)?;
     let mut doc = Document {
-        generation: generation(bytes, "rust-html", include_str!("html.rs")),
+        generation: generation(
+            bytes,
+            "rust-html",
+            &format!("{}{}", include_str!("html.rs"), include_str!("html_dom.rs")),
+        ),
         ..Document::default()
     };
     let ascii = String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]).to_ascii_lowercase();
