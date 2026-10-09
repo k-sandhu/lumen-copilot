@@ -32,7 +32,6 @@ from sqlalchemy.pool import StaticPool
 from app.api.deps import get_db_session
 from app.auth import hash_password
 from app.auth.principal import Principal
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkInput,
@@ -56,6 +55,7 @@ from app.domain.entities import (
 from app.domain.llm import Embedding
 from app.main import create_app
 from app.retrieval import RetrievalService
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -104,7 +104,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             tenant_a = await TenantRepository(seed).create(name="Acme")
@@ -304,7 +304,7 @@ async def test_missing_bearer_is_401(client: AsyncClient) -> None:
 
 
 async def test_group_from_another_tenant_is_404_not_403(
-    client: AsyncClient, seeded: _Seeded
+    client: AsyncClient, seeded: _Seeded, durable_audit_ledger
 ) -> None:
     """A tenant-B group is invisible to a tenant-A admin — 404, never 403."""
     token_b = await _login(client, seeded.admin_b_email)
@@ -320,6 +320,13 @@ async def test_group_from_another_tenant_is_404_not_403(
         await client.get(f"/api/v1/admin/groups/{group_b}/members", headers=_auth(token_a)),
     ):
         assert resp.status_code == 404, resp.text
+
+    assert [event.metadata["attempted_action"] for event in durable_audit_ledger.events] == [
+        "group.read",
+        "group.update",
+        "group.delete",
+        "group.members.read",
+    ]
 
     # ...and tenant A's list never leaks it.
     listed = await client.get("/api/v1/admin/groups", headers=_auth(token_a))

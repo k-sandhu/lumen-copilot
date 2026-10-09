@@ -119,7 +119,7 @@ export function documentStatusPresentation(doc: Document): DocumentStatusPresent
       return {
         label: statusLabel(doc.status),
         tone: statusTone(doc.status),
-        detail: doc.status === 'failed' ? doc.error : undefined,
+        detail: doc.status === 'failed' ? (doc.error ?? undefined) : undefined,
         searchable,
       };
   }

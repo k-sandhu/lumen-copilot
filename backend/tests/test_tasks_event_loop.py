@@ -45,7 +45,6 @@ import app.db.session as db_session
 import app.tasks.ingest as ingest_module
 from app.core.config import Settings
 from app.core.errors import NotFoundError
-from app.db.base import Base
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
@@ -55,6 +54,7 @@ from app.db.repositories import (
 from app.domain.entities import DocumentStatus, Role
 from app.domain.llm import Embedding
 from app.tasks.ingest import ingest_document
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -222,6 +222,26 @@ class _FakeIndexStore:
     ) -> None:
         return None
 
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        document_id: uuid.UUID,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
     async def aclose(self) -> None:
         return None
 
@@ -244,7 +264,7 @@ async def _setup_and_seed(url: str, *, count: int) -> list[tuple[uuid.UUID, uuid
     """
     setup_engine = create_async_engine(url)
     async with setup_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
 
     maker = async_sessionmaker(bind=setup_engine, expire_on_commit=False)
     seeded: list[tuple[uuid.UUID, uuid.UUID, str]] = []
@@ -300,6 +320,11 @@ def test_two_sequential_ingest_invocations_in_one_process_both_succeed(
     monkeypatch.setattr(ingest_module, "get_settings", lambda: settings)
     monkeypatch.setattr(ingest_module, "ObjectStore", lambda _s: store)
     monkeypatch.setattr(ingest_module, "LLMGateway", lambda _s: gateway)
+
+    async def _contract_ready(_settings: Settings) -> str:
+        return _settings.embedding_space_fingerprint
+
+    monkeypatch.setattr(ingest_module, "ensure_embedding_contract", _contract_ready)
 
     wrapper = ingest_document.__wrapped__.__func__  # the raw fn under the task
 

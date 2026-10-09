@@ -44,6 +44,8 @@ describe('document presentation helpers', () => {
       filename: 'a.pdf',
       mime_type: 'application/pdf',
       size_bytes: 1,
+      kind: 'document',
+      duration_ms: null,
       collection_id: 'c-1',
       owner_id: 'u-1',
       status: 'processing',
@@ -61,6 +63,8 @@ describe('document presentation helpers', () => {
       filename: 'a.pdf',
       mime_type: 'application/pdf',
       size_bytes: 1,
+      kind: 'document',
+      duration_ms: null,
       collection_id: 'c-1',
       owner_id: 'u-1',
       status: 'ready',
@@ -79,6 +83,8 @@ describe('document presentation helpers', () => {
       filename: 'a.pdf',
       mime_type: 'application/pdf',
       size_bytes: 1,
+      kind: 'document',
+      duration_ms: null,
       collection_id: 'c-1',
       owner_id: 'u-1',
       status: 'ready',
@@ -88,6 +94,27 @@ describe('document presentation helpers', () => {
     });
     expect(legacyIndexed.label).toBe('Ready');
     expect(legacyIndexed.searchable).toBe(true);
+  });
+
+  it('omits a nullable error detail for a legacy failed document', () => {
+    const failed = documentStatusPresentation({
+      id: 'd-4',
+      filename: 'a.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 1,
+      kind: 'document',
+      duration_ms: null,
+      collection_id: 'c-1',
+      owner_id: 'u-1',
+      status: 'failed',
+      error: null,
+      chunk_count: 0,
+      created_at: '',
+      updated_at: '',
+    });
+    expect(failed.label).toBe('Failed');
+    expect(failed.detail).toBeUndefined();
+    expect(failed.searchable).toBe(false);
   });
 
   it('formats bytes compactly', () => {

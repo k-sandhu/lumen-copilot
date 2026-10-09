@@ -20,7 +20,7 @@ Composition (the adapter wires four collaborators, none of which it *is*):
   source of truth, before becoming a citable passage — defense in depth) and
   for the relational agent tools (``search_documents`` / ``list_documents`` /
   ``get_document``);
-* the #36 ``llm/`` gateway ``embed()`` to embed the query (bge-m3) — the only
+* the #36 ``llm/`` gateway ``embed()`` to embed the query — the only
   model caller (ADR-0004); the gateway is injected so the service is testable
   with a fake and never imports LiteLLM.
 
@@ -45,12 +45,15 @@ known handle (text/name/id).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
-from app.db.repositories import GrantRepository, GroupRepository
+from app.db.repositories import GrantRepository, GroupRepository, MessageRepository
+from app.domain.entities import Message
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
 from app.retrieval import queries
@@ -158,7 +161,7 @@ class RetrievalService:
     ) -> list[RetrievedPassage]:
         """Permission-filtered hybrid passage search (the chokepoint API, AC-1/AC-2).
 
-        Embeds ``query`` via the #36 gateway (bge-m3), then runs **one**
+        Embeds ``query`` via the #36 gateway, then runs **one**
         OpenSearch hybrid query (BM25 ⊕ kNN, score-normalized by the engine's
         search pipeline — ADR-0010) carrying the INV-1/INV-2
         :class:`SearchAllowFilter` in both legs, and hydrates the ranked hits
@@ -232,6 +235,15 @@ class RetrievalService:
             row = rows.get(hit.chunk_id)
             if row is None:
                 continue
+            # OpenSearch is derived and can lag a retry/re-delivery. Hydration
+            # admits only the exact Ready Postgres generation and coordinate
+            # space that produced the hit; stale/failed publications are never
+            # citable even if their engine rows still exist (R1-002/R1-006).
+            if (
+                hit.ingestion_attempt != row.ingestion_attempt
+                or hit.embedding_fingerprint != row.embedding_fingerprint
+            ):
+                continue
             passages.append(
                 RetrievedPassage(
                     chunk_id=row.chunk_id,
@@ -243,6 +255,11 @@ class RetrievalService:
                     char_end=row.char_end,
                     score=hit.score,
                     source_locations=row.source_locations,
+                    time_start_ms=row.time_start_ms,
+                    time_end_ms=row.time_end_ms,
+                    transcript_segment_id=row.transcript_segment_id,
+                    speaker_id=row.speaker_id,
+                    speaker_name=row.speaker_name,
                 )
             )
         return passages
@@ -351,6 +368,46 @@ class RetrievalService:
             )
             for position, row in enumerate(rows)
         ]
+
+    async def search_conversation(
+        self,
+        *,
+        principal: Principal,
+        messages: MessageRepository,
+        session_id: UUID,
+        before_created_at: datetime,
+        before_message_id: UUID,
+        terms: Sequence[str],
+        limit: int,
+        mentioned_documents: tuple[tuple[UUID, str], ...],
+    ) -> tuple[list[Message], dict[UUID, str]]:
+        """Authorize transcript sources and stored mentions BEFORE matching (#569).
+
+        The bound reader owns session ownership and the fixed compaction cursor.
+        This chokepoint snapshots source permissions ONCE; SQL filters candidates before
+        its hard scan cap. The repository simply clips permitted prose and matches
+        literal terms in Python over that bounded set. No unknown or forbidden
+        assistant body can produce even a match/no-match signal. The returned
+        names are that same snapshot, for the handler's final withholding check.
+        """
+        allow_set = await self._resolve_allow_set(principal)
+        stmt = queries.permitted_conversation_documents(
+            allow_set=allow_set,
+            session_id=session_id,
+            mentioned_documents=mentioned_documents,
+            dialect=self._session.get_bind().dialect.name,
+        )
+        permitted = {row[0]: row[1] for row in (await self._session.execute(stmt)).all()}
+        rows = await messages.search_for_session_before(
+            session_id,
+            before_created_at=before_created_at,
+            before_message_id=before_message_id,
+            terms=terms,
+            limit=limit,
+            permitted_document_ids=tuple(permitted),
+            mentioned_documents=mentioned_documents,
+        )
+        return rows, permitted
 
     async def permitted_document_names(
         self, *, principal: Principal, document_ids: list[UUID]

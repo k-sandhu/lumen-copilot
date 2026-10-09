@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from uuid import UUID
 
 
 class Role(str, Enum):
@@ -53,6 +54,9 @@ class ChatMessage:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
+    #: Internal, never provider wire data. None means incomplete/UNKNOWN;
+    #: () means provably free of document dependencies.
+    source_document_ids: tuple[UUID, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,3 +153,30 @@ class Embedding:
 
     vector: list[float] = field(default_factory=list)
     model: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionWord:
+    """One provider-neutral, diarized word with citable local timing.
+
+    Times are integer milliseconds on the audio request's zero-based timeline.
+    ``speaker_label`` is the provider's request-local diarizer label; media
+    ingestion maps it to a stable file-local ``speaker-N`` id before anything is
+    persisted or exposed.  It is deliberately not a biometric identity.
+    """
+
+    text: str
+    start_ms: int
+    end_ms: int
+    speaker_label: str
+    confidence: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Transcription:
+    """A speech-to-text result whose evidence is safe to put on a time axis."""
+
+    text: str
+    words: tuple[TranscriptionWord, ...]
+    language: str | None
+    model: str

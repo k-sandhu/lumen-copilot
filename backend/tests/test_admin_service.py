@@ -87,7 +87,15 @@ def test_cursor_roundtrips() -> None:
     assert _decode_cursor(_encode_cursor(member_id)) == member_id
 
 
-@pytest.mark.parametrize("bad", ["not-base64!!", "", "Zm9vYmFy", "col:" + str(uuid.uuid4())])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-base64!!",
+        "",
+        "Zm9vYmFy",
+        pytest.param("col:" + str(uuid.uuid4()), id="collection-token"),
+    ],
+)
 def test_malformed_cursor_is_rejected(bad: str) -> None:
     # Garbage, a foreign prefix, or a non-uuid payload all fail closed (→ 422).
     with pytest.raises(ValidationError):

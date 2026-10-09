@@ -21,20 +21,21 @@ import asyncio
 import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from typing import cast
 
 import pytest
 import pytest_asyncio
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.deps import get_db_session, require_roles
+from app.api.deps import AuditSinkFactoryValue, get_db_session, require_roles
 from app.auth import Principal, hash_password, hashing
-from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -52,7 +53,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed_session:
             tenant = await TenantRepository(seed_session).create(name="Acme")
@@ -84,7 +85,7 @@ def app(sessionmaker: async_sessionmaker[AsyncSession]) -> Iterator[FastAPI]:
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(transport=transport, base_url="https://test") as ac:
         yield ac
 
 
@@ -151,11 +152,12 @@ async def test_refresh_rotates_and_old_token_is_rejected(app: FastAPI, client: A
     # Replay the *original* (pre-rotation) token on a clean client (no jar) so
     # only the revoked value is presented: it must now be rejected (rotation).
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as fresh:
-        replay = await fresh.post(
-            "/api/v1/auth/refresh",
-            cookies={"lumen_refresh_token": original_cookie},
-        )
+    async with AsyncClient(
+        transport=transport,
+        base_url="https://test",
+        cookies={"lumen_refresh_token": original_cookie},
+    ) as fresh:
+        replay = await fresh.post("/api/v1/auth/refresh")
     assert replay.status_code == 401
 
 
@@ -260,11 +262,25 @@ async def test_require_roles_blocks_wrong_role_with_403(app: FastAPI, client: As
     assert unauth.status_code == 401
 
 
-def test_require_roles_admits_correct_role() -> None:
+async def test_require_roles_admits_correct_role() -> None:
     """A principal holding the required role passes the gate (positive control)."""
     gate = require_roles(Role.ADMIN, Role.SECURITY)
     admin = Principal(user_id=uuid.uuid4(), tenant_id=uuid.uuid4(), roles=(Role.ADMIN,))
-    assert gate(admin) is admin
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/_admin_only",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("test", 80),
+            "client": ("203.0.113.7", 1234),
+        }
+    )
+    unused_sink_factory = cast(AuditSinkFactoryValue, object())
+
+    assert await gate(request, admin, admin.tenant_id, unused_sink_factory) is admin
 
 
 # --- Perf: a login must not park the worker (#512) -------------------------

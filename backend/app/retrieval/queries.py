@@ -34,17 +34,19 @@ test), not the in-memory SQLite used for the pure unit tests.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, String, and_, cast, false, func, or_, select
+from sqlalchemy import ColumnElement, Select, String, and_, case, cast, false, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
 from app.db.repositories import to_document
-from app.domain.entities import Document
+from app.domain.entities import Document, DocumentStatus
 from app.domain.ingestion import SourceLocation
 from app.retrieval.permissions import AllowSet
 from app.search.filters import acl_freshness_floor
@@ -67,11 +69,57 @@ class PassageRow:
     chunk_id: UUID
     document_id: UUID
     document_name: str
+    document_kind: str
+    duration_ms: int | None
     ord: int
     text: str
     char_start: int
     char_end: int
+    time_start_ms: int | None
+    time_end_ms: int | None
+    transcript_segment_id: UUID | None
+    transcript_segment_document_id: UUID | None
+    speaker_id: str | None
+    speaker_name: str | None
+    ingestion_attempt: int
+    embedding_fingerprint: str | None
     source_locations: tuple[SourceLocation, ...] = ()
+
+
+def _valid_passage_provenance(row: PassageRow) -> bool:
+    """Fail closed before malformed source timing can become a citation.
+
+    Database checks protect the local pair ordering. This hydration guard also
+    applies the cross-row duration invariant and prevents ordinary documents
+    from accidentally acquiring media-only provenance (spec 0008 §5 / INV-3).
+    """
+    media_values = (
+        row.time_start_ms,
+        row.time_end_ms,
+        row.transcript_segment_id,
+        row.transcript_segment_document_id,
+        row.speaker_id,
+        row.speaker_name,
+    )
+    if row.document_kind == "document":
+        return all(value is None for value in media_values)
+    if row.document_kind not in {"audio", "video"}:
+        return False
+    start, end = row.time_start_ms, row.time_end_ms
+    return (
+        row.duration_ms is not None
+        and start is not None
+        and end is not None
+        and 0 <= start < end <= row.duration_ms
+        and (
+            row.transcript_segment_id is None
+            or row.transcript_segment_document_id == row.document_id
+        )
+        # A chunk spanning several turns has no truthful single segment id.
+        # Speaker display metadata, when present, must still be internally
+        # coherent even though both segment and speaker are optional.
+        and (row.speaker_name is None or row.speaker_id is not None)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,8 +269,8 @@ async def get_permitted_document(
     """The permitted-document **point read** — one row, one predicate (INV-2).
 
     Every non-retrieval read path that resolves a single document by id routes
-    through here (``/documents/{id}``, its ``/content``, ``/text``, and the
-    presigned object URL), so a document point read is governed by **exactly**
+    through here (``/documents/{id}``, ``/text``, and the v2 signed-access /
+    transcript endpoints), so a document point read is governed by **exactly**
     the mode-split predicate retrieval uses — :func:`_document_permitted` — and
     not by a second, weaker rule.
 
@@ -287,6 +335,51 @@ def permitted_document_names(
     return stmt
 
 
+def permitted_conversation_documents(
+    *,
+    allow_set: AllowSet,
+    session_id: UUID,
+    mentioned_documents: Sequence[tuple[UUID, str]],
+    dialect: str,
+) -> Select[tuple[UUID, str]]:
+    """One permission snapshot for session dependencies, without transcript text.
+
+    Restrict metadata to immutable assistant sources and the stored mention map,
+    rather than enumerating the caller's entire accessible corpus. The SAME
+    retrieval predicate admits IDs and current names together in one SELECT.
+    Later recall selection and rendering use these materialized values only.
+    """
+    ids = models.Message.source_document_ids
+    mention_ids = [doc.hex for doc, name in mentioned_documents if name]
+    if dialect == "postgresql":
+        known = func.jsonb_typeof(ids) == "array"
+        sources = func.jsonb_array_elements_text(
+            case((known, ids), else_=cast([], JSONB))
+        ).table_valued("value", joins_implicitly=True)
+        mentions = func.jsonb_array_elements_text(cast(mention_ids, JSONB)).table_valued("value")
+    else:
+        known = func.json_type(ids) == "array"
+        sources = func.json_each(case((known, ids), else_="[]")).table_valued(
+            "value", joins_implicitly=True
+        )
+        mentions = func.json_each(json.dumps(mention_ids)).table_valued("value")
+    source_ids = (
+        select(func.replace(sources.c.value, "-", ""))
+        .select_from(models.Message, sources)
+        .where(
+            models.Message.tenant_id == allow_set.tenant_id,
+            models.Message.session_id == session_id,
+            models.Message.role == "assistant",
+        )
+    )
+    document_id = func.replace(cast(models.Document.id, String), "-", "")
+    return select(models.Document.id, models.Document.filename).where(
+        models.Document.tenant_id == allow_set.tenant_id,
+        or_(document_id.in_(source_ids), document_id.in_(select(mentions.c.value))),
+        _document_permitted(allow_set),
+    )
+
+
 def valid_chunk_pairs(*, tenant_id: object, chunk_ids: list[UUID]) -> Select[tuple[UUID, UUID]]:
     """(chunk_id, document_id) for chunks that really exist in this tenant.
 
@@ -295,9 +388,14 @@ def valid_chunk_pairs(*, tenant_id: object, chunk_ids: list[UUID]) -> Select[tup
     chunk id must not smuggle that id into a prompt — only chunks that belong
     to the claimed document survive the join at the caller.
     """
-    return select(models.Chunk.id, models.Chunk.document_id).where(
-        models.Chunk.tenant_id == tenant_id,
-        models.Chunk.id.in_(chunk_ids),
+    return (
+        select(models.Chunk.id, models.Chunk.document_id)
+        .join(models.Document, models.Chunk.document_id == models.Document.id)
+        .where(
+            models.Chunk.tenant_id == tenant_id,
+            models.Chunk.id.in_(chunk_ids),
+            models.Document.status == DocumentStatus.READY.value,
+        )
     )
 
 
@@ -315,28 +413,70 @@ def _permission_filter(stmt: Select[_RowT], allow_set: AllowSet) -> Select[_RowT
     """
     return stmt.where(
         models.Chunk.tenant_id == allow_set.tenant_id,
+        models.Document.status == DocumentStatus.READY.value,
         _document_permitted(allow_set),
     )
 
 
 def _base_chunk_select() -> (
-    Select[tuple[UUID, UUID, str, int, str, int, int, list[dict[str, object]] | None]]
+    Select[
+        tuple[
+            UUID,
+            UUID,
+            str,
+            str,
+            int | None,
+            int,
+            str,
+            int,
+            int,
+            int | None,
+            int | None,
+            UUID | None,
+            UUID | None,
+            str | None,
+            str | None,
+            int,
+            str | None,
+            list[dict[str, object]] | None,
+        ]
+    ]
 ):
     """A chunk-joined-document select carrying the columns passages need.
 
     Joins ``chunks`` to their ``documents`` so a hit carries the document name +
     owner (the latter for the permission predicate, the former for citations).
     """
-    return select(
-        models.Chunk.id,
-        models.Chunk.document_id,
-        models.Document.filename,
-        models.Chunk.ord,
-        models.Chunk.text,
-        models.Chunk.char_start,
-        models.Chunk.char_end,
-        models.Chunk.source_locations,
-    ).join(models.Document, models.Chunk.document_id == models.Document.id)
+    return (
+        select(
+            models.Chunk.id,
+            models.Chunk.document_id,
+            models.Document.filename,
+            models.Document.kind,
+            models.Document.duration_ms,
+            models.Chunk.ord,
+            models.Chunk.text,
+            models.Chunk.char_start,
+            models.Chunk.char_end,
+            models.Chunk.time_start_ms,
+            models.Chunk.time_end_ms,
+            models.Chunk.transcript_segment_id,
+            models.TranscriptSegment.document_id.label("transcript_segment_document_id"),
+            models.Chunk.speaker_id,
+            models.Chunk.speaker_name,
+            models.Document.ingestion_attempts,
+            models.Chunk.embedding_fingerprint,
+            models.Chunk.source_locations,
+        )
+        .join(models.Document, models.Chunk.document_id == models.Document.id)
+        .outerjoin(
+            models.TranscriptSegment,
+            and_(
+                models.TranscriptSegment.id == models.Chunk.transcript_segment_id,
+                models.TranscriptSegment.tenant_id == models.Chunk.tenant_id,
+            ),
+        )
+    )
 
 
 async def semantic_search(
@@ -422,17 +562,48 @@ async def load_passages(
     stmt = _permission_filter(stmt, allow_set)
     result = await session.execute(stmt)
     rows: dict[UUID, PassageRow] = {}
-    for cid, document_id, filename, ordinal, text, char_start, char_end, locations in result.all():
-        rows[cid] = PassageRow(
+    for (
+        cid,
+        document_id,
+        filename,
+        document_kind,
+        duration_ms,
+        ordinal,
+        text,
+        char_start,
+        char_end,
+        time_start_ms,
+        time_end_ms,
+        transcript_segment_id,
+        transcript_segment_document_id,
+        speaker_id,
+        speaker_name,
+        ingestion_attempt,
+        embedding_fingerprint,
+        locations,
+    ) in result.all():
+        row = PassageRow(
             chunk_id=cid,
             document_id=document_id,
             document_name=filename,
+            document_kind=document_kind,
+            duration_ms=duration_ms,
             ord=ordinal,
             text=text,
             char_start=char_start,
             char_end=char_end,
+            time_start_ms=time_start_ms,
+            time_end_ms=time_end_ms,
+            transcript_segment_id=transcript_segment_id,
+            transcript_segment_document_id=transcript_segment_document_id,
+            speaker_id=speaker_id,
+            speaker_name=speaker_name,
+            ingestion_attempt=ingestion_attempt,
+            embedding_fingerprint=embedding_fingerprint,
             source_locations=tuple(SourceLocation.from_dict(value) for value in locations or []),
         )
+        if _valid_passage_provenance(row):
+            rows[cid] = row
     return rows
 
 
@@ -458,6 +629,7 @@ async def document_search(
         .where(
             models.Document.tenant_id == allow_set.tenant_id,
             _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
             models.Document.filename.ilike(f"%{name_or_query}%"),
         )
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
@@ -490,6 +662,7 @@ async def list_documents(
         .where(
             models.Document.tenant_id == allow_set.tenant_id,
             _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
         )
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
         .limit(k)
@@ -518,6 +691,7 @@ async def load_document_text(
         models.Document.id == document_id,
         models.Document.tenant_id == allow_set.tenant_id,
         _document_permitted(allow_set),
+        models.Document.status == DocumentStatus.READY.value,
     )
     doc = (await session.execute(doc_stmt)).first()
     if doc is None:

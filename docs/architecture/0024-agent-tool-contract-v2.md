@@ -1,0 +1,85 @@
+# 24. Agent tool contract v2 and claim-linked answers
+
+- **Status:** Proposed (direction approved; compatibility questions held for owner review)
+- **Date:** 2026-09-30
+- **Tracking:** [#608](https://github.com/k-sandhu/lumen-copilot/issues/608)
+- **Builds on:** [ADR-0004](0004-architecture-boundaries-and-adapters.md), [ADR-0006](0006-contract-first-parallel-implementation.md), [ADR-0010](0010-dedicated-text-search-engine.md), [ADR-0016](0016-context-engine-and-cache-first-prompting.md), [ADR-0018](0018-sub-agent-orchestration.md), [spec 0004](../specs/0004-security-and-domain-invariants.md).
+
+## Context
+
+The agent currently sees at most 600 characters of each retrieved passage and the first 2,400 characters of a document without a truncation notice. Discovery matches a literal filename substring. The runtime records every retrieved passage as a citation, including passages unused by a refusal. These interfaces lose evidence and confuse retrieval with attribution. Tools must expose what the agent needs to complete its task across LiteLLM/OpenRouter routes without provider-specific features.
+
+## Decision
+
+### Task-shaped tools
+
+| Tool | Parameters and bounds | Result |
+|---|---|---|
+| `search_passages` | `query`; nullable `collection_ids`, `document_ids`, `source`, `mime_type`, source-modified or creation-date bounds; `k` 1–20 (default 6) | Ranked **complete** passages with S handles and known location; narrower filters when bounded candidate discovery would exceed 1000 documents |
+| `find_documents` | Nullable literal `query` over title, filename, path and available metadata; same filters; title/created/modified ascending or descending sort; `limit` 1–50 (default 10); nullable opaque `cursor` | D handles, actual title, filename, MIME type, source/path and known modified date; `next_cursor` and explicit continuation |
+| `read_document` | `document` (D handle or UUID), nullable `start` >=0 and exclusive `end`, or nullable `around` (S handle, fixed 1200-character window); `max_passages` 1–20 (default 5) | Complete intersecting passages with S handles, half-open returned range, `total_length`, explicit truncation and next start; no silently split passages |
+| `web_search` | Existing `query` and `k` vocabulary retained | Validated title, URL and evidence with W handles; identical calls reuse evidence within one answer |
+| `run_python`, `write_file`, `ask_user` | Existing task semantics; artifact content types use the service's supported enum | Existing bounded results |
+| MCP | Stable internal identity mapped to `mcp__<server>__<tool>` or a collision-resistant shortened form; ASCII letters, digits and underscores, <=64 characters | Existing governed execution, bounded descriptions/output, stable ordering |
+
+Offsets are zero-based Unicode character offsets into the extracted text, end-exclusive. Range and around modes are mutually exclusive; invalid combinations return actionable `tool_bad_args`. Opaque document cursors bind the tenant, requester, filters and sort, and recheck permissions on every page. Source/type/date/document filters are an **intersection** with principal, tenant, assistant collections and pinned document scope. Unknown metadata stays unknown; source-modified dates are never inferred from ingestion dates. Preserve already-fetched public title/path/modified metadata through a minimal ingestion handoff; parser, chunking and index synchronization remain separately owned. Sections/pages await structured provenance.
+
+The concrete cursor, sort and complete-passage range choices above are proposed for owner review. They replace illustrative page/max-character parameters with executable, bounded navigation. If several passages share a continuation boundary and cannot fit the selected count, return a safe instruction to increase the passage budget or narrow the range rather than skip evidence. Group membership is refreshed on each read, including legacy adapters: one agent request can span a revocation.
+
+Output limits are explicit. A truncated result states its returned and available range and how to continue; legacy reads explain their prefix-only limitation until range reads land. Passage count and context fitting bound cost; do not silently cut each passage. If complete required evidence cannot fit, the context engine returns its existing typed context refusal. Every description explains purpose, use, non-use, output, limits and handle lifetime. Flat schemas disallow additional properties, describe bounds/defaults, use integer/enums, and make every property required with nullable optional values. Compatibility adapters accept old omitted arguments; provider strict enforcement is a later route-specific experiment.
+
+Large MCP catalogs need bounded descriptions, schemas and results plus model-neutral deferred loading where appropriate. Concrete limits and the loading protocol remain an owner-reviewed extension tracked in #652; wire-name mapping alone does not implement them. Tenant/assistant allowlists, stable ordering and context fitting remain authoritative while that extension is pending. Deferred loading must preserve internal identities, approval and durable audit; provider-native tool search remains outside scope.
+
+Errors distinguish malformed arguments from execution/protocol failure. Missing and forbidden documents/handles share the same safe response. Empty searches suggest broadening or discovery. Remote errors never expose credentials or vendor internals. Reuse only identical read-only calls within one answer; write/approval paths are never deduplicated as reads. Reuse still records each consumer and its provenance and respects cancellation and permission rechecks.
+
+### Conversation handles and answer contract
+
+S (corpus passage), D (document) and W (web evidence) handles are plain text, conversation-scoped, monotonically allocated and never reassigned to different evidence. They persist for the conversation lifetime, are deleted with it, and are not bearer credentials. Durable records hold tenant/session plus source identity and exact span; summaries carry only identities. Each handle resolution rehydrates through the permission chokepoint under the **current** principal and effective scope, including at final citation resolution. Revoked/deleted evidence is excluded. Web handles refer to validated fetched evidence, not model prose.
+
+The model cites claims inline as `[S3]` or `[W1]`. D handles navigate documents and cannot support a claim without reading a passage. The runtime resolves final inline handles under current permissions and persists **only cited permitted passages**, in first-use order, after validation. If an inline handle is unknown, cross-conversation, cross-tenant, deleted, forbidden or unresolvable, or a D marker is used as claim support, **reject the entire candidate answer**, including otherwise valid claims and citations. Emit and persist a deterministic, source-independent refusal with zero citations; it must reveal neither rejected facts nor source identities. Unsafe markers are stripped by discarding the rejected candidate, never by deleting a marker while retaining its assertion. Unsourced factual claims also fail closed under INV-3. Retrieval is evidence availability, not citation creation. Refusals carry zero citations; deterministic refusal paths discard evidence and markers. A generated refusal without handles naturally persists none; mixed premise corrections containing supported claims may cite those claims after validation and are not classified by fragile phrase matching.
+
+Compaction retains the mapping independently of transcript text. Retained evidence contains its handle and complete visible text, never an unlabeled snippet. Evidence removed from the prompt must be read again before it supports a new claim. Rolling summaries contain IDs/handles only and rehydrate under current permissions (ADR-0016). Worker results are typed evidence rechecked by the parent (ADR-0018), never citations to worker summaries.
+
+Reads, reuse, refusals, citation rejection and terminal answers remain auditable. Routes commit audited empty/read/refusal transactions; tests must verify durable events in a fresh session rather than manually committing the transaction under test.
+
+### Answer publication lifecycle (proposed for owner review)
+
+For v2 answers, buffer all candidate answer text until final validation; this narrowly supersedes ADR-0016 §6's speculative/live answer-delta timing, including forced tool-free synthesis. Ordinary synthesis, `tool_choice="none"`, empty-tool-list turns and length continuations all use this rule. A length-limited partial and its bounded continuation form one candidate; the partial is not finalized separately. Tool activity and narration retain their existing lifecycle.
+
+An answer becomes finalized only after generation and any continuation have completed, final handle resolution and current-permission checks have completed or failed closed, and INV-3 validation has selected either the supported answer or the safe refusal. Persist that final text, its selected citations and durable audit before publishing it through existing `delta` envelopes. Delivered answer deltas concatenate to exactly the stored/reloaded text; emit only the selected citation events and flush answer/citation envelopes before the single `done` terminal. Rejected candidate text and provisional citations are never published. A resolution failure selects the same safe refusal; a terminal generation/persistence failure uses the existing error path without flushing the pending candidate.
+
+This buffered path needs no final-sanitization `answer_retract`: no candidate answer deltas have escaped. Envelope shapes remain compatible, but the changed publication lifecycle and optional citation fields must be documented, reviewed and frozen in `contracts/` under ADR-0006 before runtime/frontend implementation. Do not silently broaden the existing whole-turn retraction semantics to span a finalized partial or continuation.
+
+### Backward compatibility (proposed for owner review)
+
+1. Retain `search_text`, `search_documents`, `list_documents`, `get_document` as callable adapters. Existing immutable assistant versions and stored tool policies are not rewritten. New default catalogs offer only the three task-shaped tools; legacy configurations offer their selected names. Policies resolve an alias to its existing capability and intersect permissions, so a rename cannot bypass a deny, approval or scope restriction. Document this resolution in tests before replacing defaults.
+2. Preserve `mcp:<server>:<tool>` as the internal catalog/policy/audit identity. Map names at the gateway boundary in **both directions**, including history and results. Never silently migrate external identities or shadow a built-in. This naming fix references #575; it does not claim to fix its missing catalog/registry integration.
+3. REST/WS tool names remain open strings. Add the new names to documented vocabulary and frontend labels. Citation records/envelopes add an optional `handle`; older messages without it keep their numbered sources. New inline handle links resolve through the same citation identity on streaming and reload. Regenerate the frontend client in the wire-changing PR.
+4. Audit/trace keeps the invoked legacy/catalog name and optionally records canonical capability and reuse origin. Historical rows remain readable; provider wire names do not replace product identities. Tool activity is generated only by actual correlated invocation/result records.
+5. `read_conversation` (#570) remains an independent transcript-navigation tool. Its message IDs are not evidence handles. Scope, pagination and audit remain additive; it may show stored answer markers but cannot resurrect source permissions or turn transcript prose into evidence. Handles survive its compaction/readback path through durable records, not summary parsing.
+6. #606 timestamp/location citation additions are orthogonal: preserve its fields and add handles without converting time offsets to character offsets. Merge either order with regenerated contracts and integration tests. #559 approval semantics remain authoritative; alias handling cannot broaden a pre-approval.
+
+### Verification and delivery
+
+Independent draft PRs isolate truncation notices, complete passages and MCP wire names from origin/main. Handles/persistence, navigation/filtering, schema/error hygiene, prompt policy and per-route conformance each have their own issue. Stack only real dependencies and record them. Every PR remains draft with the baseline merge gate and expected fact recall, citation precision, refusal citations, repeated searches, calls/tokens/latency effects. No accuracy improvement is claimed without measurement.
+
+Synthetic tests cover late-passage facts, continuation, pagination/sorting, schema validation, safe/collision-free names and reverse mapping, unknown/cross-conversation/cross-tenant/revoked handles, inline-used-only persistence, refusal zero citations, compaction, scoped reads and durable route audits. Per-model conformance separately tests parallel calls, tool names, malformed calls, bounded repeats, result use and protocol state round trips. Provider probes are opt-in, bounded, and use configured routes; missing qualification must not be reported as a pass. Evaluation baseline and provider-only features are outside this ADR's implementation scope.
+
+The downstream answer-contract regressions must assert answer text as well as citation rows:
+
+| Case | Required assertions |
+|---|---|
+| Rejected support (R1-001) | Parameterize unknown, cross-conversation, cross-tenant, deleted, revoked and unresolvable handles, plus a D marker used as claim support. A rejected candidate such as `The confidential acquisition target is Aurora [S3].` emits and persists only the deterministic zero-citation refusal; neither the restricted assertion nor its marker appears in answer deltas or the stored answer. An unsourced factual assertion must also fail closed under INV-3. |
+| Mixed permitted/revoked support (R1-001) | After retrieval, a barrier lets the test revoke S3 before final resolution while S1 remains permitted. An answer citing both is rejected in full: no surviving claim text, citation rows or citation events, including for S1. Read back the refusal and durable rejection/answer audits in a fresh session. |
+| Publication parity (R1-002) | Hold final resolution at a barrier and assert no answer deltas or citation events have been published. Cover a generated refusal containing `[S999]`, a revoked marker and a resolver failure. After release, concatenated delivered answer deltas equal persisted and reloaded text exactly, with unsafe markers absent and exactly one terminal. |
+| Synthesis and continuation (R1-002) | Repeat parity checks for ordinary synthesis, forced `tool_choice="none"`, an empty tool list and a length-limited answer plus its continuation, including handles split across chunks or appearing only in the tail. No partial block is published before combined validation. A valid candidate preserves its exact text and first-use citations; a terminal generation/persistence failure cannot flush the pending candidate. |
+
+Use deterministic events/barriers for retrieval, revocation, continuation completion and final-resolution release, never sleeps or timing thresholds. Prove these tests load-bearing in the implementation PR by temporarily restoring marker-only stripping or early answer-delta publication and observing the corresponding failures. This documentation-only ADR specifies the regressions; it does not implement or run them.
+
+## Basis
+
+Task-shaped tools and useful result fields follow [Anthropic's tool design guidance](https://www.anthropic.com/engineering/writing-tools-for-agents). Portable schemas follow [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling); route state and naming require [Gemini function calling](https://ai.google.dev/gemini-api/docs/function-calling) conformance. Execution errors and untrusted annotations follow the [MCP tools specification](https://modelcontextprotocol.io/specification/2025-06-18/server/tools). These inform the contract; they do not establish Lumen accuracy or provider support.
+
+## Consequences
+
+Complete evidence costs more tokens per hit; count budgets and context fitting must report that cost. Durable handles add storage and permission-resolution work. Compatibility avoids breaking published assistants at the cost of temporary adapters. The final answer becomes the citation selection boundary: answer deltas and source events wait for validation and durable persistence. Buffering delays the first answer delta; tool activity and narration retain their existing liveness. Whole-answer rejection deliberately discards permitted claims alongside rejected support. Migration/alias/UI/publication choices above require owner review before merge; the approved evidence/tool direction proceeds in held drafts.

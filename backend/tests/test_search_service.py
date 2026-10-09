@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
+from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
@@ -53,10 +54,12 @@ from app.search import OpenSearchStore
 from app.services.audit import AuditSink
 from app.services.grants_service import GrantsService
 from app.services.search_service import SearchService
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
-_EMBED_DIM = 1024
+_EMBED_DIM = CANONICAL_EMBEDDING_DIMENSIONS
+_TEST_FP = "d" * 64
 
 
 # --- Fakes ------------------------------------------------------------------
@@ -163,7 +166,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
             yield sess
@@ -942,6 +945,8 @@ async def _index_document_chunks(
                 embedding=c.embedding,
                 char_start=c.char_start,
                 char_end=c.char_end,
+                ingestion_attempt=0,
+                embedding_fingerprint=_TEST_FP,
             )
             for c in chunks
         ],
@@ -1007,6 +1012,7 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
         base_url=_OS_URL,
         index=f"lumen-test-{uuid.uuid4().hex[:8]}",
         dimensions=_EMBED_DIM,
+        embedding_fingerprint=_TEST_FP,
         timeout_seconds=30.0,
     )
     hot = 11
@@ -1051,6 +1057,7 @@ async def test_live_search_excludes_other_tenant_and_owner() -> None:
                             char_start=0,
                             char_end=len(matching),
                             embedding=_unit_vector(_EMBED_DIM, hot),
+                            embedding_fingerprint=_TEST_FP,
                         )
                     ],
                 )
@@ -1127,6 +1134,7 @@ async def test_live_search_returns_granted_document_passages() -> None:
         base_url=_OS_URL,
         index=f"lumen-test-{uuid.uuid4().hex[:8]}",
         dimensions=_EMBED_DIM,
+        embedding_fingerprint=_TEST_FP,
         timeout_seconds=30.0,
     )
     hot = 13
@@ -1170,6 +1178,7 @@ async def test_live_search_returns_granted_document_passages() -> None:
                         char_start=0,
                         char_end=len(matching),
                         embedding=_unit_vector(_EMBED_DIM, hot),
+                        embedding_fingerprint=_TEST_FP,
                     )
                 ],
             )

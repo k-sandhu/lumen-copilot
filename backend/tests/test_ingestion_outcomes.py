@@ -1,16 +1,20 @@
-"""Regression coverage for native extraction outcomes (spec 0014 / issue #624)."""
+"""Regression coverage for native extraction outcomes (spec 0016 / issue #624)."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from importlib import import_module
 
 import pytest
 
+from app.domain.entities import DocumentStatus
+from app.domain.ingestion import ExtractionOutcome
 from tests.test_ingestion_locations import _make_pdf_pages_with_blank_middle
 from tests.test_ingestion_task import (
     _FakeGateway,
+    _FakeIndexStore,
     _FakeObjectStore,
     _seed_document,
     _settings,
@@ -212,3 +216,136 @@ async def test_cross_tenant_repository_read_does_not_disclose_ingestion_outcome(
         owned = await repositories.DocumentRepository(session, tenant_id).get(document_id)
     assert owned is not None
     assert owned.ingestion_outcome is None
+
+
+@pytest.mark.parametrize("newer_outcome", ["empty", "partial"])
+async def test_delayed_success_cannot_overwrite_newer_extraction_outcome(
+    sqlite_engine: None, monkeypatch: pytest.MonkeyPatch, newer_outcome: str
+) -> None:
+    """R1-001: pause A after real index sync, then fully publish connector update B."""
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="older")
+    store = _FakeObjectStore()
+    gateway = _FakeGateway()
+    async with db_session.session_scope() as session:
+        older = await repositories.DocumentRepository(session, tenant_id).get(document_id)
+        assert older is not None
+        store.put(str(tenant_id), older.storage_key, b"Older ordinary native text.")
+
+    indexed = asyncio.Event()
+    release = asyncio.Event()
+    original_sync = ingest._sync_index
+
+    async def delayed_sync(*args: object, **kwargs: object) -> bool:
+        published = await original_sync(*args, **kwargs)
+        if kwargs["expected_attempt"] == 1:
+            assert published
+            indexed.set()
+            await release.wait()
+        return published
+
+    monkeypatch.setattr(ingest, "_sync_index", delayed_sync)
+    first = asyncio.create_task(
+        ingest.ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=_settings(),
+            object_store=store,
+            gateway=gateway,
+            search_store=_FakeIndexStore(),
+        )
+    )
+    indexed_wait = asyncio.create_task(indexed.wait())
+    try:
+        await asyncio.wait((indexed_wait, first), return_when=asyncio.FIRST_COMPLETED)
+        if not indexed.is_set():
+            await first
+        assert indexed.is_set()
+        body = _blank_pdf() if newer_outcome == "empty" else _make_pdf_pages_with_blank_middle()
+        new_key = f"{tenant_id}/newer.pdf"
+        store.put(str(tenant_id), new_key, body)
+        async with db_session.session_scope() as session:
+            updated = await repositories.DocumentRepository(session, tenant_id).update_from_sync(
+                document_id,
+                filename="newer.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(body),
+                storage_key=new_key,
+                status=DocumentStatus.PENDING,
+                acl_principals=None,
+                acl_synced_at=None,
+                acl_scope_ids=None,
+            )
+            assert updated is not None
+        await ingest.ingest_document_async(
+            tenant_id,
+            document_id,
+            settings=_settings(),
+            object_store=store,
+            gateway=gateway,
+            search_store=_FakeIndexStore(),
+        )
+        async with db_session.session_scope() as session:
+            before = await repositories.DocumentRepository(session, tenant_id).get(document_id)
+            chunks_before = await repositories.ChunkRepository(
+                session, tenant_id
+            ).list_for_document(document_id)
+        assert before is not None
+        assert before.ingestion_outcome == newer_outcome
+        assert before.ingestion_attempts == 2
+        assert before.status is (
+            DocumentStatus.FAILED if newer_outcome == "empty" else DocumentStatus.READY
+        )
+        release.set()
+        await first
+        async with db_session.session_scope() as session:
+            after = await repositories.DocumentRepository(session, tenant_id).get(document_id)
+            chunks_after = await repositories.ChunkRepository(session, tenant_id).list_for_document(
+                document_id
+            )
+        assert after is not None
+        assert after.ingestion_outcome == newer_outcome
+        assert after == before
+        assert chunks_after == chunks_before
+    finally:
+        release.set()
+        indexed_wait.cancel()
+        await asyncio.gather(indexed_wait, return_exceptions=True)
+        await first
+
+
+@pytest.mark.parametrize("terminal", ["ready", "failed"])
+@pytest.mark.parametrize("claimant", ["stale", "foreign_tenant"])
+async def test_rejected_terminal_publication_preserves_outcome_metadata(
+    sqlite_engine: None, terminal: str, claimant: str
+) -> None:
+    """The outcome write shares both tenant and attempt admission with lifecycle."""
+    tenant_id, document_id = await _seed_document(mime_type="text/plain", key="guarded")
+    async with db_session.session_scope() as session:
+        documents = repositories.DocumentRepository(session, tenant_id)
+        older = await documents.begin_ingestion(document_id)
+        assert older is not None
+        before = await documents.begin_ingestion(document_id)
+        assert before is not None
+    async with db_session.session_scope() as session:
+        documents = repositories.DocumentRepository(
+            session, uuid.uuid4() if claimant == "foreign_tenant" else tenant_id
+        )
+        attempt = (
+            before.ingestion_attempts if claimant == "foreign_tenant" else older.ingestion_attempts
+        )
+        if terminal == "ready":
+            published = await documents.mark_ingestion_ready(
+                document_id, expected_attempt=attempt, outcome=ExtractionOutcome.INDEXED
+            )
+        else:
+            published = await documents.mark_ingestion_failed(
+                document_id,
+                expected_attempt=attempt,
+                outcome=ExtractionOutcome.FAILED,
+                code="test_failure",
+                message="Rejected terminal publication",
+            )
+        assert published is None
+    async with db_session.session_scope() as session:
+        after = await repositories.DocumentRepository(session, tenant_id).get(document_id)
+    assert after == before

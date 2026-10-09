@@ -36,7 +36,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
 from app.core.config import Settings
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     CitationRepository,
@@ -51,6 +50,7 @@ from app.domain.llm import Embedding, StreamEvent, ToolCall
 from app.realtime.backplane import InMemoryBackplane
 from app.services.chat_runtime import ChatRuntime
 from app.tasks.ingest import ingest_document_async
+from tests._db_helpers import copy_sqlite_schema
 from tests.eval.support import DeterministicEmbedder, OfflineRetrieval
 
 import app.db.models  # noqa: F401  isort: skip
@@ -105,6 +105,26 @@ class _FakeIndexStore:
 
     async def delete_document(
         self, *, tenant_id: object, document_id: object, refresh: bool = False
+    ) -> None:
+        return None
+
+    async def delete_document_generation(
+        self,
+        *,
+        tenant_id: object,
+        document_id: object,
+        ingestion_attempt: int,
+        refresh: bool = False,
+    ) -> None:
+        return None
+
+    async def delete_older_document_generations(
+        self,
+        *,
+        tenant_id: object,
+        document_id: object,
+        ingestion_attempt: int,
+        refresh: bool = False,
     ) -> None:
         return None
 
@@ -229,7 +249,7 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         # Point the real ingestion task's session_scope at this test DB so the
         # genuine task core runs against it (no Postgres).

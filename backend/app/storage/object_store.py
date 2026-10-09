@@ -5,11 +5,13 @@ object-store I/O is async and never blocks the event loop. A fresh client is
 created per operation via the session's async context manager (the documented
 ``aioboto3`` pattern); the session itself is cheap and reused.
 
-The adapter addresses every object by a **tenant-prefixed, content-addressed**
-key (:mod:`app.storage.keys`) and refuses any read whose key is outside the
-caller's tenant prefix — the isolation **seam** for issue #22, ahead of the full
-ACL in CC-1. Declared content-type and size are validated against the config
-allowlist/limit (:mod:`app.storage.validation`) before any bytes are stored.
+The adapter addresses every object by a **tenant-prefixed** key
+(:mod:`app.storage.keys`) and refuses any read whose key is outside the caller's
+tenant prefix — the isolation **seam** for issue #22, ahead of the full ACL in
+CC-1. Small legacy objects are content-addressed; direct multipart uploads use a
+random document-scoped quarantine key until ingestion succeeds. Declared
+content-type and size are validated against the config allowlist/limit before
+any bytes are stored.
 
 Callers see only domain types (``str`` keys, :class:`StoredObject`, ``bytes``),
 never a ``botocore`` object (ADR-0004 adapter rule 1).
@@ -45,20 +47,23 @@ janitor purging past ``retention_expires_at``) is #208's, stubbed in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import aioboto3
+from anyio import open_file
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import Settings
-from app.core.errors import NotFoundError
+from app.core.errors import DependencyError, NotFoundError
 from app.storage.keys import (
     assert_artifact_key_owned_by,
     assert_key_owned_by,
     build_artifact_key,
     build_avatar_key,
     build_key,
+    build_quarantine_key,
     sha256_hex,
 )
 from app.storage.validation import validate_upload
@@ -81,6 +86,27 @@ class StoredObject:
     content_type: str
 
 
+@dataclass(frozen=True, slots=True)
+class MultipartUpload:
+    key: str
+    provider_upload_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class UploadedPart:
+    part_number: int
+    etag: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoredObjectMetadata:
+    key: str
+    size_bytes: int
+    content_type: str
+    metadata: dict[str, str]
+
+
 class ObjectStore:
     """Async S3/MinIO adapter scoped to the configured bucket."""
 
@@ -94,6 +120,10 @@ class ObjectStore:
             s3={"addressing_style": "path"},
             retries={"max_attempts": 2, "mode": "standard"},
         )
+        # Readiness means more than reachability: direct browser uploads are
+        # safe only after bucket creation and every non-external CORS / orphaned
+        # multipart cleanup mechanism has succeeded in this process.
+        self._bootstrap_ready = False
 
     def _client(self) -> Any:
         """Return an async client context manager for the object store."""
@@ -135,20 +165,100 @@ class ObjectStore:
         Idempotent: a pre-existing bucket is a no-op. Called from the app
         lifespan so uploads have a target from first boot.
         """
-        async with self._client() as client:
-            try:
-                await client.head_bucket(Bucket=self._bucket)
-            except ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code in {"404", "NoSuchBucket", "NotFound"}:
-                    await client.create_bucket(Bucket=self._bucket)
-                else:
-                    raise
+        self._bootstrap_ready = False
+        try:
+            async with self._client() as client:
+                try:
+                    await client.head_bucket(Bucket=self._bucket)
+                except ClientError as exc:
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code in {"404", "NoSuchBucket", "NotFound"}:
+                        await client.create_bucket(Bucket=self._bucket)
+                    else:
+                        raise
+                if (
+                    self._settings.s3_cors_allowed_origins
+                    and not self._settings.s3_cors_managed_externally
+                ):
+                    await client.put_bucket_cors(
+                        Bucket=self._bucket,
+                        CORSConfiguration={
+                            "CORSRules": [
+                                {
+                                    "AllowedOrigins": sorted(
+                                        self._settings.s3_cors_allowed_origins
+                                    ),
+                                    "AllowedMethods": ["PUT", "GET", "HEAD"],
+                                    "AllowedHeaders": ["*"],
+                                    "ExposeHeaders": [
+                                        "ETag",
+                                        "Content-Length",
+                                        "Content-Range",
+                                        "Accept-Ranges",
+                                    ],
+                                    "MaxAgeSeconds": 3600,
+                                }
+                            ]
+                        },
+                    )
+                if not self._settings.s3_incomplete_multipart_cleanup_managed_externally:
+                    await self._ensure_incomplete_multipart_lifecycle(client)
+        except (ClientError, BotoCoreError) as exc:
+            raise DependencyError(
+                "Object storage bootstrap failed.", code="storage_bootstrap_failed"
+            ) from exc
+        self._bootstrap_ready = True
+
+    async def _ensure_incomplete_multipart_lifecycle(self, client: Any) -> None:
+        """Merge Lumen's abort backstop without replacing unrelated S3 rules."""
+        rule_id = "lumen-abort-incomplete-multipart"
+        desired: dict[str, object] = {
+            "ID": rule_id,
+            "Status": "Enabled",
+            "Filter": {"Prefix": ""},
+            "AbortIncompleteMultipartUpload": {
+                "DaysAfterInitiation": self._settings.upload_incomplete_lifecycle_days
+            },
+        }
+        try:
+            response = await client.get_bucket_lifecycle_configuration(Bucket=self._bucket)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in {
+                "NoSuchLifecycleConfiguration",
+                "NoSuchLifecycle",
+                "404",
+                "NotFound",
+            }:
+                raise
+            rules: list[dict[str, object]] = []
+        else:
+            rules = [dict(rule) for rule in response.get("Rules", [])]
+
+        existing = next((rule for rule in rules if rule.get("ID") == rule_id), None)
+        if existing == desired:
+            return
+        merged = [rule for rule in rules if rule.get("ID") != rule_id]
+        merged.append(desired)
+        await client.put_bucket_lifecycle_configuration(
+            Bucket=self._bucket,
+            LifecycleConfiguration={"Rules": merged},
+        )
 
     async def ping(self) -> None:
-        """Lightweight reachability check for readiness (lists buckets)."""
-        async with self._client() as client:
-            await client.list_buckets()
+        """Check both successful bootstrap and current provider reachability."""
+        if not self._bootstrap_ready:
+            raise DependencyError(
+                "Object storage bootstrap is incomplete.",
+                code="storage_bootstrap_incomplete",
+            )
+        try:
+            async with self._client() as client:
+                await client.list_buckets()
+        except (ClientError, BotoCoreError) as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
 
     # --- Object lifecycle -----------------------------------------------------
 
@@ -209,6 +319,40 @@ class ObjectStore:
                 body: bytes = await stream.read()
         return body
 
+    async def download_to_path(
+        self, tenant_id: str, key: str, destination: Path
+    ) -> StoredObjectMetadata:
+        """Stream an object to a worker-owned bounded temporary path.
+
+        Reads and writes in 1 MiB chunks; no full media object is materialized
+        in process memory. File I/O is dispatched by AnyIO rather than blocking
+        the async worker loop.
+        """
+        assert_key_owned_by(key, tenant_id)
+        try:
+            async with self._client() as client:
+                response = await client.get_object(Bucket=self._bucket, Key=key)
+                async with response["Body"] as stream, await open_file(destination, "wb") as output:
+                    while chunk := await stream.read(1024 * 1024):
+                        await output.write(chunk)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                raise NotFoundError("object not found", code="object_not_found") from exc
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        except BotoCoreError as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        return StoredObjectMetadata(
+            key=key,
+            size_bytes=int(response.get("ContentLength", 0)),
+            content_type=str(response.get("ContentType", "application/octet-stream")),
+            metadata={str(k): str(v) for k, v in response.get("Metadata", {}).items()},
+        )
+
     async def delete(self, tenant_id: str, key: str) -> None:
         """Remove the object at ``key`` (AC-4).
 
@@ -216,8 +360,13 @@ class ObjectStore:
         key is a no-op on S3/MinIO.
         """
         assert_key_owned_by(key, tenant_id)
-        async with self._client() as client:
-            await client.delete_object(Bucket=self._bucket, Key=key)
+        try:
+            async with self._client() as client:
+                await client.delete_object(Bucket=self._bucket, Key=key)
+        except (ClientError, BotoCoreError) as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
 
     # --- Presigned direct transfer (AC-3) ------------------------------------
 
@@ -255,7 +404,14 @@ class ObjectStore:
             )
         return key, url
 
-    async def presign_get(self, tenant_id: str, key: str) -> str:
+    async def presign_get(
+        self,
+        tenant_id: str,
+        key: str,
+        *,
+        download_filename: str | None = None,
+        content_type: str | None = None,
+    ) -> str:
         """Return a short-TTL presigned ``GET`` URL for ``key`` (AC-3).
 
         Tenant-prefix checked first (AC-5): a cross-prefix key is refused with
@@ -263,13 +419,211 @@ class ObjectStore:
         be issued for another tenant's object.
         """
         assert_key_owned_by(key, tenant_id)
-        async with self._presign_client() as client:
-            url: str = await client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": self._bucket, "Key": key},
-                ExpiresIn=self._settings.s3_presign_ttl_seconds,
-            )
+        try:
+            async with self._presign_client() as client:
+                params: dict[str, object] = {"Bucket": self._bucket, "Key": key}
+                if download_filename is not None:
+                    safe = download_filename.replace('"', "")
+                    params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
+                if content_type is not None:
+                    params["ResponseContentType"] = content_type
+                url: str = await client.generate_presigned_url(
+                    "get_object",
+                    Params=params,
+                    ExpiresIn=self._settings.s3_presign_ttl_seconds,
+                )
+        except (ClientError, BotoCoreError) as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
         return url
+
+    # --- Direct multipart data plane (spec 0008 / ADR-0023) -----------------
+
+    async def create_multipart_upload(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        upload_id: str,
+        filename: str,
+        content_type: str,
+    ) -> MultipartUpload:
+        key = build_quarantine_key(tenant_id, document_id, filename)
+        try:
+            async with self._client() as client:
+                response = await client.create_multipart_upload(
+                    Bucket=self._bucket,
+                    Key=key,
+                    ContentType=content_type,
+                    Metadata={
+                        "lumen-upload-id": upload_id,
+                        "lumen-document-id": document_id,
+                    },
+                )
+        except (ClientError, BotoCoreError) as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        return MultipartUpload(key=key, provider_upload_id=str(response["UploadId"]))
+
+    async def presign_upload_part(
+        self,
+        *,
+        tenant_id: str,
+        key: str,
+        provider_upload_id: str,
+        part_number: int,
+    ) -> str:
+        assert_key_owned_by(key, tenant_id)
+        try:
+            async with self._presign_client() as client:
+                url: str = await client.generate_presigned_url(
+                    "upload_part",
+                    Params={
+                        "Bucket": self._bucket,
+                        "Key": key,
+                        "UploadId": provider_upload_id,
+                        "PartNumber": part_number,
+                    },
+                    ExpiresIn=self._settings.s3_presign_ttl_seconds,
+                )
+        except (ClientError, BotoCoreError) as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        return url
+
+    async def list_multipart_parts(
+        self,
+        *,
+        tenant_id: str,
+        key: str,
+        provider_upload_id: str,
+    ) -> list[UploadedPart]:
+        assert_key_owned_by(key, tenant_id)
+        parts: list[UploadedPart] = []
+        marker = 0
+        try:
+            async with self._client() as client:
+                while True:
+                    response = await client.list_parts(
+                        Bucket=self._bucket,
+                        Key=key,
+                        UploadId=provider_upload_id,
+                        PartNumberMarker=marker,
+                        MaxParts=1000,
+                    )
+                    parts.extend(
+                        UploadedPart(
+                            part_number=int(part["PartNumber"]),
+                            etag=str(part["ETag"]),
+                            size_bytes=int(part["Size"]),
+                        )
+                        for part in response.get("Parts", [])
+                    )
+                    if not response.get("IsTruncated"):
+                        break
+                    marker = int(response["NextPartNumberMarker"])
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"NoSuchUpload", "404", "NotFound"}:
+                raise NotFoundError(
+                    "multipart upload not found", code="multipart_upload_not_found"
+                ) from exc
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        except BotoCoreError as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        return parts
+
+    async def complete_multipart_upload(
+        self,
+        *,
+        tenant_id: str,
+        key: str,
+        provider_upload_id: str,
+        parts: list[tuple[int, str]],
+    ) -> StoredObjectMetadata:
+        assert_key_owned_by(key, tenant_id)
+        try:
+            async with self._client() as client:
+                await client.complete_multipart_upload(
+                    Bucket=self._bucket,
+                    Key=key,
+                    UploadId=provider_upload_id,
+                    MultipartUpload={
+                        "Parts": [
+                            {"PartNumber": part_number, "ETag": etag} for part_number, etag in parts
+                        ]
+                    },
+                )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"NoSuchUpload", "404", "NotFound"}:
+                raise NotFoundError(
+                    "multipart upload not found", code="multipart_upload_not_found"
+                ) from exc
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        except BotoCoreError as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        return await self.head(tenant_id, key)
+
+    async def abort_multipart_upload(
+        self,
+        *,
+        tenant_id: str,
+        key: str,
+        provider_upload_id: str,
+    ) -> None:
+        assert_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            try:
+                await client.abort_multipart_upload(
+                    Bucket=self._bucket,
+                    Key=key,
+                    UploadId=provider_upload_id,
+                )
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code not in {"NoSuchUpload", "404", "NotFound"}:
+                    raise DependencyError(
+                        "Object storage is unavailable.", code="storage_unavailable"
+                    ) from exc
+            except BotoCoreError as exc:
+                raise DependencyError(
+                    "Object storage is unavailable.", code="storage_unavailable"
+                ) from exc
+
+    async def head(self, tenant_id: str, key: str) -> StoredObjectMetadata:
+        assert_key_owned_by(key, tenant_id)
+        async with self._client() as client:
+            try:
+                response = await client.head_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in {"NoSuchKey", "404", "NotFound"}:
+                    raise NotFoundError("object not found", code="object_not_found") from exc
+                raise DependencyError(
+                    "Object storage is unavailable.", code="storage_unavailable"
+                ) from exc
+            except BotoCoreError as exc:
+                raise DependencyError(
+                    "Object storage is unavailable.", code="storage_unavailable"
+                ) from exc
+        return StoredObjectMetadata(
+            key=key,
+            size_bytes=int(response["ContentLength"]),
+            content_type=str(response.get("ContentType", "application/octet-stream")),
+            metadata={str(k): str(v) for k, v in response.get("Metadata", {}).items()},
+        )
 
     # --- Per-tenant application logo (admin branding) ------------------------
     #

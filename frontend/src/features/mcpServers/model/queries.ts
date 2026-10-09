@@ -13,12 +13,7 @@
  * `ApiError`s the components branch on (a 422 → inline form error, INV-8; a 404 →
  * existence non-disclosure, INV-1/INV-2; a 401 → re-auth, INV-4).
  */
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type UseQueryResult,
-} from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
   deleteMcpServer,
   getMcpServer,
@@ -35,6 +30,7 @@ import type {
   McpServerUpdate,
   McpToolList,
 } from '@/api';
+import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 
 /** Stable query keys for the slice. */
 export const mcpKeys = {
@@ -81,8 +77,8 @@ export function useMcpServerTools(id: string | null): UseQueryResult<McpToolList
  */
 export function useRegisterMcpServer() {
   const qc = useQueryClient();
-  return useMutation<McpServer, unknown, McpServerCreate>({
-    mutationFn: (body) => registerMcpServer(body),
+  return useEphemeralMutation<McpServer, unknown, McpServerCreate>({
+    mutationFn: (body, { signal }) => registerMcpServer(body, signal),
     onSuccess: () => void qc.invalidateQueries({ queryKey: mcpKeys.list() }),
   });
 }

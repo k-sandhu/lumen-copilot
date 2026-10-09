@@ -45,22 +45,40 @@ _LIST_MAX = 50
 _SNIPPET_BUDGET = 600
 
 
-def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
-    """The EXACT snippet string a passage renders as in the tool reply (#431 NEW-1).
+def _format_player_time(milliseconds: int) -> str:
+    """Render an integer player offset without losing millisecond precision."""
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1_000)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
 
-    The single source of truth for the model-visible snippet form:
-    stripped, trimmed to the (tool-capped) budget, with the truncation
-    ellipsis when over budget. ``_render_passages`` composes the reply from
-    this, and the chat runtime records the same string as the "rendered
-    snippet" the compactor must preserve verbatim — deriving both through one
-    helper so they can never drift (a digest presenting a truncated sentence
-    as complete would weaken the ADR-0016 §3.1 verbatim guarantee).
+
+def _media_provenance(passage: RetrievedPassage) -> str:
+    """Model-visible speaker/time label for a valid media passage."""
+    if passage.time_start_ms is None or passage.time_end_ms is None:
+        return ""
+    speaker = passage.speaker_name or passage.speaker_id
+    identity = (
+        f", {speaker} ({passage.speaker_id})"
+        if passage.speaker_name and passage.speaker_id
+        else (f", {speaker}" if speaker else "")
+    )
+    return (
+        f", time {_format_player_time(passage.time_start_ms)}-"
+        f"{_format_player_time(passage.time_end_ms)}{identity}"
+    )
+
+
+def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
+    """Complete model-visible passage, also retained verbatim by compaction.
+
+    ``budget`` remains accepted for callers using the legacy signature. Evidence
+    is bounded by passage count and context fitting, never by cutting a passage
+    in half. The runtime uses this same helper for compaction protection.
     """
-    capped = max(1, min(budget, _SNIPPET_BUDGET))
-    snippet = text.strip()
-    if len(snippet) > capped:
-        snippet = snippet[:capped].rstrip() + "…"
-    return snippet
+    return text.strip()
 
 
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
@@ -82,16 +100,15 @@ def _render_passages(
     """Render retrieved passages as the tool reply the model reads.
 
     Each passage is labelled with its source document + chunk id so the model can
-    attribute a claim, and trimmed to ``snippet_budget`` chars so the context
-    stays bounded — the assembler lowers that budget under a tight window (#424
-    review, finding 2). The full snippet still travels to the citation via the
-    passage object, so trimming the model's view never weakens INV-3.
+    attribute a claim. Complete passages keep late facts visible; count ceilings
+    and the context engine bound the input cost before each model call.
     """
     blocks: list[str] = []
     for i, p in enumerate(passages, start=1):
         snippet = rendered_snippet(p.text, snippet_budget)
         blocks.append(
-            f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}):\n"
+            f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}"
+            f"{_media_provenance(p)}):\n"
             f"{snippet}"
         )
     return "\n\n".join(blocks)
@@ -100,7 +117,9 @@ def _render_passages(
 async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     query = str(args.get("query") or "").strip()
     if not query:
-        return ToolHandlerResult(content="No query provided.", summary="no query")
+        return ToolHandlerResult(
+            source_document_ids=(), content="No query provided.", summary="no query"
+        )
     # Clamp to the budget-derived ceiling, not just the tool's absolute _MAX_K
     # (#424 review, finding 3): under a tight context window ``ctx.max_k`` is
     # lowered by the assembler, so even an explicit large ``k`` cannot pull in
@@ -116,11 +135,13 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
     )
     if not passages:
         return ToolHandlerResult(
+            source_document_ids=(),
             content="No matching passages were found in your documents.",
             summary="0 passages",
         )
     document_ids = tuple({p.document_id for p in passages})
     return ToolHandlerResult(
+        source_document_ids=(),
         content=_render_passages(passages, ctx.snippet_budget),
         summary=f"{len(passages)} passage(s)",
         hit_count=len(passages),
@@ -133,7 +154,9 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
 async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     name_or_query = str(args.get("name_or_query") or "").strip()
     if not name_or_query:
-        return ToolHandlerResult(content="No document query provided.", summary="no query")
+        return ToolHandlerResult(
+            source_document_ids=(), content="No document query provided.", summary="no query"
+        )
     # Clamp to the budget-derived ceiling like search_text (#424 review, finding
     # 2): a tight window lowers ``ctx.max_k`` so even an explicit large ``k`` is
     # bounded. Defaults to _MAX_K, so a roomy run is unchanged.
@@ -142,10 +165,13 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
         principal=ctx.principal, name_or_query=name_or_query, k=k
     )
     if not matches:
-        return ToolHandlerResult(content="No matching documents.", summary="0 documents")
+        return ToolHandlerResult(
+            source_document_ids=(), content="No matching documents.", summary="0 documents"
+        )
     lines = [f"- {m.document_name} (id: {m.document_id})" for m in matches]
     document_ids = tuple(m.document_id for m in matches)
     return ToolHandlerResult(
+        source_document_ids=(),
         content="Documents:\n" + "\n".join(lines),
         summary=f"{len(matches)} document(s)",
         hit_count=len(matches),
@@ -166,6 +192,7 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
         # A clean "nothing here" is an ok result, not an error — the user simply
         # has no documents of their own and none shared with them yet.
         return ToolHandlerResult(
+            source_document_ids=(),
             content=(
                 "You don't have access to any documents yet — nothing has been "
                 "uploaded to your account or shared with you."
@@ -186,6 +213,7 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
             "search_documents using a filename or keyword.)"
         )
     return ToolHandlerResult(
+        source_document_ids=(),
         content=content,
         summary=f"{len(matches)} document(s)",
         hit_count=len(matches),
@@ -202,12 +230,18 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
         # A malformed id is a tool-specific rejection, not a crash — the runner
         # passes the ``ok=False`` through and the run continues (issue #207 §7).
         return ToolHandlerResult(
-            content="Invalid document id.", ok=False, error=ERROR_BAD_ARGS, summary="invalid id"
+            source_document_ids=(),
+            content="Invalid document id.",
+            ok=False,
+            error=ERROR_BAD_ARGS,
+            summary="invalid id",
         )
     doc = await ctx.retrieval.get_document(principal=ctx.principal, document_id=document_id)
     if doc is None:
         # Existence non-disclosure (INV-2): a foreign/missing doc is "not found".
-        return ToolHandlerResult(content="Document not found.", summary="not found")
+        return ToolHandlerResult(
+            source_document_ids=(), content="Document not found.", summary="not found"
+        )
     # Bound the returned body to the budget-derived snippet allowance (#424 third
     # re-review): a document read is ~4× a passage snippet, and a tight context
     # window lowers ``ctx.snippet_budget`` so ``get_document`` doesn't blow the
@@ -215,6 +249,7 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
     body_budget = max(1, min(ctx.snippet_budget, _SNIPPET_BUDGET)) * 4
     body = doc.text[:body_budget]
     return ToolHandlerResult(
+        source_document_ids=(),
         content=f"Document: {doc.document_name}\n\n{body}",
         summary=doc.document_name,
         hit_count=1,
@@ -230,7 +265,8 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "Hybrid semantic + keyword search over the documents the user can "
             "access (their own and any shared with them). Use this to find "
             "evidence for the question. Returns ranked passages with their source "
-            "document and a snippet. Search again with a refined query if results "
+            "document and complete passage text. Count limits and the context "
+            "engine bound evidence cost. Search again with a refined query if results "
             "are thin."
         ),
         json_schema={

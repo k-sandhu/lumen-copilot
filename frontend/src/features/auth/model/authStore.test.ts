@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { createElement } from 'react';
 import { useAuthStore } from './authStore';
 import { clearAccessToken, setAccessToken } from '@/api';
+import { renderWithQuery } from '@/test/renderWithQuery';
 
 function reset() {
   clearAccessToken();
@@ -26,8 +28,9 @@ describe('authStore', () => {
   });
 
   it('reacts to the api token holder: clearing the token marks unauthenticated', () => {
-    // The store subscribes to token changes at module load. A failed silent
+    // The mounted principal lifecycle observes token changes. A failed silent
     // refresh clears the token, which must route the user back to login (AC-4).
+    renderWithQuery(createElement('div'));
     setAccessToken('jwt');
     useAuthStore.getState().markAuthenticated();
 

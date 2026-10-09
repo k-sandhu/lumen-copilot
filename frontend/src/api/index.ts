@@ -2,7 +2,7 @@
  * Public surface of the api/ boundary. Import from here, not from deep paths.
  * This is the ONLY module the rest of the app uses to reach the backend.
  */
-export { ApiError, request, registerRefreshHandler } from './client';
+export { ApiError, request, requestV2, registerRefreshHandler } from './client';
 export type { RequestOptions } from './client';
 export { getHealth, getReadiness } from './health';
 export { login, refresh, getCurrentUser, logout, installAuthRefresh } from './auth';
@@ -16,9 +16,31 @@ export {
   deleteDocument,
   uploadDocument,
   fetchDocumentContent,
+  createDocumentAccessUrl,
+  fetchDocumentTranscript,
   fetchDocumentText,
 } from './documents';
 export type { PageQuery, UploadDocumentArgs, DocumentContent } from './documents';
+export {
+  initiateDocumentUpload,
+  getDocumentUpload,
+  signDocumentUploadParts,
+  completeDocumentUpload,
+  abortDocumentUpload,
+  putSignedUploadPart,
+  DirectUploadManager,
+  DirectUploadError,
+  StorageUploadError,
+  documentUploadManager,
+} from './documentUploads';
+export type {
+  DirectUploadInput,
+  DirectUploadPhase,
+  DirectUploadProgress,
+  DirectUploadTransport,
+  DirectUploadManagerOptions,
+  UploadedPartEtag,
+} from './documentUploads';
 export {
   listChatSessions,
   createChatSession,
@@ -133,6 +155,8 @@ export {
   subscribeToken,
 } from './token';
 export { WsClient, parseEnvelope, resolveWsUrl } from './ws';
+export type { TokenChangeReason } from './token';
 export type { WsClientOptions, WsConnectionState } from './ws';
 export { API_BASE_URL, WS_BASE_URL, DEV_PAGES_ENABLED, parseBoolFlag } from './env';
+export { AUDIT_EVENT_TYPES } from './types';
 export type * from './types';

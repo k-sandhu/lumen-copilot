@@ -22,10 +22,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings, get_settings
+from app.db.audit_transactions import DurableAuditTransactions
 from app.db.tenant_context import bind_tenant
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+_durable_audit: DurableAuditTransactions | None = None
 
 
 def get_engine(settings: Settings | None = None) -> AsyncEngine:
@@ -53,6 +55,34 @@ def get_sessionmaker(
             autoflush=False,
         )
     return _sessionmaker
+
+
+def get_durable_audit_transactions(
+    settings: Settings | None = None,
+) -> DurableAuditTransactions:
+    """Return the process-owned durable-audit transaction provider.
+
+    This engine is deliberately separate from :func:`get_engine`: denial paths
+    often hold a request-pool connection after their visibility SELECT.  A
+    dedicated bounded pool prevents circular acquisition at request-pool
+    capacity and guarantees that its commit cannot touch caller work (R1-001).
+    """
+    global _durable_audit
+    if _durable_audit is None:
+        settings = settings or get_settings()
+        engine = create_async_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=settings.audit_db_pool_size,
+            max_overflow=0,
+            pool_timeout=settings.audit_db_pool_timeout_seconds,
+            future=True,
+        )
+        _durable_audit = DurableAuditTransactions(
+            engine,
+            operation_timeout_seconds=settings.audit_db_operation_timeout_seconds,
+        )
+    return _durable_audit
 
 
 @asynccontextmanager
@@ -114,8 +144,11 @@ async def ping() -> None:
 
 async def dispose_engine() -> None:
     """Dispose the engine and reset module state (called on app shutdown)."""
-    global _engine, _sessionmaker
+    global _engine, _sessionmaker, _durable_audit
+    if _durable_audit is not None:
+        await _durable_audit.dispose()
     if _engine is not None:
         await _engine.dispose()
     _engine = None
     _sessionmaker = None
+    _durable_audit = None

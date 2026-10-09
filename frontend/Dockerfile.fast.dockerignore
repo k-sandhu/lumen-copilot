@@ -1,0 +1,21 @@
+# Allow-list the frontend build inputs. Never send .env, Git or local outputs
+# to the builder, even when this Dockerfile uses the repository-root context.
+**
+!frontend/
+!frontend/**
+!docs/
+!docs/**
+!AGENTS.md
+!README.md
+!backend/
+!backend/AGENTS.md
+!contracts/
+!contracts/AGENTS.md
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/test-results/
+frontend/playwright-report/
+frontend/src/api/generated/
+frontend/.env*
+frontend/**/*.tsbuildinfo

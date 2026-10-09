@@ -4,32 +4,36 @@
  * identically everywhere.
  *
  * Rendering strategy by type:
- * - PDF — the browser's one dependable native viewer. Fetch the original bytes
- *   through the api/ boundary (`fetchDocumentContent`: bearer attached, the
- *   contract's 302→presigned redirect followed) and render the resulting `blob:`
- *   URL in an iframe. The iframe is left UNsandboxed: a fully-restrictive
+ * - PDF — mint a short-lived JSON access capability and render its storage URL
+ *   directly in an iframe. The iframe is left UNsandboxed: a fully-restrictive
  *   sandbox="" blocks Chrome's out-of-process PDF viewer (broken-plugin
  *   placeholder). Safe — the upload allowlist admits no active-content types
  *   (no HTML/SVG/scripts), so a PDF frame carries no script vector.
- * - Everything else (office docx/pptx/xlsx AND plain text / markdown) — render
+ * - Audio/video — native metadata-only playback over a signed Range URL plus a
+ *   paginated timestamped transcript.
+ * - Office docx/pptx/xlsx and plain text/markdown — render
  *   the server's reassembled text (`GET /documents/{id}/text`, #244), labeled as
  *   an extracted-text preview, with a truncation notice when the server capped
- *   it. A blob iframe shows office types as nothing/a download and renders
+ *   it. A browser iframe shows office types as nothing/a download and renders
  *   text/* blank under any restrictive sandbox, so the text endpoint is the
  *   reliable, consistently-styled path for all of them.
- * - Every type keeps a "Download original" affordance so the raw bytes are
- *   always one click away (fetched on demand; never auto-downloaded).
+ * - Every type keeps a purpose-bound signed "Download original" affordance.
  *
  * The type is decided by the document's `mime_type` when the caller has it
- * (documents feature) and by the fetched blob's content-type when it does not
- * (chat citations — the chat wire carries no mime type).
+ * (documents feature) and by the access capability's MIME type otherwise.
  *
  * INV-2: a 404 (not permitted / cross-tenant) renders as "no longer available"
  * with no retry — the UI never suggests access might appear. Other failures
- * are actionable (Retry). Object URLs are revoked on unmount/change.
+ * are actionable (Retry).
  */
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, fetchDocumentContent, fetchDocumentText } from '@/api';
+import {
+  ApiError,
+  createDocumentAccessUrl,
+  fetchDocumentText,
+  type DocumentAccessUrl,
+} from '@/api';
+import { MediaTranscriptPlayer } from './MediaTranscriptPlayer';
 
 /** OOXML office MIME types a browser cannot render natively. */
 const OFFICE_MIME_TYPES = new Set([
@@ -40,7 +44,7 @@ const OFFICE_MIME_TYPES = new Set([
 
 /**
  * Types previewed as server-extracted text (via `GET /documents/{id}/text`, #244)
- * rather than in an iframe: the office set PLUS plain text / markdown. A blob
+ * rather than in an iframe: the office set PLUS plain text / markdown. An iframe
  * iframe shows office types as nothing/a download, and — under any restrictive
  * sandbox — renders text/* blank in Chrome. Routing all of them through the
  * reassembled-text endpoint is reliable and consistently styled. Only PDF (the
@@ -54,28 +58,36 @@ export interface DocumentPreviewBodyProps {
   filename: string;
   /**
    * The document's declared MIME type, when the caller knows it (documents
-   * feature). Chat citations don't carry one — leave undefined and the fetched
-   * blob's content-type decides the office branch.
+   * feature). Chat citations may omit it; the access capability decides.
    */
   mimeType?: string | undefined;
+  /** Media citation target; seeks after metadata loads and never autoplays. */
+  initialTimeMs?: number | undefined;
 }
 
 type PreviewState =
   | { kind: 'loading' }
   // Only PDFs use the iframe now (text types render via /text); it stays unsandboxed.
   | { kind: 'frame'; url: string }
+  | { kind: 'media'; mediaKind: 'audio' | 'video'; access: DocumentAccessUrl }
   | { kind: 'text'; text: string; truncated: boolean }
+  | { kind: 'processing' }
   | { kind: 'gone' } // 404 — INV-2: not permitted / deleted; no retry
   | { kind: 'error'; message: string; downloadOnly: boolean };
 
-export function DocumentPreviewBody({ documentId, filename, mimeType }: DocumentPreviewBodyProps) {
+export function DocumentPreviewBody({
+  documentId,
+  filename,
+  mimeType,
+  initialTimeMs,
+}: DocumentPreviewBodyProps) {
   const [state, setState] = useState<PreviewState>({ kind: 'loading' });
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   // Bumping retries the load (errors stay actionable, never dead ends).
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    let revoke: (() => void) | null = null;
     const abort = new AbortController();
     setState({ kind: 'loading' });
 
@@ -86,28 +98,29 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
         const text = await fetchDocumentText(documentId, abort.signal);
         return { kind: 'text', text: text.text, truncated: text.truncated };
       }
-      // Otherwise load the bytes; the blob's content-type settles unknown types
-      // (chat citations carry no declared mime type).
-      const content = await fetchDocumentContent(documentId, abort.signal);
-      if (TEXT_PREVIEW_MIME_TYPES.has(content.type)) {
-        content.revoke(); // text is served via /text — release the bytes now
+      // Mint a JSON access capability; browser bytes then flow directly from
+      // storage (including native media Range requests).
+      const access = await createDocumentAccessUrl(documentId, 'preview', abort.signal);
+      if (TEXT_PREVIEW_MIME_TYPES.has(access.mime_type)) {
         const text = await fetchDocumentText(documentId, abort.signal);
         return { kind: 'text', text: text.text, truncated: text.truncated };
       }
+      if (isAudioMime(access.mime_type)) {
+        return { kind: 'media', mediaKind: 'audio', access };
+      }
+      if (isVideoMime(access.mime_type)) {
+        return { kind: 'media', mediaKind: 'video', access };
+      }
       // Only PDFs reach here (the sole type with a dependable browser viewer).
-      // The blob iframe is left UNsandboxed — a restrictive sandbox="" blocks
+      // The signed-URL iframe is left UNsandboxed — a restrictive sandbox="" blocks
       // Chrome's out-of-process PDF viewer (broken-plugin placeholder). Safe:
       // the upload allowlist admits no active content (no HTML/SVG/scripts).
-      revoke = content.revoke;
-      return { kind: 'frame', url: content.url };
+      return { kind: 'frame', url: access.url };
     };
 
     toState()
       .then((next) => {
-        if (cancelled) {
-          if (revoke) revoke();
-          return;
-        }
+        if (cancelled) return;
         setState(next);
       })
       .catch((error: unknown) => {
@@ -116,12 +129,17 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
           setState({ kind: 'gone' });
           return;
         }
+        if (error instanceof ApiError && error.status === 409) {
+          setState({ kind: 'processing' });
+          return;
+        }
         // A text-extraction failure still leaves the original bytes downloadable
         // — degrade to that rather than a dead end (office + text/markdown).
         const textTypeKnown = mimeType !== undefined && TEXT_PREVIEW_MIME_TYPES.has(mimeType);
         setState({
           kind: 'error',
-          message: error instanceof ApiError ? error.displayMessage : 'Could not load the document.',
+          message:
+            error instanceof ApiError ? error.displayMessage : 'Could not load the document.',
           downloadOnly: textTypeKnown,
         });
       });
@@ -129,24 +147,25 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
     return () => {
       cancelled = true;
       abort.abort();
-      if (revoke) revoke();
     };
   }, [documentId, mimeType, attempt]);
 
   const downloadOriginal = useCallback(async () => {
-    // Fetched on demand so the office/text path never pays for unused bytes.
-    const content = await fetchDocumentContent(documentId);
-    const anchor = document.createElement('a');
-    anchor.href = content.url;
-    anchor.download = filename;
-    anchor.rel = 'noopener';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    // Revoke on the next tick, not synchronously: some browsers cancel an
-    // in-flight download if the object URL is revoked in the same frame as the
-    // click. A 0ms defer lets the download pipeline take the blob first.
-    setTimeout(content.revoke, 0);
+    setDownloadError(null);
+    try {
+      const access = await createDocumentAccessUrl(documentId, 'download');
+      const anchor = document.createElement('a');
+      anchor.href = access.url;
+      anchor.download = access.filename || filename;
+      anchor.rel = 'noopener';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch (error) {
+      setDownloadError(
+        error instanceof ApiError ? error.displayMessage : 'Could not start the download.',
+      );
+    }
   }, [documentId, filename]);
 
   if (state.kind === 'loading') {
@@ -161,6 +180,24 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
     return (
       <div role="alert" className="flex h-full items-center justify-center p-6 text-center">
         <p className="text-sm text-foreground-muted">This document is no longer available.</p>
+      </div>
+    );
+  }
+
+  if (state.kind === 'processing') {
+    return (
+      <div
+        role="status"
+        className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center"
+      >
+        <p className="text-sm text-foreground-muted">This file is still being processed.</p>
+        <button
+          type="button"
+          onClick={() => setAttempt((value) => value + 1)}
+          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-muted"
+        >
+          Check again
+        </button>
       </div>
     );
   }
@@ -215,9 +252,44 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
             Long document — preview truncated. Download the original for the full content.
           </p>
         )}
+        {downloadError ? (
+          <p role="alert" className="shrink-0 border-b border-border px-3 py-1 text-xs text-danger">
+            {downloadError}
+          </p>
+        ) : null}
         <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-3 font-sans text-sm leading-relaxed text-foreground">
           {state.text}
         </pre>
+      </div>
+    );
+  }
+
+  if (state.kind === 'media') {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="min-h-0 flex-1">
+          <MediaTranscriptPlayer
+            documentId={documentId}
+            filename={filename}
+            kind={state.mediaKind}
+            initialAccess={state.access}
+            {...(initialTimeMs !== undefined ? { initialTimeMs } : {})}
+          />
+        </div>
+        <div className="flex shrink-0 justify-end border-t border-border px-3 py-1.5">
+          <button
+            type="button"
+            onClick={() => void downloadOriginal()}
+            className="rounded-md border border-border px-2 py-0.5 text-xs hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            Download original
+          </button>
+        </div>
+        {downloadError ? (
+          <p role="alert" className="shrink-0 px-3 py-1 text-xs text-danger">
+            {downloadError}
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -242,6 +314,19 @@ export function DocumentPreviewBody({ documentId, filename, mimeType }: Document
           Download original
         </button>
       </div>
+      {downloadError ? (
+        <p role="alert" className="shrink-0 px-3 py-1 text-xs text-danger">
+          {downloadError}
+        </p>
+      ) : null}
     </div>
   );
+}
+
+function isAudioMime(mime: string): boolean {
+  return mime.startsWith('audio/');
+}
+
+function isVideoMime(mime: string): boolean {
+  return mime.startsWith('video/');
 }

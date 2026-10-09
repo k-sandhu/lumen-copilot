@@ -36,10 +36,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ValidationError
 from app.core.logging import get_logger
-from app.db.repositories import CollectionRepository, DocumentRepository
+from app.db.repositories import (
+    CollectionRepository,
+    DocumentRepository,
+    DocumentUploadRepository,
+)
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Collection
-from app.services.audit import AuditSink
+from app.domain.entities import AuditOutcome, Collection, DocumentUploadState
+from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -134,18 +138,20 @@ class CollectionsService:
         owner_id: UUID,
         object_store: ObjectStore,
         audit: AuditSink,
-        request_id: str,
-        source_ip: str,
+        denials: PermissionDeniedContext,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._repo = CollectionRepository(session, tenant_id)
         self._documents = DocumentRepository(session, tenant_id)
+        self._uploads = DocumentUploadRepository(session, tenant_id)
         self._owner_id = owner_id
         self._object_store = object_store
         self._audit = audit
-        self._request_id = request_id
-        self._source_ip = source_ip
+        denials.assert_user(tenant_id, owner_id)
+        self._denials = denials
+        self._request_id = denials.request_id
+        self._source_ip = denials.source_ip
 
     # --- internal helpers ---------------------------------------------------
 
@@ -203,11 +209,11 @@ class CollectionsService:
         # and defaults to 0, exactly as the single-id count returns.
         document_counts = await self._repo.count_documents_for([c.id for c in page])
         items = [
-            CollectionView(collection=c, document_count=document_counts.get(c.id, 0))
-            for c in page
+            CollectionView(collection=c, document_count=document_counts.get(c.id, 0)) for c in page
         ]
         return CollectionPage(items=items, next_cursor=next_cursor)
 
+    @audited_resource("collection.read", "collection", "collection_id", missing_result=True)
     async def get(self, collection_id: UUID) -> CollectionView | None:
         """Fetch one of the caller's collections, or ``None`` if not visible.
 
@@ -217,9 +223,11 @@ class CollectionsService:
         """
         collection = await self._repo.get(collection_id)
         if collection is None or not self._owns(collection):
+            await self._record_not_visible(collection_id, attempted_action="collection.read")
             return None
         return await self._view(collection)
 
+    @audited_resource("collection.update", "collection", "collection_id", missing_result=True)
     async def update(
         self,
         collection_id: UUID,
@@ -237,6 +245,7 @@ class CollectionsService:
         """
         existing = await self._repo.get(collection_id)
         if existing is None or not self._owns(existing):
+            await self._record_not_visible(collection_id, attempted_action="collection.update")
             return None
         updated = await self._repo.update(
             collection_id,
@@ -244,10 +253,11 @@ class CollectionsService:
             description=description,
             set_description=set_description,
         )
-        if updated is None:  # pragma: no cover — visibility already established
+        if updated is None:
             return None
         return await self._view(updated)
 
+    @audited_resource("collection.delete", "collection", "collection_id", missing_result=True)
     async def delete(self, collection_id: UUID) -> bool:
         """Delete one of the caller's collections (cascades to docs + chunks).
 
@@ -256,30 +266,77 @@ class CollectionsService:
         (INV-1/INV-2). On success the ORM ``delete-orphan`` cascade removes the
         collection's documents and *their* chunks in one transaction.
 
-        Audit (spec 0004 §2.4, INV-6): the taxonomy defines ``document.deleted``
-        (not a collection-level delete event), so each cascaded document is
-        audited with that action — the spec's event list is authoritative
-        (AGENTS.md §4) — capturing exactly which documents the deletion removed.
-        All audit rows flush within this request's transaction, committing
-        atomically with the delete.
+        Audit (spec 0004 §2.4, INV-6): the collection itself emits exactly one
+        ``collection.deleted`` event, including when empty; each cascaded
+        document also emits ``document.deleted``. All rows contain ids/counts
+        only and flush within this request's transaction, committing atomically
+        with the delete. A failed repository delete returns before the allowed
+        collection event, so it can never fabricate success.
 
         The backing **object-store** bytes of the cascaded documents ARE removed
         here (#269) — the row+chunk cascade clears retrievable content, but the
-        content-addressed MinIO objects would otherwise be orphaned. Cleanup runs
-        after a ``flush`` and is guarded by ``count_by_storage_key``, so a
-        content-addressed object is deleted only once no surviving document (this
+        MinIO objects would otherwise be orphaned. Cleanup runs
+        after a ``flush`` and is guarded by ``count_by_storage_key``, so an
+        object is deleted only once no surviving document (this
         tenant) still references it; it is best-effort (a storage blip never fails
         the delete). Mirrors ``DocumentService.delete``.
         """
-        existing = await self._repo.get(collection_id)
+        # Serialize with direct-upload initiation, which holds this same row
+        # lock until its provider id and janitor row commit atomically.
+        existing = await self._repo.get(collection_id, lock=True)
         if existing is None or not self._owns(existing):
+            await self._record_not_visible(collection_id, attempted_action="collection.delete")
             return False
-        # Enumerate the documents the cascade will remove *before* deleting, so
-        # each can be individually audited (spec 0004 §2.4 ``document.deleted``).
-        documents = await self._documents.list_in_collection(collection_id)
-        deleted = await self._repo.delete(collection_id)
-        if not deleted:  # pragma: no cover — visibility already established
+        # The upload row cascades with the collection. Abort the provider-side
+        # resources under row locks first so that cascade can never silently
+        # erase the janitor's only handle to an incomplete multipart upload.
+        active_uploads = await self._uploads.list_active_for_collection(
+            collection_id, self._owner_id, lock=True
+        )
+        for upload in active_uploads:
+            await self._object_store.abort_multipart_upload(
+                tenant_id=str(self._tenant_id),
+                key=upload.storage_key,
+                provider_upload_id=upload.provider_upload_id,
+            )
+            # COMPLETING may already have crossed the irreversible provider
+            # boundary; DELETE is idempotent and prevents a completed orphan.
+            await self._object_store.delete(str(self._tenant_id), upload.storage_key)
+            await self._uploads.set_state(
+                upload.id,
+                self._owner_id,
+                DocumentUploadState.ABORTED,
+                error="collection_deleted",
+            )
+            await self._audit.emit(
+                action=AuditAction.DOCUMENT_UPLOAD_ABORTED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="document_upload",
+                resource_id=str(upload.id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "document_id": str(upload.document_id),
+                    "collection_id": str(collection_id),
+                    "reason": "collection_deleted",
+                },
+            )
+            await self._uploads.delete(upload.id, self._owner_id)
+        documents = await self._repo.delete_owned(collection_id, owner_id=self._owner_id)
+        if documents is None:
+            await self._record_not_visible(collection_id, attempted_action="collection.delete")
             return False
+        await self._audit.emit(
+            action=AuditAction.COLLECTION_DELETED,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="collection",
+            resource_id=str(collection_id),
+            outcome=AuditOutcome.ALLOWED,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata={"document_count": len(documents)},
+        )
         for doc in documents:
             await self._audit.emit(
                 action=AuditAction.DOCUMENT_DELETED,
@@ -298,7 +355,7 @@ class CollectionsService:
 
         await self._session.flush()
         # Remove the backing objects of the cascaded documents — the row+chunk
-        # cascade above clears retrievable content but leaves the content-addressed
+        # cascade above clears retrievable content but leaves the stored
         # MinIO objects orphaned otherwise (#269). Best-effort + post-flush: a
         # storage blip must not fail the delete, and only an object no surviving
         # document (this tenant) still references is removed (shared-content guard).
@@ -314,6 +371,15 @@ class CollectionsService:
                         error=type(exc).__name__,
                     )
         return True
+
+    async def _record_not_visible(self, collection_id: UUID, *, attempted_action: str) -> None:
+        """Emit exactly one safe INV-1/INV-2 collection denial."""
+        await self._denials.emit(
+            resource_type="collection",
+            resource_id=str(collection_id),
+            attempted_action=attempted_action,
+            reason="not_visible",
+        )
 
     def _enqueue_index_sync_after_commit(self, document_id: UUID) -> None:
         """Schedule a search-index sync to fire after the request commits.

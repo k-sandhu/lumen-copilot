@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.errors import ConflictError, DependencyError, NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.db import session as db_session
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -44,7 +45,12 @@ from app.domain.entities import (
 from app.sandbox.runner import SandboxRunner
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec, StagedInput
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
-from app.services.audit import AuditSink
+from app.services.audit import (
+    AuditSink,
+    PermissionDeniedContext,
+    PermissionDeniedRecorder,
+    audited_resource,
+)
 from app.services.sandbox_policy_service import EffectiveSandboxPolicy, SandboxPolicyReader
 from app.storage import ObjectStore
 
@@ -303,9 +309,12 @@ class SandboxSessionService:
         owner_id: UUID,
         runner: SandboxRunner,
         settings: Settings,
-        request_id: str = "sandbox-request",
-        source_ip: str = "system",
+        denials: PermissionDeniedContext,
     ) -> None:
+        denials.assert_tenant(tenant_id)
+        if not denials.actor.is_system:
+            denials.assert_user(tenant_id, owner_id)
+        self._denials = denials
         self._session = session
         self._tenant_id = tenant_id
         self._owner_id = owner_id
@@ -315,11 +324,12 @@ class SandboxSessionService:
         self._sessions = SandboxSessionRepository(session, tenant_id)
         self._runs = CodeRunRepository(session, tenant_id)
         self._audit_sink = AuditSink(AuditEventRepository(session, tenant_id))
-        self._request_id = request_id
-        self._source_ip = source_ip
+        self._request_id = denials.request_id
+        self._source_ip = denials.source_ip
 
+    @audited_resource("sandbox_session.read", "chat_session", "chat_session_id")
     async def get(self, chat_session_id: UUID) -> SandboxSession | None:
-        await self._require_visible_chat(chat_session_id)
+        await self._require_visible_chat(chat_session_id, attempted_action="sandbox_session.read")
         return await self._sessions.get_for_chat(chat_session_id)
 
     async def is_enabled(self) -> bool:
@@ -330,7 +340,7 @@ class SandboxSessionService:
         return policy.enabled
 
     async def ensure(self, chat_session_id: UUID) -> SandboxSession:
-        await self._require_visible_chat(chat_session_id)
+        await self._require_visible_chat(chat_session_id, attempted_action="sandbox_session.ensure")
         await self._require_enabled(chat_session_id, lifecycle="ensure")
         previous = await self._sessions.get_for_chat(chat_session_id)
         value = await self._sessions.get_or_create(
@@ -361,8 +371,9 @@ class SandboxSessionService:
             )
         return value
 
+    @audited_resource("sandbox_session.reset", "chat_session", "chat_session_id")
     async def reset(self, chat_session_id: UUID) -> SandboxSession:
-        await self._require_visible_chat(chat_session_id)
+        await self._require_visible_chat(chat_session_id, attempted_action="sandbox_session.reset")
         await self._require_enabled(chat_session_id, lifecycle="reset")
         current = await self._sessions.get_for_chat(chat_session_id)
         if current is None:
@@ -392,8 +403,9 @@ class SandboxSessionService:
         )
         return replacement
 
+    @audited_resource("sandbox_session.close", "chat_session", "chat_session_id")
     async def close(self, chat_session_id: UUID) -> None:
-        await self._require_visible_chat(chat_session_id)
+        await self._require_visible_chat(chat_session_id, attempted_action="sandbox_session.close")
         current = await self._sessions.get_for_chat(chat_session_id)
         if current is None or current.status is SandboxSessionStatus.CLOSED:
             return
@@ -410,9 +422,16 @@ class SandboxSessionService:
             metadata={"generation": closed.generation},
         )
 
+    @audited_resource("code_run.cancel", "code_run", "code_run_id")
     async def cancel(self, code_run_id: UUID) -> CodeRun:
         run = await self._runs.get(code_run_id)
         if run is None or run.owner_id != self._owner_id:
+            await self._denials.emit(
+                resource_type="code_run",
+                resource_id=str(code_run_id),
+                attempted_action="code_run.cancel",
+                reason="not_visible",
+            )
             raise NotFoundError("Code run not found.")
         if run.status not in (CodeRunStatus.QUEUED, CodeRunStatus.RUNNING):
             raise ConflictError(
@@ -479,9 +498,15 @@ class SandboxSessionService:
         )
         return latest
 
-    async def _require_visible_chat(self, chat_session_id: UUID) -> None:
+    async def _require_visible_chat(self, chat_session_id: UUID, *, attempted_action: str) -> None:
         chat = await self._chats.get(chat_session_id)
         if chat is None or chat.owner_id != self._owner_id:
+            await self._denials.emit(
+                resource_type="chat_session",
+                resource_id=str(chat_session_id),
+                attempted_action=attempted_action,
+                reason="not_visible",
+            )
             raise NotFoundError("Chat session not found.")
 
     async def _require_enabled(self, chat_session_id: UUID, *, lifecycle: str) -> None:
@@ -714,8 +739,16 @@ class SandboxService:
             owner_id=self._owner_id,
             runner=self._runner,
             settings=self._settings,
-            request_id=self._request_id,
-            source_ip=self._source_ip,
+            denials=PermissionDeniedContext(
+                PermissionDeniedRecorder(
+                    db_session.get_durable_audit_transactions(self._settings),
+                    tenant_id=self._tenant_id,
+                    request_session=session,
+                ),
+                actor=AuditActor.system(),
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+            ),
         )
         assert run.session_id is not None
         started_at = datetime.now(UTC)
@@ -840,6 +873,7 @@ class SandboxService:
             owner_id=self._owner_id,
             object_store=self._store,
             audit=AuditSink(AuditEventRepository(session, self._tenant_id)),
+            denials=None,  # output capture is create-only; no direct-resource guard
             request_id=self._request_id,
             source_ip=self._source_ip,
             artifact_allowed_content_types=self._settings.artifact_allowed_content_types,
@@ -975,13 +1009,29 @@ class SandboxService:
 class SandboxReadService:
     """Owner/tenant-scoped read service for code-run inspection."""
 
-    def __init__(self, session: AsyncSession, *, tenant_id: UUID, owner_id: UUID) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        owner_id: UUID,
+        denials: PermissionDeniedContext,
+    ) -> None:
+        denials.assert_user(tenant_id, owner_id)
+        self._denials = denials
         self._code_runs = CodeRunRepository(session, tenant_id)
         self._owner_id = owner_id
 
+    @audited_resource("code_run.read", "code_run", "code_run_id")
     async def get(self, code_run_id: UUID) -> CodeRun:
         run = await self._code_runs.get(code_run_id)
         if run is None or run.owner_id != self._owner_id:
+            await self._denials.emit(
+                resource_type="code_run",
+                resource_id=str(code_run_id),
+                attempted_action="code_run.read",
+                reason="not_visible",
+            )
             raise NotFoundError("Code run not found.")
         return run
 
