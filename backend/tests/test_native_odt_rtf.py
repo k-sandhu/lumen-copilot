@@ -51,7 +51,7 @@ def test_actual_bridge_generated_odt_rtf() -> None:
         package.writestr("mimetype", "application/vnd.oasis.opendocument.text")
         package.writestr(
             "content.xml",
-            '<office:document-content '
+            "<office:document-content "
             'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
             'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
             "<office:body><office:text><text:p>café 😀</text:p></office:text></office:body>"
