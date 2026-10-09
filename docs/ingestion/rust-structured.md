@@ -71,3 +71,5 @@ alongside the typed numeric `value`, with exact rendered value spans. Python's
 JSON view retains arbitrary integers but converts decimal numeric values to
 binary floats; consumers requiring decimal precision must use `number_text`.
 No additional crate or licence was introduced by the serde_json feature.
+
+The candidate routing controls `native_json_enabled`, `native_json_shadow`, `native_jsonl_enabled`, `native_jsonl_shadow`, `native_xml_enabled`, `native_xml_shadow`, `native_xbrl_enabled`, `native_xbrl_shadow`, `native_ixbrl_enabled`, `native_ixbrl_shadow` are explicitly classified as nonsecret deployment configuration in the connector conformance policy. The settings completeness guard verifies this classification; infrastructure credentials and test-only password hashing remain forbidden.
