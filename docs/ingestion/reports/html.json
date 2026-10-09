@@ -1,0 +1,153 @@
+{
+  "rows": [
+    {
+      "fixture": "mhtml-facts",
+      "sha256": "2b2dd66798809431890dce32559b7b78305b31cd320600d575b3dc92aac75dd9",
+      "format": "mhtml",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 1.9600032828748226e-05,
+      "input_bytes_per_second": 8826515.8283946,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23625728,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "mhtml-facts",
+      "sha256": "2b2dd66798809431890dce32559b7b78305b31cd320600d575b3dc92aac75dd9",
+      "format": "mhtml",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.01726500003132969,
+      "input_bytes_per_second": 10020.272208865796,
+      "peak_rss_bytes": 24129536,
+      "peak_rss_increment_bytes": 688128,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    },
+    {
+      "fixture": "html-table",
+      "sha256": "e0c69b960506757522cb3112260148b05f765c91dd1d87c43183d2381e94603f",
+      "format": "html",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 1.599994720891118e-05,
+      "input_bytes_per_second": 8750028.870221954,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23281664,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "html-table",
+      "sha256": "e0c69b960506757522cb3112260148b05f765c91dd1d87c43183d2381e94603f",
+      "format": "html",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.008702700026333332,
+      "input_bytes_per_second": 16086.961469012685,
+      "peak_rss_bytes": 24293376,
+      "peak_rss_increment_bytes": 917504,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    },
+    {
+      "fixture": "xhtml-facts",
+      "sha256": "faf203460b5622010d57f59a768e1757cfdbc72e577bee90082e02ce26d20477",
+      "format": "xhtml",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 2.010003663599491e-05,
+      "input_bytes_per_second": 5422875.687938005,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23412736,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "xhtml-facts",
+      "sha256": "faf203460b5622010d57f59a768e1757cfdbc72e577bee90082e02ce26d20477",
+      "format": "xhtml",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.004866300034336746,
+      "input_bytes_per_second": 22398.947707887517,
+      "peak_rss_bytes": 24002560,
+      "peak_rss_increment_bytes": 565248,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "answer_quality": "unmeasured"
+}

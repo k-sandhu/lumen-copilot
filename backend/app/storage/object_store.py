@@ -280,7 +280,7 @@ class ObjectStore:
         validate_upload(
             size_bytes=len(data),
             content_type=content_type,
-            allowed_content_types=self._settings.upload_allowed_content_types,
+            allowed_content_types=self._settings.effective_upload_content_types,
             max_bytes=self._settings.max_upload_bytes,
         )
         key = build_key(tenant_id, data, filename)
@@ -388,7 +388,7 @@ class ObjectStore:
         validate_upload(
             size_bytes=len(data),
             content_type=content_type,
-            allowed_content_types=self._settings.upload_allowed_content_types,
+            allowed_content_types=self._settings.effective_upload_content_types,
             max_bytes=self._settings.max_upload_bytes,
         )
         key = build_key(tenant_id, data, filename)

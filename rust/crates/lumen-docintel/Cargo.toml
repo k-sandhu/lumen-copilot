@@ -19,6 +19,10 @@ zip.workspace = true
 cfb.workspace = true
 
 rayon.workspace = true
+sha2.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
+mailparse.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

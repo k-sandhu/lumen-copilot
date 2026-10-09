@@ -10,5 +10,6 @@ name = "lumen_docintel"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+serde_json.workspace = true
 lumen-docintel = { path = "../lumen-docintel", version = "=0.1.0" }
 pyo3.workspace = true
