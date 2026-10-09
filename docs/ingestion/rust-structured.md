@@ -15,7 +15,7 @@ XBRL and inline XBRL retain supplied concept, lexical value, context/unit refere
 resolved periods/units where present, format/scale/sign attributes and fact paths.
 Late contexts/units are resolved after streaming; missing values remain unknown.
 Inline content is well-formed XML/XHTML; scripts/styles are omitted. Numeric
-transformation and continuation composition are outside this conservative profile
+transformation, continuation and exclusion composition are outside this conservative profile
 and produce an incomplete result when present. Tagged facts have exact value spans
 and block provenance alongside readable source text. Nothing executes.
 
@@ -56,3 +56,8 @@ caller-budget routing, specialized format selection and persisted structure.
 [s] 2026-10-09: live service tests excluded by task; deployed behavior unverified.
 
 [x] 2026-10-09: backend-configured strict mypy passed for 13 source files.
+
+[x] 2026-10-09: exclusion regression failed before adding explicit incomplete
+diagnostics. Eight Rust and 7 installed structured Python tests now pass, with
+clippy/all-targets and Ruff green. Inline composition follow-up: #736. Shared
+binary-signature helper is identical to the other format branches.

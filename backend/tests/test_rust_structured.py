@@ -57,14 +57,22 @@ def test_entities_depth_and_transformation_are_blocked() -> None:
     inline = (
         b'<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL">'
         b'<ix:nonFraction name="Mass" contextRef="C" format="unsupported">'
-        b'1,234</ix:nonFraction></html>'
+        b"1,234</ix:nonFraction></html>"
     )
-    doc = native.extract_candidate(inline, family="ixbrl", mime="application/ixbrl+xml")
-    assert json.loads(doc.generation_json)["outcome"] == "partial"
-    with pytest.raises(DocumentParseError):
-        parse_document(
-            inline, mime_type="application/ixbrl+xml", settings=Settings(native_ixbrl_enabled=True)
-        )
+    excluded = (
+        b'<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL">'
+        b'<ix:nonFraction name="Mass" contextRef="C">120'
+        b"<ix:exclude>annotation</ix:exclude></ix:nonFraction></html>"
+    )
+    for data in (inline, excluded):
+        doc = native.extract_candidate(data, family="ixbrl", mime="application/ixbrl+xml")
+        assert json.loads(doc.generation_json)["outcome"] == "partial"
+        with pytest.raises(DocumentParseError):
+            parse_document(
+                data,
+                mime_type="application/ixbrl+xml",
+                settings=Settings(native_ixbrl_enabled=True),
+            )
 
 
 def test_shadow_and_old_wheel_keep_admission_closed(monkeypatch: pytest.MonkeyPatch) -> None:

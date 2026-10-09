@@ -95,6 +95,19 @@ fn namespaces_facts_and_late_contexts() {
         true
     );
 }
+
+#[test]
+fn inline_exclusion_is_explicitly_incomplete() {
+    let source=br#"<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"><ix:nonFraction name="Mass" contextRef="C">120<ix:exclude>annotation</ix:exclude></ix:nonFraction></html>"#;
+    let d = ixbrl::parse(source, Limits::default()).unwrap();
+    assert_eq!(d.generation.outcome.as_deref(), Some("partial"));
+    assert!(
+        !d.generation.diagnostics.as_ref().unwrap()["incomplete"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
 proptest! {
  #[test]
  fn tagged_fact_unicode_locations(value in "[a-zé東京🦀]{1,30}") {

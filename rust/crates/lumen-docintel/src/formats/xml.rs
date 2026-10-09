@@ -273,6 +273,9 @@ pub(crate) fn parse_mode(bytes: &[u8], limits: Limits, mode: Mode) -> Result<Doc
                         return Err(CoreError::InvalidInput);
                     }
                 }
+                if (ns == INLINE || ns == INLINE_OLD) && name == "exclude" {
+                    incomplete.push(json!({"path":path,"reason":"inline_exclusion_requires_separate_resolution"}));
+                }
                 let inline = (ns == INLINE || ns == INLINE_OLD)
                     && matches!(name.as_str(), "nonFraction" | "nonNumeric" | "fraction");
                 let concept = if inline {
