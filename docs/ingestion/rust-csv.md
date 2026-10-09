@@ -45,3 +45,5 @@ Production promotion also holds for budget-aware detection #728.
 [x] 2026-10-09: ragged regression failed before the fix; 4 Rust tests then
 passed, clippy/all-targets and Ruff passed. Wheel rebuilt/imported; 7 targeted
 CSV/detection Python tests passed, including incomplete cutover and old wheels.
+
+[x] 2026-10-09: strict mypy with backend configuration passed (9 source files).
