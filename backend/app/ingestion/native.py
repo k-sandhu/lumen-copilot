@@ -42,7 +42,12 @@ def render_canonical(document_json: str) -> CanonicalDocument:
 
 
 # Recognition does not land a parser. Format issue implementations register here.
-_LANDED_NATIVE_FORMATS: frozenset[str] = frozenset()
+def _landed_native_formats() -> frozenset[str]:
+    from app.ingestion.candidates import candidates
+
+    return frozenset(format_name for candidate in candidates() for format_name in candidate.formats)
+
+
 _PYTHON_FALLBACK_FORMATS = frozenset({"pdf", "docx", "pptx", "xlsx", "text", "markdown"})
 
 
@@ -55,7 +60,7 @@ def detect_content(data: bytes, *, declared_mime: str | None = None) -> Detected
 
 def plan_native_route(detected: DetectedDocument, *, enabled_formats: frozenset[str]) -> str:
     """Config can enable installed parsers; it cannot claim one has landed."""
-    if detected.format in _LANDED_NATIVE_FORMATS & enabled_formats:
+    if detected.format in _landed_native_formats() & enabled_formats:
         return "native"
     if detected.format in _PYTHON_FALLBACK_FORMATS:
         return "python_fallback"
@@ -76,6 +81,21 @@ class CancellationHandle:
 
 
 _DEFAULT_BUDGET = RuntimeBudget()
+
+
+def extract_candidate(
+    data: bytes, *, family: str, mime: str, budget: RuntimeBudget = _DEFAULT_BUDGET
+) -> CanonicalDocument:
+    """Only registered pure parsers cross this lazy, domain-returning boundary."""
+    from app.ingestion.candidates import candidates
+
+    if family not in {candidate.family for candidate in candidates()}:
+        raise NativeUnavailableError("unregistered native parser")
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    result = getattr(extension, f"extract_{family}")(data, json.dumps(asdict(budget)), mime)
+    return CanonicalDocument.from_render_json(result)
 
 
 class NativeExecutor:

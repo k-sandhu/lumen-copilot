@@ -1,9 +1,9 @@
-"""Application configuration — the single source of runtime config.
+"""Application configuration â€” the single source of runtime config.
 
 This module is the **only** place in the backend that reads the environment
 (ADR-0004 boundary table: "Config & secrets -> core/config.py"). Everything
 else receives a ``Settings`` instance via dependency injection. No
-``os.environ`` reads, no hardcoded config, no secrets in code (AGENTS.md §6 /
+``os.environ`` reads, no hardcoded config, no secrets in code (AGENTS.md Â§6 /
 backend/AGENTS.md).
 
 Settings fail fast: a missing required value raises at construction, so the
@@ -60,7 +60,7 @@ class ChatModelSetting(BaseModel):
 _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
     # ``id`` is the LiteLLM routing id: the OpenRouter gateway routes via the
     # ``openrouter/`` prefix (matching the LLM_MODEL default). Without it LiteLLM
-    # would treat e.g. ``anthropic/...`` as a direct Anthropic call (no key →
+    # would treat e.g. ``anthropic/...`` as a direct Anthropic call (no key â†’
     # AuthenticationError). ``label`` is the clean display name for the picker.
     ChatModelSetting(
         id="openrouter/anthropic/claude-opus-4.8",
@@ -83,11 +83,11 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
     # The shipped chat default (#490 / #486). A FAST-tier model, deliberately not
     # frontier: the answer is buffered whole before the user sees any of it, so
     # token-generation time is the floor for perceived chat speed. Chosen over
-    # the sibling FAST entry (gemini-3.5-flash) on two merits — (1) it stays in
+    # the sibling FAST entry (gemini-3.5-flash) on two merits â€” (1) it stays in
     # the Anthropic family the prior frontier default and the grounded system
     # prompt were tuned against, minimising answer-quality/instruction-following
     # drift, and (2) only the anthropic/openai families earn prompt-cache
-    # directives (ADR-0016 §2; gateway._cache_family), so keeping the default on
+    # directives (ADR-0016 Â§2; gateway._cache_family), so keeping the default on
     # an anthropic route preserves the cache-first latency win that a google
     # route would forfeit. Frontier stays selectable per session / per tenant.
     ChatModelSetting(
@@ -115,18 +115,18 @@ _DEFAULT_CHAT_MODEL_REGISTRY: tuple[ChatModelSetting, ...] = (
 # Interactive-answer worst-case bound (#489 AC-4, BE-7 / R2-8). A live chat answer
 # must surface a typed terminal within this ceiling when the provider is
 # unreachable. The interactive per-turn deadline is the load-bearing part of that
-# budget, but publishing the terminal (and settling) costs a little MORE on top —
+# budget, but publishing the terminal (and settling) costs a little MORE on top â€”
 # so the accepted per-turn deadline must reserve a margin, or a deadline set right
 # at the ceiling would overshoot once the terminal publish is added. The maximum
 # accepted ``LLM_INTERACTIVE_TIMEOUT_SECONDS`` is therefore the ceiling minus that
-# margin. Round-1 stopped there — but the margin was only a *reservation*: nothing
+# margin. Round-1 stopped there â€” but the margin was only a *reservation*: nothing
 # actually bounded terminal publication, which awaits a Redis pipeline that can
 # stall unbounded (``realtime/backplane.py``), so the true worst case was
 # unbounded (R2-8). The margin is now BOTH the reservation AND the runtime budget
 # the answer producer bounds the terminal publish by
 # (``ChatRuntime._publish_terminal``), and a cross-field validator keeps
 # ``interactive_deadline + margin <= ceiling`` an enforced invariant even when the
-# margin is overridden — so a config that could let the producer→terminal path
+# margin is overridden â€” so a config that could let the producerâ†’terminal path
 # exceed the ceiling fails fast at boot instead of silently overshooting.
 _INTERACTIVE_WORST_CASE_CEILING_SECONDS = 30.0
 _INTERACTIVE_TERMINAL_PUBLISH_MARGIN_SECONDS = 3.0
@@ -135,7 +135,7 @@ _MAX_INTERACTIVE_TIMEOUT_SECONDS = (
 )
 
 # The exact, version-pinned closure the sandbox EXECUTION image ships (issue #504).
-# It is a literal copy of ``sandbox_exec/requirements.txt`` — that file is the build
+# It is a literal copy of ``sandbox_exec/requirements.txt`` â€” that file is the build
 # input, this tuple is what the admission path treats as "already installed, no
 # fetch needed", and ``backend/tests/test_sandbox_exec_image.py`` fails if they
 # drift. It cannot simply READ that file: the backend image is built from
@@ -166,11 +166,11 @@ _SANDBOX_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 # `:latest` and requiring a digest says nothing about whether the rest of the string
 # is a reference at all: `@sha256:<hex>`, `repo name:tag`, `:tag`, `repo:tag:extra`
 # and `name:-badtag` all passed the earlier checks. Each of those fails closed later
-# — the runner cannot resolve them — but "the daemon will reject it eventually" is a
+# â€” the runner cannot resolve them â€” but "the daemon will reject it eventually" is a
 # worse error than "your config is malformed", and it fails at first EXECUTION rather
 # than at boot.
 _REF_DOMAIN_COMPONENT = r"(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])"
-# A leading component is a REGISTRY HOST only if it looks like one — it contains a
+# A leading component is a REGISTRY HOST only if it looks like one â€” it contains a
 # `.` or a `:port`, or it is exactly `localhost`. Otherwise Docker reads it as a
 # path component, which must be lowercase. Without this, `UPPER/name:1.0` parses as
 # host `UPPER` and is wrongly accepted; a real daemon rejects it.
@@ -182,26 +182,26 @@ _REF_DOMAIN = (
 #: Lowercase only, with `.`/`_`/`__`/`-` separators between alphanumeric runs.
 _REF_PATH_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*"
 _REF_NAME = rf"(?:{_REF_DOMAIN}/)?{_REF_PATH_COMPONENT}(?:/{_REF_PATH_COMPONENT})*"
-#: A tag starts with a word character — `:-badtag` is not a tag — and is ≤128 chars.
+#: A tag starts with a word character â€” `:-badtag` is not a tag â€” and is â‰¤128 chars.
 _REF_TAG = r"[\w][\w.-]{0,127}"
 _SANDBOX_IMAGE_NAME = re.compile(_REF_NAME)
 _SANDBOX_IMAGE_TAG = re.compile(_REF_TAG)
 
 
 def _string_set(value: object) -> object:
-    """Parse a set-valued setting from an env string — BOTH the comma and JSON forms.
+    """Parse a set-valued setting from an env string â€” BOTH the comma and JSON forms.
 
     ``NoDecode`` (#511) hands the raw string here instead of letting
     ``pydantic-settings`` JSON-decode it first, which is what made the documented
     comma form work. But the JSON form was the only form that worked BEFORE that
     change, so a deploy already setting ``'["application/pdf", "text/plain"]'`` would
-    have had it split on commas into ``{'["application/pdf"', '"text/plain"]'}`` —
+    have had it split on commas into ``{'["application/pdf"', '"text/plain"]'}`` â€”
     boot succeeds, `Settings` looks valid, and every upload is then rejected because
     no real content type matches the garbage (#554 review). A silent corruption of a
     working configuration is a worse failure than the one #511 fixed.
 
     So: a value that looks like a JSON array is parsed as one, anything else splits on
-    commas. Both forms are supported deliberately and permanently — there is no reason
+    commas. Both forms are supported deliberately and permanently â€” there is no reason
     to break either, and a deploy should not have to know which release it is on.
     """
     if not isinstance(value, str):
@@ -242,7 +242,7 @@ class Settings(BaseSettings):
     service_name: str = "lumen-copilot-backend"
     # Sourced once from the package version (app.__version__, mirroring
     # pyproject.toml) so the value served by /health and the OpenAPI title cannot
-    # drift from the package when someone bumps the release — not a re-typed
+    # drift from the package when someone bumps the release â€” not a re-typed
     # literal. Override per-deploy via the VERSION env var if needed.
     version: str = _APP_VERSION
 
@@ -250,18 +250,18 @@ class Settings(BaseSettings):
     environment: str = Field(default="local", alias="ENVIRONMENT")
     log_level: str = Field(default="info", alias="LOG_LEVEL")
 
-    # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
+    # --- Identity & auth (CC-3 / spec 0004 Â§2.3) ---
     # Symmetric signing secret for the access JWT. A dev default is provided so
     # the skeleton boots; production MUST override it (a deploy with the default
-    # in a non-local environment fails fast — see the validator below). The
+    # in a non-local environment fails fast â€” see the validator below). The
     # refresh token is opaque/random, not signed, so it has no separate secret.
     jwt_secret: str = Field(default="dev-only-insecure-jwt-secret-change-me", alias="JWT_SECRET")
     # HS256 keeps key management to one symmetric secret for the app-managed MVP;
-    # the OIDC end-state (Keycloak, spec 0004 §2.3) swaps this for asymmetric
+    # the OIDC end-state (Keycloak, spec 0004 Â§2.3) swaps this for asymmetric
     # verification inside auth/ without touching callers.
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_issuer: str = Field(default="lumen-copilot", alias="JWT_ISSUER")
-    # Short-lived access token (spec 0004 §2.3: <= 15 min).
+    # Short-lived access token (spec 0004 Â§2.3: <= 15 min).
     access_token_ttl_seconds: int = Field(default=900, alias="ACCESS_TOKEN_TTL_SECONDS")
     # Rotating refresh token lifetime (default 14 days). Each use rotates it.
     refresh_token_ttl_seconds: int = Field(
@@ -272,7 +272,7 @@ class Settings(BaseSettings):
     # Base64 of a 32-byte (AES-256) master key for the per-tenant secrets vault's
     # envelope encryption (``app.core.crypto``). A dev default lets the skeleton
     # boot locally; OUTSIDE ``local`` the app refuses to start unless this is
-    # overridden — the same fail-fast rule as ``JWT_SECRET`` (validator below), so
+    # overridden â€” the same fail-fast rule as ``JWT_SECRET`` (validator below), so
     # a deployed vault never encrypts under a publicly-known key. The value is
     # validated to be base64 of exactly 32 bytes at construction (fail fast) rather
     # than deep in a store/retrieve call.
@@ -281,15 +281,15 @@ class Settings(BaseSettings):
         alias="SECRETS_ENCRYPTION_KEY",
     )
 
-    # --- Managed-connector OAuth (ADR-0019 §1, issue #452) ---
+    # --- Managed-connector OAuth (ADR-0019 Â§1, issue #452) ---
     # TTL of the server-side single-use state record. Bounded [1, 600]: the ADR
-    # caps the flow at 10 minutes — the record holds the PKCE verifier, so an
+    # caps the flow at 10 minutes â€” the record holds the PKCE verifier, so an
     # overlong TTL retains it beyond the decided window, and a non-positive TTL
     # would fail deep in Redis instead of at boot (fail fast, INV-8).
     connector_oauth_state_ttl_seconds: int = Field(
         default=600, ge=1, le=600, alias="CONNECTOR_OAUTH_STATE_TTL_SECONDS"
     )
-    # Externally-reachable base of THIS API — the provider redirects the browser
+    # Externally-reachable base of THIS API â€” the provider redirects the browser
     # to ``{base}/api/v1/sources/oauth/callback``, so it must be the URL the
     # browser (and the provider's allowlist) sees, not an in-network address.
     # Default = the local compose host port (ADR-0005).
@@ -303,11 +303,11 @@ class Settings(BaseSettings):
         alias="CONNECTOR_OAUTH_FRONTEND_RETURN_URL",
     )
 
-    # --- Google Drive connector (ADR-0019 §5, issue #453) ---
-    # The platform's Google OAuth app registration (deployment-level config —
+    # --- Google Drive connector (ADR-0019 Â§5, issue #453) ---
+    # The platform's Google OAuth app registration (deployment-level config â€”
     # per-tenant bring-your-own-client is a recorded follow-up, not v1). Blank
     # defaults let the skeleton boot locally without a Google registration;
-    # OUTSIDE ``local`` a blank value refuses to start (validator below) — the
+    # OUTSIDE ``local`` a blank value refuses to start (validator below) â€” the
     # JWT/vault-key fail-fast rule applied to the connector's client secret.
     gdrive_oauth_client_id: str = Field(default="", alias="GDRIVE_OAUTH_CLIENT_ID")
     gdrive_oauth_client_secret: str = Field(default="", alias="GDRIVE_OAUTH_CLIENT_SECRET")
@@ -316,19 +316,19 @@ class Settings(BaseSettings):
     gdrive_fetch_max_bytes: int = Field(
         default=20 * 1024 * 1024, ge=1, alias="GDRIVE_FETCH_MAX_BYTES"
     )
-    # Mirrored-ACL freshness window (ADR-0019 §2, spec 0004 §2.2): a mirrored
-    # ACL older than this is DENIED at retrieval — a stalled sync progressively
+    # Mirrored-ACL freshness window (ADR-0019 Â§2, spec 0004 Â§2.2): a mirrored
+    # ACL older than this is DENIED at retrieval â€” a stalled sync progressively
     # hides connector content rather than serving stale rights. This is also the
     # recorded worst-case revocation-to-enforcement bound.
     connector_acl_max_age_hours: int = Field(default=24, ge=1, alias="CONNECTOR_ACL_MAX_AGE_HOURS")
-    # Periodic connector sync-poll interval (ADR-0019 §3 cadence): the Beat
+    # Periodic connector sync-poll interval (ADR-0019 Â§3 cadence): the Beat
     # enqueues a sync for every connected managed source this often, through
     # the existing per-tenant rate-limited enqueue seam.
     connector_sync_interval_minutes: int = Field(
         default=60, ge=1, alias="CONNECTOR_SYNC_INTERVAL_MINUTES"
     )
     # How long a connector document may sit pending/processing before the sync
-    # poll re-drives its ingestion (ADR-0019 §3 recovery): a worker that dies
+    # poll re-drives its ingestion (ADR-0019 Â§3 recovery): a worker that dies
     # between a page's commit and its post-commit ingestion leaves a `pending`
     # row with no chunks that the advanced cursor will never revisit. Must
     # comfortably exceed a normal ingestion run so an in-flight document is
@@ -344,9 +344,9 @@ class Settings(BaseSettings):
     @field_validator("access_token_ttl_seconds")
     @classmethod
     def _cap_access_ttl(cls, value: int) -> int:
-        """Enforce the spec 0004 §2.3 ceiling: access tokens are <= 15 minutes."""
+        """Enforce the spec 0004 Â§2.3 ceiling: access tokens are <= 15 minutes."""
         if value <= 0 or value > 900:
-            raise ValueError("ACCESS_TOKEN_TTL_SECONDS must be in (0, 900] (spec 0004 §2.3)")
+            raise ValueError("ACCESS_TOKEN_TTL_SECONDS must be in (0, 900] (spec 0004 Â§2.3)")
         return value
 
     # --- Datastores / infra (required: misconfig should fail fast) ---
@@ -374,9 +374,9 @@ class Settings(BaseSettings):
     s3_bucket: str = Field(alias="S3_BUCKET")
     # Browser-reachable base URL used ONLY for minting presigned URLs (#241).
     # SigV4 binds the signature to the Host header, so presigning must happen
-    # against the URL the client will actually fetch — inside compose that
+    # against the URL the client will actually fetch â€” inside compose that
     # differs from the in-network S3_ENDPOINT_URL (http://minio:9000 internally
-    # vs the published host port from a browser). Unset ⇒ presign against
+    # vs the published host port from a browser). Unset â‡’ presign against
     # S3_ENDPOINT_URL (single-network deployments where one URL serves both).
     s3_public_endpoint_url: str | None = Field(default=None, alias="S3_PUBLIC_ENDPOINT_URL")
 
@@ -439,7 +439,7 @@ class Settings(BaseSettings):
     )
     # Allowlisted upload content-types (AC-4). The declared type is checked
     # against this set before storing. NOTE: a client-declared content-type is
-    # not a security guarantee — sniffing/parsing-sandbox hardening is CC-5/OD-4,
+    # not a security guarantee â€” sniffing/parsing-sandbox hardening is CC-5/OD-4,
     # fenced OUT of #22. Comma-separated override via UPLOAD_ALLOWED_CONTENT_TYPES.
     upload_allowed_content_types: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset(
@@ -486,10 +486,10 @@ class Settings(BaseSettings):
     # silent drop or a 500 (#208 AC-2).
     max_artifact_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_ARTIFACT_BYTES")
     # Allowlisted artifact content-types (#208 AC-2):
-    # csv/json/png/svg/xlsx/docx/pptx/md/txt/html — the formats a file-writing
+    # csv/json/png/svg/xlsx/docx/pptx/md/txt/html â€” the formats a file-writing
     # tool or code sandbox typically emits. The declared type is checked against
     # this set before storing (a client-declared type is a usability/allowlist
-    # check, not a security guarantee — sniffing is fenced OUT, OD-4). Comma-
+    # check, not a security guarantee â€” sniffing is fenced OUT, OD-4). Comma-
     # separated override via ARTIFACT_ALLOWED_CONTENT_TYPES.
     artifact_allowed_content_types: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset(
@@ -509,7 +509,7 @@ class Settings(BaseSettings):
         alias="ARTIFACT_ALLOWED_CONTENT_TYPES",
     )
     # Default retention window for a produced artifact, in days. NULL/absent (the
-    # default) ⇒ **keep** (no expiry); a positive value stamps
+    # default) â‡’ **keep** (no expiry); a positive value stamps
     # ``retention_expires_at = created_at + N days`` at creation, and the retention
     # janitor (``app.tasks.artifact_retention``) may purge rows past it. Kept
     # config, not a literal at the call site (backend/AGENTS.md).
@@ -528,7 +528,7 @@ class Settings(BaseSettings):
     # image-only allowlist), the object key persisted on the ``tenants`` row. A
     # logo is chrome, not a document, so it gets a much smaller cap. The declared
     # type is checked against this set before storing (a client-declared type is a
-    # usability/allowlist check, not a security guarantee — sniffing is fenced OUT,
+    # usability/allowlist check, not a security guarantee â€” sniffing is fenced OUT,
     # OD-4). Hard upper bound on a single logo (bytes). Default 1 MiB.
     max_logo_bytes: int = Field(default=1 * 1024 * 1024, alias="MAX_LOGO_BYTES")
     # Allowlisted logo content-types: the raster + vector marks a browser renders
@@ -562,12 +562,12 @@ class Settings(BaseSettings):
     # True redirects artifact bytes to storage; false streams artifacts inline.
     document_content_redirect: bool = Field(default=True, alias="DOCUMENT_CONTENT_REDIRECT")
     # Cap on the extracted text served by GET /documents/{id}/text (#244), in
-    # UTF-8 bytes. The viewer needs readable text, not an unbounded payload —
+    # UTF-8 bytes. The viewer needs readable text, not an unbounded payload â€”
     # an over-cap document is cut at a character boundary and flagged
     # ``truncated`` so the UI says so honestly. Default 2 MiB.
     document_text_max_bytes: int = Field(default=2 * 1024 * 1024, alias="DOCUMENT_TEXT_MAX_BYTES")
 
-    # --- OpenSearch — the single retrieval store (ADR-0010) ---
+    # --- OpenSearch â€” the single retrieval store (ADR-0010) ---
     # BM25 lexical + kNN vectors in one engine behind ``app/search/``. Inside
     # compose the URL is the service name (``.env``); the default targets the
     # compose-mapped HOST port so dev/tests outside the containers reach the same
@@ -638,7 +638,7 @@ class Settings(BaseSettings):
     # OpenAI-compatible endpoint; LiteLLM's native ``openrouter/`` route for
     # embeddings is unreliable (BerriAI/litellm#17773), so embeddings go through
     # LiteLLM's OpenAI-compatible client pointed at ``llm_embedding_api_base``
-    # with the OpenRouter key — chat keeps the native ``openrouter/`` route.
+    # with the OpenRouter key â€” chat keeps the native ``openrouter/`` route.
     # Hence the ``openai/<author>/<model>`` form: LiteLLM strips ``openai/`` and
     # sends the provider/model suffix to the configured base.
     llm_embedding_model: str = Field(
@@ -646,7 +646,7 @@ class Settings(BaseSettings):
         alias="LLM_EMBEDDING_MODEL",
     )
     # Base URL embeddings are sent to (OpenRouter's OpenAI-compatible endpoint).
-    # Blank disables the override — use only with a model LiteLLM routes natively.
+    # Blank disables the override â€” use only with a model LiteLLM routes natively.
     llm_embedding_api_base: str = Field(
         default="https://openrouter.ai/api/v1",
         alias="LLM_EMBEDDING_API_BASE",
@@ -661,12 +661,12 @@ class Settings(BaseSettings):
     )
     # Per-request wall-clock budget handed to LiteLLM so a stalled provider
     # surfaces as a typed timeout rather than hanging the caller (AC-4, AC-7).
-    # This is the BATCH budget — ingestion, summarisation, headless runs — where a
+    # This is the BATCH budget â€” ingestion, summarisation, headless runs â€” where a
     # human is not waiting; 60s tolerates a slow-but-alive provider.
     llm_timeout_seconds: float = Field(default=60.0, alias="LLM_TIMEOUT_SECONDS")
     # The INTERACTIVE per-turn deadline for a live chat answer (#489). A human is
     # waiting, so a single model turn (one streamed completion, including its
-    # bounded same-route retries and backoffs) is capped here — a hung/unreachable
+    # bounded same-route retries and backoffs) is capped here â€” a hung/unreachable
     # provider surfaces a typed 503 within this budget instead of stacking the
     # 60s batch timeout across every retry (the ~182s cliff). Enforced at the
     # runtime as an asyncio deadline around the whole resilient turn, so it also
@@ -697,8 +697,8 @@ class Settings(BaseSettings):
     # RESERVED this margin on top of the per-turn deadline without bounding the
     # publish, so the real worst case to a typed terminal was still unbounded. The
     # runtime now bounds the terminal publish by the time actually left in the
-    # producer→terminal budget (``turn deadline + this margin``), degrading to a
-    # bounded best-effort re-attempt if it stalls — so the client still gets a typed
+    # producerâ†’terminal budget (``turn deadline + this margin``), degrading to a
+    # bounded best-effort re-attempt if it stalls â€” so the client still gets a typed
     # terminal and the producer never hangs. Defaults to the module constant used
     # for the interactive-deadline ceiling above; the validator below keeps
     # ``interactive_deadline + margin <= 30s`` honest even if this is overridden.
@@ -712,11 +712,11 @@ class Settings(BaseSettings):
     def _interactive_budget_within_worst_case_ceiling(self) -> Settings:
         """Interactive turn budget + terminal-publish margin must fit the ceiling (R2-8).
 
-        The per-turn field bound above already caps the deadline at ``ceiling −
+        The per-turn field bound above already caps the deadline at ``ceiling âˆ’
         default margin`` (27s), but the margin is now its own (overridable) setting.
         This cross-field check keeps the <=30s worst-case invariant real even when the
         margin is raised: a config whose ``interactive_deadline + margin`` would let
-        the producer→terminal path exceed the 30s ceiling fails fast at boot rather
+        the producerâ†’terminal path exceed the 30s ceiling fails fast at boot rather
         than silently overshooting the bound the whole feature promises (#489 AC-4).
         """
         if (
@@ -726,12 +726,12 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LLM_INTERACTIVE_TIMEOUT_SECONDS + LLM_TERMINAL_PUBLISH_MARGIN_SECONDS "
                 f"must be <= {_INTERACTIVE_WORST_CASE_CEILING_SECONDS:g}s (#489 AC-4 / "
-                "R2-8): the whole producer→terminal path must land a typed terminal "
+                "R2-8): the whole producerâ†’terminal path must land a typed terminal "
                 "within the interactive worst-case ceiling."
             )
         return self
 
-    # #395 — operational/cost controls for the search path (config-driven per
+    # #395 â€” operational/cost controls for the search path (config-driven per
     # backend/AGENTS.md: limits are never hardcoded at call sites).
     # Query-embedding cache (single-text, default-credential, namespaced calls).
     llm_embed_cache_max_entries: int = Field(default=512, gt=0, alias="LLM_EMBED_CACHE_MAX_ENTRIES")
@@ -743,27 +743,27 @@ class Settings(BaseSettings):
         default=300, gt=0, alias="SEARCH_DIRECT_ANSWER_MAX_TOKENS"
     )
     # How many tool-calling turns the grounded answer runtime may take before it
-    # forces a final, tool-free synthesis (issue #148 — the agent loop bound; a
+    # forces a final, tool-free synthesis (issue #148 â€” the agent loop bound; a
     # "turn" is one streamed completion that may request tools). This is the
     # SYSTEM default; a tenant admin may override it per tenant (``Tenant``
     # ``max_tool_turns``). Kept config, not a literal (backend/AGENTS.md: LLM
-    # limits are config). Bounded to the same 1–50 band as the per-tenant
+    # limits are config). Bounded to the same 1â€“50 band as the per-tenant
     # override so neither path can disable bounding or explode answer cost.
     chat_max_tool_turns: int = Field(default=20, alias="CHAT_MAX_TOOL_TURNS")
 
     @field_validator("chat_max_tool_turns")
     @classmethod
     def _chat_max_tool_turns_in_band(cls, value: int) -> int:
-        """Reject a budget outside 1–50: 0/negative disables bounding, >50 risks cost."""
+        """Reject a budget outside 1â€“50: 0/negative disables bounding, >50 risks cost."""
         if not 1 <= value <= 50:
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
     # Output ceiling for the grounded answer / forced-synthesis turn (#488). Bounds
-    # answer length — and therefore the tail of the "streaming" wait — so a runaway
+    # answer length â€” and therefore the tail of the "streaming" wait â€” so a runaway
     # generation cannot stall time-to-completion. ``finish_reason == "length"`` then
     # becomes an ordinary terminal handled by the ONE length continuation (ADR-0016
-    # §4), which caps a single answer at ~2× this value. ``0`` ⇒ unbounded (the
+    # Â§4), which caps a single answer at ~2Ã— this value. ``0`` â‡’ unbounded (the
     # pre-#488 shape); the offline/headless runtime default is also unbounded so
     # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
     chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
@@ -771,7 +771,7 @@ class Settings(BaseSettings):
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.
     # A nicety, so it is config-gated and time-bounded; any failure is a silent
-    # skip — an answer never degrades because suggestions did. Count is capped
+    # skip â€” an answer never degrades because suggestions did. Count is capped
     # at the contract's ChatSuggestions maxItems (5).
     chat_suggestions_enabled: bool = Field(default=True, alias="CHAT_SUGGESTIONS_ENABLED")
     chat_suggestions_count: int = Field(default=3, ge=1, le=5, alias="CHAT_SUGGESTIONS_COUNT")
@@ -780,7 +780,7 @@ class Settings(BaseSettings):
     )
     # The model the suggestions completion runs on (#490). A DEDICATED FAST-tier
     # id, not the answer's route: a <=400-token nicety on the critical path must
-    # not ride the session's (possibly frontier) model. Empty ⇒ inherit the
+    # not ride the session's (possibly frontier) model. Empty â‡’ inherit the
     # answer route (the pre-#490 behaviour). Routed like any config id (default
     # OpenRouter credentials); a per-tenant ``provider:`` id is resolved through
     # the same seam chat uses.
@@ -792,7 +792,7 @@ class Settings(BaseSettings):
     # terminal, so the backplane/relay keep relaying for this bounded window and
     # stop at the first `event:suggestions` OR at grace expiry, whichever comes
     # first. Derived from the suggestions timeout plus a small margin (the extra
-    # covers scheduling + the one publish after the completion returns) — it must
+    # covers scheduling + the one publish after the completion returns) â€” it must
     # comfortably outlast a suggestions attempt that runs to its full timeout, or
     # a slow-but-succeeding suggestion would be cut off. Validated below.
     chat_suggestions_grace_seconds: float = Field(
@@ -804,7 +804,7 @@ class Settings(BaseSettings):
         """The post-terminal grace must exceed the suggestions timeout (#489).
 
         A grace shorter than the generation timeout could close the subscription
-        before a slow-but-successful suggestion is published — silently dropping
+        before a slow-but-successful suggestion is published â€” silently dropping
         it. Fail fast at boot rather than lose suggestions intermittently.
         """
         if self.chat_suggestions_grace_seconds <= self.chat_suggestions_timeout_seconds:
@@ -815,13 +815,13 @@ class Settings(BaseSettings):
             )
         return self
 
-    # Rolling session summary (#416, ADR-0016 §3.2): the async post-answer
+    # Rolling session summary (#416, ADR-0016 Â§3.2): the async post-answer
     # summarizer. ``keep_messages`` is the verbatim tail never summarized (the
     # last M turns stay word-for-word); ``min_batch`` is how many messages
     # beyond that tail must accumulate before a summarize call is worth its
     # cost (the task no-ops below it). ``summary_model`` pins the summarizer's
-    # model. Empty (the default) ⇒ the summarizer uses the DEDICATED FAST-tier
-    # default (the registry ``is_default`` id, now FAST — #490) for a config
+    # model. Empty (the default) â‡’ the summarizer uses the DEDICATED FAST-tier
+    # default (the registry ``is_default`` id, now FAST â€” #490) for a config
     # session, so a background compaction task never inherits a frontier answer
     # route; a per-tenant ``provider:`` session still summarizes through its own
     # provider (#446 finding 6). A non-empty value is an explicit override used
@@ -830,40 +830,40 @@ class Settings(BaseSettings):
     # #491: summarise EARLIER. The task first folds turns into the summary once
     # ``keep + min_batch`` messages have accumulated. The old 8 + 4 meant the
     # first compaction only fired at >=12 uncovered messages (~turn 7 of a 2-msg
-    # /turn session) — by then turn-5 input was already ~2.5x turn-1. Retuned to
+    # /turn session) â€” by then turn-5 input was already ~2.5x turn-1. Retuned to
     # 4 + 2: the first compaction now fires at >=6 messages (~turn 3), while the
     # verbatim tail still keeps the last 2 full turns (4 messages) word-for-word
-    # — the immediate context the model most needs — and older turns roll into
+    # â€” the immediate context the model most needs â€” and older turns roll into
     # the <300-word rolling summary + IDs-only evidence carry-forward. The
     # summariser runs on the dedicated FAST model (#490), so the earlier/smaller
     # batches cost little. Groundedness under this tail is guarded by the
-    # compression-regression eval (ADR-0016 §3.2, live).
+    # compression-regression eval (ADR-0016 Â§3.2, live).
     chat_summary_keep_messages: int = Field(
         default=4, ge=2, le=50, alias="CHAT_SUMMARY_KEEP_MESSAGES"
     )
     chat_summary_min_batch: int = Field(default=2, ge=1, le=50, alias="CHAT_SUMMARY_MIN_BATCH")
     chat_summary_model: str = Field(default="", alias="CHAT_SUMMARY_MODEL")
 
-    # Prompt caching (ADR-0016 §2, #411): provider cache directives on the
+    # Prompt caching (ADR-0016 Â§2, #411): provider cache directives on the
     # answer loop's repeated prefixes (Anthropic cache_control breakpoints /
-    # OpenAI prompt_cache_key). A kill-switch, not a tuning knob — off means
+    # OpenAI prompt_cache_key). A kill-switch, not a tuning knob â€” off means
     # the exact pre-#411 wire shape everywhere.
     chat_prompt_cache_enabled: bool = Field(default=True, alias="CHAT_PROMPT_CACHE_ENABLED")
 
-    # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
+    # Context-assembler budget knobs (ADR-0016 Â§1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the
     # tokens reserved for the completion. Config, not literals (backend/AGENTS.md).
     # Bounded so a bad value fails at startup, not as a silent guard bypass (#424
     # review, finding 6): a non-positive fallback would floor the budget to a
     # confusing 1-token refusal, and a NEGATIVE headroom would INFLATE the input
-    # budget beyond the model's real window — defeating the overflow guard.
+    # budget beyond the model's real window â€” defeating the overflow guard.
     context_fallback_max_input_tokens: int = Field(
         default=100_000, gt=0, alias="CONTEXT_FALLBACK_MAX_INPUT_TOKENS"
     )
     context_output_headroom_tokens: int = Field(
         default=8_000, ge=0, alias="CONTEXT_OUTPUT_HEADROOM_TOKENS"
     )
-    # In-answer tool-result compaction knobs (ADR-0016 §3.1, issue #415): the
+    # In-answer tool-result compaction knobs (ADR-0016 Â§3.1, issue #415): the
     # chars of a tool result's real content the digest keeps, and how many results
     # one compaction pass clears (a chunk, so cache invalidation is amortized).
     # Both positive so a bad value fails at startup rather than degrading silently.
@@ -873,17 +873,17 @@ class Settings(BaseSettings):
     context_compaction_chunk_size: int = Field(
         default=4, gt=0, alias="CONTEXT_COMPACTION_CHUNK_SIZE"
     )
-    # PROACTIVE tool-result compaction (ADR-0016 §3.1 amendment, issue #491). The
+    # PROACTIVE tool-result compaction (ADR-0016 Â§3.1 amendment, issue #491). The
     # reactive compaction above only fires when the transcript is over budget,
-    # which a frontier-sized window never reaches — so on the default routes a
+    # which a frontier-sized window never reaches â€” so on the default routes a
     # superseded search result rides every later turn at full size (the re-sent
     # -evidence tax #491 measured). With this ON, ``fit_transcript`` digests a tool
     # result once it is BOTH superseded by a later tool group AND represented in
-    # citations — the newest tool group (the evidence a pending call is about to
+    # citations â€” the newest tool group (the evidence a pending call is about to
     # reference) is always preserved. The digest is the SAME ``_context_digest`` the
     # reactive path builds: the bounded content-bearing head (capped at
     # CONTEXT_COMPACTION_DIGEST_CHARS) PLUS every cited snippet re-embedded VERBATIM
-    # (BE-2 / R2-9, INV-3 — a citation must resolve to evidence the model actually
+    # (BE-2 / R2-9, INV-3 â€” a citation must resolve to evidence the model actually
     # saw in the prompt, not merely to a record kept elsewhere; a cited passage
     # beyond the head would otherwise be truncated away). The strict cost-reduction
     # guard still gates each result, so one whose verbatim snippet cannot be kept
@@ -893,18 +893,18 @@ class Settings(BaseSettings):
         default=True, alias="CONTEXT_PROACTIVE_COMPACTION_ENABLED"
     )
     # How many of one turn's read-only tool calls execute at once (#412,
-    # ADR-0016 §5). Each concurrently EXECUTING call briefly opens its own DB
+    # ADR-0016 Â§5). Each concurrently EXECUTING call briefly opens its own DB
     # session (released before it queues to persist), so this bounds the
-    # per-answer draw on the engine pool — keep it under the pool size, and
+    # per-answer draw on the engine pool â€” keep it under the pool size, and
     # remember concurrent answers each get their own batch. Validated to
     # [1, 16]: 0 would deadlock the batch semaphore, an unbounded value could
     # exhaust the pool; 1 disables fan-out entirely (the genuinely serial
-    # pre-#412 path — no batch, no extra sessions, per-call event order).
+    # pre-#412 path â€” no batch, no extra sessions, per-call event order).
     chat_tool_concurrency: int = Field(default=4, gt=0, le=16, alias="CHAT_TOOL_CONCURRENCY")
 
     # Streamed-text coalescing (issue #487). The runtime used to mint ONE
     # envelope per provider chunk, so a long answer's envelope count tracked the
-    # provider's tokenisation — each one a backplane round-trip out and a React
+    # provider's tokenisation â€” each one a backplane round-trip out and a React
     # state commit in. The producer now buffers adjacent chunks of the same kind
     # (answer ``delta`` / ``event:narration``) and flushes on whichever comes
     # first: the character budget or the elapsed-time deadline. It ALWAYS flushes
@@ -917,7 +917,7 @@ class Settings(BaseSettings):
     # The time budget governs genuinely live streaming (chunks arriving tens of
     # ms apart); the character budget governs a burst (today's answer turn is
     # buffered until it is classified, then replayed at once). ``0`` characters
-    # is the kill switch — it restores the exact pre-#487 one-envelope-per-chunk
+    # is the kill switch â€” it restores the exact pre-#487 one-envelope-per-chunk
     # wire shape without a code change.
     chat_text_coalesce_chars: int = Field(default=160, ge=0, alias="CHAT_TEXT_COALESCE_CHARS")
     chat_text_coalesce_seconds: float = Field(
@@ -928,12 +928,12 @@ class Settings(BaseSettings):
     def _context_budget_leaves_room(self) -> Settings:
         """The fallback window must leave positive input room after headroom + margin.
 
-        The assembler computes ``budget = fallback − headroom − safety_margin``
+        The assembler computes ``budget = fallback âˆ’ headroom âˆ’ safety_margin``
         (the margin absorbs tokenizer drift). This rejects a config where that
-        derived budget is not strictly positive — e.g. fallback 1025 + headroom
+        derived budget is not strictly positive â€” e.g. fallback 1025 + headroom
         1024, which passes the field bounds yet floors the budget to 1 and refuses
         even an empty prompt (#424 re-review). The margin is mirrored from
-        ``app.llm.context._SAFETY_MARGIN_TOKENS`` (kept in lockstep — both are the
+        ``app.llm.context._SAFETY_MARGIN_TOKENS`` (kept in lockstep â€” both are the
         same 1024-token drift allowance).
         """
         _context_safety_margin = 1024
@@ -956,7 +956,7 @@ class Settings(BaseSettings):
     # ``asyncio.Task``; on SIGTERM the lifespan cancels those tasks and awaits them
     # bounded by this budget so a hung/slow answer can no longer block uvicorn's
     # graceful shutdown. Kept config, not a literal at the call site
-    # (backend/AGENTS.md). A non-positive value would disable the bound — rejected.
+    # (backend/AGENTS.md). A non-positive value would disable the bound â€” rejected.
     chat_shutdown_grace_seconds: float = Field(default=10.0, alias="CHAT_SHUTDOWN_GRACE_SECONDS")
 
     @field_validator("chat_shutdown_grace_seconds")
@@ -973,6 +973,16 @@ class Settings(BaseSettings):
     # characters. Defaults are a reasonable passage size for retrieval; tune per
     # corpus without a code change. Invariant: 0 <= overlap < size (validated).
     # Native computation knobs; no parser is promoted by these settings (#666).
+    native_text_enabled: bool = False
+    native_text_shadow: bool = False
+
+    @property
+    def effective_upload_content_types(self) -> frozenset[str]:
+        """Only landed, installed and explicitly enabled candidates add types."""
+        from app.ingestion.candidates import upload_types
+
+        return upload_types(self)
+
     native_ingestion_threads: int = Field(default=2, ge=1, le=64)
     native_ingestion_max_documents: int = Field(default=1, ge=1, le=128)
     native_ingestion_max_memory_bytes: int = Field(default=128 * 1024 * 1024, ge=1)
@@ -988,7 +998,7 @@ class Settings(BaseSettings):
     # the gateway sends each batch as a single request preserving order.
     ingestion_embed_batch_size: int = Field(default=64, alias="INGESTION_EMBED_BATCH_SIZE")
     # Celery retry policy for the ingestion task (idempotent, backed off,
-    # dead-lettered — backend/AGENTS.md). Max attempts and the base backoff (the
+    # dead-lettered â€” backend/AGENTS.md). Max attempts and the base backoff (the
     # task uses exponential backoff capped by Celery's retry_backoff_max).
     ingestion_max_retries: int = Field(default=3, alias="INGESTION_MAX_RETRIES")
     ingestion_retry_backoff_seconds: int = Field(default=5, alias="INGESTION_RETRY_BACKOFF_SECONDS")
@@ -996,17 +1006,17 @@ class Settings(BaseSettings):
     @field_validator("ingestion_chunk_size")
     @classmethod
     def _chunk_size_positive(cls, value: int) -> int:
-        """A non-positive chunk window would make ingestion loop/empty — reject."""
+        """A non-positive chunk window would make ingestion loop/empty â€” reject."""
         if value <= 0:
             raise ValueError("INGESTION_CHUNK_SIZE must be positive")
         return value
 
-    # --- Connector sync rate limit (ADR-0009 §3, issue #20) -----------------
+    # --- Connector sync rate limit (ADR-0009 Â§3, issue #20) -----------------
     # Per-tenant fetch rate limit, enforced at the sync-enqueue boundary
     # (Redis-backed fixed window) so a single tenant cannot make the server fan
     # out unbounded outbound fetches. A sync that would exceed the window is
     # **deferred** (re-enqueued with backoff), never dropped and never surfaced
-    # as an HTTP error (the /sources contract is frozen — no 429). The window is
+    # as an HTTP error (the /sources contract is frozen â€” no 429). The window is
     # ``source_sync_rate_max_per_window`` syncs per ``source_sync_rate_window_seconds``
     # seconds per tenant; a deferred sync re-enqueues after
     # ``source_sync_rate_backoff_seconds`` (bounded by the window).
@@ -1027,19 +1037,19 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _source_sync_rate_positive(cls, value: int) -> int:
-        """A non-positive rate window/limit/backoff would disable bounding — reject.
+        """A non-positive rate window/limit/backoff would disable bounding â€” reject.
 
-        The per-tenant fetch rate limit is load-bearing (ADR-0009 §3); a zero or
+        The per-tenant fetch rate limit is load-bearing (ADR-0009 Â§3); a zero or
         negative value would either divide-by-window-zero or make every sync
         defer forever, so misconfiguration must fail fast at startup.
         """
         if value <= 0:
             raise ValueError(
-                "SOURCE_SYNC_RATE_* (max/window/backoff) must be positive (ADR-0009 §3)"
+                "SOURCE_SYNC_RATE_* (max/window/backoff) must be positive (ADR-0009 Â§3)"
             )
         return value
 
-    # --- Web connector outbound identity (ADR-0009 §3, issue #138) -----------
+    # --- Web connector outbound identity (ADR-0009 Â§3, issue #138) -----------
     # Descriptive User-Agent sent on EVERY outbound web-connector fetch. Many
     # sites (e.g. Wikimedia) reject a request that announces no descriptive
     # client with a 4xx error *page*; without a real UA the connector would index
@@ -1062,11 +1072,11 @@ class Settings(BaseSettings):
             )
         return self
 
-    # --- Web search (the ``web_search`` agent tool — ADR-0014, issue #219) ----
+    # --- Web search (the ``web_search`` agent tool â€” ADR-0014, issue #219) ----
     # Backs the ``web_search`` tool with self-hosted SearXNG (OSS, no per-query
-    # key; ADR-0014 §1) run as a compose service. **Off by default** (governance,
-    # ADR-0014 §5): the tool fails closed unless a tenant/deploy explicitly enables
-    # web mode here — a disabled deploy returns a tool *result* error, never a
+    # key; ADR-0014 Â§1) run as a compose service. **Off by default** (governance,
+    # ADR-0014 Â§5): the tool fails closed unless a tenant/deploy explicitly enables
+    # web mode here â€” a disabled deploy returns a tool *result* error, never a
     # crash. The endpoint is an internal service address, so the query leg is a
     # trusted internal hop (distinct from the untrusted result-page fetch, which
     # always goes through the ``connectors/web/fetch.py`` SSRF chokepoint).
@@ -1083,13 +1093,13 @@ class Settings(BaseSettings):
     # Hard cap on the requested ``k`` (a hostile/large value is clamped to this).
     web_search_max_k: int = Field(default=10, alias="WEB_SEARCH_MAX_K")
     # How many top result pages to fetch + extract through the SSRF chokepoint for
-    # passage-level, cite-worthy text (ADR-0014 §4). ``0`` disables page fetching
+    # passage-level, cite-worthy text (ADR-0014 Â§4). ``0`` disables page fetching
     # (snippets only). Each fetched page counts against the per-tenant rate limit.
     web_search_fetch_top_n: int = Field(default=3, alias="WEB_SEARCH_FETCH_TOP_N")
     # Per-tenant rate limit for web search, reusing the Redis fixed-window limiter
-    # (``tasks/rate_limit.py``; ADR-0014 §3). Bounds how many search calls one
+    # (``tasks/rate_limit.py``; ADR-0014 Â§3). Bounds how many search calls one
     # tenant may make per window so a single tenant cannot fan out unbounded
-    # outbound requests (search calls + result-page fetches) — a DoS/amplification
+    # outbound requests (search calls + result-page fetches) â€” a DoS/amplification
     # pivot. An over-budget search is refused as a tool result (throttled), not an
     # HTTP error. Distinct keyspace from the connector-sync limiter.
     web_search_rate_max_per_window: int = Field(default=20, alias="WEB_SEARCH_RATE_MAX_PER_WINDOW")
@@ -1103,9 +1113,9 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _web_search_counts_positive(cls, value: int) -> int:
-        """A non-positive k/window/limit would disable bounding — reject (fail fast).
+        """A non-positive k/window/limit would disable bounding â€” reject (fail fast).
 
-        The per-tenant web-search rate limit is load-bearing (ADR-0014 §3); a zero
+        The per-tenant web-search rate limit is load-bearing (ADR-0014 Â§3); a zero
         or negative window/limit would make the limiter admit everything or divide
         by a zero window, and a non-positive ``k`` would make a search return
         nothing, so a misconfiguration must fail fast at startup.
@@ -1126,12 +1136,12 @@ class Settings(BaseSettings):
 
     # --- MCP client adapter + egress (ADR-0012, issue #225) ------------------
     # The remote MCP client (``app/mcp/``) connects to user-supplied MCP server
-    # endpoints, so — like the web connector — every outbound connection is
-    # SSRF-guarded and per-tenant rate-limited (ADR-0012 §4). ALL knobs are config,
+    # endpoints, so â€” like the web connector â€” every outbound connection is
+    # SSRF-guarded and per-tenant rate-limited (ADR-0012 Â§4). ALL knobs are config,
     # never a literal at the call site (backend/AGENTS.md).
     #
     # Which remote transports the adapter will open. Only the remote transports
-    # ship in v1 (ADR-0012 §1); stdio/local-process is deferred behind the
+    # ship in v1 (ADR-0012 Â§1); stdio/local-process is deferred behind the
     # code-execution sandbox and is not even a valid value. Comma-separated
     # override; an unknown transport name fails fast at startup.
     mcp_allowed_transports: Annotated[frozenset[str], NoDecode] = Field(
@@ -1144,17 +1154,17 @@ class Settings(BaseSettings):
     # Per-call wall-clock budget for one tool invocation / discovery / probe.
     mcp_call_timeout_seconds: float = Field(default=30.0, alias="MCP_CALL_TIMEOUT_SECONDS")
     # Per-tenant MCP egress rate limit, reusing the Redis fixed-window limiter
-    # (``tasks/rate_limit.py``; ADR-0012 §4). Bounds how many MCP connections one
+    # (``tasks/rate_limit.py``; ADR-0012 Â§4). Bounds how many MCP connections one
     # tenant may open per window so a single tenant cannot fan out unbounded
-    # outbound requests. Over-budget → a contained ``mcp_rate_limited`` result,
+    # outbound requests. Over-budget â†’ a contained ``mcp_rate_limited`` result,
     # never an HTTP error. Distinct keyspace from the connector-sync / web-search
     # / run limiters.
     mcp_rate_max_per_window: int = Field(default=30, alias="MCP_RATE_MAX_PER_WINDOW")
     mcp_rate_window_seconds: int = Field(default=60, alias="MCP_RATE_WINDOW_SECONDS")
-    # Optional admin endpoint allowlist (ADR-0012 §4 — defence-in-depth). A
+    # Optional admin endpoint allowlist (ADR-0012 Â§4 â€” defence-in-depth). A
     # comma-separated set of permitted MCP endpoint hosts; **empty = no allowlist**
     # (the SSRF guard is the mandatory control). An allowlist only *narrows*
-    # (deny-by-default on top of SSRF), never widens — an allowlisted host still
+    # (deny-by-default on top of SSRF), never widens â€” an allowlisted host still
     # passes the full range check. Not required for v1.
     mcp_endpoint_allowlist: Annotated[frozenset[str], NoDecode] = Field(
         default=frozenset(), alias="MCP_ENDPOINT_ALLOWLIST"
@@ -1169,10 +1179,10 @@ class Settings(BaseSettings):
     @field_validator("mcp_allowed_transports")
     @classmethod
     def _mcp_transports_known(cls, value: frozenset[str]) -> frozenset[str]:
-        """Reject any transport that is not a shipped remote transport (ADR-0012 §1).
+        """Reject any transport that is not a shipped remote transport (ADR-0012 Â§1).
 
         Only ``streamable_http`` / ``sse`` are valid; ``stdio`` (or anything else)
-        is deferred and must not be configurable — a misconfiguration fails fast at
+        is deferred and must not be configurable â€” a misconfiguration fails fast at
         startup rather than letting an unshippable transport be requested.
         """
         allowed = {"streamable_http", "sse"}
@@ -1180,7 +1190,7 @@ class Settings(BaseSettings):
         if unknown:
             raise ValueError(
                 f"MCP_ALLOWED_TRANSPORTS may only contain {sorted(allowed)} "
-                f"(remote only, ADR-0012 §1); rejected: {sorted(unknown)}"
+                f"(remote only, ADR-0012 Â§1); rejected: {sorted(unknown)}"
             )
         if not value:
             raise ValueError("MCP_ALLOWED_TRANSPORTS must list at least one transport")
@@ -1194,27 +1204,27 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _mcp_bounds_positive(cls, value: float) -> float:
-        """A non-positive MCP timeout/rate would disable a bound — reject (fail fast).
+        """A non-positive MCP timeout/rate would disable a bound â€” reject (fail fast).
 
         The per-call timeouts and the per-tenant egress rate limit are load-bearing
-        (ADR-0012 §4/§7); a zero or negative value would let a call run unbounded or
+        (ADR-0012 Â§4/Â§7); a zero or negative value would let a call run unbounded or
         make the limiter admit everything, so a misconfiguration fails fast.
         """
         if value <= 0:
             raise ValueError(
                 "MCP_CONNECT_TIMEOUT_SECONDS / MCP_CALL_TIMEOUT_SECONDS / MCP_RATE_* "
-                "must be positive (ADR-0012 §4/§7)"
+                "must be positive (ADR-0012 Â§4/Â§7)"
             )
         return value
 
-    # --- Dynamic per-tenant scheduler (ADR-0015 §7, issue #236) -------------
+    # --- Dynamic per-tenant scheduler (ADR-0015 Â§7, issue #236) -------------
     # celery-redbeat rides the EXISTING Redis broker (no new infra): the derived
     # live schedule entries live under this key prefix, and Beat holds a leader lock
     # so only one Beat process fires (safe to run a single ``beat`` service). All
     # config, never a literal at the call site (backend/AGENTS.md).
     redbeat_key_prefix: str = Field(default="lumen:redbeat:", alias="REDBEAT_KEY_PREFIX")
     redbeat_lock_timeout_seconds: int = Field(default=90, alias="REDBEAT_LOCK_TIMEOUT_SECONDS")
-    # Per-tenant run enqueue rate cap (ADR-0015 §5) — reuses the Redis fixed-window
+    # Per-tenant run enqueue rate cap (ADR-0015 Â§5) â€” reuses the Redis fixed-window
     # limiter pattern (``tasks/rate_limit.py``). A tenant cannot flood the worker
     # pool with scheduled/run-now runs: the first N enqueues per window are admitted;
     # beyond the cap a fire is deferred with backoff (never dropped). Distinct
@@ -1222,26 +1232,26 @@ class Settings(BaseSettings):
     run_rate_max_per_window: int = Field(default=60, alias="RUN_RATE_MAX_PER_WINDOW")
     run_rate_window_seconds: int = Field(default=60, alias="RUN_RATE_WINDOW_SECONDS")
     run_rate_backoff_seconds: int = Field(default=30, alias="RUN_RATE_BACKOFF_SECONDS")
-    # Per-tenant simultaneous in-flight run cap (ADR-0015 §5): bounds how many runs a
+    # Per-tenant simultaneous in-flight run cap (ADR-0015 Â§5): bounds how many runs a
     # single tenant may have ``queued``/``running`` at once so one tenant cannot
     # monopolize the worker pool. A fire that would exceed it is deferred, not
-    # dropped. 0 would disable the cap → rejected (fail fast).
+    # dropped. 0 would disable the cap â†’ rejected (fail fast).
     run_max_in_flight_per_tenant: int = Field(default=20, alias="RUN_MAX_IN_FLIGHT_PER_TENANT")
     # How often the digest beat rolls pending low-urgency run deliveries into an
-    # in-app digest (ADR-0015 §6, issue #238). A completed run whose schedule opted
+    # in-app digest (ADR-0015 Â§6, issue #238). A completed run whose schedule opted
     # into a digest lands as a ``pending`` delivery; the periodic sweep marks the
     # batch ``delivered`` so the owner is notified once per window, not per fire. The
-    # default is hourly (3600s) — the sweep is idempotent and cheap; the *cadence*
+    # default is hourly (3600s) â€” the sweep is idempotent and cheap; the *cadence*
     # (daily/weekly) the schedule opted into is a product notion, this is just how
     # often the beat drains the pending batch. Non-positive would disable batching.
     run_digest_interval_seconds: int = Field(default=3600, alias="RUN_DIGEST_INTERVAL_SECONDS")
     # Bounded retry-with-backoff for a **transient** run fault (model/db/storage
-    # briefly unavailable) before the run reaches a terminal (ADR-0015 §5, E7-5 #239).
+    # briefly unavailable) before the run reaches a terminal (ADR-0015 Â§5, E7-5 #239).
     # A transient failure is re-driven up to ``run_max_retries`` times with exponential
     # backoff (``run_retry_backoff_seconds * 2**attempt``); on exhaustion the run
     # reaches a queryable ``failed`` terminal, never a silent drop. A *permanent* /
     # escalation-worthy failure (ambiguity / restricted data / tool failure) is never
-    # retried — it escalates to a human immediately. Mirrors ``ingestion_*``.
+    # retried â€” it escalates to a human immediately. Mirrors ``ingestion_*``.
     run_max_retries: int = Field(default=3, alias="RUN_MAX_RETRIES")
     run_retry_backoff_seconds: int = Field(default=5, alias="RUN_RETRY_BACKOFF_SECONDS")
 
@@ -1255,17 +1265,17 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _scheduler_counts_positive(cls, value: int) -> int:
-        """A non-positive lock/rate/concurrency value would disable bounding — reject.
+        """A non-positive lock/rate/concurrency value would disable bounding â€” reject.
 
         The per-tenant run rate + concurrency caps are load-bearing availability
-        controls (ADR-0015 §5); a zero or negative window/limit/lock would either
+        controls (ADR-0015 Â§5); a zero or negative window/limit/lock would either
         admit everything, divide by a zero window, or disable the Beat lock, so a
         misconfiguration must fail fast at startup.
         """
         if value <= 0:
             raise ValueError(
                 "REDBEAT_LOCK_TIMEOUT_SECONDS / RUN_RATE_* / RUN_MAX_IN_FLIGHT_PER_TENANT "
-                "/ RUN_DIGEST_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
+                "/ RUN_DIGEST_INTERVAL_SECONDS must be positive (ADR-0015 Â§5/Â§6/Â§7)"
             )
         return value
 
@@ -1279,26 +1289,26 @@ class Settings(BaseSettings):
         return self
 
     # --- Sandbox code execution (ADR-0020, issue #457) -----------------------
-    # The isolated Python code-execution sandbox — the HIGHEST-RISK capability in
+    # The isolated Python code-execution sandbox â€” the HIGHEST-RISK capability in
     # the program (adversarial-by-assumption model-authored code). ALL settings are
     # config, never a literal at the call site (backend/AGENTS.md).
     #
-    # **Default OFF per tenant (ADR-0013 §6, the kill-switch).** Code execution is
+    # **Default OFF per tenant (ADR-0013 Â§6, the kill-switch).** Code execution is
     # disabled for every tenant until an admin explicitly enables it. The system flag
     # below is the deploy-wide master switch (default False): with it off, EVERY run
-    # is refused (``status=denied``, audited) — the sandbox never launches. The
+    # is refused (``status=denied``, audited) â€” the sandbox never launches. The
     # per-tenant admin enable (#233) layers on top; this issue ships the master switch
     # and defaults them closed.
     sandbox_enabled: bool = Field(default=False, alias="SANDBOX_ENABLED")
     # The internal HTTP API the worker calls the dedicated ``sandbox-runner`` service
-    # on (ADR-0013 §1). Inside compose this is the service name on the internal
-    # network, never a published host port. The worker holds NO Docker socket — this
+    # on (ADR-0013 Â§1). Inside compose this is the service name on the internal
+    # network, never a published host port. The worker holds NO Docker socket â€” this
     # hop is the entire container-engine surface.
     sandbox_runner_url: str = Field(
         default="http://sandbox-runner:8000", alias="SANDBOX_RUNNER_URL"
     )
     # The shared secret the API/worker present to that runner (#508). The runner holds
-    # the Docker socket — host-root-equivalent authority — and its API was previously
+    # the Docker socket â€” host-root-equivalent authority â€” and its API was previously
     # UNAUTHENTICATED on the shared compose network, so an SSRF here or a compromised
     # sibling container could have it execute arbitrary code. Empty by default so the
     # offline suite and a sandbox-less deploy need no secret; the validator below
@@ -1306,10 +1316,10 @@ class Settings(BaseSettings):
     # only moment the credential can matter.
     sandbox_runner_token: str = Field(default="", alias="SANDBOX_RUNNER_TOKEN")
     # The pinned image model-authored code EXECUTES in (curated Python + scientific
-    # stack, ADR-0013 §3), built by ``sandbox_exec/Dockerfile``. Recorded per run for
+    # stack, ADR-0013 Â§3), built by ``sandbox_exec/Dockerfile``. Recorded per run for
     # reproducibility (E3-7).
     #
-    # Issue #503: this defaulted to ``lumen-sandbox-runner:0.2.0`` — the RUNNER's own
+    # Issue #503: this defaulted to ``lumen-sandbox-runner:0.2.0`` â€” the RUNNER's own
     # control-plane image (python-slim + fastapi/docker/pydantic). Every run therefore
     # executed with no pandas, numpy, or matplotlib, so "run Python" could not do the
     # data work the capability exists for, and tenant code ran in the image of the one
@@ -1323,9 +1333,9 @@ class Settings(BaseSettings):
     # PINNED AT LAUNCH TIME, not only at build time. ``sandbox_exec/Dockerfile``
     # pins its BASE by digest, but that is a fact about a layer at build time; this
     # value is the reference the runner resolves per session. It was previously
-    # unvalidated, so ``:latest`` or a tagless name — either of which can change
-    # what tenant code executes in without any deploy — was accepted while
-    # ADR-0013 §3 claimed a digest pin. The validators below require an exact tag
+    # unvalidated, so ``:latest`` or a tagless name â€” either of which can change
+    # what tenant code executes in without any deploy â€” was accepted while
+    # ADR-0013 Â§3 claimed a digest pin. The validators below require an exact tag
     # (never ``latest``), and require the ``name@sha256:<64 hex>`` digest form once
     # code execution is enabled outside local development. In local dev a tag is
     # trust-on-first-build: you built the image yourself, on this daemon.
@@ -1337,13 +1347,13 @@ class Settings(BaseSettings):
     @field_validator("sandbox_image")
     @classmethod
     def _sandbox_image_is_pinned(cls, value: str) -> str:
-        """Refuse a mutable or unparseable execution-image reference (ADR-0013 §3)."""
+        """Refuse a mutable or unparseable execution-image reference (ADR-0013 Â§3)."""
         reference = value.strip()
         if not reference:
             raise ValueError("SANDBOX_IMAGE must name the sandbox execution image")
         name_and_tag, _, digest = reference.partition("@")
         if digest and not _SANDBOX_IMAGE_DIGEST.fullmatch(digest):
-            raise ValueError("SANDBOX_IMAGE digest must be 'sha256:<64 hex chars>' (ADR-0013 §3)")
+            raise ValueError("SANDBOX_IMAGE digest must be 'sha256:<64 hex chars>' (ADR-0013 Â§3)")
         # Docker allows a port in the registry host (``host:5000/name``), so the tag
         # is only the colon inside the FINAL path segment.
         head, slash, last = name_and_tag.rpartition("/")
@@ -1361,18 +1371,18 @@ class Settings(BaseSettings):
         if not digest and not tag:
             raise ValueError(
                 "SANDBOX_IMAGE must be pinned to an exact tag or digest, not a bare "
-                "image name (ADR-0013 §3, ADR-0005: no floating references)"
+                "image name (ADR-0013 Â§3, ADR-0005: no floating references)"
             )
         # `:latest` is only mutable when it is what resolves the image. With a digest
         # present the daemon resolves BY digest and the tag is a human-readable label,
-        # so `name:latest@sha256:…` is exactly as immutable as `name@sha256:…` — and
+        # so `name:latest@sha256:â€¦` is exactly as immutable as `name@sha256:â€¦` â€” and
         # it is the form `docker pull` prints, so rejecting it punished the most
         # explicit possible pin (#520).
         if tag == "latest" and not digest:
-            raise ValueError("SANDBOX_IMAGE must not use the ':latest' tag (ADR-0013 §3)")
+            raise ValueError("SANDBOX_IMAGE must not use the ':latest' tag (ADR-0013 Â§3)")
         return reference
 
-    # What the execution image above ALREADY SHIPS — the exact, version-pinned closure
+    # What the execution image above ALREADY SHIPS â€” the exact, version-pinned closure
     # in ``sandbox_exec/requirements.txt`` (the drift guard in
     # ``backend/tests/test_sandbox_exec_image.py`` fails if the two diverge).
     #
@@ -1380,21 +1390,21 @@ class Settings(BaseSettings):
     # network, so every ``packages=[...]`` request was refused with no install path to
     # offer. A distribution that is already in the image needs no install at all, so
     # the admission path admits it against this list without asking the runner to
-    # fetch anything — the offline-correct answer. Anything NOT here is a genuine
+    # fetch anything â€” the offline-correct answer. Anything NOT here is a genuine
     # install: it needs the admin allow-list AND the runner's own outbound network.
     # Override only when running a custom execution image (comma-separated pins).
     #
     # ``NoDecode`` is load-bearing, not decoration. ``pydantic-settings`` JSON-decodes
-    # a complex-typed field's env value inside ``EnvSettingsSource`` — BEFORE any
-    # validator runs — so the ``mode="before"`` splitter below was dead code for env
+    # a complex-typed field's env value inside ``EnvSettingsSource`` â€” BEFORE any
+    # validator runs â€” so the ``mode="before"`` splitter below was dead code for env
     # input and every documented comma form raised ``SettingsError`` at import. The
     # empty form shipped on the commented ``.env.example`` line was the worst case: an
     # operator who copied the file and uncommented that line broke BOTH the API and
     # the worker at boot. ``NoDecode`` hands the raw string to the validator instead,
     # which is what makes the documented form actually work.
     #
-    # An explicitly EMPTY value therefore now means what it says — "this image ships
-    # nothing" — and refuses every ``packages=[...]`` request rather than crashing the
+    # An explicitly EMPTY value therefore now means what it says â€” "this image ships
+    # nothing" â€” and refuses every ``packages=[...]`` request rather than crashing the
     # process. Leave the variable UNSET unless you run a custom execution image.
     sandbox_preinstalled_packages: Annotated[tuple[str, ...], NoDecode] = Field(
         default=_DEFAULT_SANDBOX_PREINSTALLED_PACKAGES,
@@ -1410,11 +1420,11 @@ class Settings(BaseSettings):
         return value
 
     # The OCI runtime: ``runc`` (hardened Docker baseline, laptop-viable) or ``runsc``
-    # (gVisor — the recommended production hardening; a config swap, no code change,
-    # ADR-0013 §2). Anything else is rejected fail-fast.
+    # (gVisor â€” the recommended production hardening; a config swap, no code change,
+    # ADR-0013 Â§2). Anything else is rejected fail-fast.
     sandbox_runtime: str = Field(default="runc", alias="SANDBOX_RUNTIME")
-    # ADR-0013 resource caps. ADR-0020 reusable sessions ship UNBOUNDED — no cpu,
-    # memory or PID limit on the execution container — which is a deliberate sponsor
+    # ADR-0013 resource caps. ADR-0020 reusable sessions ship UNBOUNDED â€” no cpu,
+    # memory or PID limit on the execution container â€” which is a deliberate sponsor
     # decision (ADR-0020 Consequences) and the largest residual operational risk in
     # that design: one ``run_python`` call can exhaust host RAM, saturate every core or
     # fork-bomb, and explicit cancel/reset is the only recovery.
@@ -1438,7 +1448,7 @@ class Settings(BaseSettings):
     )
     # ENFORCED, unlike the compatibility values around it: how many bytes of ONE
     # execution's output directory the runner will read into its own memory before it
-    # stops and reports partial collection. This protects the RUNNER, not the run —
+    # stops and reports partial collection. This protects the RUNNER, not the run â€”
     # the runner is the single Docker-socket holder, so an unbounded collection let one
     # chat turn's 4GB file OOM the process every tenant's code execution depends on
     # (the field was previously sent as ``None`` and read by nothing).
@@ -1473,7 +1483,7 @@ class Settings(BaseSettings):
     def _sandbox_limits_positive(cls, value: float) -> float:
         """Keep compatibility-only ADR-0013 policy values syntactically valid."""
         if value <= 0:
-            raise ValueError("SANDBOX_* resource caps and quotas must be positive (ADR-0013 §2/§6)")
+            raise ValueError("SANDBOX_* resource caps and quotas must be positive (ADR-0013 Â§2/Â§6)")
         return value
 
     @field_validator("sandbox_runtime")
@@ -1481,7 +1491,7 @@ class Settings(BaseSettings):
     def _sandbox_runtime_known(cls, value: str) -> str:
         """Only ``runc`` (Docker baseline) or ``runsc`` (gVisor) are valid runtimes."""
         if value not in ("runc", "runsc"):
-            raise ValueError("SANDBOX_RUNTIME must be 'runc' or 'runsc' (ADR-0013 §2)")
+            raise ValueError("SANDBOX_RUNTIME must be 'runc' or 'runsc' (ADR-0013 Â§2)")
         return value
 
     @model_validator(mode="after")
@@ -1501,7 +1511,7 @@ class Settings(BaseSettings):
         A tag is mutable on the daemon: whoever can push/retag it chooses what
         model-authored code executes in, with no deploy and no audit trail. Local dev
         may keep the tag (you built it there yourself, from this checkout); anywhere
-        else the digest is the pin ADR-0013 §3 promises. Gated on ``sandbox_enabled``
+        else the digest is the pin ADR-0013 Â§3 promises. Gated on ``sandbox_enabled``
         so a deploy that launches nothing is not held hostage to a reference it never
         resolves.
         """
@@ -1512,7 +1522,7 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "SANDBOX_IMAGE must be digest-pinned ('name@sha256:<64 hex chars>') when "
-                "SANDBOX_ENABLED=true outside local development (ADR-0013 §3)"
+                "SANDBOX_ENABLED=true outside local development (ADR-0013 Â§3)"
             )
         return self
 
@@ -1520,7 +1530,7 @@ class Settings(BaseSettings):
     def _sandbox_runner_token_when_enabled(self) -> Settings:
         """An enabled sandbox must authenticate to the runner (#508).
 
-        Gated on ``sandbox_enabled`` — and on that alone, including local development.
+        Gated on ``sandbox_enabled`` â€” and on that alone, including local development.
         The digest rule above exempts local because you built the image yourself on
         your own daemon, which is a real reduction in risk. There is no equivalent
         argument here: the runner holds the Docker socket on whatever machine it runs
@@ -1528,7 +1538,7 @@ class Settings(BaseSettings):
         channel in dev as in production. Exempting local would also mean the path
         every developer exercises is the one path never tested.
 
-        Absent, this fails at STARTUP rather than at the first run — the runner
+        Absent, this fails at STARTUP rather than at the first run â€” the runner
         refuses to boot without the same secret, so a mismatch should surface at
         `docker compose up`, where both halves are visible together.
         """
@@ -1577,7 +1587,7 @@ class Settings(BaseSettings):
     ) -> tuple[ChatModelSetting, ...]:
         """Enforce the registry invariants (issue #47 AC-1).
 
-        Non-empty, unique ids, and **exactly one** ``is_default`` — so the picker
+        Non-empty, unique ids, and **exactly one** ``is_default`` â€” so the picker
         always has a well-defined default and the contract's "exactly one
         ``is_default``" holds for any (mis)configuration. A bad override fails at
         startup, not deep in a request.
@@ -1600,7 +1610,7 @@ class Settings(BaseSettings):
         """True when an LLM provider key is configured.
 
         The gateway no-ops gracefully when this is False so the skeleton boots
-        and runs without any model provider (per the compose contract — the key
+        and runs without any model provider (per the compose contract â€” the key
         may be left blank in ``.env``).
         """
         return bool(self.openrouter_api_key.strip())
@@ -1639,7 +1649,7 @@ class Settings(BaseSettings):
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     _DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
-    # The base64 dev vault key baked into the ``secrets_encryption_key`` default —
+    # The base64 dev vault key baked into the ``secrets_encryption_key`` default â€”
     # obviously insecure and refused outside ``local`` (mirrors the JWT rule).
     _DEV_SECRETS_KEY = "bHVtZW4tbG9jYWwtZGV2LXNlY3JldHMta2V5LTAwMDA="
 
@@ -1649,11 +1659,11 @@ class Settings(BaseSettings):
 
         The dev default lets the skeleton boot locally; any non-``local``
         environment that still carries it is a misconfiguration that must refuse
-        to start rather than mint forgeable tokens (spec 0004 §2.3).
+        to start rather than mint forgeable tokens (spec 0004 Â§2.3).
         """
         if self.environment != "local" and self.jwt_secret == self._DEV_JWT_SECRET:
             raise ValueError(
-                "JWT_SECRET must be overridden outside the local environment (spec 0004 §2.3)"
+                "JWT_SECRET must be overridden outside the local environment (spec 0004 Â§2.3)"
             )
         return self
 
@@ -1664,12 +1674,12 @@ class Settings(BaseSettings):
 
         The secrets vault (issue #209) encrypts with AES-256, which needs a 32-byte
         key. Validating the shape here means a malformed ``SECRETS_ENCRYPTION_KEY``
-        refuses to boot rather than failing the first store/retrieve — the same
+        refuses to boot rather than failing the first store/retrieve â€” the same
         fail-fast posture as every other required config value. Delegates to the
         crypto module's loader so the one definition of "valid key material" is not
         duplicated.
         """
-        # Local import avoids a core→core import cycle at module load and keeps the
+        # Local import avoids a coreâ†’core import cycle at module load and keeps the
         # cipher's key rules the single source of truth for validity.
         from app.core.crypto import SecretsCryptoError, load_master_key
 
@@ -1697,12 +1707,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_gdrive_oauth_client_in_prod(self) -> Settings:
-        """Blank Google OAuth client config is refused outside local (ADR-0019 §1).
+        """Blank Google OAuth client config is refused outside local (ADR-0019 Â§1).
 
         The blank defaults exist only so the local skeleton boots without a
         Google Cloud registration; a deployed environment shipping without a
         client id/secret would fail deep inside the first connect flow instead
-        of at boot — fail fast like ``JWT_SECRET``/``SECRETS_ENCRYPTION_KEY``.
+        of at boot â€” fail fast like ``JWT_SECRET``/``SECRETS_ENCRYPTION_KEY``.
         """
         if self.environment != "local":
             for value, name in (
@@ -1711,7 +1721,7 @@ class Settings(BaseSettings):
             ):
                 if not value:
                     raise ValueError(
-                        f"{name} must be set outside the local environment (ADR-0019 §1)"
+                        f"{name} must be set outside the local environment (ADR-0019 Â§1)"
                     )
         return self
 
@@ -1719,10 +1729,10 @@ class Settings(BaseSettings):
     def _require_https_oauth_urls_in_prod(self) -> Settings:
         """OAuth state/code must never transit cleartext outside local dev.
 
-        ADR-0019 §1: the callback URL carries the opaque state handle and the
+        ADR-0019 Â§1: the callback URL carries the opaque state handle and the
         provider's authorization code. The http defaults exist only for the
         local compose stack; a deployed environment must serve both the
-        callback base and the SPA return target over https — refuse to boot
+        callback base and the SPA return target over https â€” refuse to boot
         otherwise (fail fast, the JWT/vault-key rule applied to OAuth).
         """
         if self.environment != "local":
@@ -1732,7 +1742,7 @@ class Settings(BaseSettings):
             ):
                 if not value.startswith("https://"):
                     raise ValueError(
-                        f"{name} must be https outside the local environment (ADR-0019 §1)"
+                        f"{name} must be https outside the local environment (ADR-0019 Â§1)"
                     )
         return self
 

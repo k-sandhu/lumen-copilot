@@ -23,6 +23,10 @@ work with no network and no I/O beyond the in-memory bytes it is handed.
 from __future__ import annotations
 
 import io
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 # Upload-allowlist MIME types (kept in lockstep with #22's
 # ``Settings.upload_allowed_content_types`` default; the task validates against
@@ -425,7 +429,7 @@ _PARSERS = {
 }
 
 
-def parse_document(data: bytes, *, mime_type: str) -> str:
+def parse_document(data: bytes, *, mime_type: str, settings: Settings | None = None) -> str:
     """Extract plain text from ``data`` for the allowlisted ``mime_type``.
 
     Dispatches on the (normalized) MIME type to the matching helper. The leading
@@ -438,6 +442,10 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
     """
     normalized = mime_type.split(";", 1)[0].strip().lower()
     parser = _PARSERS.get(normalized)
+    if settings is not None:
+        from app.ingestion.candidates import configured_parse
+
+        return configured_parse(data, normalized, settings, parser(data) if parser else None)
     if parser is None:
         raise UnsupportedMimeTypeError(f"unsupported MIME type for ingestion: {normalized!r}")
     return parser(data)
