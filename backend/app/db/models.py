@@ -276,6 +276,7 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
 
     __tablename__ = "documents"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_documents_tenant_id_id"),
         Index("ix_documents_collection_id", "collection_id"),
         Index("ix_documents_source_id", "source_id"),
         # Identity-based reconcile (ADR-0019 §3): a provider document maps to at
@@ -336,6 +337,7 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     ingestion_failure: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    ingestion_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
     # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH
@@ -373,6 +375,36 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     chunks: Mapped[list[Chunk]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    stage_outputs: Mapped[list[IngestionStageOutput]] = relationship(cascade="all, delete-orphan")
+
+
+class IngestionStageOutput(TenantScopedMixin, TimestampMixin, Base):
+    """Bounded operational cache; never an authorization or citation source."""
+
+    __tablename__ = "ingestion_stage_outputs"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "document_id"],
+            ["documents.tenant_id", "documents.id"],
+            ondelete="CASCADE",
+            name="fk_ingestion_stage_document_tenant",
+        ),
+        UniqueConstraint("tenant_id", "document_id", "stage", name="uq_ingestion_stage_document"),
+        CheckConstraint(
+            "stage IN ('detect','extract','normalize','classify','chunk','embed','index')",
+            name="ck_ingestion_stage_name",
+        ),
+        CheckConstraint(
+            "length(fingerprint) = 64 AND length(output_sha256) = 64",
+            name="ck_ingestion_stage_hashes",
+        ),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class DocumentUpload(TenantScopedMixin, TimestampMixin, Base):

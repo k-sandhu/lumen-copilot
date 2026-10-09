@@ -75,6 +75,8 @@ _BASE_ENV = {
     "OPENROUTER_API_KEY": "sk-test",
     "INGESTION_CHUNK_SIZE": "200",
     "INGESTION_CHUNK_OVERLAP": "40",
+    # Checkpoints validate provider width; match the deterministic offline adapter.
+    "LLM_EMBEDDING_DIMENSIONS": str(len(DeterministicEmbedder.vector(""))),
 }
 
 
