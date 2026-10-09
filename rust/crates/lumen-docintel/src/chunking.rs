@@ -260,12 +260,18 @@ pub fn chunk_document(
     let mut reservations = vec![];
     for (block, span) in rendered.document.blocks.iter().zip(&rendered.spans) {
         ctx.work(1)?;
-        let excluded = rendered.document.generation.diagnostics.as_ref()
-            .and_then(|d|d.get("native_normalization"))
-            .and_then(|d|d.get("excluded_block_ids"))
-            .and_then(|d|d.as_array())
-            .is_some_and(|ids|ids.iter().any(|id|id.as_str()==Some(block.id.as_str())));
-        if block.kind==BlockKind::Furniture && excluded {continue;}
+        let excluded = rendered
+            .document
+            .generation
+            .diagnostics
+            .as_ref()
+            .and_then(|d| d.get("native_normalization"))
+            .and_then(|d| d.get("excluded_block_ids"))
+            .and_then(|d| d.as_array())
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(block.id.as_str())));
+        if block.kind == BlockKind::Furniture && excluded {
+            continue;
+        }
         let _chars_memory = ctx.reserve(block.text.len().saturating_mul(8) + 4096)?;
         let chars: Vec<char> = block.text.chars().collect();
         let atomic = if block.kind == BlockKind::Table {

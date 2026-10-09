@@ -135,11 +135,16 @@ fn render_document(py: Python<'_>, document_json: String) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn normalize_document(py: Python<'_>, document_json: String, budget_json: String, token: &CancellationToken) -> PyResult<String> {
-    let cancellation=token.0.clone();
-    compute(py,|| {
-        let ctx=lumen_docintel_core::runtime::context_json(&budget_json,cancellation)?;
-        lumen_docintel_core::normalization::normalize_json(&document_json,&ctx)
+fn normalize_document(
+    py: Python<'_>,
+    document_json: String,
+    budget_json: String,
+    token: &CancellationToken,
+) -> PyResult<String> {
+    let cancellation = token.0.clone();
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+        lumen_docintel_core::normalization::normalize_json(&document_json, &ctx)
     })
 }
 
