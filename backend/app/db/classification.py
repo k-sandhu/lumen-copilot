@@ -13,7 +13,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
-from app.domain.classification import ClassificationWork
+from app.domain.classification import PROMPT_VERSION, ClassificationMetadata, ClassificationWork
 from app.domain.decisions import DecisionAttempt, DecisionUsage
 
 
@@ -38,6 +38,33 @@ class ClassificationRepository:
     def __init__(self, session: AsyncSession, tenant_id: UUID) -> None:
         self.session = session
         self.tenant_id = tenant_id
+
+    async def metadata_for_documents(
+        self, document_ids: list[UUID]
+    ) -> dict[UUID, ClassificationMetadata]:
+        """One bounded tenant query; callers supply already-permitted document IDs."""
+        if not document_ids:
+            return {}
+        if len(document_ids) > 500:
+            raise ValueError("classification metadata batch too large")
+        rows = (
+            await self.session.execute(
+                select(
+                    models.DocumentClassification.document_id,
+                    models.DocumentClassification.status,
+                    models.DocumentClassification.result,
+                ).where(
+                    models.DocumentClassification.tenant_id == self.tenant_id,
+                    models.DocumentClassification.document_id.in_(document_ids),
+                )
+            )
+        ).all()
+        result = {}
+        for document_id, status, value in rows:
+            metadata = ClassificationMetadata.from_result(status, value)
+            if metadata is not None:
+                result[document_id] = metadata
+        return result
 
     async def _document_lock(self, document_id: UUID) -> bool:
         return (
@@ -114,7 +141,7 @@ class ClassificationRepository:
                     "extraction": extraction_id,
                     "taxonomy": taxonomy_version,
                     "controls": controls,
-                    "prompt": "classification-1",
+                    "prompt": PROMPT_VERSION,
                     "rules": "1",
                 },
                 sort_keys=True,

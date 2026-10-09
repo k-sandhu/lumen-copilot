@@ -52,7 +52,11 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.principal import Principal
+from app.classification.taxonomy import _nodes, load_taxonomy
+from app.core.errors import ValidationError
+from app.db.classification import ClassificationRepository
 from app.db.repositories import GrantRepository, GroupRepository, MessageRepository
+from app.domain.classification import ClassificationFilter
 from app.domain.entities import Message
 from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
@@ -158,6 +162,7 @@ class RetrievalService:
         k: int,
         collection_ids: list[UUID] | None = None,
         document_ids: list[UUID] | None = None,
+        classification: ClassificationFilter | None = None,
     ) -> list[RetrievedPassage]:
         """Permission-filtered hybrid passage search (the chokepoint API, AC-1/AC-2).
 
@@ -192,6 +197,16 @@ class RetrievalService:
                 closed → 503, never an unfiltered fallback).
         """
         k = _clamp_k(k)
+        if classification is not None:
+            taxonomy = load_taxonomy()
+            if (
+                classification.taxonomy_prefix is not None
+                and classification.taxonomy_prefix not in _nodes(taxonomy)
+            ) or any(
+                key not in {facet["id"] for facet in taxonomy["facets"]}
+                for key, _ in classification.facets
+            ):
+                raise ValidationError("Unknown classification filter identifier.")
         if not query.strip():
             return []
         allow_set = await self._resolve_allow_set(principal)
@@ -219,6 +234,7 @@ class RetrievalService:
             k=k,
             collection_ids=collection_ids,
             document_ids=document_ids,
+            **({"classification": classification} if classification is not None else {}),
         )
         if not hits:
             return []
@@ -230,10 +246,21 @@ class RetrievalService:
         rows = await queries.load_passages(
             self._session, allow_set=allow_set, chunk_ids=[h.chunk_id for h in hits]
         )
+        metadata = (
+            await ClassificationRepository(
+                self._session, principal.tenant_id
+            ).metadata_for_documents(list({row.document_id for row in rows.values()}))
+            if classification is not None
+            else {}
+        )
         passages: list[RetrievedPassage] = []
         for hit in hits:  # engine ranking order preserved
             row = rows.get(hit.chunk_id)
             if row is None:
+                continue
+            if classification is not None and not classification.matches(
+                metadata.get(row.document_id)
+            ):
                 continue
             # OpenSearch is derived and can lag a retry/re-delivery. Hydration
             # admits only the exact Ready Postgres generation and coordinate

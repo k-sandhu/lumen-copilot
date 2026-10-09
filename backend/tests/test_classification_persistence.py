@@ -19,6 +19,12 @@ sqlite_engine = fixtures.sqlite_engine
 _offline_index_store = fixtures._offline_index_store
 
 
+@pytest.fixture(autouse=True)
+def offline_classification_index_enqueue(monkeypatch):
+    # Classification repair is independent of the broker and ingestion readiness.
+    monkeypatch.setattr("app.tasks.index_sync.enqueue_index_sync", lambda *_: None)
+
+
 async def seed():
     tenant, document = await fixtures._seed_document(mime_type="text/plain", key="key")
     async with db_session.tenant_session_scope(tenant) as s:
@@ -32,6 +38,27 @@ async def seed():
             controls={"enabled": True},
         )
     return tenant, document
+
+
+async def test_classifier_version_change_reschedules_prior_inputs(sqlite_engine, monkeypatch):
+    import app.db.classification as repository_module
+
+    tenant, document = await seed()
+    async with db_session.tenant_session_scope(tenant) as session:
+        repo = ClassificationRepository(session, tenant)
+        arguments = {
+            "extraction_id": "a" * 64,
+            "input_json": '{"text":"synthetic"}',
+            "taxonomy_version": "1.0.0",
+            "controls": {"enabled": True},
+        }
+        with monkeypatch.context() as patch:
+            patch.setattr(repository_module, "PROMPT_VERSION", "classification-prior")
+            assert await repo.schedule(document, **arguments)
+            previous = (await repo.get(document)).input_fingerprint
+        assert await repo.schedule(document, **arguments)
+        assert (await repo.get(document)).input_fingerprint != previous
+        assert not await repo.schedule(document, **arguments)
 
 
 async def test_schedule_is_idempotent_tenant_scoped_and_override_survives(sqlite_engine):
