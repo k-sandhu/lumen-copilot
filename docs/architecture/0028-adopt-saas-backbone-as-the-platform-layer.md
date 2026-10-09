@@ -4,7 +4,8 @@
 - **Date:** 2026-10-09
 - **Tracking:** [#716](https://github.com/k-sandhu/lumen-copilot/issues/716)
 - **Supersedes, in part:** [ADR-0003](0003-application-stack.md) §§1, 4, 5, 6, 7 (runtime mechanisms only); [ADR-0004](0004-architecture-boundaries-and-adapters.md) boundary-table rows; [ADR-0005](0005-local-run-and-developer-workflow.md) compose topology; [ADR-0010](0010-dedicated-text-search-engine.md) §3 module ownership; [ADR-0015](0015-scheduling-and-headless-runs.md) §§1, 4; [ADR-0022](0022-group-access-model.md) storage of groups and grants. The precise scope is in §8.
-- **Amends a proposal:** ADR-0026 *Rust ingestion core* ([#662](https://github.com/k-sandhu/lumen-copilot/issues/662), PR [#699](https://github.com/k-sandhu/lumen-copilot/pull/699), not yet accepted) — its rules stand; its home moves (§5).
+- **Amends a proposal:** *Rust ingestion core* ([#662](https://github.com/k-sandhu/lumen-copilot/issues/662), PR [#699](https://github.com/k-sandhu/lumen-copilot/pull/699), not yet accepted; numbered 0026 on its branch, a number `main` now gives to the CI ADR) — its rules stand; its home moves (§5). Below it is called *the Rust-core proposal*.
+- **Amends, on the migration branch only:** [ADR-0026](0026-continuous-integration.md) *Continuous integration* — see §8.
 - **Precedent:** `lumen-accountant` ADR-0022 *Adopt SaaS Backbone as the platform layer* and branch `backbone-migration` (all 39 acceptance rows green, 2026-10-03).
 
 ## Context
@@ -169,7 +170,7 @@ OpenSearch remains the single retrieval store (ADR-0010 §§1–2, 4–5 stand).
 2. **Epic #661 relocates; it is not cancelled.**
    - **Crates move.** The `lumen-docintel` and `lumen-docintel-py` crates and their work in #701–#715 move into the backbone's Rust workspace. The core becomes a backbone crate (for example `bb-docintel`) beside `bb-extract`. Its bindings join `bb-py`, so it is exposed through `backbone_native` and runnable as `bb-worker` native jobs.
    - **One toolchain.** Toolchain, PyO3 and cargo-deny pins are unified on the backbone's.
-   - **ADR-0026's rules carry over unchanged:**
+   - **The Rust-core proposal's rules carry over unchanged:**
      - bytes in, typed results out;
      - no credentials, database handles or storage capabilities in Rust library calls;
      - rayon with the GIL released;
@@ -179,7 +180,7 @@ OpenSearch remains the single retrieval store (ADR-0010 §§1–2, 4–5 stand).
      - shadow mode before per-format cutover;
      - permissive licences only.
    - **Process change.** The open PRs stay draft in Copilot and are re-opened against the backbone. Their issues remain the tracking units, re-pointed at the backbone home. Copilot's ADR-0025 evaluation and the #670 fidelity benchmark gate each format's cutover.
-   - **One deliberate difference from ADR-0026.** `bb-worker` is an existing backbone service that reads its queue from Postgres and fetches files through signed, expiring, allow-listed grants. Running native jobs there is accepted; it is not "a new service" in ADR-0026's sense.
+   - **One deliberate difference from the Rust-core proposal.** `bb-worker` is an existing backbone service that reads its queue from Postgres and fetches files through signed, expiring, allow-listed grants. Running native jobs there is accepted; it is not "a new service" in that proposal's sense.
 3. **Adopt the Rust the backbone already ships.** `bb-gateway` carries all realtime traffic, so long-lived sockets leave the Python API. `bb-worker` runs native extraction and thumbnails. `backbone_native` replaces Copilot's Python parsers and chunker per format, after parity.
 4. **New Rust is added only in the backbone, and only after a profile.** These candidates come from code reading; none is measured, and none ships without a before/after benchmark:
    - **Context fitter.** `fit_transcript` runs before each of up to 20 turns and rebuilds a `ToolNameMap` per message (`llm/context.py:491–529`).
@@ -242,8 +243,9 @@ Behavioural requirements in the earlier ADRs survive; only the mechanisms named 
 | 0010 | §3 ownership of the OpenSearch client by `backend/app/search/` | Engine choice, single store, permission and parity rules, publication semantics |
 | 0015 | §1 celery-redbeat and §4 the Celery `run_assistant` task | The data model (schedules, runs, run steps), headless-run semantics, overlap and retry rules |
 | 0022 | Group and grant tables as the storage of record | Group principals, the derived "All members" group, source-visibility semantics |
+| 0026 (CI) | On `backbone-migration` only: the backend job runs in the pinned backbone runtime image at its Python version (instead of setup-python 3.12.5), and pulls private images with a read-only credential. That is the one exception to "no secrets", and it ends when the backbone is OSI-published (§9). | Every gate (lint, format, typecheck, offline tests, frontend build), locked dependencies, the same commands locally and in CI, and no secrets on `main` |
 
-ADRs 0006–0009, 0011–0014, 0016–0021 and 0023–0025 remain binding, except where §§2–5 move a mechanism behind a backbone port.
+ADRs 0006–0009, 0011–0014, 0016–0021 and 0023–0025 remain binding, as does 0026 outside the migration branch, except where §§2–5 move a mechanism behind a backbone port.
 
 **`AGENTS.md`.** §3, §6, §11 and §12 change. Under §5 that needs owner approval, so this ADR ships a review-only diff: [`0028-proposed-agents-md.diff`](0028-proposed-agents-md.diff).
 
@@ -282,8 +284,8 @@ From package A onward it also fails if `backend/` runs its own agent loop outsid
 
 **Consumption and licensing.** ADR-0003 is open-source-only, and Copilot is public under MIT.
 
-- **Bridge.** Until the backbone is published under an OSI licence, the migration branch and its CI consume private, digest-pinned images from a registry, using a read-only pull credential held as a CI secret.
-- **Cutover precondition.** Merging into `main` requires the backbone to be published under an OSI licence, so that the public repository stays buildable by anyone. Only the owner can waive this, in writing on #716.
+- **Bridge.** Until the backbone is published under an OSI licence, the migration branch and its CI consume private, digest-pinned images from a registry, using a read-only pull credential held as a CI secret. This is the only exception to ADR-0026's no-secrets rule, and it never reaches `main`.
+- **Cutover precondition.** Merging into `main` requires the backbone to be published under an OSI licence, so that the public repository stays buildable by anyone and `main`'s CI keeps needing no secrets. Only the owner can waive this, in writing on #716.
 - **Pin.** The backbone commit and image digests are pinned in one place and bumped by PR.
 
 ### 10. Verification before acceptance
