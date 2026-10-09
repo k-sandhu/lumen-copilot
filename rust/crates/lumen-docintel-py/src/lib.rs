@@ -57,6 +57,91 @@ fn core_version() -> &'static str {
 }
 
 #[pyfunction]
+fn extract_json(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let document = lumen_docintel_core::formats::json::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
+fn extract_jsonl(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let document = lumen_docintel_core::formats::jsonl::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
+fn extract_xml(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let document = lumen_docintel_core::formats::xml::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
+fn extract_xbrl(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let document = lumen_docintel_core::formats::xbrl::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
+fn extract_ixbrl(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let document = lumen_docintel_core::formats::ixbrl::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(document)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
 fn _test_error(py: Python<'_>) -> PyResult<()> {
     compute(py, || Err(CoreError::InvalidInput))
 }
@@ -260,6 +345,11 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DocumentSession>()?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_ixbrl, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_xbrl, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_xml, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_jsonl, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_json, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(_test_panic, m)?)?;
     m.add_function(wrap_pyfunction!(_test_wait, m)?)?;
