@@ -71,3 +71,25 @@ def test_generated_corpus_is_deterministic_and_covers_families() -> None:
         "msg",
         "image",
     }
+
+
+def test_baseline_arm_extracts_text_and_keeps_failed_rows() -> None:
+    import base64
+
+    from tests.eval.docintel.benchmark import _child
+
+    gold = {"facts": ["North", "-120", "kg"], "associations": [], "order": [], "native_regions": 0}
+    payload = {
+        "data": base64.b64encode(b"North -120 kg").decode(),
+        "gold": gold,
+        "mime": "text/plain",
+        "arm": "python-baseline",
+    }
+    result = _child(payload)
+    assert result["outcome"] == "indexed"
+    assert result["score"]["fact_coverage"] == 1.0
+    assert result["peak_rss_bytes"] > 0
+    payload["mime"] = "application/octet-stream"
+    result = _child(payload)
+    assert result["outcome"] == "unsupported"
+    assert result["score"]["fact_coverage"] == 0.0

@@ -54,6 +54,26 @@ def _stable_office(data: bytes) -> bytes:
     return _zip(files)
 
 
+def _raster_fact() -> tuple[int, int, bytes]:
+    # Original bitmap glyphs author the visible gold word FACT. No image assets.
+    glyphs = (
+        "111/100/110/100/100",
+        "010/101/111/101/101",
+        "111/100/100/100/111",
+        "111/010/010/010/010",
+    )
+    scale = 8
+    rows = ["0".join(glyph.split("/")[row] for glyph in glyphs) for row in range(5)]
+    pixels = bytes(
+        value
+        for row in rows
+        for _ in range(scale)
+        for bit in row
+        for value in [0 if bit == "1" else 255] * scale
+    )
+    return len(rows[0]) * scale, len(rows) * scale, pixels
+
+
 def _pdf(*, scanned: bool = False, mixed: bool = False) -> bytes:
     from pypdf import PdfWriter
     from pypdf.generic import (
@@ -83,21 +103,22 @@ def _pdf(*, scanned: bool = False, mixed: bool = False) -> bytes:
         if scanned and (not mixed or index == 1):
             # Our own 1-bit image marks. It has no text layer and requires OCR.
             image = DecodedStreamObject()
-            image.set_data(bytes([0b10101010] * 8))
+            width, height, pixels = _raster_fact()
+            image.set_data(pixels)
             image.update(
                 {
                     NameObject("/Type"): NameObject("/XObject"),
                     NameObject("/Subtype"): NameObject("/Image"),
-                    NameObject("/Width"): NumberObject(8),
-                    NameObject("/Height"): NumberObject(8),
-                    NameObject("/BitsPerComponent"): NumberObject(1),
+                    NameObject("/Width"): NumberObject(width),
+                    NameObject("/Height"): NumberObject(height),
+                    NameObject("/BitsPerComponent"): NumberObject(8),
                     NameObject("/ColorSpace"): NameObject("/DeviceGray"),
                 }
             )
             page[NameObject("/Resources")][NameObject("/XObject")] = DictionaryObject(
                 {NameObject("/Im1"): writer._add_object(image)}
             )
-            stream.set_data(b"q 80 0 0 80 50 650 cm /Im1 Do Q")
+            stream.set_data(b"q 300 0 0 100 50 650 cm /Im1 Do Q")
         else:
             # Two columns, a fact-bearing row, and a second native page.
             lines = (
@@ -286,7 +307,7 @@ def corpus() -> list[Fixture]:
             "pdf",
             "application/pdf",
             _pdf(scanned=True),
-            Gold(facts=("RasterMarks",), native_regions=2),
+            Gold(facts=("FACT",), native_regions=2),
             case="scanned",
         ),
         Fixture(
@@ -294,7 +315,7 @@ def corpus() -> list[Fixture]:
             "pdf",
             "application/pdf",
             _pdf(scanned=True, mixed=True),
-            Gold(facts=("Intro", "RasterMarks"), native_regions=2),
+            Gold(facts=("Intro", "FACT"), native_regions=2),
             case="mixed",
         ),
         Fixture(
@@ -510,16 +531,16 @@ def corpus() -> list[Fixture]:
             struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
         )
 
+    width, height, pixels = _raster_fact()
+    raw = b"".join(b"\0" + pixels[y * width : (y + 1) * width] for y in range(height))
     png = (
         b"\x89PNG\r\n\x1a\n"
-        + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 0, 0, 0, 0))
-        + png_chunk(b"IDAT", zlib.compress(b"".join(b"\0" + bytes([0, 255] * 4) for _ in range(8))))
+        + png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+        + png_chunk(b"IDAT", zlib.compress(raw))
         + png_chunk(b"IEND", b"")
     )
     result.append(
-        Fixture(
-            "image-pixels", "image", "image/png", png, Gold(facts=("RasterMarks",)), case="scanned"
-        )
+        Fixture("image-pixels", "image", "image/png", png, Gold(facts=("FACT",)), case="scanned")
     )
     result.extend(
         [
@@ -549,6 +570,39 @@ def corpus() -> list[Fixture]:
                 Gold(),
                 case="entity",
                 expected="failed",
+            ),
+        ]
+    )
+    result.extend(
+        [
+            Fixture(
+                "html-table",
+                "html",
+                "text/html",
+                (
+                    b"<h1>Intro</h1><table><tr><th>Region</th><th>Mass</th><th>Unit</th>"
+                    b"</tr><tr><td>North</td><td>-120</td><td>kg</td></tr></table><p>PageTwo</p>"
+                ),
+                gold,
+            ),
+            Fixture(
+                "xhtml-facts",
+                "xhtml",
+                "application/xhtml+xml",
+                (
+                    b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Intro</p>'
+                    b"<p>North -120 kg</p><p>PageTwo</p></body></html>"
+                ),
+                gold,
+            ),
+            Fixture(
+                "text-multilingual",
+                "text",
+                "text/plain",
+                "مرحبا\nשלום\nहिन्दी\n世界\n😀".encode(),
+                Gold(facts=("مرحبا", "שלום", "हिन्दी", "世界", "😀")),
+                language="mixed",
+                case="unicode",
             ),
         ]
     )

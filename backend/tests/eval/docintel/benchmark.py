@@ -84,7 +84,7 @@ def _child(payload: dict[str, Any]) -> dict[str, Any]:
             outcome = "failed"
             code = "input_budget"
         elif arm == "python-baseline":
-            text = parse_document(data, payload["mime"])
+            text = parse_document(data, mime_type=payload["mime"])
             outcome = "indexed" if text.strip() else "empty"
             # Existing chunker exact slices are checked, not invented page provenance.
             from app.ingestion.chunking import chunk_text
@@ -261,7 +261,10 @@ def run(*, external: Path | None = None, model_control: bool = False) -> dict[st
         controls.append(_isolated(control, "native-model-control"))
     groups = {}
     for row in rows:
-        key = f'{row["arm"]}/{row["format"]}/{row["language"]}/{row["case"]}/{row["outcome"]}/{row["code"]}'
+        key = (
+            f'{row["arm"]}/{row["format"]}/{row["language"]}/'
+            f'{row["case"]}/{row["outcome"]}/{row["code"]}'
+        )
         group = groups.setdefault(
             key,
             {
