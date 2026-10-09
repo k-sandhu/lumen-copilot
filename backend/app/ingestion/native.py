@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from importlib import import_module
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -87,6 +87,18 @@ class NativeExecutor:
             raise NativeUnavailableError("native ingestion extension is unavailable")
         self._runtime = extension.Runtime(threads, max_documents)
 
+    def extract_pdf(
+        self,
+        data: bytes,
+        *,
+        budget: RuntimeBudget = _DEFAULT_BUDGET,
+        cancellation: CancellationHandle | None = None,
+    ) -> CanonicalDocument:
+        token = cancellation or CancellationHandle()
+        return CanonicalDocument.from_render_json(
+            self._runtime.extract_pdf(data, json.dumps(asdict(budget)), token._token)
+        )
+
     def run_units(
         self,
         units: tuple[str, ...],
@@ -131,3 +143,54 @@ def configured_native_executor(settings: Settings) -> tuple[NativeExecutor, Runt
         timeout_ms=settings.native_ingestion_timeout_ms,
     )
     return executor, budget
+
+
+@dataclass(frozen=True, slots=True)
+class PdfCandidateResult:
+    text: str
+    route: Literal["python", "native"]
+    canonical: CanonicalDocument | None = None
+    native_error: str | None = None
+    text_equal: bool | None = None
+
+
+class PdfNeedsOcrError(Exception):
+    """A native PDF has incomplete text; orchestration must handle OCR explicitly."""
+
+    code = "needs_ocr"
+
+
+def parse_pdf_candidate(
+    data: bytes,
+    *,
+    mode: Literal["python", "shadow", "native"] = "python",
+    executor: NativeExecutor | None = None,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+) -> PdfCandidateResult:
+    """Independent PDF opt-in seam for #669/#687; existing parsers stay authoritative.
+
+    Shadow returns the exact Python text even when the candidate fails. Native
+    failures propagate; a needs-OCR/partial document never becomes empty success.
+    Nothing logs content, persists data, or activates an extraction generation.
+    """
+    if mode not in {"python", "shadow", "native"}:
+        raise ValueError("invalid PDF candidate mode")
+    from app.ingestion.parsers import parse_document
+
+    if mode == "python":
+        return PdfCandidateResult(parse_document(data, mime_type="application/pdf"), "python")
+    baseline = parse_document(data, mime_type="application/pdf") if mode == "shadow" else ""
+    try:
+        document = (executor or NativeExecutor()).extract_pdf(data, budget=budget)
+        if mode == "native":
+            if document.generation.outcome != "indexed":
+                raise PdfNeedsOcrError("PDF pages need OCR")
+            return PdfCandidateResult(document.rendered_text, "native", document)
+        return PdfCandidateResult(
+            baseline, "python", document, text_equal=baseline == document.rendered_text
+        )
+    except Exception as error:
+        if mode == "native":
+            raise
+        code = "native_unavailable" if isinstance(error, NativeUnavailableError) else "native_failed"
+        return PdfCandidateResult(baseline, "python", native_error=code)

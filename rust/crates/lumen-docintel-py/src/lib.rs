@@ -171,6 +171,20 @@ impl NativeRuntime {
             lumen_docintel_core::runtime::Runtime::new(threads, max_documents).map(Self)
         })
     }
+    fn extract_pdf(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyBytes>,
+        budget_json: String,
+        token: &CancellationToken,
+    ) -> PyResult<String> {
+        let bytes = data.as_bytes();
+        let cancellation = token.0.clone();
+        compute(py, || {
+            let context = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+            lumen_docintel_core::formats::pdf::extract_json(bytes, &context, &self.0)
+        })
+    }
     fn open_document(
         &self,
         py: Python<'_>,
