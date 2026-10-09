@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 from importlib import import_module
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import pytest
 
@@ -169,9 +171,9 @@ def test_empty_plain_text_is_distinguished_from_extracted_text() -> None:
 def test_native_tables_measure_omitted_cells_without_storing_cell_text(
     mime_type: str, data: bytes, cell_values: list[str]
 ) -> None:
-    parsed = import_module("app.ingestion.parsers").parse_document_with_locations(
-        data, mime_type=mime_type
-    )
+    from app.domain.ingestion import ParsedDocument
+
+    parsed = ParsedDocument("deliberately incomplete extraction")
     diagnostics = import_module("app.ingestion.diagnostics").build_extraction_diagnostics(
         data, mime_type=mime_type, parsed=parsed
     )
@@ -211,7 +213,7 @@ def test_sparse_workbook_counts_nonempty_cells_and_formula_without_cached_value(
     assert diagnostics.table_probe == "sheet_cells"
     assert diagnostics.table_regions == 1
     assert diagnostics.table_cells == 4
-    assert diagnostics.missing_table_cells == 1
+    assert diagnostics.missing_table_cells == 0
 
 
 @pytest.mark.parametrize(
@@ -233,6 +235,132 @@ def test_corrupt_ooxml_probe_raises_typed_parse_error(mime_type: str) -> None:
             mime_type=mime_type,
             parsed=ParsedDocument("already extracted native text"),
         )
+
+
+def _rename_part(data: bytes, old: str, new: str) -> bytes:
+    """Rename the part and every reference, including its relationship file."""
+    output = io.BytesIO()
+    with ZipFile(io.BytesIO(data)) as source, ZipFile(output, "w") as target:
+        for name in source.namelist():
+            body = source.read(name)
+            if name.endswith((".xml", ".rels")):
+                body = body.replace(old.encode(), new.encode())
+            target.writestr(name.replace(old, new), body)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("presentation", [False, True], ids=["docx", "pptx"])
+async def test_renamed_ooxml_parts_ingest_and_count_native_cells(
+    sqlite_engine: None, presentation: bool
+) -> None:
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+    from app.tasks.ingest import ingest_document_async
+
+    mime_type = (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        if presentation
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    body = _rename_part(
+        _make_pptx_table() if presentation else _make_docx_table(),
+        "slide1.xml" if presentation else "document.xml",
+        "cover.xml" if presentation else "main.xml",
+    )
+    tenant_id, document_id = await _seed_document(mime_type=mime_type, key="renamed-part")
+    store = _FakeObjectStore()
+    async with session_scope() as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+        assert document is not None
+        store.put(str(tenant_id), document.storage_key, body)
+    result = await ingest_document_async(
+        tenant_id, document_id, settings=_settings(), object_store=store, gateway=_FakeGateway()
+    )
+    assert result.status.value == "ready"
+    assert result.chunk_count > 0
+    async with session_scope() as session:
+        document = await DocumentRepository(session, tenant_id).get(document_id)
+    assert document is not None
+    diagnostics = document.ingestion_metadata["extraction_diagnostics"]
+    assert diagnostics["table_regions"] == 1
+    assert diagnostics["table_cells"] == 4
+    assert diagnostics["missing_table_cells"] == 0
+
+
+def test_presentation_inspects_only_relationship_referenced_slides() -> None:
+    body = _make_pptx_table()
+    output = io.BytesIO()
+    with ZipFile(io.BytesIO(body)) as source, ZipFile(output, "w") as target:
+        for name in source.namelist():
+            target.writestr(name, source.read(name))
+        target.writestr("ppt/slides/slide99.xml", source.read("ppt/slides/slide1.xml"))
+    diagnostics = _diagnostics(
+        output.getvalue(),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    assert diagnostics.table_regions == 1
+    assert diagnostics.table_cells == 4
+
+
+@pytest.mark.parametrize("wrapper", ["tr", "tc"], ids=["row-controls", "cell-controls"])
+def test_docx_content_controls_do_not_hide_missing_cell_text(wrapper: str) -> None:
+    from app.domain.ingestion import ParsedDocument
+    from app.ingestion.diagnostics import build_extraction_diagnostics
+
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    output = io.BytesIO()
+    with ZipFile(io.BytesIO(_make_docx_table())) as source, ZipFile(output, "w") as target:
+        for name in source.namelist():
+            body = source.read(name)
+            if name == "word/document.xml":
+                root = ElementTree.fromstring(body)
+                for parent in list(root.iter()):
+                    for index, child in enumerate(list(parent)):
+                        if child.tag == f"{{{namespace}}}{wrapper}":
+                            control = ElementTree.Element(f"{{{namespace}}}sdt")
+                            content = ElementTree.SubElement(control, f"{{{namespace}}}sdtContent")
+                            parent.remove(child)
+                            content.append(child)
+                            parent.insert(index, control)
+                body = ElementTree.tostring(root)
+            target.writestr(name, body)
+    diagnostics = build_extraction_diagnostics(
+        output.getvalue(),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        parsed=ParsedDocument("Region"),
+    )
+    assert diagnostics.table_regions == 1
+    assert diagnostics.table_cells == 4
+    assert diagnostics.missing_table_cells == 3
+    assert "missing_native_table_text" in diagnostics.warnings
+
+
+def test_docx_nested_tables_keep_cells_owned_by_their_nearest_table() -> None:
+    import docx
+
+    from app.domain.ingestion import ParsedDocument
+    from app.ingestion.diagnostics import build_extraction_diagnostics
+
+    document = docx.Document()
+    outer = document.add_table(rows=1, cols=1).cell(0, 0)
+    outer.text = "outer"
+    outer.add_table(rows=1, cols=1).cell(0, 0).text = "inner"
+    output = io.BytesIO()
+    document.save(output)
+    diagnostics = build_extraction_diagnostics(
+        output.getvalue(),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        parsed=ParsedDocument("outer"),
+    )
+    assert diagnostics.table_regions == 2
+    assert diagnostics.table_cells == 2
+    assert diagnostics.missing_table_cells == 1
+
+
+def test_unicode_c1_controls_are_counted_with_c0_and_del() -> None:
+    diagnostics = _diagnostics("abc\x01\x7f\x80\x9f\t\n\r".encode(), "text/plain")
+    assert diagnostics.suspicious_controls == 4
+    assert "suspicious_controls" in diagnostics.warnings
 
 
 @pytest.mark.asyncio

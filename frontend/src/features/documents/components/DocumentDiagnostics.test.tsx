@@ -11,6 +11,8 @@ const doc: Document = {
   size_bytes: 100,
   collection_id: 'col-1',
   owner_id: 'u-1',
+  kind: 'document',
+  duration_ms: null,
   status: 'processing',
   chunk_count: 0,
   created_at: '2026-09-30T00:00:00Z',

@@ -6,9 +6,15 @@ Record diagnostics beside exact extraction text/maps, including empty text:
 character count, replacement characters, suspicious controls excluding ordinary
 tab/newline/carriage return, native source-part kind/count, parts with text and
 one-based blank part numbers. A blank native part is not diagnosed as a scan.
-Nonzero replacement/control counts are inspection warnings, not a quality gate.
+Count Unicode category `Cc`, including C0, DEL and C1, with only the stated
+whitespace exceptions. Nonzero replacement/control counts are inspection
+warnings, not a quality gate.
 
 Probe DOCX/PPTX native tables and XLSX sheet grids behind lazy parser helpers.
+Resolve the DOCX main part and actual presentation slides through package
+relationships, including legally renamed parts; ignore unreferenced slide parts.
+Traverse DOCX row/cell content-control wrappers. Each nested table owns its own
+cells and text, so a parent cell never absorbs its nested table's paragraphs.
 Record probe type, table/sheet-region count, nonempty cell count and count of
 cell strings absent from the rendered text after whitespace normalization.
 Formula strings without a cached value count as source content for this probe.
@@ -32,6 +38,9 @@ the latest extraction attempt, not activation of new chunks. Retained source tex
 source map and replacement chunks still change atomically after embeddings, so
 failed attempts do not retarget existing exact citation slices. A new attempt
 replaces prior diagnostics; permanent parse failure records no invented coverage.
+Both diagnostics updates and source/map activation merge their JSON keys in an
+atomic tenant-scoped database update against current stored metadata. Overlapping
+writers and cached ORM rows cannot restore an older map or erase unrelated keys.
 Malformed bytes remain typed parse errors. No OCR, automatic retry/profile choice
 or new quality gate. No additional dependency or migration beyond #621.
 
@@ -40,6 +49,10 @@ native DOCX/PPTX table cells and sparse workbook retain measured diagnostics;
 empty and ordinary text are distinguished; corrupt bytes raise typed errors;
 tenant/permission/member negatives hide diagnostics; administrators can inspect
 stored values after ingestion read-back, including a later embedding fault.
+Event-handshaked interleaved sessions cover both write directions, current maps,
+unrelated metadata, explicit null diagnostics and foreign-tenant writes. Renamed
+DOCX/PPTX parts pass ingestion read-back; row/cell controls, nested ownership and
+C1 controls have synthetic regressions.
 
 Legacy diagnostics remain unknown until original bytes are re-ingested. Search
 reindex does not reparse. Existing chunks and historical citation offsets are

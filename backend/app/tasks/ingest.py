@@ -70,8 +70,8 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
-from app.ingestion.diagnostics import build_extraction_diagnostics
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
+from app.ingestion.diagnostics import build_extraction_diagnostics
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
     VIDEO_MIME_TYPES,

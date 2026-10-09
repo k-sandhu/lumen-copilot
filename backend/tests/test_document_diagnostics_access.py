@@ -72,7 +72,9 @@ async def test_admin_inspection_get_and_list_commit_view_audits(
     token = await fixtures._login(client, seeded.alice_email)
     response = await client.get(f"/api/v1/documents/{document_id}", headers=fixtures._auth(token))
     assert response.status_code == 200
-    expected = {key: value for key, value in _DIAGNOSTICS.items() if value is not None}
+    # The media contract retains nullable fields (including duration_ms) in
+    # document responses; unknown diagnostic coverage remains explicit null.
+    expected = _DIAGNOSTICS
     assert response.json().get("extraction_diagnostics") == expected
     listing = await client.get("/api/v1/documents", headers=fixtures._auth(token))
     assert listing.status_code == 200

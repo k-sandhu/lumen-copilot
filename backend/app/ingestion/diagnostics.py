@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import io
-import re
+import unicodedata
+from collections.abc import Iterator
 from xml.etree import ElementTree
-from zipfile import ZipFile
 
 from app.domain.ingestion import ExtractionDiagnostics, LocationKind, ParsedDocument, TableProbe
 from app.ingestion.parsers import DocumentParseError
@@ -18,40 +18,60 @@ _DRAWING = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _PART_KIND: dict[str, LocationKind] = {"application/pdf": "page", _PPTX: "slide", _XLSX: "sheet"}
 
 
+def _owned_elements(
+    parent: ElementTree.Element, tag: str, *, boundaries: set[str]
+) -> Iterator[ElementTree.Element]:
+    """Traverse wrappers while keeping nested table content with its owner."""
+    for child in parent:
+        if child.tag == tag:
+            yield child
+        elif child.tag not in boundaries:
+            yield from _owned_elements(child, tag, boundaries=boundaries)
+
+
 def _ooxml_tables(data: bytes, *, presentation: bool) -> tuple[int, list[str]]:
     namespace = _DRAWING if presentation else _WORD
-    with ZipFile(io.BytesIO(data)) as archive:
-        names = (
-            [name for name in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)]
-            if presentation
-            else ["word/document.xml"]
-        )
-        regions = 0
-        cells: list[str] = []
-        for name in names:
-            root = ElementTree.fromstring(archive.read(name))
-            for table in root.iter(f"{{{namespace}}}tbl"):
-                regions += 1
-                for row in table.findall(f"{{{namespace}}}tr"):
-                    for cell in row.findall(f"{{{namespace}}}tc"):
-                        paragraphs = []
-                        for paragraph in cell.iter(f"{{{namespace}}}p"):
-                            fragments = [
-                                element.text or "" if element.tag == f"{{{namespace}}}t" else " "
-                                for element in paragraph.iter()
-                                if element.tag
-                                in {
-                                    f"{{{namespace}}}t",
-                                    f"{{{namespace}}}br",
-                                    f"{{{namespace}}}cr",
-                                    f"{{{namespace}}}tab",
-                                }
-                            ]
-                            paragraphs.append("".join(fragments))
-                        text = " ".join(paragraphs)
-                        if text.strip():
-                            cells.append(text)
-        return regions, cells
+    # Native libraries discover parts through package relationships; legal
+    # producers need not use the conventional document.xml / slideN.xml names.
+    if presentation:
+        from pptx import Presentation
+
+        roots = [
+            ElementTree.fromstring(slide.part.blob)
+            for slide in Presentation(io.BytesIO(data)).slides
+        ]
+    else:
+        from docx import Document
+
+        roots = [ElementTree.fromstring(Document(io.BytesIO(data)).part.blob)]
+    regions = 0
+    cells: list[str] = []
+    table_tag = f"{{{namespace}}}tbl"
+    for root in roots:
+        for table in root.iter(table_tag):
+            regions += 1
+            for row in _owned_elements(table, f"{{{namespace}}}tr", boundaries={table_tag}):
+                for cell in _owned_elements(row, f"{{{namespace}}}tc", boundaries={table_tag}):
+                    paragraphs = []
+                    for paragraph in _owned_elements(
+                        cell, f"{{{namespace}}}p", boundaries={table_tag}
+                    ):
+                        fragments = [
+                            element.text or "" if element.tag == f"{{{namespace}}}t" else " "
+                            for element in paragraph.iter()
+                            if element.tag
+                            in {
+                                f"{{{namespace}}}t",
+                                f"{{{namespace}}}br",
+                                f"{{{namespace}}}cr",
+                                f"{{{namespace}}}tab",
+                            }
+                        ]
+                        paragraphs.append("".join(fragments))
+                    text = " ".join(paragraphs)
+                    if text.strip():
+                        cells.append(text)
+    return regions, cells
 
 
 def _sheet_cells(data: bytes) -> tuple[int, list[str]]:
@@ -93,7 +113,7 @@ def build_extraction_diagnostics(
     total = len(parsed.locations) if kind is not None else None
     replacements = parsed.text.count("\ufffd")
     controls = sum(
-        (ord(character) < 32 and character not in "\t\n\r") or ord(character) == 127
+        unicodedata.category(character) == "Cc" and character not in "\t\n\r"
         for character in parsed.text
     )
     probe: TableProbe = "unavailable"
