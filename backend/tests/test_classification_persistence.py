@@ -9,6 +9,7 @@ from sqlalchemy import select
 import app.db.session as db_session
 from app.db import models
 from app.db.classification import ClassificationRepository, DecisionBudgetRepository
+from app.db.repositories import DocumentRepository
 from app.domain.decisions import DecisionAttempt, DecisionUsage
 from app.domain.llm import TokenUsage
 from app.tasks.classification import reclassify_changed_async
@@ -155,3 +156,83 @@ async def test_changed_only_bulk_job_skips_same_inputs_and_overrides(sqlite_engi
         )
         == 1
     )
+
+
+def bounded_controls():
+    return {
+        "enabled": True,
+        "provider_approved": True,
+        "model": "fixture",
+        "allowed_models": ["fixture"],
+        "per_call_ceiling_usd": ".01",
+        "budget_usd": ".05",
+        "input_tokens": 4096,
+        "excerpt_tokens": 128,
+        "excerpt_chars": 512,
+        "input_bytes": 32768,
+        "timeout_seconds": 1,
+        "retries": 0,
+        "stage_retries": 2,
+        "backoff_seconds": 60,
+        "concurrency": 1,
+    }
+
+
+async def test_model_failure_and_missing_audit_cannot_change_search_readiness(
+    sqlite_engine, monkeypatch
+):
+    from app.tasks.classification import classify_document_async
+
+    tenant, document = await fixtures._seed_document(mime_type="text/plain", key="key")
+    async with db_session.tenant_session_scope(tenant) as s:
+        await ClassificationRepository(s, tenant).set_policy(bounded_controls())
+    store = fixtures._FakeObjectStore()
+    store.put(str(tenant), "key", b"Synthetic search-ready evidence.")
+    assert (
+        await fixtures.ingest_document_async(
+            tenant,
+            document,
+            settings=fixtures._settings(),
+            object_store=store,
+            gateway=fixtures._FakeGateway(),
+        )
+    ).status.value == "ready"
+
+    async def failed(work, controls, settings):
+        return {
+            "status": "unclassified",
+            "reason": "decision_timeout",
+            "retryable": True,
+            "path": None,
+            "total_cost_usd": None,
+        }
+
+    assert await classify_document_async(
+        tenant, document, settings=fixtures._settings(), compute=failed
+    )
+    async with db_session.tenant_session_scope(tenant) as s:
+        assert (await DocumentRepository(s, tenant).get(document)).status.value == "ready"
+        work = await ClassificationRepository(s, tenant).get(document)
+        assert work.result["reason"] == "decision_timeout" and work.retries == 1
+
+
+async def test_budget_ledger_rechecks_override_before_another_dispatch(sqlite_engine):
+    from app.services.classification_ledger import DurableDecisionBudgetStore
+
+    tenant, document = await seed()
+    async with db_session.tenant_session_scope(tenant) as s:
+        repo = ClassificationRepository(s, tenant)
+        await repo.set_policy(bounded_controls())
+        work = await repo.claim(document, run_id=uuid4(), lease_seconds=60)
+    ledger = DurableDecisionBudgetStore(tenant, work=work)
+    assert await ledger.reserve(attempt(tenant), Decimal(".01"), Decimal(".05"))
+    async with db_session.tenant_session_scope(tenant) as s:
+        await ClassificationRepository(s, tenant).override(
+            document,
+            expected_revision=0,
+            path="other/other/other",
+            actor=uuid4(),
+            reason="synthetic",
+            taxonomy_version="1.0.0",
+        )
+    assert not await ledger.reserve(attempt(tenant), Decimal(".01"), Decimal(".05"))

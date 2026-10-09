@@ -116,6 +116,22 @@ def test_metadata_covers_every_mvp_table() -> None:
     assert set(Base.metadata.tables) == _ALL_TABLES
 
 
+def test_classification_migration_reversible_and_tenant_bound(capsys) -> None:
+    from alembic import command
+
+    cfg = _alembic_config()
+    command.upgrade(cfg, "0047_ingestion_stages:0048_classification", sql=True)
+    up = capsys.readouterr().out.lower()
+    for table in ("document_classifications", "classification_policies", "classification_spend"):
+        assert f"create table {table}" in up
+        assert f"alter table {table} force row level security" in up
+        assert f"create policy {table}_tenant" in up
+    assert "foreign key(tenant_id, document_id) references documents (tenant_id, id)" in up
+    command.downgrade(cfg, "0048_classification:0047_ingestion_stages", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop table document_classifications" in down
+
+
 def test_every_revision_id_fits_alembic_version_column() -> None:
     """Every revision id must fit ``alembic_version.version_num`` — varchar(32).
 

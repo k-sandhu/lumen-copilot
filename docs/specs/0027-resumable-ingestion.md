@@ -18,7 +18,10 @@ stages atomically; document deletion cascades. Raw object bytes stay in storage.
 
 Existing Python extraction/chunking remains authoritative. Normalize/classify
 stages explicitly preserve that output when no approved implementation is enabled;
-unknown classification is recorded as unknown, never invented. Native candidate
+unknown classification is recorded as unknown, never invented. #692 persists
+classification on an independent work record and queue; the cached classify
+checkpoint records only the scheduling policy. Chunk/embed/index depend on
+normalized evidence, never a model classification result. Native candidate
 normalization/chunking remains separate and optional until #687's format approval.
 Retain actual returned embedding model/dimension in the checksummed stage output;
 cache requests by configured embedding-space identity. Reject invalid vectors

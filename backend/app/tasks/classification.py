@@ -10,12 +10,12 @@ from app.classification.rules import load_rules
 from app.classification.taxonomy import load_taxonomy
 from app.core.config import Settings, get_settings
 from app.db.classification import ClassificationRepository
-from app.db.repositories import AuditEventRepository, DocumentRepository
+from app.db.repositories import AuditEventRepository, DocumentRepository, UserRepository
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.classification import ClassificationWork
 from app.domain.decisions import DecisionPolicy
-from app.domain.entities import AuditOutcome
+from app.domain.entities import AuditOutcome, Role
 from app.ingestion.native import (
     NativeUnavailableError,
     classification_features,
@@ -91,6 +91,8 @@ async def _compute(
     if settings.classification_tokenizer_model != controls.model:
         raise ValueError("classification tokenizer model mismatch")
     raw = json.loads(work.input_json)
+    if hashlib.sha256(work.input_json.encode()).hexdigest() != work.extraction_id:
+        raise ValueError("classification source checksum mismatch")
     # Preserve a supplied canonical model; Python's flat extraction is labelled explicitly.
     canonical = raw.get("canonical") or {
         "blocks": [{"id": "python-extraction", "text": raw["text"]}],
@@ -113,19 +115,35 @@ async def _compute(
         document = await DocumentRepository(session, work.tenant_id).get(work.document_id)
         if document is None:
             raise ValueError("classification document missing")
+        if controls.approved_by is None:
+            raise ValueError("classification requires a trusted approving administrator")
+        administrator = await UserRepository(session, work.tenant_id).get(controls.approved_by)
+        if administrator is None or Role.ADMIN not in administrator.roles:
+            raise ValueError("classification administrator approval is no longer valid")
         resolver = build_model_route_resolver(
             settings=settings,
             tenant_id=work.tenant_id,
-            owner_id=document.owner_id,
-            roles=(),
+            owner_id=administrator.id,
+            roles=tuple(administrator.roles),
             request_id="document-classification-task",
             source_ip="system",
         )
         route = await resolver(session, controls.model)
+        from app.db.repositories import LlmProviderRepository
+        from app.services.provider_models import is_provider_model_id, resolve_provider_model
+
+        if (
+            is_provider_model_id(controls.model)
+            and await resolve_provider_model(
+                controls.model, LlmProviderRepository(session, work.tenant_id)
+            )
+            is None
+        ):
+            raise ValueError("classification provider is unavailable")
         if route.api_base and route.api_base.rstrip("/") != "https://openrouter.ai/api/v1":
             raise ValueError("decisions provider origin is not approved")
         ledger = CanonicalDecisionLedger(
-            DurableDecisionBudgetStore(work.tenant_id),
+            DurableDecisionBudgetStore(work.tenant_id, work=work),
             AuditSink(AuditEventRepository(session, work.tenant_id)),
             actor=AuditActor.system(),
             resource_id=str(work.document_id),
@@ -156,14 +174,29 @@ async def _compute(
             ledger=ledger,
             token_counter=lambda s: classification_token_count(s, artifact),
             max_input_tokens=controls.input_tokens,
+            fallback_token_counter=_fallback_counter(controls, settings),
         )
-        return await classify(
+        result = await classify(
             evidence,
             load_taxonomy(work.taxonomy_version),
             gateway,
             tenant_id=work.tenant_id,
             policy=policy,
         )
+        result["requested_model"] = controls.model
+        return result
+
+
+def _fallback_counter(controls: ClassificationControls, settings: Settings) -> Any:
+    if controls.fallback_model is None:
+        return None
+    if settings.classification_fallback_tokenizer_model != controls.fallback_model:
+        raise ValueError("classification fallback tokenizer model mismatch")
+    artifact = load_tokenizer_artifact(
+        settings.classification_fallback_tokenizer_path,
+        sha256=settings.classification_fallback_tokenizer_sha256,
+    )
+    return lambda text: classification_token_count(text, artifact)
 
 
 async def classify_document_async(
@@ -297,13 +330,19 @@ def sweep_classification() -> int:
         from app.db.classification import classification_tenants
 
         sent = 0
-        for tenant_id in await classification_tenants(limit=500):
-            async with tenant_session_scope(tenant_id) as session:
-                rows = await ClassificationRepository(session, tenant_id).batch(
-                    limit=100, due_only=True
-                )
-            for row in rows:
-                sent += int(enqueue_classification(tenant_id, row.document_id))
+        after = None
+        while True:
+            tenants = await classification_tenants(after=after, limit=100)
+            if not tenants:
+                break
+            for tenant_id in tenants:
+                async with tenant_session_scope(tenant_id) as session:
+                    rows = await ClassificationRepository(session, tenant_id).batch(
+                        limit=100, due_only=True
+                    )
+                for row in rows:
+                    sent += int(enqueue_classification(tenant_id, row.document_id))
+            after = tenants[-1]
         return sent
 
     return run_task(run())

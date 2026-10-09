@@ -79,7 +79,7 @@ celery_app.conf.update(
         "expired-upload-sweep": {
             "task": "lumen.sweep_expired_uploads",
             "schedule": float(_settings.upload_janitor_interval_seconds),
-        }
+        },
     },
 )
 

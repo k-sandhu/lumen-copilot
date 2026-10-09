@@ -13,7 +13,6 @@ from app.core.errors import ConflictError, ForbiddenError, NotFoundError, Valida
 from app.db.classification import ClassificationRepository
 from app.db.repositories import GroupRepository
 from app.domain.audit import AuditAction
-from app.domain.classification import ClassificationWork
 from app.domain.entities import AuditOutcome, Role
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document
@@ -70,7 +69,7 @@ class ClassificationService:
         target_parameter="document_id",
         missing_result=False,
     )
-    async def get(self, document_id: UUID) -> ClassificationWork | None:
+    async def get(self, document_id: UUID) -> dict[str, Any] | None:
         await self._visible(document_id)
         await self._audit.emit(
             action=AuditAction.DOCUMENT_VIEWED,
@@ -82,7 +81,8 @@ class ClassificationService:
             source_ip=self._denials.source_ip,
             metadata={"surface": "classification"},
         )
-        return await self._repo.get(document_id)
+        work = await self._repo.get(document_id)
+        return {**work.result, "status": work.status, "revision": work.revision} if work else None
 
     @audited_resource(
         attempted_action="document.classification_override",
@@ -141,7 +141,8 @@ class ClassificationService:
             )
             raise ForbiddenError("Administrator role is required.")
         load_taxonomy(controls.taxonomy_version)
-        await self._repo.set_policy(controls.model_dump(mode="json"))
+        approved = controls.model_copy(update={"approved_by": self._principal.user_id})
+        await self._repo.set_policy(approved.model_dump(mode="json"))
         await self._audit.emit(
             action=AuditAction.CLASSIFICATION_POLICY_UPDATED,
             actor=self._denials.actor,

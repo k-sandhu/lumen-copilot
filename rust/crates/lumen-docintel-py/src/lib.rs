@@ -59,7 +59,10 @@ fn core_version() -> &'static str {
 #[pyfunction]
 fn classification_token_count(py: Python<'_>, input: String, artifact: String) -> PyResult<usize> {
     compute(py, || {
-        let ctx = lumen_docintel_core::runtime::Context::new(lumen_docintel_core::runtime::Budget::default(), lumen_docintel_core::runtime::Cancellation::default())?;
+        let ctx = lumen_docintel_core::runtime::Context::new(
+            lumen_docintel_core::runtime::Budget::default(),
+            lumen_docintel_core::runtime::Cancellation::default(),
+        )?;
         lumen_docintel_core::classification::count_request_tokens(&input, &artifact, &ctx)
     })
 }

@@ -184,6 +184,7 @@ class DecisionsGateway:
         chat_gateway: LLMGateway | None = None,
         token_counter: Callable[[str], int] | None = None,
         max_input_tokens: int | None = None,
+        fallback_token_counter: Callable[[str], int] | None = None,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
@@ -194,10 +195,14 @@ class DecisionsGateway:
             raise ValueError("token counter and token limit must be configured together")
         self._token_counter = token_counter
         self._max_input_tokens = max_input_tokens
+        self._fallback_token_counter = fallback_token_counter
 
-    def _check_token_budget(self, payload: dict[str, Any]) -> None:
+    def _check_token_budget(self, payload: dict[str, Any], *, fallback: bool = False) -> None:
         if self._token_counter is not None:
-            count = self._token_counter(json.dumps(payload, ensure_ascii=False))
+            counter = self._fallback_token_counter if fallback else self._token_counter
+            if counter is None:
+                raise DecisionError("decision_fallback_unsupported")
+            count = counter(json.dumps(payload, ensure_ascii=False))
             if self._max_input_tokens is None or count > self._max_input_tokens:
                 raise DecisionError("decision_input_budget_exceeded")
 
@@ -351,7 +356,8 @@ class DecisionsGateway:
                         if isinstance(q, ChoiceQuestion)
                     },
                 ),
-            }
+            },
+            fallback=True,
         )
         try:
             completion = await self._chat.structured_chat(

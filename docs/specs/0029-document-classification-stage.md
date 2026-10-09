@@ -14,6 +14,17 @@ cannot be used with the decisions endpoint. No chat selection enables this stage
 No production budget or review threshold is inferred. Model results always require
 review until #694's owner-approved calibration artifacts exist.
 
+The administrator's identity is bound by the service when approving controls;
+the worker rechecks their current tenant/admin role before resolving credentials.
+Fallback requires a dated supported-parameters snapshot naming its model and
+`structured_outputs`, and a separately checked matching tokenizer artifact.
+The primary and fallback complete request text/options/schema are token-counted
+before dispatch, in addition to the byte cap. The ledger rechecks current enabled
+policy, input revision/run lease and override before every further model request.
+The dedicated classification worker consumes only its queue with one Celery child;
+its threads/budgets retain ADR-0027's bounded native settings. Configure the checked
+tokenizer paths in the deployment filesystem; none are downloaded automatically.
+
 The input fingerprint includes extraction checksum, taxonomy/rule/prompt versions
 and tenant policy identity. A durable revision and worker lease fence computation
 and publication. Save path, each conditional probability/confidence, evidence

@@ -301,6 +301,11 @@ class DecisionBudgetRepository:
         self.session = session
         self.tenant_id = tenant_id
 
+    async def lock_tenant(self) -> None:
+        await self.session.execute(
+            select(models.Tenant.id).where(models.Tenant.id == self.tenant_id).with_for_update()
+        )
+
     async def reserve(self, attempt: DecisionAttempt, ceiling: Decimal, budget: Decimal) -> bool:
         if attempt.tenant_id != self.tenant_id:
             raise ValueError("decision tenant mismatch")
@@ -379,7 +384,7 @@ class DecisionBudgetRepository:
             return
         if not usage.cost_usd.is_finite() or usage.cost_usd < 0:
             raise ValueError("invalid actual cost")
-        value = {
+        value: dict[str, object] = {
             "prompt_tokens": usage.tokens.prompt_tokens,
             "completion_tokens": usage.tokens.completion_tokens,
             "reported_model": usage.reported_model,
@@ -391,17 +396,12 @@ class DecisionBudgetRepository:
         await self.session.flush()
 
 
-async def classification_tenants(*, limit: int = 500) -> list[UUID]:
+async def classification_tenants(*, after: UUID | None = None, limit: int = 500) -> list[UUID]:
     """System inventory reads only root tenant IDs; never bypasses content RLS."""
     from app.db.session import session_scope
 
     async with session_scope() as session:
-        return list(
-            (
-                await session.execute(
-                    select(models.Tenant.id).order_by(models.Tenant.id).limit(min(limit, 500))
-                )
-            )
-            .scalars()
-            .all()
-        )
+        query = select(models.Tenant.id).order_by(models.Tenant.id).limit(min(limit, 500))
+        if after is not None:
+            query = query.where(models.Tenant.id > after)
+        return list((await session.execute(query)).scalars().all())

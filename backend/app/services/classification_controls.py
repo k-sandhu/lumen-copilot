@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Self
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,6 +13,7 @@ class ClassificationControls(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     provider_approved: bool = False
+    approved_by: UUID | None = None
     model: str = ""
     allowed_models: tuple[str, ...] = ()
     taxonomy_version: str = "1.0.0"
@@ -28,9 +30,18 @@ class ClassificationControls(BaseModel):
     concurrency: int | None = Field(default=None, ge=1, le=8)
     fallback_model: str | None = None
     fallback_structured_outputs: bool = False
+    fallback_capability_snapshot: dict[str, str | tuple[str, ...]] | None = None
 
     @model_validator(mode="after")
     def require_enabled_controls(self) -> Self:
+        if self.fallback_structured_outputs and (
+            self.fallback_capability_snapshot is None
+            or self.fallback_capability_snapshot.get("model") != self.fallback_model
+            or "structured_outputs"
+            not in self.fallback_capability_snapshot.get("supported_parameters", ())
+            or not self.fallback_capability_snapshot.get("verified_at")
+        ):
+            raise ValueError("strict fallback requires a verified model capability snapshot")
         if self.enabled and (
             not self.provider_approved
             or not self.model

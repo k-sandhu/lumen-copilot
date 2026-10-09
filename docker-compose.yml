@@ -390,6 +390,7 @@ services:
   # new infra). Reuses the worker image; a thin add — it holds no state of its own.
   # A single beat process is correct (RedBeat holds a Redis leader lock).
   beat:
+    # Classification models run on their own queue/worker below.
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -417,6 +418,26 @@ services:
         condition: service_healthy
       # Beat reconciles its RedBeat entries from Postgres on boot, so wait for the web
       # service to have run `alembic upgrade head` (the `schedules` table must exist).
+      backend:
+        condition: service_healthy
+
+  classification-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=info", "--queues=classification", "--concurrency=1"]
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
       backend:
         condition: service_healthy
 
