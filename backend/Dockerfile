@@ -9,6 +9,8 @@ ENV PATH="/usr/local/cargo/bin:${PATH}" RUSTUP_HOME=/usr/local/rustup CARGO_HOME
 RUN pip install --no-cache-dir maturin==1.15.0
 WORKDIR /build
 COPY rust ./rust
+COPY scripts/setup-pdfium.py ./scripts/setup-pdfium.py
+RUN python scripts/setup-pdfium.py
 RUN maturin build --release --locked --manifest-path rust/crates/lumen-docintel-py/Cargo.toml --interpreter python3.12 --out /wheels
 
 FROM python:3.12-slim-bookworm AS runtime
@@ -46,6 +48,10 @@ RUN uv pip install --system --no-cache /tmp/native-wheels/*.whl \
  && python -c "import lumen_docintel; assert lumen_docintel.core_version() == '0.1.0'" \
  && rm -rf /tmp/native-wheels
 COPY backend/ .
+COPY scripts/check-pdfium-wheel.py ./scripts/check-pdfium-wheel.py
+# Load the installed engine, with OS memory and parent deadline limits, during
+# CI image builds. This catches missing runtime libraries and missing wheel data.
+RUN python scripts/check-pdfium-wheel.py
 
 EXPOSE 8000
 

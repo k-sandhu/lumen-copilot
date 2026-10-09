@@ -1,0 +1,375 @@
+{
+  "pdf_documents": 64,
+  "skipped_over_100_mib": 0,
+  "unreadable_entries": 0,
+  "engines": {
+    "pypdf": {
+      "parsed": 51,
+      "needs_ocr": 6,
+      "unsupported": 2,
+      "failed": 3,
+      "timed_out": 2,
+      "pages": 1760,
+      "characters": 7912784,
+      "seconds": 208.1818810001132,
+      "peak_rss_bytes": 545763328,
+      "error_codes": {
+        "timed_out": 2,
+        "memory_limit": 3,
+        "encrypted": 2
+      },
+      "budget_limits": {},
+      "ocr_page_reasons": {}
+    },
+    "in_core": {
+      "parsed": 1,
+      "needs_ocr": 4,
+      "unsupported": 52,
+      "failed": 7,
+      "timed_out": 0,
+      "pages": 16,
+      "characters": 649,
+      "seconds": 10.812982500065118,
+      "peak_rss_bytes": 82116608,
+      "error_codes": {
+        "unsupported": 52,
+        "parse_error": 7
+      },
+      "budget_limits": {},
+      "ocr_page_reasons": {
+        "image_only": 15
+      }
+    },
+    "pdfium": {
+      "parsed": 38,
+      "needs_ocr": 14,
+      "unsupported": 2,
+      "failed": 10,
+      "timed_out": 0,
+      "pages": 1358,
+      "characters": 5529452,
+      "seconds": 43.11794149980415,
+      "peak_rss_bytes": 250454016,
+      "error_codes": {
+        "parse_error": 3,
+        "budget": 6,
+        "invalid_structure": 1,
+        "encrypted": 2
+      },
+      "budget_limits": {
+        "table_rulings": 2,
+        "memory": 1,
+        "output": 3
+      },
+      "ocr_page_reasons": {
+        "image_only": 15,
+        "unusable_glyphs": 138,
+        "blank_or_empty": 4
+      }
+    }
+  },
+  "agreement": {
+    "pypdf/in_core": {
+      "comparable": 5,
+      "exact_matches": 4,
+      "exact_agreement": 0.8,
+      "token_dice_mean": 1.0,
+      "exact_all_document_rate": 0.0625
+    },
+    "pypdf/pdfium": {
+      "comparable": 52,
+      "exact_matches": 4,
+      "exact_agreement": 0.07692307692307693,
+      "token_dice_mean": 0.9236016887314238,
+      "exact_all_document_rate": 0.0625
+    },
+    "in_core/pdfium": {
+      "comparable": 5,
+      "exact_matches": 5,
+      "exact_agreement": 1.0,
+      "token_dice_mean": 1.0,
+      "exact_all_document_rate": 0.078125
+    }
+  },
+  "workers_max": 2,
+  "work_units_max": 20000000,
+  "python_complete_pdfium_gaps": {
+    "parse_error": 3,
+    "partial": 7,
+    "budget/memory": 1,
+    "invalid_structure": 1,
+    "needs_ocr": 1
+  },
+  "counter_distributions": {
+    "pypdf": {},
+    "in_core": {
+      "pages": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "glyphs": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "peak_accounted_bytes": {
+        "p50": 802112,
+        "p95": 2359219,
+        "max": 2359219
+      },
+      "work_units": {
+        "p50": 1179,
+        "p95": 10430,
+        "max": 10430
+      },
+      "output_chars": {
+        "p50": 0,
+        "p95": 667,
+        "max": 667
+      },
+      "source_input_bytes": {
+        "p50": 434312,
+        "p95": 1140032,
+        "max": 1140032
+      },
+      "max_page_rulings": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      }
+    },
+    "pdfium": {
+      "pages": {
+        "p50": 7,
+        "p95": 99,
+        "max": 311
+      },
+      "glyphs": {
+        "p50": 25638,
+        "p95": 504586,
+        "max": 1177150
+      },
+      "peak_accounted_bytes": {
+        "p50": 7603854,
+        "p95": 116586493,
+        "max": 229347074
+      },
+      "work_units": {
+        "p50": 121113,
+        "p95": 4618146,
+        "max": 12067318
+      },
+      "output_chars": {
+        "p50": 25666,
+        "p95": 623335,
+        "max": 1236579
+      },
+      "source_input_bytes": {
+        "p50": 334200,
+        "p95": 3086212,
+        "max": 12876838
+      },
+      "max_page_rulings": {
+        "p50": 9,
+        "p95": 439,
+        "max": 996
+      }
+    }
+  },
+  "failure_counter_distributions": {
+    "pypdf": {
+      "unattributed": {}
+    },
+    "in_core": {
+      "unattributed": {
+        "pages": {
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "glyphs": {
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "peak_accounted_bytes": {
+          "p50": 0,
+          "p95": 585040,
+          "max": 4082920
+        },
+        "work_units": {
+          "p50": 0,
+          "p95": 2709,
+          "max": 6102
+        },
+        "output_chars": {
+          "p50": 0,
+          "p95": 0,
+          "max": 220
+        },
+        "source_input_bytes": {
+          "p50": 517474,
+          "p95": 23440660,
+          "max": 31959786
+        },
+        "max_page_rulings": {
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        }
+      }
+    },
+    "pdfium": {
+      "unattributed": {
+        "pages": {
+          "p50": 4,
+          "p95": 49,
+          "max": 49
+        },
+        "glyphs": {
+          "p50": 11631,
+          "p95": 222220,
+          "max": 222220
+        },
+        "peak_accounted_bytes": {
+          "p50": 6632007,
+          "p95": 26907107,
+          "max": 26907107
+        },
+        "work_units": {
+          "p50": 57781,
+          "p95": 1786360,
+          "max": 1786360
+        },
+        "output_chars": {
+          "p50": 11563,
+          "p95": 222869,
+          "max": 222869
+        },
+        "source_input_bytes": {
+          "p50": 789627,
+          "p95": 4434643,
+          "max": 4434643
+        },
+        "max_page_rulings": {
+          "p50": 52,
+          "p95": 846,
+          "max": 846
+        }
+      },
+      "table_rulings": {
+        "pages": {
+          "p50": 33,
+          "p95": 86,
+          "max": 86
+        },
+        "glyphs": {
+          "p50": 143811,
+          "p95": 458272,
+          "max": 458272
+        },
+        "peak_accounted_bytes": {
+          "p50": 51479524,
+          "p95": 59772718,
+          "max": 59772718
+        },
+        "work_units": {
+          "p50": 1319400,
+          "p95": 10749177,
+          "max": 10749177
+        },
+        "output_chars": {
+          "p50": 128496,
+          "p95": 443339,
+          "max": 443339
+        },
+        "source_input_bytes": {
+          "p50": 26196128,
+          "p95": 31959786,
+          "max": 31959786
+        },
+        "max_page_rulings": {
+          "p50": 2060,
+          "p95": 3713,
+          "max": 3713
+        }
+      },
+      "memory": {
+        "pages": {
+          "p50": 143,
+          "p95": 143,
+          "max": 143
+        },
+        "glyphs": {
+          "p50": 1027191,
+          "p95": 1027191,
+          "max": 1027191
+        },
+        "peak_accounted_bytes": {
+          "p50": 266283093,
+          "p95": 266283093,
+          "max": 266283093
+        },
+        "work_units": {
+          "p50": 12102941,
+          "p95": 12102941,
+          "max": 12102941
+        },
+        "output_chars": {
+          "p50": 1046344,
+          "p95": 1046344,
+          "max": 1046344
+        },
+        "source_input_bytes": {
+          "p50": 3046757,
+          "p95": 3046757,
+          "max": 3046757
+        },
+        "max_page_rulings": {
+          "p50": 467,
+          "p95": 467,
+          "max": 467
+        }
+      },
+      "output": {
+        "pages": {
+          "p50": 456,
+          "p95": 913,
+          "max": 913
+        },
+        "glyphs": {
+          "p50": 1988777,
+          "p95": 1994168,
+          "max": 1994168
+        },
+        "peak_accounted_bytes": {
+          "p50": 143254881,
+          "p95": 161445936,
+          "max": 161445936
+        },
+        "work_units": {
+          "p50": 10046958,
+          "p95": 10091694,
+          "max": 10091694
+        },
+        "output_chars": {
+          "p50": 2000000,
+          "p95": 2000000,
+          "max": 2000000
+        },
+        "source_input_bytes": {
+          "p50": 14189927,
+          "p95": 23440660,
+          "max": 23440660
+        },
+        "max_page_rulings": {
+          "p50": 8,
+          "p95": 122,
+          "max": 122
+        }
+      }
+    }
+  },
+  "method": "cold recycled workers; pages/chars include partial OCR outcomes; time includes startup and IPC; exact agreement normalizes NFC/whitespace; token Dice is multiset overlap, not fidelity"
+}

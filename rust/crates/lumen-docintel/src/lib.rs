@@ -5,6 +5,7 @@ pub enum CoreError {
     InvalidInput,
     Unsupported,
     Parse,
+    Encrypted,
     Budget,
     Cancelled,
     Internal,
@@ -17,6 +18,7 @@ impl std::fmt::Display for CoreError {
             Self::InvalidInput => "invalid native input",
             Self::Unsupported => "unsupported document format",
             Self::Parse => "native parsing failed",
+            Self::Encrypted => "encrypted PDF requires an approved password policy",
             Self::Budget => "document budget exceeded",
             Self::Cancelled => "document computation cancelled",
             Self::Internal => "native computation failed",
@@ -38,3 +40,4 @@ pub mod runtime;
 pub mod chunking;
 
 pub mod normalization;
+pub mod formats;
