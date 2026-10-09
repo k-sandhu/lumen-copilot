@@ -34,7 +34,9 @@ class Fixture:
 def _zip(files: dict[str, bytes | str]) -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:
-        for name, data in sorted(files.items()):
+        names = sorted(files, key=lambda name: (name != "mimetype", name))
+        for name in names:
+            data = files[name]
             info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
             archive.writestr(info, data)
     return out.getvalue()
