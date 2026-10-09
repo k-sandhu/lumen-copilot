@@ -303,7 +303,6 @@ def corpus() -> list[Fixture]:
         facts=("Intro", "North", "-120", "kg", "PageTwo"),
         associations=(("North", "-120", "kg"),),
         order=("Intro", "North", "PageTwo"),
-        native_regions=2,
     )
     result = [
         Fixture("pdf-columns", "pdf", "application/pdf", _pdf(), gold),
@@ -312,7 +311,7 @@ def corpus() -> list[Fixture]:
             "pdf",
             "application/pdf",
             _pdf(scanned=True),
-            Gold(facts=("FACT",), native_regions=2),
+            Gold(facts=("FACT",), native_regions=3),
             case="scanned",
         ),
         Fixture(
@@ -320,7 +319,7 @@ def corpus() -> list[Fixture]:
             "pdf",
             "application/pdf",
             _pdf(scanned=True, mixed=True),
-            Gold(facts=("Intro", "FACT"), native_regions=2),
+            Gold(facts=("Intro", "FACT"), native_regions=3),
             case="mixed",
         ),
         Fixture(
@@ -472,7 +471,16 @@ def corpus() -> list[Fixture]:
         "markdown": ("text/markdown", ("# " + text).encode()),
     }
     for kind, (mime, data) in samples.items():
-        result.append(Fixture(kind + "-facts", kind, mime, data, gold))
+        annotated = (
+            Gold(
+                facts=gold.facts + ("AttachmentFact",),
+                associations=gold.associations,
+                order=gold.order + ("AttachmentFact",),
+            )
+            if kind == "eml"
+            else gold
+        )
+        result.append(Fixture(kind + "-facts", kind, mime, data, annotated))
     result.extend(
         [
             Fixture(
@@ -510,7 +518,16 @@ def corpus() -> list[Fixture]:
         ("tar", "application/x-tar", tar.getvalue()),
         ("gzip", "application/gzip", gzip.compress(text.encode(), mtime=0)),
     ):
-        result.append(Fixture(kind + "-nested", kind, mime, data, gold))
+        annotated = (
+            Gold(
+                facts=gold.facts + ("AttachmentFact",),
+                associations=gold.associations,
+                order=gold.order + ("AttachmentFact",),
+            )
+            if kind == "zip"
+            else gold
+        )
+        result.append(Fixture(kind + "-nested", kind, mime, data, annotated))
     for kind, stream in (
         ("doc", "WordDocument"),
         ("xls", "Workbook"),

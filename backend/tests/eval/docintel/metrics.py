@@ -63,7 +63,11 @@ def evaluate(
     )
     positions = [_find(tokens, _tokens(anchor)) for anchor in gold.order]
     pairs = list(zip(positions, positions[1:], strict=False))
-    order = sum(0 <= a < b for a, b in pairs) / len(pairs) if pairs else 1.0
+    order = (
+        sum(0 <= a < b for a, b in pairs) / len(pairs)
+        if pairs
+        else float(all(position >= 0 for position in positions))
+    )
     valid = all(
         0 <= start <= end <= len(text) and text[start:end] == value for start, end, value in spans
     )
@@ -81,7 +85,7 @@ def evaluate(
     )
 
 
-def require_fidelity(score: Score, *, format_name: str, require_provenance: bool = False) -> None:
+def require_fidelity(score: Score, *, format_name: str, require_provenance: bool = True) -> None:
     values = (
         score.fact_coverage,
         score.table_association,
