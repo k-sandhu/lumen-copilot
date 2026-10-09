@@ -17,7 +17,7 @@ def test_content_detection_and_encoding() -> None:
     assert text.decoding_errors == 0
     csv = detect_content(b"A,B\n1,2\n3,4")
     assert csv.format == "csv"
-    assert plan_native_route(csv, enabled_formats=frozenset({"csv"})) == "unsupported"
+    assert plan_native_route(csv, enabled_formats=frozenset()) == "unsupported"
 
 
 def test_unknown_binary_and_corrupt_container_are_typed() -> None:

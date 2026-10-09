@@ -1,0 +1,55 @@
+{
+  "rows": [
+    {
+      "fixture": "jsonl-facts",
+      "sha256": "3ce50643ca71ec2f33ffb54bbe6c618f9c72238e3caf04576a3602b7e7edca98",
+      "format": "jsonl",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 4.2599975131452084e-05,
+      "input_bytes_per_second": 985916.0685047181,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23416832,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "jsonl-facts",
+      "sha256": "3ce50643ca71ec2f33ffb54bbe6c618f9c72238e3caf04576a3602b7e7edca98",
+      "format": "jsonl",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.01732290000654757,
+      "input_bytes_per_second": 2424.536306514797,
+      "peak_rss_bytes": 23781376,
+      "peak_rss_increment_bytes": 221184,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "answer_quality": "unmeasured"
+}

@@ -373,7 +373,7 @@ async def _ingest_claimed_document(
         ) from exc
 
     try:
-        text = parse_document(data, mime_type=mime_type)
+        text = parse_document(data, mime_type=mime_type, settings=settings)
     except DocumentParseError as exc:
         return await _finalize_failure(
             tenant_id,
