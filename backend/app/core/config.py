@@ -1015,6 +1015,20 @@ class Settings(PasswordHashingSettings):
     native_ingestion_chunk_chars: int = Field(default=4096, ge=1, le=32768)
     native_ingestion_overlap_chars: int = Field(default=200, ge=0, le=32767)
 
+    chunk_context_generated_enabled: bool = False
+    chunk_context_model: str = ""
+    chunk_context_max_chars: int = Field(default=4096, ge=1, le=32768)
+    chunk_context_input_chars: int = Field(default=8192, ge=1, le=65536)
+    chunk_context_output_tokens: int = Field(default=128, ge=1, le=2048)
+    chunk_context_max_tokens: int = Field(default=32768, ge=1, le=1000000)
+    chunk_context_max_calls: int = Field(default=16, ge=0, le=256)
+
+    @model_validator(mode="after")
+    def _chunk_context_model_required(self) -> Settings:
+        if self.chunk_context_generated_enabled:
+            raise ValueError("context generation requires the reviewed audit contract")
+        return self
+
     ingestion_chunk_size: int = Field(default=1200, alias="INGESTION_CHUNK_SIZE")
     ingestion_chunk_overlap: int = Field(default=200, alias="INGESTION_CHUNK_OVERLAP")
     # How many chunks are embedded per gateway ``embed()`` call. Batching keeps

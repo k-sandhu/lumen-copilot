@@ -316,6 +316,10 @@ def _to_chunk(row: models.Chunk) -> Chunk:
         document_id=row.document_id,
         ord=row.ord,
         text=row.text,
+        context_text=row.context_text,
+        generated_context=row.generated_context,
+        context_fingerprint=row.context_fingerprint,
+        context_metadata=row.context_metadata,
         embedding=tuple(row.embedding) if row.embedding is not None else None,
         char_start=row.char_start,
         char_end=row.char_end,
@@ -2920,6 +2924,10 @@ class ChunkInput:
     speaker_id: str | None = None
     speaker_name: str | None = None
     embedding_fingerprint: str | None = None
+    context_text: str = ""
+    generated_context: str | None = None
+    context_fingerprint: str | None = None
+    context_metadata: dict[str, object] | None = None
 
 
 class ChunkRepository(_TenantScopedRepository):
@@ -3112,6 +3120,10 @@ class ChunkRepository(_TenantScopedRepository):
                 for row, chunk in zip(existing, chunks, strict=True):
                     row.embedding = list(chunk.embedding) if chunk.embedding is not None else None
                     row.embedding_fingerprint = chunk.embedding_fingerprint
+                    row.context_text = chunk.context_text
+                    row.generated_context = chunk.generated_context
+                    row.context_fingerprint = chunk.context_fingerprint
+                    row.context_metadata = chunk.context_metadata
                     row.time_start_ms = chunk.time_start_ms
                     row.time_end_ms = chunk.time_end_ms
                     row.transcript_segment_id = chunk.transcript_segment_id
@@ -3136,6 +3148,10 @@ class ChunkRepository(_TenantScopedRepository):
                 document_id=document_id,
                 ord=ordinal,
                 text=chunk.text,
+                context_text=chunk.context_text,
+                generated_context=chunk.generated_context,
+                context_fingerprint=chunk.context_fingerprint,
+                context_metadata=chunk.context_metadata,
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 embedding=list(chunk.embedding) if chunk.embedding is not None else None,
