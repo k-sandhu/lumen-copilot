@@ -19,14 +19,20 @@ Pipeline (all slow/burst work — never the request path, backend/AGENTS.md):
 5. **Persist** the chunks (text + embedding vector + offsets + tenant + document
    + ordinal) via the #44 ``ChunkRepository``, tenant-scoped, **idempotently**
    (a re-run *replaces* the document's chunks — AC-5).
-6. **Advance status** ``pending → processing → ready`` and set ``chunk_count``;
-   any parse/embed/persist failure marks the document ``failed`` with the reason
-   (AC-6) and **does not crash silently**.
-7. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
+6. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
    chunk docs in OpenSearch via :func:`app.tasks.index_sync.sync_document_index_async`
    — retrieval serves from the engine (single-store), so ``ready`` must imply
    retrievable. An engine fault is a *transient* fault like storage/model: the
-   run fails and Celery retries the (idempotent) pipeline as a unit.
+   run fails and Celery resumes matching completed stages.
+7. **Advance status** ``pending → processing → ready`` after index publication;
+   failures persist a safe terminal reason under the same attempt fence.
+
+Seven durable operational stages (detect, extract, normalize, classify, chunk,
+embed, index) cache bounded, checksummed outputs by upstream/configuration/build
+identity. Normalize/classify preserve current Python behavior until their approved
+cutover. Native candidate computation remains optional. Each new stage output and
+its content-free system audit commit together. A retry always republishes the
+index for its new attempt before ready; cache data never grants citation access.
 
 Idempotency, retry-with-backoff, and dead-lettering (backend/AGENTS.md): the
 task replaces (never duplicates) chunks; transient faults (storage/model/db
@@ -43,9 +49,13 @@ it threads the system actor only where an audit event is appropriate.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
@@ -68,8 +78,10 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
+from app.domain.ingestion_stages import StageOutputInvalid, StageOwnershipLost
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document
+from app.ingestion.chunking import TextChunk
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
@@ -87,12 +99,15 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
+from app.ingestion.stage_identity import parser_identity
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
+from app.services.ingestion_stages import CheckpointPipeline
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import sync_document_index_async
+from app.tasks.ingestion_stages import DurableStageStore
 from app.tasks.runner import run_task
 
 
@@ -287,8 +302,17 @@ async def ingest_document_async(
             search_store=search_store,
             correlation_id=correlation_id,
         )
-    except IngestionLeaseLost:
+    except (IngestionLeaseLost, StageOwnershipLost):
         return await _current_ingestion_result(tenant_id, document_id)
+    except StageOutputInvalid:
+        return await _finalize_failure(
+            tenant_id,
+            document_id,
+            "Ingestion checkpoint output is invalid or exceeds its budget.",
+            expected_attempt=attempt,
+            code="ingestion_checkpoint_invalid",
+            correlation_id=correlation_id,
+        )
     except (MediaProcessingError, InvalidTranscriptionResponse, ValueError):
         return await _finalize_failure(
             tenant_id,
@@ -372,8 +396,36 @@ async def _ingest_claimed_document(
             code="ingestion_storage_error",
         ) from exc
 
+    stages = CheckpointPipeline(
+        DurableStageStore(tenant_id, document_id, attempt),
+        max_output_bytes=settings.ingestion_checkpoint_max_output_bytes,
+    )
+    source_sha256 = hashlib.sha256(data).hexdigest()
+
+    async def detect_stage() -> dict[str, object]:
+        return {
+            "source_sha256": source_sha256,
+            "mime_type": mime_type.split(";", 1)[0].strip().lower(),
+        }
+
+    detected = await stages.run(
+        "detect",
+        upstream=source_sha256,
+        config={"policy": "python-declared-mime-1", "mime_type": mime_type},
+        compute=detect_stage,
+    )
+
+    async def extract_stage() -> dict[str, object]:
+        return {"text": parse_document(data, mime_type=mime_type), "source_sha256": source_sha256}
+
     try:
-        text = parse_document(data, mime_type=mime_type)
+        extracted = await stages.run(
+            "extract",
+            upstream=detected.output_sha256,
+            config=parser_identity(mime_type),
+            compute=extract_stage,
+        )
+        text = str(json.loads(extracted.payload_json)["text"])
     except DocumentParseError as exc:
         return await _finalize_failure(
             tenant_id,
@@ -384,11 +436,77 @@ async def _ingest_claimed_document(
             correlation_id=correlation_id,
         )
 
-    chunks = chunk_text(
-        text,
-        chunk_size=settings.ingestion_chunk_size,
-        overlap=settings.ingestion_chunk_overlap,
+    async def preserve_stage() -> dict[str, object]:
+        # Production normalization/classification policy remains in its owning issues.
+        return {"text": text, "policy": "python-preserved-1"}
+
+    normalized = await stages.run(
+        "normalize",
+        upstream=extracted.output_sha256,
+        config={"policy": "python-preserved-1"},
+        compute=preserve_stage,
     )
+
+    async def classify_stage() -> dict[str, object]:
+        return {"classification": None, "policy": "independent-classification-queue-1"}
+
+    await stages.run(
+        "classify",
+        upstream=normalized.output_sha256,
+        config={"policy": "independent-classification-queue-1"},
+        compute=classify_stage,
+    )
+
+    async def chunk_stage() -> dict[str, object]:
+        return {
+            "chunks": [
+                asdict(c)
+                for c in chunk_text(
+                    text,
+                    chunk_size=settings.ingestion_chunk_size,
+                    overlap=settings.ingestion_chunk_overlap,
+                )
+            ]
+        }
+
+    chunked = await stages.run(
+        "chunk",
+        upstream=normalized.output_sha256,
+        config={
+            "size": settings.ingestion_chunk_size,
+            "overlap": settings.ingestion_chunk_overlap,
+            "chunker_sha256": hashlib.sha256(
+                files("app.ingestion").joinpath("chunking.py").read_bytes().replace(b"\r\n", b"\n")
+            ).hexdigest(),
+        },
+        compute=chunk_stage,
+    )
+    chunks = [TextChunk(**c) for c in json.loads(chunked.payload_json)["chunks"]]
+
+    async def publish_stage() -> dict[str, object]:
+        return {
+            "published": await _sync_index(
+                tenant_id,
+                document_id,
+                expected_attempt=attempt,
+                settings=settings,
+                store=search_store,
+            )
+        }
+
+    async def publish(upstream: str) -> bool:
+        indexed = await stages.run(
+            "index",
+            upstream=upstream,
+            config={
+                "attempt": attempt,
+                "embedding_space": settings.embedding_space_fingerprint,
+                "refresh": True,
+            },
+            compute=publish_stage,
+        )
+        return bool(json.loads(indexed.payload_json)["published"])
+
     if not chunks:
         async with tenant_session_scope(tenant_id) as session:
             persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
@@ -399,13 +517,17 @@ async def _ingest_claimed_document(
             )
         if persisted is None:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        published = await _sync_index(
-            tenant_id,
-            document_id,
-            expected_attempt=attempt,
-            settings=settings,
-            store=search_store,
+
+        async def empty_embeddings() -> dict[str, object]:
+            return {"embeddings": [], "actual_model": None, "actual_dimension": None}
+
+        embedded = await stages.run(
+            "embed",
+            upstream=chunked.output_sha256,
+            config={"embedding_space": settings.embedding_space_fingerprint},
+            compute=empty_embeddings,
         )
+        published = await publish(embedded.output_sha256)
         if not published:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         async with tenant_session_scope(tenant_id) as session:
@@ -423,12 +545,56 @@ async def _ingest_claimed_document(
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         return IngestionResult(document_id, DocumentStatus.READY, 0)
 
+    def validate_embeddings(values: list[Embedding]) -> tuple[str, int]:
+        if len(values) != len(chunks):
+            raise IngestionError(
+                "Document ingestion received an unexpected embedding count.",
+                code="embedding_count_mismatch",
+            )
+        actual_model = values[0].model
+        actual_dimension = len(values[0].vector)
+        if (
+            not actual_model.strip()
+            or actual_dimension != settings.llm_embedding_dimensions
+            or any(
+                value.model != actual_model
+                or len(value.vector) != actual_dimension
+                or any(
+                    isinstance(n, bool) or not isinstance(n, int | float) or not math.isfinite(n)
+                    for n in value.vector
+                )
+                for value in values
+            )
+        ):
+            raise StageOutputInvalid("embedding metadata or vector is invalid")
+        return actual_model, actual_dimension
+
     try:
-        embeddings = await _embed_in_batches(
-            gateway,
-            [chunk.text for chunk in chunks],
-            batch_size=settings.ingestion_embed_batch_size,
+
+        async def embed_stage() -> dict[str, object]:
+            values = await _embed_in_batches(
+                gateway,
+                [chunk.text for chunk in chunks],
+                batch_size=settings.ingestion_embed_batch_size,
+            )
+            actual_model, actual_dimension = validate_embeddings(values)
+            return {
+                "embeddings": [asdict(value) for value in values],
+                "actual_model": actual_model,
+                "actual_dimension": actual_dimension,
+            }
+
+        embedded = await stages.run(
+            "embed",
+            upstream=chunked.output_sha256,
+            config={
+                "embedding_space": settings.embedding_space_fingerprint,
+                "validation": "finite-uniform-configured-dimension-1",
+            },
+            compute=embed_stage,
         )
+        embeddings = [Embedding(**v) for v in json.loads(embedded.payload_json)["embeddings"]]
+        validate_embeddings(embeddings)
     except DependencyError as exc:
         code = (
             exc.code
@@ -472,13 +638,7 @@ async def _ingest_claimed_document(
 
     if persisted is None:
         return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-    published = await _sync_index(
-        tenant_id,
-        document_id,
-        expected_attempt=attempt,
-        settings=settings,
-        store=search_store,
-    )
+    published = await publish(embedded.output_sha256)
     if not published:
         return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     async with tenant_session_scope(tenant_id) as session:
@@ -769,6 +929,22 @@ async def _persist_media_result(
         )
         if persisted_chunks is None:
             raise IngestionLeaseLost
+
+        from app.tasks.classification import schedule_in_transaction
+
+        classification_input = json.dumps(
+            {"text": "\n".join(s.text for s in persisted_segments), "format": "transcript"},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        await schedule_in_transaction(
+            session,
+            tenant_id,
+            document_id,
+            input_json=classification_input,
+            extraction_id=hashlib.sha256(classification_input.encode()).hexdigest(),
+            taxonomy_version=settings.classification_taxonomy_version,
+        )
 
         if not was_transcribed:
             await AuditSink(AuditEventRepository(session, tenant_id)).emit(

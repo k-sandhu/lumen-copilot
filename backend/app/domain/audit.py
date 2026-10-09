@@ -46,6 +46,9 @@ class AuditAction(str, enum.Enum):
     DOCUMENT_UPLOAD_EXPIRED = "document.upload_expired"
     DOCUMENT_UPLOADED = "document.uploaded"
     DOCUMENT_TRANSCRIBED = "document.transcribed"
+    DOCUMENT_PROCESSING_STAGE_COMPLETED = "document.processing_stage_completed"
+    DOCUMENT_CLASSIFICATION_UPDATED = "document.classification_updated"
+    CLASSIFICATION_POLICY_UPDATED = "classification.policy_updated"
     DOCUMENT_VIEWED = "document.viewed"
     DOCUMENT_DOWNLOADED = "document.downloaded"
     DOCUMENT_DELETED = "document.deleted"
@@ -281,6 +284,9 @@ class AuditAction(str, enum.Enum):
     LLM_PROVIDER_DISCOVERED = "llm_provider.discovered"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
+    # ADR-0028 / #690: safe model-decision accounting through the canonical sink.
+    MODEL_DECISION_REQUESTED = "model.decision_requested"
+    MODEL_DECISION_COMPLETED = "model.decision_completed"
     ACTION_APPROVED = "action.approved"
     ACTION_EXECUTED = "action.executed"
 

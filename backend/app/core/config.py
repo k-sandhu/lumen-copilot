@@ -16,7 +16,7 @@ import hashlib
 import json
 import re
 from functools import lru_cache
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -268,6 +268,26 @@ class Settings(PasswordHashingSettings):
 
     # --- Service identity (surfaced by /health) ---
     service_name: str = "lumen-copilot-backend"
+    classification_taxonomy_version: str = Field(
+        default="1.0.0", alias="CLASSIFICATION_TAXONOMY_VERSION"
+    )
+    classification_tokenizer_path: str = Field(default="", alias="CLASSIFICATION_TOKENIZER_PATH")
+    classification_tokenizer_sha256: str = Field(
+        default="", alias="CLASSIFICATION_TOKENIZER_SHA256"
+    )
+    classification_tokenizer_model: str = Field(default="", alias="CLASSIFICATION_TOKENIZER_MODEL")
+    classification_fallback_tokenizer_path: str = Field(
+        default="", alias="CLASSIFICATION_FALLBACK_TOKENIZER_PATH"
+    )
+    classification_fallback_tokenizer_sha256: str = Field(
+        default="", alias="CLASSIFICATION_FALLBACK_TOKENIZER_SHA256"
+    )
+    classification_fallback_tokenizer_model: str = Field(
+        default="", alias="CLASSIFICATION_FALLBACK_TOKENIZER_MODEL"
+    )
+    classification_sweep_interval_seconds: float = Field(
+        default=60, gt=0, alias="CLASSIFICATION_SWEEP_INTERVAL_SECONDS"
+    )
     # Sourced once from the package version (app.__version__, mirroring
     # pyproject.toml) so the value served by /health and the OpenAPI title cannot
     # drift from the package when someone bumps the release — not a re-typed
@@ -616,6 +636,42 @@ class Settings(PasswordHashingSettings):
 
     # --- LLM gateway (LiteLLM -> OpenRouter first; key may be blank) ---
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+
+    # ADR-0028 / #690. Separate admission from chat; no automatic document calls.
+    decisions_enabled: bool = Field(default=False, alias="DECISIONS_ENABLED")
+    decisions_model: str = Field(
+        default="openai/gpt-6-luna-decisions", min_length=1, alias="DECISIONS_MODEL"
+    )
+    decisions_fallback_model: str = Field(default="", alias="DECISIONS_FALLBACK_MODEL")
+    decisions_timeout_seconds: float = Field(
+        default=30, gt=0, le=120, allow_inf_nan=False, alias="DECISIONS_TIMEOUT_SECONDS"
+    )
+    decisions_retries: int = Field(default=1, ge=0, le=5, alias="DECISIONS_RETRIES")
+    decisions_retry_backoff_seconds: float = Field(
+        default=0.5, ge=0, le=10, allow_inf_nan=False, alias="DECISIONS_RETRY_BACKOFF_SECONDS"
+    )
+    decisions_concurrency: int = Field(default=2, ge=1, le=32, alias="DECISIONS_CONCURRENCY")
+    decisions_max_input_bytes: int = Field(
+        default=32768, ge=1, le=262144, alias="DECISIONS_MAX_INPUT_BYTES"
+    )
+    decisions_max_response_bytes: int = Field(
+        default=262144, ge=1024, le=1048576, alias="DECISIONS_MAX_RESPONSE_BYTES"
+    )
+    decisions_max_questions: int = Field(default=32, ge=1, le=128, alias="DECISIONS_MAX_QUESTIONS")
+    decisions_max_options: int = Field(default=64, ge=2, le=256, alias="DECISIONS_MAX_OPTIONS")
+    decisions_fallback_max_tokens: int = Field(
+        default=4096, ge=1, le=16384, alias="DECISIONS_FALLBACK_MAX_TOKENS"
+    )
+    decisions_option_order: Literal["fixed", "seeded_shuffle"] = Field(
+        default="fixed", alias="DECISIONS_OPTION_ORDER"
+    )
+    decisions_order_seed: int = Field(default=0, alias="DECISIONS_ORDER_SEED")
+    decisions_tenant_budget_usd: float = Field(
+        default=0, ge=0, allow_inf_nan=False, alias="DECISIONS_TENANT_BUDGET_USD"
+    )
+    decisions_per_call_ceiling_usd: float = Field(
+        default=0, ge=0, allow_inf_nan=False, alias="DECISIONS_PER_CALL_CEILING_USD"
+    )
     # OpenRouter speech-to-text adapter (ADR-0023's narrow LiteLLM exception).
     transcription_model: str = Field(default="x-ai/grok-stt-1.0", alias="TRANSCRIPTION_MODEL")
     transcription_base_url: str = Field(
@@ -1014,6 +1070,7 @@ class Settings(PasswordHashingSettings):
     native_ingestion_chunk_tokens: int = Field(default=512, ge=1, le=32768)
     native_ingestion_chunk_chars: int = Field(default=4096, ge=1, le=32768)
     native_ingestion_overlap_chars: int = Field(default=200, ge=0, le=32767)
+    ingestion_checkpoint_max_output_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
 
     ingestion_chunk_size: int = Field(default=1200, alias="INGESTION_CHUNK_SIZE")
     ingestion_chunk_overlap: int = Field(default=200, alias="INGESTION_CHUNK_OVERLAP")

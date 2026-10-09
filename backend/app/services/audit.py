@@ -50,6 +50,11 @@ class AuditSink:
     def __init__(self, repository: AuditEventRepository) -> None:
         self._repository = repository
 
+    @property
+    def tenant_id(self) -> UUID:
+        """Trusted scope for composing tenant-bound accounting services (#690)."""
+        return self._repository.tenant_id
+
     async def emit(
         self,
         *,

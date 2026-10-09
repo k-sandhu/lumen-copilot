@@ -6,6 +6,30 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tokenizers::Tokenizer;
 
+pub fn count_request_tokens(
+    input: &str,
+    artifact: &str,
+    ctx: &Context,
+) -> Result<usize, CoreError> {
+    if input.len() > 256 * 1024 || artifact.len() > 16 * 1024 * 1024 {
+        return Err(CoreError::Budget);
+    }
+    ctx.work(1)?;
+    let _memory =
+        ctx.reserve(input.len().saturating_mul(256) + artifact.len().saturating_mul(32))?;
+    let mut tokenizer = Tokenizer::from_bytes(artifact).map_err(|_| CoreError::InvalidInput)?;
+    tokenizer
+        .with_truncation(None)
+        .map_err(|_| CoreError::InvalidInput)?;
+    tokenizer.with_padding(None);
+    let result = tokenizer
+        .encode(input, true)
+        .map_err(|_| CoreError::InvalidInput)?
+        .len();
+    ctx.checkpoint()?;
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureSettings {

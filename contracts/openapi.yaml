@@ -441,6 +441,49 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /documents/{documentId}/processing:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    get:
+      operationId: getDocumentProcessing
+      summary: Inspect permissioned ingestion progress without cached content.
+      description: Current document visibility is required; the read is audited.
+      tags: [documents]
+      responses:
+        "200":
+          description: Durable ingestion state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentProcessing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: controlDocumentProcessing
+      summary: Cancel, resume or restart an ordinary document's ingestion.
+      description: >
+        Current visibility AND owner or tenant admin role are required. Admin
+        does not bypass ACLs. Revision is an optimistic concurrency fence.
+        Cancel retains checkpoints; resume reuses matching outputs; restart clears
+        them. Mutation and audit commit together. Enqueue occurs after commit.
+        Media, illegal transitions and stale revisions return 409.
+      tags: [documents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DocumentProcessingControl" }
+      responses:
+        "200":
+          description: Committed control transition; pending work is queued after commit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentProcessing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /documents/{documentId}/content:
     parameters:
       - { $ref: "#/components/parameters/DocumentId" }
@@ -3569,6 +3612,46 @@ components:
       description: Ingestion lifecycle.
       enum: [pending, processing, ready, failed]
 
+    IngestionStage:
+      type: string
+      enum: [detect, extract, normalize, classify, chunk, embed, index]
+
+    DocumentProcessingControl:
+      type: object
+      additionalProperties: false
+      required: [action, expected_revision]
+      properties:
+        action: { type: string, enum: [cancel, resume, restart] }
+        expected_revision: { type: integer, minimum: 0 }
+
+    CompletedIngestionStage:
+      type: object
+      additionalProperties: false
+      required: [stage, fingerprint, output_sha256]
+      properties:
+        stage: { $ref: "#/components/schemas/IngestionStage" }
+        fingerprint: { type: string, pattern: "^[a-f0-9]{64}$" }
+        output_sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+
+    DocumentProcessing:
+      type: object
+      additionalProperties: false
+      required: [state, status, revision, current_stage, completed_stages]
+      properties:
+        state:
+          type: string
+          enum: [pending, processing, ready, failed, cancelled]
+        status: { $ref: "#/components/schemas/DocumentStatus" }
+        revision: { type: integer, minimum: 0 }
+        current_stage:
+          anyOf:
+            - { $ref: "#/components/schemas/IngestionStage" }
+            - { type: "null" }
+        completed_stages:
+          type: array
+          maxItems: 7
+          items: { $ref: "#/components/schemas/CompletedIngestionStage" }
+
     DocumentKind:
       type: string
       description: Processing/viewer family derived from the validated MIME type.
@@ -4345,6 +4428,9 @@ components:
         - collection.deleted
         - document.deleted
         - document.downloaded
+        - document.processing_stage_completed
+        - document.classification_updated
+        - classification.policy_updated
         - document.transcribed
         - document.upload_aborted
         - document.upload_expired
@@ -4364,6 +4450,8 @@ components:
         - mcp_server.registered
         - mcp_server.tested
         - mcp_server.updated
+        - model.decision_completed
+        - model.decision_requested
         - permission.denied
         - permission.granted
         - permission.revoked

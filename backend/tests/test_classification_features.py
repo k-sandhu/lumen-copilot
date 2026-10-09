@@ -70,3 +70,4 @@ def test_native_features_and_batch_binding() -> None:
         ),
     )
     assert batch == (result, result)
+    assert native.classification_token_count("Synthetic 🧾", tokenizer) > 0

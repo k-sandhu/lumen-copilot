@@ -103,6 +103,16 @@ while structural checks still reject every unclassified active target route.
 
 ## 3. Invariants → negative-test categories
 
+Classification (#692) adds `document.classification_updated` (scheduled,
+completed or override) and `classification.policy_updated`. Success and their
+content-free audit commit atomically; denials use the durable canonical context.
+No source excerpt, override reason, credentials or personal-data values enter audit.
+
+Resumable ingestion (#669) adds `document.processing_stage_completed`: each
+new completed operational stage and its safe stage/fingerprint/checksum audit
+commit in one tenant-bound transaction. The system actor has no client address.
+No source text, embeddings, object keys, local paths or credentials enter audit.
+
 This table is the canonical set that `AGENTS.md` §9 references. Every feature touching a chokepoint ships the matching negative test (test-first, `AGENTS.md` §9).
 
 | ID | Invariant | Chokepoint | Negative test (must fail closed) |
