@@ -338,6 +338,9 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     )
     ingestion_failure: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     ingestion_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    native_evidence_locked: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     # --- Mirrored source ACL (ADR-0019 §2/§3, spec 0004 §2.2 exclusive split) ---
     # ``acl_enforced=false`` (uploads, web): today's owner-or-grant predicate.
     # ``acl_enforced=true`` (managed connectors): retrieval requires a FRESH

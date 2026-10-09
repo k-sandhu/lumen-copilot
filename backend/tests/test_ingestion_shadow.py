@@ -243,6 +243,7 @@ def test_cli_scopes_pages_and_format_summary():
     assert summarize([ShadowRecord(uuid4(), uuid4(), value)]) == {
         "pdf": {
             "records": 1,
+            "baseline_failed": 0,
             "partial": 1,
             "exact_equal": 0,
             "baseline_chars": 10,
@@ -250,3 +251,236 @@ def test_cli_scopes_pages_and_format_summary():
             "positional_mismatches": 9,
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_shadow_baseline_failure_is_recorded_without_changing_its_error():
+    from app.domain.ingestion_shadow import CandidateExtraction
+    from app.ingestion.parsers import DocumentParseError
+    from app.services.ingestion_shadow import extract_with_mode
+
+    error = DocumentParseError("fixture baseline failure")
+    records = []
+
+    async def baseline():
+        raise error
+
+    async def candidate():
+        return CandidateExtraction("Native source", "indexed", 1)
+
+    async def record(value):
+        records.append(value)
+
+    with pytest.raises(DocumentParseError) as caught:
+        await extract_with_mode(
+            mode="shadow",
+            source_format="pdf",
+            baseline=baseline,
+            candidate=candidate,
+            record=record,
+        )
+    assert caught.value is error
+    assert records[0].baseline_failed and not records[0].exact_equal
+
+
+@pytest.mark.asyncio
+async def test_native_rollback_never_replaces_published_evidence(sqlite_engine, monkeypatch):  # noqa: F811
+    import app.db.session as db_session
+    import app.tasks.ingest as ingest
+    from app.db.repositories import ChunkRepository
+    from app.domain.canonical import CanonicalDocument
+    from app.domain.ingestion_shadow import CandidateExtraction
+    from tests.test_ingestion_task import (
+        _FakeGateway,
+        _FakeIndexStore,
+        _FakeObjectStore,
+        _seed_document,
+        _settings,
+    )
+
+    tenant, doc = await _seed_document(mime_type="text/plain", key="fixture")
+    store = _FakeObjectStore()
+    store.put(str(tenant), "fixture", b"Python source")
+
+    async def candidate(*args, **kwargs):
+        value = CanonicalDocument(1, 1, (), (), "Native source", (), '{"outcome":"indexed"}', "{}")
+        return CandidateExtraction("Native source", "indexed", 0, value)
+
+    monkeypatch.setattr(ingest, "extract_format_candidate", candidate)
+    result = await ingest.ingest_document_async(
+        tenant,
+        doc,
+        settings=_settings(ingestion_format_modes={"text": "native"}),
+        object_store=store,
+        gateway=_FakeGateway(),
+        search_store=_FakeIndexStore(),
+    )
+    assert result.error is None
+    async with db_session.session_scope() as session:
+        before = await ChunkRepository(session, tenant).list_for_document(doc)
+    result = await ingest.ingest_document_async(
+        tenant,
+        doc,
+        settings=_settings(),
+        object_store=store,
+        gateway=_FakeGateway(),
+        search_store=_FakeIndexStore(),
+    )
+    assert result.error == "immutable_generation_policy_required"
+    async with db_session.session_scope() as session:
+        after = await ChunkRepository(session, tenant).list_for_document(doc)
+        assert after[0].id == before[0].id and after[0].text == "Native source"
+
+
+@pytest.mark.asyncio
+async def test_unpublished_native_retry_reuses_extraction_after_index_failure(
+    sqlite_engine,  # noqa: F811
+    monkeypatch,
+):
+    import app.db.session as db_session
+    import app.tasks.ingest as ingest
+    from app.core.errors import DependencyError
+    from app.db.repositories import DocumentRepository
+    from app.domain.canonical import CanonicalDocument
+    from app.domain.ingestion_shadow import CandidateExtraction
+    from tests.test_ingestion_task import (
+        _FakeGateway,
+        _FakeIndexStore,
+        _FakeObjectStore,
+        _seed_document,
+        _settings,
+    )
+
+    tenant, doc = await _seed_document(mime_type="text/plain", key="fixture")
+    store = _FakeObjectStore()
+    store.put(str(tenant), "fixture", b"Python source")
+    calls = 0
+
+    async def candidate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        value = CanonicalDocument(1, 1, (), (), "Native source", (), '{"outcome":"indexed"}', "{}")
+        return CandidateExtraction("Native source", "indexed", 0, value)
+
+    class FailOnce(_FakeIndexStore):
+        calls = 0
+
+        async def ensure_index(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise DependencyError("fixture", code="search_unavailable")
+
+    monkeypatch.setattr(ingest, "extract_format_candidate", candidate)
+    index = FailOnce()
+    args = {
+        "settings": _settings(ingestion_format_modes={"text": "native"}),
+        "object_store": store,
+        "gateway": _FakeGateway(),
+        "search_store": index,
+    }
+    with pytest.raises((DependencyError, ingest.IngestionError)):
+        await ingest.ingest_document_async(tenant, doc, **args)
+    async with db_session.session_scope() as session:
+        assert not (await DocumentRepository(session, tenant).get(doc)).native_evidence_locked
+    result = await ingest.ingest_document_async(tenant, doc, **args)
+    assert result.error is None and calls == 1
+    async with db_session.session_scope() as session:
+        assert (await DocumentRepository(session, tenant).get(doc)).native_evidence_locked
+
+
+def test_malformed_shadow_counter_and_failure_code_are_rejected():
+    from dataclasses import asdict
+
+    from app.domain.ingestion_shadow import ShadowComparison
+
+    value = asdict(ShadowComparison("pdf", "indexed", 1, 1, True, 0, 1))
+    with pytest.raises(ValueError):
+        ShadowComparison.from_payload(value | {"baseline_chars": "untrusted"})
+    with pytest.raises(ValueError):
+        ShadowComparison.from_payload(value | {"failure_code": "untrusted"})
+
+
+@pytest.mark.asyncio
+async def test_original_replay_records_failed_baseline_and_keeps_original_error(
+    sqlite_engine,  # noqa: F811
+    monkeypatch,
+):
+    import app.db.session as db_session
+    import app.services.ingestion_admin as admin_module
+    from app.auth.principal import Principal
+    from app.core.config import Settings
+    from app.db.ingestion_shadow import ShadowRepository
+    from app.db.repositories import DocumentRepository
+    from app.domain.entities import Role
+    from app.domain.ingestion_shadow import CandidateExtraction
+    from app.ingestion.parsers import DocumentParseError
+    from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+    from tests.test_ingestion_task import _FakeObjectStore, _seed_document
+
+    tenant, doc = await _seed_document(mime_type="text/plain", key="fixture")
+    async with db_session.session_scope() as session:
+        owner = (await DocumentRepository(session, tenant).get(doc)).owner_id
+    store = _FakeObjectStore()
+    store.put(str(tenant), "fixture", b"Original evidence")
+    error = DocumentParseError("fixture baseline failure")
+
+    def baseline(*args, **kwargs):
+        raise error
+
+    async def candidate(*args, **kwargs):
+        return CandidateExtraction("Candidate evidence", "indexed", 1)
+
+    monkeypatch.setattr(admin_module, "parse_document", baseline)
+    monkeypatch.setattr(admin_module, "extract_format_candidate", candidate)
+    service = admin_module.IngestionAdminService(
+        Principal(owner, tenant, (Role.ADMIN,)),
+        settings=Settings(),
+        object_store=store,
+        denials=denial_context(RecordingDurableAuditTransactions(), object(), tenant, owner),
+    )
+    with pytest.raises(DocumentParseError) as caught:
+        await service.replay(doc)
+    assert caught.value is error
+    async with db_session.session_scope() as session:
+        rows = await ShadowRepository(session, tenant).page(limit=10)
+        assert len(rows) == 1 and rows[0].comparison.baseline_failed
+        assert rows[0].comparison.positional_mismatches == 0
+
+
+@pytest.mark.asyncio
+async def test_shadow_repository_rejects_malformed_baseline_flag(sqlite_engine):  # noqa: F811
+    import app.db.session as db_session
+    from app.db.ingestion_shadow import ShadowRepository
+    from app.domain.ingestion_shadow import ShadowComparison
+    from tests.test_ingestion_task import _seed_document
+
+    tenant, doc = await _seed_document(mime_type="text/plain", key="fixture")
+    value = ShadowComparison("text", "indexed", 1, 1, True, 0, 1, baseline_failed="bad")
+    async with db_session.session_scope() as session:
+        with pytest.raises(ValueError, match="baseline"):
+            await ShadowRepository(session, tenant).record(doc, "a" * 64, value)
+
+
+@pytest.mark.asyncio
+async def test_failed_shadow_audit_rolls_back_diagnostic(sqlite_engine, monkeypatch):  # noqa: F811
+    import app.db.session as db_session
+    import app.services.shadow_diagnostics as diagnostics
+    from app.db.ingestion_shadow import ShadowRepository
+    from app.domain.ingestion_shadow import ShadowComparison
+    from tests.test_ingestion_task import _seed_document
+
+    tenant, doc = await _seed_document(mime_type="text/plain", key="fixture")
+
+    async def failed_audit(*args, **kwargs):
+        raise RuntimeError("fixture audit unavailable")
+
+    monkeypatch.setattr(diagnostics.AuditSink, "emit", failed_audit)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await diagnostics.record_comparison(
+            tenant,
+            doc,
+            fingerprint="a" * 64,
+            comparison=ShadowComparison("text", "indexed", 1, 1, True, 0, 1),
+        )
+    async with db_session.session_scope() as session:
+        assert not await ShadowRepository(session, tenant).page(limit=10)

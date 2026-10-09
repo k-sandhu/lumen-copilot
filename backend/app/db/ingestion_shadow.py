@@ -31,39 +31,7 @@ class ShadowRepository:
         if len(fingerprint) != 64 or value.source_format not in FORMATS:
             raise ValueError("invalid shadow identity")
         payload = asdict(value)
-        if value.status not in {
-            "indexed",
-            "partial",
-            "needs_ocr",
-            "unsupported",
-            "encrypted",
-            "failed",
-        }:
-            raise ValueError("invalid shadow status")
-        numbers = (
-            value.baseline_chars,
-            value.candidate_chars,
-            value.positional_mismatches,
-            value.block_count,
-        )
-        if any(type(n) is not int or n < 0 for n in numbers) or type(value.exact_equal) is not bool:
-            raise ValueError("invalid shadow counters")
-        allowed = {
-            None,
-            "native_unavailable",
-            "native_failed",
-            "budget",
-            "timeout",
-            "encrypted",
-            "parse",
-            "invalid_structure",
-            "native_panic",
-            "output_limit",
-            "worker_memory",
-            "worker_failed",
-        }
-        if value.failure_code not in allowed:
-            raise ValueError("invalid shadow failure category")
+        ShadowComparison.from_payload(payload)
         insert = sqlite_insert if self._session.get_bind().dialect.name == "sqlite" else pg_insert
         statement = (
             insert(models.IngestionShadow)

@@ -759,6 +759,7 @@ class Document:
     duration_ms: int | None = None
     transcript_language: str | None = None
     transcription_model: str | None = None
+    native_evidence_locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)

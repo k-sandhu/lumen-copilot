@@ -11,6 +11,12 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.add_column(
+        "documents",
+        sa.Column(
+            "native_evidence_locked", sa.Boolean(), nullable=False, server_default=sa.text("false")
+        ),
+    )
     op.create_table(
         "ingestion_shadow",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -48,3 +54,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("ingestion_shadow")
+    op.drop_column("documents", "native_evidence_locked")

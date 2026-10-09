@@ -112,9 +112,11 @@ def test_direct_resource_guard_manifest_matches_the_registered_api() -> None:
         set(manifest) == governed_registered
     ), f"missing={governed_registered - set(manifest)}, extra={set(manifest) - governed_registered}"
     assert set(manifest) <= registered
-    assert {entry.owner for entry in manifest.values()} | {"enqueue_manual_run"} == set(
-        _OWNER_SEAMS
-    )
+    assert (
+        {entry.owner for entry in manifest.values()}
+        | {owner for owner, _method, _action in DIRECT_RESOURCE_SERVICE_GUARDS}
+        | {"enqueue_manual_run"}
+    ) == set(_OWNER_SEAMS)
 
 
 def test_retired_routes_have_only_unconditional_gone_outcomes() -> None:

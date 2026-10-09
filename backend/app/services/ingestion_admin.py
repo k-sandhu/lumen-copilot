@@ -225,15 +225,22 @@ class IngestionAdminService:
         async def capture(value: ShadowComparison) -> None:
             recorded.append(value)
 
-        await extract_with_mode(
-            mode="shadow",
-            source_format=source_format(document.mime_type),
-            baseline=baseline,
-            candidate=candidate,
-            record=capture,
-            max_chars=self._settings.native_ingestion_max_output_chars,
-        )
-        await record(recorded[0])
+        baseline_error: Exception | None = None
+        try:
+            await extract_with_mode(
+                mode="shadow",
+                source_format=source_format(document.mime_type),
+                baseline=baseline,
+                candidate=candidate,
+                record=capture,
+                max_chars=self._settings.native_ingestion_max_output_chars,
+            )
+        except Exception as error:
+            baseline_error = error
+        if recorded:
+            await record(recorded[0])
+        if baseline_error is not None:
+            raise baseline_error
         return recorded[0]
 
     @audited_resource(
@@ -263,6 +270,7 @@ def summarize(rows: Sequence[ShadowRecord]) -> dict[str, dict[str, int]]:
         bucket = counts.setdefault(value.source_format, {})
         for key, amount in (
             ("records", 1),
+            ("baseline_failed", int(value.baseline_failed)),
             (value.status, 1),
             ("exact_equal", int(value.exact_equal)),
             ("baseline_chars", value.baseline_chars),

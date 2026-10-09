@@ -30,7 +30,13 @@ async def extract_with_mode(
         return RoutedExtraction(await baseline())
     if mode not in {"shadow", "native"}:
         raise ValueError("invalid extraction mode")
-    live = await baseline() if mode == "shadow" else ""
+    live = ""
+    baseline_error: Exception | None = None
+    if mode == "shadow":
+        try:
+            live = await baseline()
+        except Exception as error:
+            baseline_error = error
     value: CandidateExtraction | None = None
     failure: str | None = None
     try:
@@ -75,19 +81,22 @@ async def extract_with_mode(
         value.outcome if value else "failed",
         len(live),
         len(value.text) if value else 0,
-        value is not None and live == value.text,
+        baseline_error is None and value is not None and live == value.text,
         (
             sum(a != b for a, b in zip(live, value.text, strict=False))
             + abs(len(live) - len(value.text))
         )
-        if value
-        else len(live),
+        if value and baseline_error is None
+        else (len(live) if baseline_error is None else 0),
         value.block_count if value else 0,
         failure,
+        baseline_error is not None,
     )
     try:
         await record(comparison)
     except Exception:
         # A safe aggregate operational event, never exception text or source identity.
         log.warning("ingestion.shadow_diagnostic_unrecorded", source_format=source_format, count=1)
+    if baseline_error is not None:
+        raise baseline_error
     return RoutedExtraction(live, comparison=comparison)

@@ -78,7 +78,12 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
-from app.domain.ingestion_shadow import CandidateExtraction, ShadowComparison, source_format
+from app.domain.ingestion_shadow import (
+    CandidateExtraction,
+    NativeEvidenceLocked,
+    ShadowComparison,
+    source_format,
+)
 from app.domain.ingestion_stages import StageOutputInvalid, StageOwnershipLost
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document
@@ -240,18 +245,12 @@ async def ingest_document_async(
     try:
         async with tenant_session_scope(tenant_id) as session:
             documents = DocumentRepository(session, tenant_id)
-            existing = await documents.get(document_id)
-            if (
-                existing is not None
-                and settings.ingestion_format_modes.get(source_format(existing.mime_type), "python")
-                == "native"
-            ):
-                count = await documents.count_chunks(document_id)
-                if count:
-                    # Native cutover cannot replace historical evidence without a generation policy.
-                    return IngestionResult(
-                        document_id, existing.status, count, "immutable_generation_policy_required"
-                    )
+            await documents.guard_native_ingestion(
+                document_id,
+                native_formats=frozenset(
+                    fmt for fmt, mode in settings.ingestion_format_modes.items() if mode == "native"
+                ),
+            )
             document = await documents.begin_ingestion(
                 document_id, ingestion_run_id=run_id, stale_before=stale_before
             )
@@ -262,6 +261,11 @@ async def ingest_document_async(
             storage_key = document.storage_key
             mime_type = document.mime_type
             attempt = document.ingestion_attempts
+    except NativeEvidenceLocked:
+        current = await _current_ingestion_result(tenant_id, document_id)
+        return IngestionResult(
+            document_id, current.status, current.chunk_count, "immutable_generation_policy_required"
+        )
     except SQLAlchemyError as exc:
         raise IngestionError(
             "Document ingestion could not claim the database row.",
@@ -597,7 +601,7 @@ async def _ingest_claimed_document(
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         async with tenant_session_scope(tenant_id) as session:
             ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-                document_id, expected_attempt=attempt
+                document_id, expected_attempt=attempt, native=mode == "native"
             )
         if ready is None:
             await _discard_generation(
@@ -708,7 +712,7 @@ async def _ingest_claimed_document(
         return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     async with tenant_session_scope(tenant_id) as session:
         ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-            document_id, expected_attempt=attempt
+            document_id, expected_attempt=attempt, native=mode == "native"
         )
     if ready is None:
         await _discard_generation(

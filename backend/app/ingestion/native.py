@@ -434,7 +434,15 @@ def candidate_identity(settings: Settings) -> dict[str, object]:
         "rust/pdfium-binaries.json",
     ]
     source = root / "rust/crates/lumen-docintel/src"
+    local = Path(__file__).resolve()
     paths = [root / name for name in names] + sorted(source.rglob("*.rs"))
+    paths += [
+        local,
+        local.with_name("_pdf_pool.py"),
+        local.with_name("_pdf_worker.py"),
+        local.parents[1] / "services/ingestion_shadow.py",
+        local.parents[1] / "tasks/ingest.py",
+    ]
     digest = hashlib.sha256()
     extension = _extension()
     if extension is not None and extension.__file__:
@@ -442,6 +450,13 @@ def candidate_identity(settings: Settings) -> dict[str, object]:
         paths += sorted(
             p for p in package.iterdir() if p.suffix in {".pyd", ".so", ".dylib", ".py"}
         )
+        pin = package / "pdfium/pin.json"
+        if pin.is_file():
+            paths.append(pin)
+            manifest = json.loads(pin.read_text(encoding="utf-8"))
+            library = str(manifest.get("library", ""))
+            if library and Path(library).name == library:
+                paths.append(pin.parent / library)
     for path in paths:
         if not path.is_file():
             continue  # Wheels need no checkout: compiled module bytes are fingerprinted above.

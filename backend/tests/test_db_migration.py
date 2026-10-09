@@ -2165,6 +2165,7 @@ def test_offline_shadow_migration_round_trips(capsys):
     command.upgrade(cfg, "0047_ingestion_stages:0048_ingestion_shadow", sql=True)
     sql = capsys.readouterr().out.lower()
     assert "create table ingestion_shadow" in sql
+    assert "add column native_evidence_locked" in sql
     assert "force row level security" in sql and "with check" in sql
     assert "fk_ingestion_shadow_document_tenant" in sql and "uq_ingestion_shadow_sample" in sql
     command.downgrade(cfg, "0048_ingestion_shadow:0047_ingestion_stages", sql=True)

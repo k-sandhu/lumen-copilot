@@ -14,7 +14,11 @@ other native format adapters remain in their own issues. No new format is added.
 Route and candidate build/budget identity enter the extraction checkpoint key.
 Switching one format changes only its checkpoint identity; switching back to Python
 recomputes under the baseline identity. Native publication is limited to documents
-without existing chunks; existing evidence needs an immutable generation path.
+without previously published evidence.
+A permanent private publication fence blocks every later route (including Python
+rollback) once native evidence is Ready. Guard/claim share a document row lock.
+Unpublished native retries may resume only from a verified native extraction cache
+and with no citation references. Existing evidence needs an immutable generation path.
 
 Comparisons retain numeric/code diagnostics only: format, candidate outcome,
 evidence lengths, exact equality, positional code-point mismatch count, canonical

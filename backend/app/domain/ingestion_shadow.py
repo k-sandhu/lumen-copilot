@@ -42,10 +42,14 @@ class ShadowComparison:
     positional_mismatches: int
     block_count: int
     failure_code: str | None = None
+    baseline_failed: bool = False
 
     @classmethod
     def from_payload(cls, raw: dict[str, object]) -> ShadowComparison:
+        raw = dict(raw)
+        raw.setdefault("baseline_failed", False)
         expected = {
+            "baseline_failed",
             "source_format",
             "status",
             "baseline_chars",
@@ -65,6 +69,8 @@ class ShadowComparison:
         for name in ("baseline_chars", "candidate_chars", "positional_mismatches", "block_count"):
             if type(raw[name]) is not int or cast(int, raw[name]) < 0:
                 raise ValueError("invalid shadow counters")
+        if type(raw["baseline_failed"]) is not bool:
+            raise ValueError("invalid baseline diagnostic")
         if type(raw["exact_equal"]) is not bool or raw["failure_code"] not in {
             None,
             "native_unavailable",
@@ -85,10 +91,11 @@ class ShadowComparison:
             cast(str, raw["status"]),
             cast(int, raw["baseline_chars"]),
             cast(int, raw["candidate_chars"]),
-            cast(bool, raw["exact_equal"]),
+            raw["exact_equal"],
             cast(int, raw["positional_mismatches"]),
             cast(int, raw["block_count"]),
             cast(str | None, raw["failure_code"]),
+            raw["baseline_failed"],
         )
 
 
@@ -104,3 +111,7 @@ class ShadowRecord:
     id: UUID
     document_id: UUID
     comparison: ShadowComparison
+
+
+class NativeEvidenceLocked(Exception):
+    """Published evidence cannot be replaced without immutable generation policy."""

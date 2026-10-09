@@ -32,18 +32,24 @@ that generation activation/backfill has shipped.
 
 Reports summarize comparison records per format/outcome, exact matches and
 positional code-point mismatches. Counts include distinct profile samples of a
-document; retrying an identical sample is idempotent. These metrics are diagnostic,
+document; the first observation for each original/parser/budget fingerprint is
+retained. Retrying the same profile does not replace that observation or inflate
+counts; select a new profile to measure a changed build or budget. These metrics are diagnostic,
 not edit distance, extraction fidelity, retrieval or grounded-answer evaluation.
 A safe `ingestion.shadow_diagnostic_unrecorded` counter warns that persistence
 failed while the live baseline continued; investigate before treating report
-coverage as complete. Shadows of failed Python baseline extraction are not scored.
+coverage as complete. Failed Python baselines are recorded with `baseline_failed`;
+their original error is retained and equality is never claimed. Mismatch counts
+are zero when no baseline exists, not a claim of equality.
 
 After owner baseline evaluation approval, set a selected format to `native` only
 for fresh documents with no existing evidence. Incomplete/failed candidates fail
 closed. Existing evidence is refused until immutable generation policy is frozen.
 Rollback: return that format to `python`, restart workers, and retry affected
-fresh documents. Other formats retain their modes. Rollback does not retroactively
-rewrite an already published generation or citation. Parser removal is later work.
+fresh documents. Other formats retain their modes. A permanent publication fence
+prevents later automatic replacement of native evidence by any route, including
+rollback to Python. Unpublished native index failures may resume verified
+checkpoints when no citations refer to the work. Parser removal is later work.
 
 Migration 0048 depends on #726's 0047. Coordinate sibling draft migrations against
 origin/main 0046 before merge. Deployment/RLS/index validation remains a live gate.
