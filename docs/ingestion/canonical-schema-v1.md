@@ -27,6 +27,11 @@ identities, dependencies, and fingerprint/diagnostics/outcome metadata. Legacy
 unknown values stay null; metadata describes supplied provenance, not readiness.
 Python alone owns outcome publication, permissions, persistence and activation.
 
+Document-level container children are not represented by this v1 contract.
+The [container child-document proposal](container-children-proposal.md) (#682)
+defines a separate proposed bundle for owner review; it is not an implemented
+schema extension. `Block.parent_id` continues to refer only to another block.
+
 Render returns the document, exact `rendered_text` and one span per block. Offset
 units are Unicode scalar values (Python str code points for valid Unicode);
 unpaired surrogates are rejected by JSON/native input validation. Empty block
