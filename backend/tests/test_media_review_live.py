@@ -23,6 +23,8 @@ from sqlalchemy import Connection, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from tests._live_helpers import isolated_live_url, worker_database_name
+
 import app.tasks  # noqa: F401  isort: skip — initialize task registry before upload service
 
 from app.api.v2.uploads import _commit_rejection
@@ -52,7 +54,10 @@ from app.storage import UploadedPart
 from app.tasks.upload_janitor import _recovery_service, sweep_expired_uploads_async
 from tests.test_direct_upload_api import FakeMultipartStore
 
-_URL = "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr604"
+_URL = isolated_live_url(
+    "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr604"
+)
+_LIVE_DB = worker_database_name(_URL.rsplit("/", 1)[-1])
 _BACKEND = Path(__file__).resolve().parents[1]
 pytestmark = [
     pytest.mark.live,
@@ -69,7 +74,7 @@ def _config() -> Config:
     return cfg
 
 
-async def _admin(database: str = "lumentest_pr604") -> asyncpg.Connection:
+async def _admin(database: str = _LIVE_DB) -> asyncpg.Connection:
     return await asyncpg.connect(
         user="lumen", password="lumen_local_dev", host="localhost", port=47182, database=database
     )
@@ -83,8 +88,8 @@ def live_database() -> Iterator[str]:
     async def reset() -> None:
         connection = await _admin("postgres")
         try:
-            await connection.execute("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)")
-            await connection.execute("CREATE DATABASE lumentest_pr604")
+            await connection.execute(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)")
+            await connection.execute(f"CREATE DATABASE {_LIVE_DB}")
         finally:
             await connection.close()
 
@@ -103,7 +108,7 @@ def live_database() -> Iterator[str]:
     async def cleanup() -> None:
         connection = await _admin("postgres")
         try:
-            await connection.execute("DROP DATABASE IF EXISTS lumentest_pr604 WITH (FORCE)")
+            await connection.execute(f"DROP DATABASE IF EXISTS {_LIVE_DB} WITH (FORCE)")
             await connection.execute(f"DROP ROLE IF EXISTS {role}")
         finally:
             await connection.close()
