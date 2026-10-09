@@ -4,7 +4,7 @@ Status: durable stage implementation; proposed wire contract. ADR-0006
 review/freeze precedes endpoint code.
 
 Python owns orchestration, authorization, storage/network/model calls, audit and
-generation activation. Persist detect, extract, normalize, classify, chunk, embed
+generation activation. Persist detect, extract, ocr, normalize, classify, chunk, embed
 and index stage outputs in the existing tenant database, keyed by source content
 and each stage's own configuration/build plus upstream artifact checksum. Cache
 data is operational, not a new historical-citation retention policy. A source or
@@ -101,3 +101,15 @@ and real platform parity remain unverified under this session's constraints.
 The grounded offline upload/chat fixture explicitly configures the dimension of
 its deterministic embedding adapter. Checkpoint validation continues to require
 uniform finite vectors of the configured width; production defaults are unchanged.
+
+
+## Selective OCR stage amendment — #695 (2026-10-09)
+
+ADR-0029 adds an OCR checkpoint immediately after extract. The upstream checksum,
+provider/model/profile and current trusted tenant approval/limits determine its
+fingerprint. Ordinary digital text is preserved. Disabled, unavailable or incomplete
+OCR stores needs_ocr and fails with an owner-visible needs_ocr reason before chunk,
+embed or index. Retrying a paid page uses the separate tenant/hash/engine cache;
+restart clears operational stages but never erases paid-page accounting. OCR chunks
+carry a machine-read marker through permissioned retrieval and live/stored citations.
+The historical seven-stage verification above records #669, not an OCR verification.

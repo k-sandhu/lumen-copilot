@@ -82,6 +82,7 @@ class PassageRow:
     speaker_name: str | None
     ingestion_attempt: int
     embedding_fingerprint: str | None
+    machine_read: bool = False
 
 
 def _valid_passage_provenance(row: PassageRow) -> bool:
@@ -436,6 +437,7 @@ def _base_chunk_select() -> (
             str | None,
             int,
             str | None,
+            bool,
         ]
     ]
 ):
@@ -463,6 +465,7 @@ def _base_chunk_select() -> (
             models.Chunk.speaker_name,
             models.Document.ingestion_attempts,
             models.Chunk.embedding_fingerprint,
+            models.Chunk.machine_read,
         )
         .join(models.Document, models.Chunk.document_id == models.Document.id)
         .outerjoin(
@@ -576,6 +579,7 @@ async def load_passages(
         speaker_name,
         ingestion_attempt,
         embedding_fingerprint,
+        machine_read,
     ) in result.all():
         row = PassageRow(
             chunk_id=cid,
@@ -595,6 +599,7 @@ async def load_passages(
             speaker_name=speaker_name,
             ingestion_attempt=ingestion_attempt,
             embedding_fingerprint=embedding_fingerprint,
+            machine_read=machine_read,
         )
         if _valid_passage_provenance(row):
             rows[cid] = row

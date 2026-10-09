@@ -39,3 +39,5 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 | [0027](0027-rust-ingestion-core.md) | Rust ingestion core behind the Python backend | Proposed — foundation; evaluation before merge |
 
 > The remaining `.claude/` harness work (OD-6 remainder) is tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). CI (OD-7) closed through #655 and ADR-0026. Each costly, non-obvious choice gets its own ADR before code lands.
+
+- [ADR-0029 — Selective hosted OCR](0029-selective-hosted-ocr.md): proposed in #695; default OFF, tenant consent, durable paid-page cache, budget/audit and exact machine-read evidence.

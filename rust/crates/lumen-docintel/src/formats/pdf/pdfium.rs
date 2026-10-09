@@ -267,3 +267,45 @@ fn rules(
     }
     Ok(())
 }
+
+/// Single-page PDF preprocessing, private OS-limited worker only.
+pub fn split_page(
+    bytes: &[u8],
+    library: &str,
+    page: usize,
+    ctx: &Context,
+) -> Result<String, CoreError> {
+    ctx.input(bytes.len())?;
+    let _memory = ctx.reserve(bytes.len().checked_mul(8).ok_or(CoreError::Budget)?)?;
+    if page == 0 || !bytes.starts_with(b"%PDF-") {
+        return Err(CoreError::InvalidInput);
+    }
+    let pdfium = Pdfium::new(Pdfium::bind_to_library(library).map_err(|_| CoreError::Unsupported)?);
+    let source = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(error)?;
+    if !matches!(
+        source.permissions().security_handler_revision(),
+        Ok(PdfSecurityHandlerRevision::Unprotected)
+    ) {
+        return Err(CoreError::Encrypted);
+    }
+    if page > source.pages().len() as usize {
+        return Err(CoreError::InvalidInput);
+    }
+    ctx.work(1)?;
+    let mut destination = pdfium.create_new_pdf().map_err(error)?;
+    destination
+        .pages_mut()
+        .copy_page_from_document(&source, (page - 1) as i32, 0)
+        .map_err(error)?;
+    ctx.checkpoint()?;
+    let output = destination.save_to_bytes().map_err(error)?;
+    let _output = ctx.reserve(output.len().checked_mul(3).ok_or(CoreError::Budget)?)?;
+    ctx.output(output.len())?;
+    let hex = output
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    serde_json::to_string(&json!({"page":page,"pdf_hex":hex})).map_err(|_| CoreError::Internal)
+}

@@ -391,7 +391,7 @@ class IngestionStageOutput(TenantScopedMixin, TimestampMixin, Base):
         ),
         UniqueConstraint("tenant_id", "document_id", "stage", name="uq_ingestion_stage_document"),
         CheckConstraint(
-            "stage IN ('detect','extract','normalize','classify','chunk','embed','index')",
+            "stage IN ('detect','extract','ocr','normalize','classify','chunk','embed','index')",
             name="ck_ingestion_stage_name",
         ),
         CheckConstraint(
@@ -519,6 +519,9 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     )
     speaker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     speaker_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    machine_read: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 
@@ -2242,3 +2245,52 @@ class SessionSummary(TenantScopedMixin, TimestampMixin, Base):
     # read path can redact names of no-longer-permitted documents (#446 f.1).
     mentioned_documents: Mapped[dict[str, str] | None] = mapped_column(_JSON, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class OcrTenantPolicy(TenantScopedMixin, TimestampMixin, Base):
+    """Lifetime tenant OCR approval, held spend and cross-worker concurrency."""
+
+    __tablename__ = "ocr_tenant_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_ocr_policy_tenant"),
+        CheckConstraint(
+            "page_limit >= 0 AND pages_used >= 0 AND budget_microusd >= 0 "
+            "AND cost_used_microusd >= 0 AND active_calls >= 0 "
+            "AND concurrency >= 1 AND concurrency <= 16 AND ceiling_microusd > 0",
+            name="ck_ocr_policy_budgets",
+        ),
+        CheckConstraint(
+            "NOT enabled OR (approved_by IS NOT NULL AND page_limit > 0 AND budget_microusd > 0)",
+            name="ck_ocr_policy_approval",
+        ),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    page_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pages_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    budget_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cost_used_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    ceiling_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=10000)
+    concurrency: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    active_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class OcrPageCache(TenantScopedMixin, TimestampMixin, Base):
+    """A paid/possibly-paid page; never automatically delete and repay."""
+
+    __tablename__ = "ocr_page_cache"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "content_sha256", "engine_id", name="uq_ocr_page_identity"),
+        CheckConstraint("state IN ('pending','complete','unknown')", name="ck_ocr_page_state"),
+        CheckConstraint("reserved_microusd > 0", name="ck_ocr_page_reservation"),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    engine_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    reserved_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(64), nullable=True)

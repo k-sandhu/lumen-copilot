@@ -162,6 +162,7 @@ class CitationResponse(BaseModel):
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    machine_read: bool | None = None
     score: float | None = None
     #: True when the caller may no longer retrieve the cited document (#536), in
     #: which case `snippet` and `document_name` are empty. The row is kept so a
@@ -341,6 +342,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         transcript_segment_id=view.transcript_segment_id if disclose_media else None,
         speaker_id=view.speaker_id if disclose_media else None,
         speaker_name=view.speaker_name if disclose_media else None,
+        machine_read=view.machine_read if not view.redacted and view.machine_read else None,
         score=view.score,
         redacted=view.redacted,
     )

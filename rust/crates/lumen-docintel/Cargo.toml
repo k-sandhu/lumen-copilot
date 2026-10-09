@@ -26,5 +26,8 @@ tokenizers.workspace = true
 unicode-normalization.workspace = true
 whatlang.workspace = true
 
+image.workspace = true
+tiff.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true

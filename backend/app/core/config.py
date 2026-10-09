@@ -472,6 +472,10 @@ class Settings(PasswordHashingSettings):
         default=frozenset(
             {
                 "application/pdf",
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/tiff",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # pptx
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
@@ -1011,6 +1015,13 @@ class Settings(PasswordHashingSettings):
     native_pdf_workers: int = Field(default=0, ge=0, le=64)
     native_pdf_worker_memory_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
     native_pdf_pool_memory_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
+    # Hosted OCR requires a separate explicit tenant approval row.
+    ocr_enabled: bool = False
+    ocr_model: str = ""
+    ocr_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    ocr_max_page_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
+    ocr_max_response_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
+    ocr_concurrency: int = Field(default=1, ge=1, le=16)
     native_ingestion_tokenizer_path: str = ""
     native_ingestion_tokenizer_sha256: str = ""
     native_ingestion_tokenizer_model: str = ""

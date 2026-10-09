@@ -1,0 +1,35 @@
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Discard this model answer",
+        "annotations": [
+          {
+            "type": "file",
+            "file": {
+              "hash": "generated-only",
+              "name": "page-0003.pdf",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Generated café 😀 é"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data:image/png;base64,AA=="
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 1,
+    "cost": 0.00201
+  }
+}

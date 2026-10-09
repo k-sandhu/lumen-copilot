@@ -198,6 +198,7 @@ export function ChatView() {
                 openViewer({
                   documentId: citation.documentId,
                   documentName: citation.documentName,
+                  machineRead: citation.machine_read,
                   charStart: citation.charStart,
                   charEnd: citation.charEnd,
                   snippet: citation.snippet,

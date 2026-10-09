@@ -52,6 +52,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -99,15 +100,19 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
+from app.ingestion.native import _default_pdf_executor, extract_ocr_candidate, render_canonical
 from app.ingestion.stage_identity import parser_identity
 from app.llm import InvalidTranscriptionResponse, LLMGateway
+from app.llm.ocr import OpenRouterOcrProvider
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
 from app.services.ingestion_stages import CheckpointPipeline
+from app.services.ocr import OcrService, ocr_identity
 from app.storage import ObjectStore
 from app.tasks.celery_app import celery_app
 from app.tasks.index_sync import sync_document_index_async
 from app.tasks.ingestion_stages import DurableStageStore
+from app.tasks.ocr import DurableOcrLedger
 from app.tasks.runner import run_task
 
 
@@ -415,14 +420,42 @@ async def _ingest_claimed_document(
         compute=detect_stage,
     )
 
+    ledger = DurableOcrLedger(tenant_id, document_id, attempt)
+    # Pure text controls avoid even a policy DB read; OCR is a PDF/image capability.
+    eligible = mime_type.split(";", 1)[0].strip().lower() in {
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/tiff",
+    }
+    policy = await ledger.policy() if eligible else None
+
     async def extract_stage() -> dict[str, object]:
-        return {"text": parse_document(data, mime_type=mime_type), "source_sha256": source_sha256}
+        if eligible:
+            return {
+                **extract_ocr_candidate(
+                    data,
+                    mime_type=mime_type,
+                    enabled=settings.ocr_enabled and bool(policy and policy.enabled),
+                ),
+                "source_sha256": source_sha256,
+            }
+        return {
+            "text": parse_document(data, mime_type=mime_type),
+            "source_sha256": source_sha256,
+            "needs_ocr": False,
+            "canonical_json": None,
+        }
 
     try:
         extracted = await stages.run(
             "extract",
             upstream=detected.output_sha256,
-            config=parser_identity(mime_type),
+            config={
+                **parser_identity(mime_type),
+                "ocr_candidate": settings.ocr_enabled and bool(policy and policy.enabled),
+            },
             compute=extract_stage,
         )
         text = str(json.loads(extracted.payload_json)["text"])
@@ -436,13 +469,74 @@ async def _ingest_claimed_document(
             correlation_id=correlation_id,
         )
 
+    extracted_payload = json.loads(extracted.payload_json)
+
+    async def ocr_stage() -> dict[str, object]:
+        payload = dict(extracted_payload)
+        payload["machine_read_spans"] = []
+        if not payload.get("needs_ocr"):
+            return payload
+        if not settings.ocr_enabled or policy is None or not policy.enabled:
+            payload["ocr_reason"] = "ocr_disabled"
+            return payload
+        if not settings.openrouter_api_key.strip() or not settings.ocr_model.strip():
+            payload["ocr_reason"] = "ocr_unconfigured"
+            return payload
+        raw = payload.get("canonical_json")
+        if not isinstance(raw, str):
+            payload["ocr_reason"] = "ocr_native_unavailable"
+            return payload
+        document = render_canonical(raw)
+        executor, budget = _default_pdf_executor(os.getpid())
+
+        def prepare(page: int) -> bytes:
+            return executor.prepare_ocr_page(
+                data, page=page, image=mime_type.startswith("image/"), budget=budget
+            )
+
+        document, reason = await OcrService(
+            OpenRouterOcrProvider(settings), ledger, concurrency=settings.ocr_concurrency
+        ).run(document, prepare)
+        payload.update(
+            {
+                "text": document.rendered_text,
+                "canonical_json": document.document_json,
+                "needs_ocr": json.loads(document.generation_json)["outcome"] != "indexed",
+                "ocr_reason": reason,
+                "machine_read_spans": [
+                    asdict(span)
+                    for span, block in zip(document.spans, document.blocks, strict=True)
+                    if block.origin == "ocr"
+                ],
+            }
+        )
+        return payload
+
+    processed = await stages.run(
+        "ocr",
+        upstream=extracted.output_sha256,
+        config=ocr_identity(settings, policy),
+        compute=ocr_stage,
+    )
+    processed_payload = json.loads(processed.payload_json)
+    text = str(processed_payload["text"])
+    if processed_payload.get("needs_ocr"):
+        return await _finalize_failure(
+            tenant_id,
+            document_id,
+            "Document needs OCR. Hosted OCR is disabled, unavailable, incomplete or over budget.",
+            expected_attempt=attempt,
+            code="needs_ocr",
+            correlation_id=correlation_id,
+        )
+
     async def preserve_stage() -> dict[str, object]:
         # Production normalization/classification policy remains in its owning issues.
         return {"text": text, "policy": "python-preserved-1"}
 
     normalized = await stages.run(
         "normalize",
-        upstream=extracted.output_sha256,
+        upstream=processed.output_sha256,
         config={"policy": "python-preserved-1"},
         compute=preserve_stage,
     )
@@ -620,6 +714,10 @@ async def _ingest_claimed_document(
             char_start=chunk.char_start,
             char_end=chunk.char_end,
             embedding=embedding.vector,
+            machine_read=any(
+                span["char_start"] < chunk.char_end and chunk.char_start < span["char_end"]
+                for span in processed_payload.get("machine_read_spans", [])
+            ),
             embedding_fingerprint=settings.embedding_space_fingerprint,
         )
         for chunk, embedding in zip(chunks, embeddings, strict=True)

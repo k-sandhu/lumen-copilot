@@ -53,6 +53,7 @@ async def test_embedding_fault_retry_reuses_extraction(sqlite_engine, monkeypatc
         assert [s.stage for s in stages] == [
             "detect",
             "extract",
+            "ocr",
             "normalize",
             "classify",
             "chunk",
@@ -171,7 +172,7 @@ async def test_index_fault_reuses_embeddings_and_republishes_current_attempt(
     async with db_session.tenant_session_scope(tenant) as session:
         events = (await session.execute(select(models.AuditEvent))).scalars().all()
         stage_events = [e for e in events if e.action == "document.processing_stage_completed"]
-        assert len(stage_events) == 7
+        assert len(stage_events) == len(STAGES)
         assert all(
             set(e.event_metadata) == {"stage", "fingerprint", "output_sha256"} for e in stage_events
         )

@@ -291,6 +291,31 @@ impl NativeRuntime {
 #[pyclass(frozen)]
 struct DocumentSession(lumen_docintel_core::runtime::Context);
 
+#[pyfunction]
+fn merge_ocr(py: Python<'_>, document: String, results: String) -> PyResult<String> {
+    compute(py, || {
+        lumen_docintel_core::ocr::merge_json(&document, &results)
+    })
+}
+#[pyfunction]
+fn _prepare_ocr_worker(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    library: String,
+    page: usize,
+    budget_json: String,
+) -> PyResult<String> {
+    let bytes = data.as_bytes();
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::context_json(&budget_json, Default::default())?;
+        if page == 0 {
+            lumen_docintel_core::ocr_image::wrap(bytes, &ctx)
+        } else {
+            lumen_docintel_core::formats::pdf::pdfium::split_page(bytes, &library, page, &ctx)
+        }
+    })
+}
+
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
@@ -298,6 +323,8 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<DocIntelEncryptedError>(),
     )?;
     m.add_function(wrap_pyfunction!(_extract_pdfium_worker, m)?)?;
+    m.add_function(wrap_pyfunction!(_prepare_ocr_worker, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_ocr, m)?)?;
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
     m.add(
         "DocIntelInvalidInputError",

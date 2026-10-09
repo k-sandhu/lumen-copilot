@@ -3614,7 +3614,7 @@ components:
 
     IngestionStage:
       type: string
-      enum: [detect, extract, normalize, classify, chunk, embed, index]
+      enum: [detect, extract, ocr, normalize, classify, chunk, embed, index]
 
     DocumentProcessingControl:
       type: object
@@ -4431,6 +4431,8 @@ components:
         - collection.deleted
         - document.deleted
         - document.downloaded
+        - document.ocr_requested
+        - document.ocr_completed
         - document.processing_stage_completed
         - document.transcribed
         - document.upload_aborted

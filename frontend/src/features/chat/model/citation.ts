@@ -35,6 +35,7 @@ export interface UiCitation {
   snippet: string;
   charStart: number;
   charEnd: number;
+  machineRead?: boolean;
   timeStartMs?: number;
   timeEndMs?: number;
   transcriptSegmentId?: string;
@@ -128,6 +129,7 @@ export function fromRestCitation(c: Citation & WebCitationExtras): UiCitation {
     snippet: c.snippet,
     charStart: c.char_start,
     charEnd: c.char_end,
+    ...(c.machine_read ? { machineRead: true } : {}),
     ...media,
     ...(c.score !== undefined ? { score: c.score } : {}),
     ...(c.redacted ? { redacted: true } : {}),
@@ -164,6 +166,7 @@ export function fromWsCitation(c: ChatCitation & WebCitationExtras): UiCitation 
     snippet: c.snippet,
     charStart: c.charStart,
     charEnd: c.charEnd,
+    ...(c.machineRead ? { machineRead: true } : {}),
     ...(c.timeStartMs !== undefined ? { timeStartMs: c.timeStartMs } : {}),
     ...(c.timeEndMs !== undefined ? { timeEndMs: c.timeEndMs } : {}),
     ...(c.transcriptSegmentId !== undefined ? { transcriptSegmentId: c.transcriptSegmentId } : {}),

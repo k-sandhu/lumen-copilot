@@ -52,6 +52,8 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "document.uploaded",
         "document.transcribed",
         "document.processing_stage_completed",
+        "document.ocr_requested",
+        "document.ocr_completed",
         "document.viewed",
         "document.downloaded",
         "document.deleted",

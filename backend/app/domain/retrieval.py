@@ -53,6 +53,7 @@ class RetrievedPassage:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    machine_read: bool = False
 
 
 @dataclass(frozen=True, slots=True)

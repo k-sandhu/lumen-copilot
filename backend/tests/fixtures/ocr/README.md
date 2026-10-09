@@ -1,0 +1,1 @@
+Synthetic schema fixtures based on the OpenRouter PDF docs, verified 2026-10-09. All text is generated here. No live requests were recorded. Responses exercise success and parsed-annotation recovery after inference failure.

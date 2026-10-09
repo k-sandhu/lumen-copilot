@@ -378,6 +378,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
  * is true and `snippet`/`document_name` come back empty.
  */
 export interface Citation {
+  machine_read?: boolean;
   id: string;
   document_id: string;
   document_name: string;
@@ -715,6 +716,8 @@ export const AUDIT_EVENT_TYPES = [
   'collection.deleted',
   'document.deleted',
   'document.downloaded',
+  'document.ocr_requested',
+  'document.ocr_completed',
   'document.processing_stage_completed',
   'document.transcribed',
   'document.upload_aborted',
@@ -1988,6 +1991,7 @@ export interface ChatTokenDelta {
  * resolving to the document + span.
  */
 export interface ChatCitation {
+  machineRead?: boolean;
   id: string;
   documentId: string;
   documentName: string;

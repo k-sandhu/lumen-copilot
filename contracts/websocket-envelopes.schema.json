@@ -2,25 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lumen-copilot/contracts/websocket-envelopes.schema.json",
   "title": "Lumen Copilot WebSocket envelope",
-  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 \u00a78, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The terminal is the last envelope that SETTLES the stream. One narrow exception (chat, #489): a terminal `done` MAY declare `data.pendingSuggestions=true`, in which case at most one `event:suggestions` envelope may still follow it within a bounded server-side grace window; the subscription holds open for that one post-terminal event and then closes. There is still exactly one terminal, it is still `done`, and nothing else may follow it. The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
+  "description": "Transport framing for ALL WebSocket traffic (ADR-0003 §8, contracts/AGENTS.md). Every message is an envelope discriminated by `type`. Concrete product event payloads are slotted into `data` per `type`. Stream lifecycle: start -> (delta | event)* -> done | error, with exactly one terminal (done|error). The terminal is the last envelope that SETTLES the stream. One narrow exception (chat, #489): a terminal `done` MAY declare `data.pendingSuggestions=true`, in which case at most one `event:suggestions` envelope may still follow it within a bounded server-side grace window; the subscription holds open for that one post-terminal event and then closes. There is still exactly one terminal, it is still `done`, and nothing else may follow it. The chat feature's payloads (issue #37, CC-6 #24 / CC-11 #26) are defined under $defs and mapped by x-chatStream.",
   "$defs": {
     "BaseEnvelope": {
       "type": "object",
-      "required": [
-        "type",
-        "streamId",
-        "seq"
-      ],
+      "required": ["type", "streamId", "seq"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": [
-            "start",
-            "delta",
-            "event",
-            "done",
-            "error"
-          ],
+          "enum": ["start", "delta", "event", "done", "error"],
           "description": "Discriminator for the envelope kind."
         },
         "streamId": {
@@ -40,81 +30,43 @@
       }
     },
     "Start": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/BaseEnvelope"
-        }
-      ],
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
       "properties": {
-        "type": {
-          "const": "start"
-        },
+        "type": { "const": "start" },
         "data": {
           "type": "object",
           "description": "Stream-open metadata; shape defined per feature (chat: ChatStartData)."
         }
       },
-      "required": [
-        "type",
-        "streamId",
-        "seq"
-      ]
+      "required": ["type", "streamId", "seq"]
     },
     "Delta": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/BaseEnvelope"
-        }
-      ],
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
       "properties": {
-        "type": {
-          "const": "delta"
-        },
+        "type": { "const": "delta" },
         "data": {
           "description": "Incremental output (e.g. a token chunk). Payload shape defined per feature (chat: ChatTokenDelta). Chunk boundaries are NOT semantic: the server may coalesce adjacent chunks into one delta (#487). Clients must concatenate in seq order and must not assume any relationship between delta count and provider tokens."
         }
       },
-      "required": [
-        "type",
-        "streamId",
-        "seq",
-        "data"
-      ]
+      "required": ["type", "streamId", "seq", "data"]
     },
     "Event": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/BaseEnvelope"
-        }
-      ],
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
       "properties": {
-        "type": {
-          "const": "event"
-        },
+        "type": { "const": "event" },
         "name": {
           "type": "string",
-          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry reusable sandbox output/outcome, ADR-0020 #457), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status \u2014 ADR-0016 \u00a76 #414), answer_retract (a speculative-streaming retraction \u2014 ADR-0016 \u00a76 #488; carries no data). MEANING of answer_retract: every answer-text `delta` delivered so far for the CURRENTLY streaming assistant turn was NOT answer text \u2014 discard it and reset the live answer to empty. It is well-defined as a WHOLE-TURN retraction because at most one un-finalised speculative answer block can exist at any instant: a tool-free turn ends the answer, so once a turn's text is finalised as the answer no retraction can follow it, and the ONLY live answer deltas at any moment are those of the current speculative turn. After a retraction the same text is normally re-emitted as event:narration (the transient affordance clients already use for #414), so no content is lost \u2014 only its classification (answer\u2192narration) is corrected. Clients MUST ignore unknown names (forward compatibility)."
+          "description": "Structured side-band event name. Chat vocabulary: citation, tool_call, tool_result, code_output, code_result (the last two carry reusable sandbox output/outcome, ADR-0020 #457), step (live run-phase progress, spec 0006 #429), ask_user (the model's clarifying question, spec 0006 #429), suggestions (follow-up questions after the answer, spec 0006 #429), narration (a tool-calling turn's visible narration text, transient status — ADR-0016 §6 #414), answer_retract (a speculative-streaming retraction — ADR-0016 §6 #488; carries no data). MEANING of answer_retract: every answer-text `delta` delivered so far for the CURRENTLY streaming assistant turn was NOT answer text — discard it and reset the live answer to empty. It is well-defined as a WHOLE-TURN retraction because at most one un-finalised speculative answer block can exist at any instant: a tool-free turn ends the answer, so once a turn's text is finalised as the answer no retraction can follow it, and the ONLY live answer deltas at any moment are those of the current speculative turn. After a retraction the same text is normally re-emitted as event:narration (the transient affordance clients already use for #414), so no content is lost — only its classification (answer→narration) is corrected. Clients MUST ignore unknown names (forward compatibility)."
         },
         "data": {}
       },
-      "required": [
-        "type",
-        "streamId",
-        "seq",
-        "name"
-      ],
+      "required": ["type", "streamId", "seq", "name"],
       "if": {
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "name": {
-            "const": "answer_retract"
-          }
-        }
+        "required": ["name"],
+        "properties": { "name": { "const": "answer_retract" } }
       },
       "then": {
-        "$comment": "answer_retract carries NO data (#488/BE-6): a whole-turn retraction is fully specified by its name, so an exact shape (base envelope fields + name, nothing else) is enforced \u2014 a `data` payload or any unexpected top-level property is rejected rather than silently accepted. Scoped to answer_retract; every other event name is unaffected and may carry `data`.",
+        "$comment": "answer_retract carries NO data (#488/BE-6): a whole-turn retraction is fully specified by its name, so an exact shape (base envelope fields + name, nothing else) is enforced — a `data` payload or any unexpected top-level property is rejected rather than silently accepted. Scoped to answer_retract; every other event name is unaffected and may carry `data`.",
         "properties": {
           "type": true,
           "streamId": true,
@@ -126,80 +78,42 @@
       }
     },
     "Done": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/BaseEnvelope"
-        }
-      ],
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
       "properties": {
-        "type": {
-          "const": "done"
-        },
+        "type": { "const": "done" },
         "data": {
           "type": "object",
-          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData). The terminal that settles the stream. Chat (#489) may set `data.pendingSuggestions=true` to signal that one post-terminal `event:suggestions` may still follow within a bounded grace window (see the root description); absent/false \u21d2 the stream stops at this terminal."
+          "description": "Terminal success summary; shape defined per feature (chat: ChatDoneData). The terminal that settles the stream. Chat (#489) may set `data.pendingSuggestions=true` to signal that one post-terminal `event:suggestions` may still follow within a bounded grace window (see the root description); absent/false ⇒ the stream stops at this terminal."
         }
       },
-      "required": [
-        "type",
-        "streamId",
-        "seq"
-      ]
+      "required": ["type", "streamId", "seq"]
     },
     "Error": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/BaseEnvelope"
-        }
-      ],
+      "allOf": [{ "$ref": "#/$defs/BaseEnvelope" }],
       "properties": {
-        "type": {
-          "const": "error"
-        },
+        "type": { "const": "error" },
         "problem": {
           "type": "object",
           "description": "Same problem model as the REST error shape (openapi.yaml #/components/schemas/Problem).",
-          "required": [
-            "title",
-            "status"
-          ],
+          "required": ["title", "status"],
           "properties": {
-            "title": {
-              "type": "string"
-            },
-            "status": {
-              "type": "integer"
-            },
-            "detail": {
-              "type": "string"
-            },
-            "code": {
-              "type": "string"
-            }
+            "title": { "type": "string" },
+            "status": { "type": "integer" },
+            "detail": { "type": "string" },
+            "code": { "type": "string" }
           }
         }
       },
-      "required": [
-        "type",
-        "streamId",
-        "seq",
-        "problem"
-      ]
+      "required": ["type", "streamId", "seq", "problem"]
     },
+
     "ChatStartData": {
       "type": "object",
       "additionalProperties": false,
       "description": "`start.data` for a chat answer stream.",
-      "required": [
-        "sessionId",
-        "messageId",
-        "model"
-      ],
+      "required": ["sessionId", "messageId", "model"],
       "properties": {
-        "sessionId": {
-          "type": "string",
-          "format": "uuid"
-        },
+        "sessionId": { "type": "string", "format": "uuid" },
         "messageId": {
           "type": "string",
           "format": "uuid",
@@ -207,211 +121,107 @@
         },
         "model": {
           "type": "string",
-          "description": "The REQUESTED model id (#413): the id the session/send chose. After a mid-answer failover the model that actually produced the answer may differ \u2014 done.model is authoritative for attribution."
+          "description": "The REQUESTED model id (#413): the id the session/send chose. After a mid-answer failover the model that actually produced the answer may differ — done.model is authoritative for attribution."
         }
       }
     },
     "ChatTokenDelta": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`delta.data` \u2014 one streamed chunk of the assistant answer.",
-      "required": [
-        "text"
-      ],
-      "properties": {
-        "text": {
-          "type": "string"
-        }
-      }
+      "description": "`delta.data` — one streamed chunk of the assistant answer.",
+      "required": ["text"],
+      "properties": { "text": { "type": "string" } }
     },
     "ChatCitation": {
       "type": "object",
       "additionalProperties": false,
       "description": "`event.data` for name=citation. Mirrors openapi Citation (spec 0004 INV-3 / spec 0008): a permitted passage the answer cites. Media citations additionally carry a paired player-relative millisecond span and transcript segment so the UI can seek the original audio/video.",
-      "required": [
-        "id",
-        "documentId",
-        "documentName",
-        "chunkId",
-        "snippet",
-        "charStart",
-        "charEnd"
-      ],
+      "required": ["id", "documentId", "documentName", "chunkId", "snippet", "charStart", "charEnd"],
       "dependentRequired": {
-        "timeStartMs": [
-          "timeEndMs"
-        ],
-        "timeEndMs": [
-          "timeStartMs"
-        ]
+        "timeStartMs": ["timeEndMs"],
+        "timeEndMs": ["timeStartMs"]
       },
       "properties": {
-        "id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "documentId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "documentName": {
-          "type": "string"
-        },
-        "chunkId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "snippet": {
-          "type": "string"
-        },
-        "charStart": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "charEnd": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "timeStartMs": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "timeEndMs": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "transcriptSegmentId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "speakerId": {
-          "type": "string"
-        },
-        "speakerName": {
-          "type": "string"
-        },
-        "score": {
-          "type": "number"
-        },
-        "machineRead": {
-          "type": "boolean",
-          "description": "OCR evidence; label machine-read."
-        }
+        "id": { "type": "string", "format": "uuid" },
+        "documentId": { "type": "string", "format": "uuid" },
+        "documentName": { "type": "string" },
+        "chunkId": { "type": "string", "format": "uuid" },
+        "snippet": { "type": "string" },
+        "machineRead": { "type": "boolean", "description": "OCR evidence; label machine-read." },
+        "charStart": { "type": "integer", "minimum": 0 },
+        "charEnd": { "type": "integer", "minimum": 0 },
+        "timeStartMs": { "type": "integer", "minimum": 0 },
+        "timeEndMs": { "type": "integer", "minimum": 1 },
+        "transcriptSegmentId": { "type": "string", "format": "uuid" },
+        "speakerId": { "type": "string" },
+        "speakerName": { "type": "string" },
+        "score": { "type": "number" }
       }
     },
     "ChatToolCall": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=tool_call \u2014 the agent invoked a governed tool (CC-6 #24 / CC-7 #207). Surfaced so the UI can show 'searching\u2026'. Every call is permission-filtered + allow-list-checked + audited via the tool registry (INV-2/INV-6).",
-      "required": [
-        "callId",
-        "tool",
-        "args"
-      ],
+      "description": "`event.data` for name=tool_call — the agent invoked a governed tool (CC-6 #24 / CC-7 #207). Surfaced so the UI can show 'searching…'. Every call is permission-filtered + allow-list-checked + audited via the tool registry (INV-2/INV-6).",
+      "required": ["callId", "tool", "args"],
       "properties": {
-        "callId": {
-          "type": "string"
-        },
+        "callId": { "type": "string" },
         "tool": {
           "type": "string",
-          "description": "The registered tool name (CC-7 #207 \u2014 the tool set is open-ended). MVP retrieval tools: search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; list_documents = enumerate the documents the user can access (no query); get_document = fetch a permitted document's text."
+          "description": "The registered tool name (CC-7 #207 — the tool set is open-ended). MVP retrieval tools: search_text = hybrid semantic+lexical passage search; search_documents = by filename/metadata; list_documents = enumerate the documents the user can access (no query); get_document = fetch a permitted document's text."
         },
-        "args": {
-          "type": "object",
-          "description": "Tool arguments (shape per tool)."
-        }
+        "args": { "type": "object", "description": "Tool arguments (shape per tool)." }
       }
     },
     "ChatToolResult": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=tool_result \u2014 outcome of a tool_call (CC-7 #207). A denied (off-allow-list / unapproved) or failing tool is reported as ok=false with a typed error, never a crashed stream.",
-      "required": [
-        "callId",
-        "tool",
-        "hitCount"
-      ],
+      "description": "`event.data` for name=tool_result — outcome of a tool_call (CC-7 #207). A denied (off-allow-list / unapproved) or failing tool is reported as ok=false with a typed error, never a crashed stream.",
+      "required": ["callId", "tool", "hitCount"],
       "properties": {
-        "callId": {
-          "type": "string"
-        },
+        "callId": { "type": "string" },
         "tool": {
           "type": "string",
-          "description": "The registered tool name (CC-7 #207 \u2014 the tool set is open-ended)."
+          "description": "The registered tool name (CC-7 #207 — the tool set is open-ended)."
         },
-        "hitCount": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "summary": {
-          "type": "string",
-          "description": "Optional human-readable result summary."
-        },
-        "ok": {
-          "type": "boolean",
-          "description": "Whether the tool succeeded. Absent \u21d2 treat as ok (back-compat). Additive (CC-7 #207)."
-        },
-        "error": {
-          "type": "string",
-          "description": "Typed error code when ok=false (e.g. tool_not_permitted, approval_denied, tool_error, tool_timeout). Additive (CC-7 #207)."
-        }
+        "hitCount": { "type": "integer", "minimum": 0 },
+        "summary": { "type": "string", "description": "Optional human-readable result summary." },
+        "ok": { "type": "boolean", "description": "Whether the tool succeeded. Absent ⇒ treat as ok (back-compat). Additive (CC-7 #207)." },
+        "error": { "type": "string", "description": "Typed error code when ok=false (e.g. tool_not_permitted, approval_denied, tool_error, tool_timeout). Additive (CC-7 #207)." }
       }
     },
     "ChatDoneData": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`done.data` \u2014 terminal success summary for a chat answer.",
-      "required": [
-        "messageId",
-        "finishReason",
-        "citationCount"
-      ],
+      "description": "`done.data` — terminal success summary for a chat answer.",
+      "required": ["messageId", "finishReason", "citationCount"],
       "properties": {
-        "messageId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "finishReason": {
-          "type": "string",
-          "description": "e.g. stop, length, content_filter, ask_user (the turn ended with a clarifying question \u2014 spec 0006 #429)."
-        },
+        "messageId": { "type": "string", "format": "uuid" },
+        "finishReason": { "type": "string", "description": "e.g. stop, length, content_filter, ask_user (the turn ended with a clarifying question — spec 0006 #429)." },
         "model": {
           "type": "string",
-          "description": "The model that ACTUALLY produced this answer (#413, ADR-0016 \u00a74): equals start.model unless a mid-answer failover switched to a tenant-configured fallback. Authoritative for attribution; additive (older servers omit it)."
+          "description": "The model that ACTUALLY produced this answer (#413, ADR-0016 §4): equals start.model unless a mid-answer failover switched to a tenant-configured fallback. Authoritative for attribution; additive (older servers omit it)."
         },
         "pendingSuggestions": {
           "type": "boolean",
-          "description": "When true (#489), the server will attempt follow-up suggestions AFTER this terminal and MAY deliver exactly one post-terminal `event:suggestions` within a bounded grace window; a subscriber must hold the subscription open for it and accept that one event without un-settling this terminal. Absent/false \u21d2 the stream stops at this terminal (the default, and the case for a refusal/ask_user answer or when suggestions are disabled). Optimistic: `done.usage` covers the ANSWER only, and a suggestions attempt that fails/times out simply produces no event. Additive; older clients ignore it and close at the terminal as before."
+          "description": "When true (#489), the server will attempt follow-up suggestions AFTER this terminal and MAY deliver exactly one post-terminal `event:suggestions` within a bounded grace window; a subscriber must hold the subscription open for it and accept that one event without un-settling this terminal. Absent/false ⇒ the stream stops at this terminal (the default, and the case for a refusal/ask_user answer or when suggestions are disabled). Optimistic: `done.usage` covers the ANSWER only, and a suggestions attempt that fails/times out simply produces no event. Additive; older clients ignore it and close at the terminal as before."
         },
         "suggestionsGraceMs": {
           "type": "integer",
           "minimum": 0,
-          "description": "The server's post-terminal grace window in MILLISECONDS (#489/BE-5). Present only alongside `pendingSuggestions=true`, it is the single source of truth for how long the subscriber should hold the socket open for the one trailing `event:suggestions`: the server relays for exactly this window (its own subscription grace, derived from the suggestions timeout + a margin), so the consumer must wait at least this long rather than guess with a hard-coded default that a larger server grace would overrun (silently dropping a slow-but-arriving suggestion). Absent \u21d2 the consumer falls back to its own sane default. Additive; older clients ignore it."
+          "description": "The server's post-terminal grace window in MILLISECONDS (#489/BE-5). Present only alongside `pendingSuggestions=true`, it is the single source of truth for how long the subscriber should hold the socket open for the one trailing `event:suggestions`: the server relays for exactly this window (its own subscription grace, derived from the suggestions timeout + a margin), so the consumer must wait at least this long rather than guess with a hard-coded default that a larger server grace would overrun (silently dropping a slow-but-arriving suggestion). Absent ⇒ the consumer falls back to its own sane default. Additive; older clients ignore it."
         },
-        "citationCount": {
-          "type": "integer",
-          "minimum": 0
-        },
+        "citationCount": { "type": "integer", "minimum": 0 },
         "usage": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "promptTokens": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "completionTokens": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "totalTokens": {
-              "type": "integer",
-              "minimum": 0
-            },
+            "promptTokens": { "type": "integer", "minimum": 0 },
+            "completionTokens": { "type": "integer", "minimum": 0 },
+            "totalTokens": { "type": "integer", "minimum": 0 },
             "cachedPromptTokens": {
               "type": "integer",
               "minimum": 0,
-              "description": "Prompt tokens served from the provider's prompt cache this answer (#409, ADR-0016 \u00a72.6). Additive; 0 when the provider reports no cache detail."
+              "description": "Prompt tokens served from the provider's prompt cache this answer (#409, ADR-0016 §2.6). Additive; 0 when the provider reports no cache detail."
             },
             "cacheWriteTokens": {
               "type": "integer",
@@ -422,83 +232,39 @@
         }
       }
     },
+
     "ChatNarration": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=narration (ADR-0016 \u00a76, #414): one chunk of a tool-calling turn's VISIBLE narration text, streamed live as transient status. Never a delta, never persisted (the streamed answer == stored message invariant is untouched); provider hidden-reasoning is excluded by construction. Additive: clients ignoring it lose nothing but liveness.",
-      "required": [
-        "text",
-        "turn"
-      ],
+      "description": "`event.data` for name=narration (ADR-0016 §6, #414): one chunk of a tool-calling turn's VISIBLE narration text, streamed live as transient status. Never a delta, never persisted (the streamed answer == stored message invariant is untouched); provider hidden-reasoning is excluded by construction. Additive: clients ignoring it lose nothing but liveness.",
+      "required": ["text", "turn"],
       "properties": {
-        "text": {
-          "type": "string",
-          "description": "One or more narration chunks; append-ordered within the turn by seq. Adjacent chunks of the same turn may be coalesced server-side into a single envelope (#487), so chunk boundaries are not semantic \u2014 concatenate in seq order."
-        },
-        "turn": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "The 1-based answer-loop turn this narration belongs to (clients reset the transient display per turn)."
-        }
+        "text": { "type": "string", "description": "One or more narration chunks; append-ordered within the turn by seq. Adjacent chunks of the same turn may be coalesced server-side into a single envelope (#487), so chunk boundaries are not semantic — concatenate in seq order." },
+        "turn": { "type": "integer", "minimum": 1, "description": "The 1-based answer-loop turn this narration belongs to (clients reset the transient display per turn)." }
       }
     },
+
     "ChatStep": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=step \u2014 live run-phase progress (spec 0006 #429). Transient run-visibility state (ADR-0016 \u00a76 posture): never persisted, absent after reload, replayed idempotently by seq. Keys fixed by spec 0006: prepare (context assembly), think (one model turn; `turn` ordinal), finalize (persist + citations), suggest (follow-up generation). Additive keys may appear later \u2014 clients render unknown keys generically off the server-supplied `label`. A re-`started` key restarts that step row (e.g. think per turn). Does NOT duplicate per-tool detail; tool_call/tool_result events carry that.",
-      "required": [
-        "key",
-        "label",
-        "state"
-      ],
+      "description": "`event.data` for name=step — live run-phase progress (spec 0006 #429). Transient run-visibility state (ADR-0016 §6 posture): never persisted, absent after reload, replayed idempotently by seq. Keys fixed by spec 0006: prepare (context assembly), think (one model turn; `turn` ordinal), finalize (persist + citations), suggest (follow-up generation). Additive keys may appear later — clients render unknown keys generically off the server-supplied `label`. A re-`started` key restarts that step row (e.g. think per turn). Does NOT duplicate per-tool detail; tool_call/tool_result events carry that.",
+      "required": ["key", "label", "state"],
       "properties": {
-        "key": {
-          "type": "string",
-          "description": "Stable machine key of the phase (spec 0006: prepare | think | finalize | suggest; open-ended)."
-        },
-        "label": {
-          "type": "string",
-          "description": "Human-readable phase label to render (server-supplied; client never needs a key\u2192label map)."
-        },
-        "state": {
-          "type": "string",
-          "enum": [
-            "started",
-            "completed"
-          ],
-          "description": "Phase transition. A stream that errors may leave a step started \u2014 the terminal error supersedes it."
-        },
-        "detail": {
-          "type": "string",
-          "description": "Optional short human-readable annotation (e.g. 'requested 2 tools')."
-        },
-        "turn": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "1-based model-turn ordinal for repeating keys (think)."
-        }
+        "key": { "type": "string", "description": "Stable machine key of the phase (spec 0006: prepare | think | finalize | suggest; open-ended)." },
+        "label": { "type": "string", "description": "Human-readable phase label to render (server-supplied; client never needs a key→label map)." },
+        "state": { "type": "string", "enum": ["started", "completed"], "description": "Phase transition. A stream that errors may leave a step started — the terminal error supersedes it." },
+        "detail": { "type": "string", "description": "Optional short human-readable annotation (e.g. 'requested 2 tools')." },
+        "turn": { "type": "integer", "minimum": 1, "description": "1-based model-turn ordinal for repeating keys (think)." }
       }
     },
     "ChatAskUser": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=ask_user \u2014 the model asked the user a clarifying question instead of answering (spec 0006 #429). At most one per stream; the stream then ends with done(finishReason=ask_user) and NO suggestions event. The question is ALSO persisted on the assistant message (REST Message.question) so it stays answerable after reload; this event carries the same payload for live rendering. The user's choice is sent as an ordinary POST /chat/sessions/{id}/messages \u2014 there is no inbound WS path.",
-      "required": [
-        "messageId",
-        "question",
-        "options",
-        "allowFreeText"
-      ],
+      "description": "`event.data` for name=ask_user — the model asked the user a clarifying question instead of answering (spec 0006 #429). At most one per stream; the stream then ends with done(finishReason=ask_user) and NO suggestions event. The question is ALSO persisted on the assistant message (REST Message.question) so it stays answerable after reload; this event carries the same payload for live rendering. The user's choice is sent as an ordinary POST /chat/sessions/{id}/messages — there is no inbound WS path.",
+      "required": ["messageId", "question", "options", "allowFreeText"],
       "properties": {
-        "messageId": {
-          "type": "string",
-          "format": "uuid",
-          "description": "The assistant message the question persists under (same id as start.messageId)."
-        },
-        "question": {
-          "type": "string",
-          "description": "The clarifying question text (also the persisted message content)."
-        },
+        "messageId": { "type": "string", "format": "uuid", "description": "The assistant message the question persists under (same id as start.messageId)." },
+        "question": { "type": "string", "description": "The clarifying question text (also the persisted message content)." },
         "options": {
           "type": "array",
           "minItems": 2,
@@ -507,61 +273,37 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "label"
-            ],
+            "required": ["label"],
             "properties": {
-              "label": {
-                "type": "string",
-                "description": "The choice text sent verbatim as the user's reply when clicked."
-              },
-              "description": {
-                "type": "string",
-                "description": "Optional one-line elaboration shown under the label."
-              }
+              "label": { "type": "string", "description": "The choice text sent verbatim as the user's reply when clicked." },
+              "description": { "type": "string", "description": "Optional one-line elaboration shown under the label." }
             }
           }
         },
-        "allowFreeText": {
-          "type": "boolean",
-          "description": "Whether typing a custom reply (the composer) is a sanctioned answer path (always true in practice; the composer is never disabled)."
-        }
+        "allowFreeText": { "type": "boolean", "description": "Whether typing a custom reply (the composer) is a sanctioned answer path (always true in practice; the composer is never disabled)." }
       }
     },
     "ChatSuggestions": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=suggestions \u2014 follow-up questions the user could ask next (spec 0006 #429). At most one per stream. Emitted OFF the answer's critical path (#489): the terminal `done` is published first (declaring `pendingSuggestions=true`), then this event arrives POST-terminal within a bounded grace window; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation \u2014 no retrieval, no new INV-2 surface.",
-      "required": [
-        "messageId",
-        "suggestions"
-      ],
+      "description": "`event.data` for name=suggestions — follow-up questions the user could ask next (spec 0006 #429). At most one per stream. Emitted OFF the answer's critical path (#489): the terminal `done` is published first (declaring `pendingSuggestions=true`), then this event arrives POST-terminal within a bounded grace window; absent when generation is disabled, failed, timed out, or the turn ended in ask_user. Transient (never persisted; gone after reload). Derived ONLY from the caller's own visible conversation — no retrieval, no new INV-2 surface.",
+      "required": ["messageId", "suggestions"],
       "properties": {
-        "messageId": {
-          "type": "string",
-          "format": "uuid",
-          "description": "The settled assistant message these follow-ups attach under."
-        },
+        "messageId": { "type": "string", "format": "uuid", "description": "The settled assistant message these follow-ups attach under." },
         "suggestions": {
           "type": "array",
           "minItems": 1,
           "maxItems": 5,
           "description": "Short user-perspective questions, best first. The first is the composer's ghost-prefill candidate.",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         }
       }
     },
     "CodeOutput": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=code_output \u2014 one streamed chunk from a reusable sandbox run (ADR-0020). Emitted within the chat answer stream while `run_python` executes so the inspector can show stdout/stderr. `stream` identifies stdout or stderr; multiple events for a `runId` arrive in `seq` order. Non-terminal \u2014 one code_result carries the outcome.",
-      "required": [
-        "runId",
-        "stream",
-        "text"
-      ],
+      "description": "`event.data` for name=code_output — one streamed chunk from a reusable sandbox run (ADR-0020). Emitted within the chat answer stream while `run_python` executes so the inspector can show stdout/stderr. `stream` identifies stdout or stderr; multiple events for a `runId` arrive in `seq` order. Non-terminal — one code_result carries the outcome.",
+      "required": ["runId", "stream", "text"],
       "properties": {
         "runId": {
           "type": "string",
@@ -574,10 +316,7 @@
         },
         "stream": {
           "type": "string",
-          "enum": [
-            "stdout",
-            "stderr"
-          ],
+          "enum": ["stdout", "stderr"],
           "description": "Which output stream this chunk came from."
         },
         "text": {
@@ -589,12 +328,8 @@
     "CodeResult": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`event.data` for name=code_result \u2014 the terminal-ish outcome of a sandbox code run (ADR-0020). Exactly one arrives per `runId` after its code_output chunks, carrying the reusable sandbox id/generation, final status, exit code, duration, and emitted artifact ids. This is a run-level terminal event, NOT the chat stream's terminal \u2014 the chat stream still ends with its own done|error. The full record is inspectable via GET /code-runs/{runId}.",
-      "required": [
-        "runId",
-        "status",
-        "artifactIds"
-      ],
+      "description": "`event.data` for name=code_result — the terminal-ish outcome of a sandbox code run (ADR-0020). Exactly one arrives per `runId` after its code_output chunks, carrying the reusable sandbox id/generation, final status, exit code, duration, and emitted artifact ids. This is a run-level terminal event, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full record is inspectable via GET /code-runs/{runId}.",
+      "required": ["runId", "status", "artifactIds"],
       "properties": {
         "runId": {
           "type": "string",
@@ -602,18 +337,12 @@
           "description": "The code_runs.id this result finalizes (matches GET /code-runs/{codeRunId})."
         },
         "sandboxSessionId": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "format": "uuid",
           "description": "Opaque reusable sandbox session used by this run; null when denied before allocation."
         },
         "sandboxGeneration": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 1,
           "description": "Reusable sandbox generation used by this run; changes after reset or cancel."
         },
@@ -623,45 +352,31 @@
         },
         "status": {
           "type": "string",
-          "enum": [
-            "succeeded",
-            "failed",
-            "timeout",
-            "killed",
-            "denied"
-          ],
+          "enum": ["succeeded", "failed", "timeout", "killed", "denied"],
           "description": "The run's terminal status (mirrors openapi CodeRunStatus, minus the non-terminal queued/running)."
         },
         "exitCode": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "description": "Process exit code; null when killed/timeout/denied before producing one."
         },
         "durationMs": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "description": "Wall-clock execution time in milliseconds; null when the run never started (denied)."
         },
         "artifactIds": {
           "type": "array",
           "description": "Ids of artifacts the run emitted (files collected + persisted via CC-B #208, tenant-scoped). Empty when the run produced none.",
-          "items": {
-            "type": "string",
-            "format": "uuid"
-          }
+          "items": { "type": "string", "format": "uuid" }
         }
       }
     }
   },
+
   "x-chatStream": {
-    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via run_python (ADR-0020 #457), sandbox output rides this same stream as event:code_output / event:code_result \u2014 additive, non-terminal for the chat stream itself.",
-    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:answer_retract | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) )* -> done(ChatDoneData) | error(Problem) -> [ event:suggestions(ChatSuggestions) ]?. Exactly one terminal (done|error). Constraints (spec 0006 #429 / #489): at most one ask_user per stream (then finishReason=ask_user, no suggestions); suggestions are OFF the critical path \u2014 the terminal done is published FIRST with data.pendingSuggestions=true, then at most one event:suggestions may follow POST-terminal within a bounded server grace window (derived from the suggestions timeout plus a small margin). The post-terminal event does not un-settle the terminal; nothing else may follow done, and a done without pendingSuggestions closes the stream immediately. Speculative streaming (#488): the answer turn's text streams live as `delta` before the turn is proven tool-free; if it then reveals a tool call, one event:answer_retract discards those speculative deltas (they are re-emitted as event:narration) and the turn narrates the rest live. answer_retract can only target the current speculative turn's deltas (there is at most one un-finalised speculative block), and it never appears after the answer is finalised nor after a terminal.",
-    "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal \u2014 the chat stream still ends with its own done|error. The full run record (code, stdout/stderr, resource_usage, sandbox generation) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
+    "description": "Concrete payloads carried by a chat answer stream (issue #37). The transport envelope (root oneOf) is unchanged; these define what rides in `data` per `type`/`name`. When the agent runs code via run_python (ADR-0020 #457), sandbox output rides this same stream as event:code_output / event:code_result — additive, non-terminal for the chat stream itself.",
+    "lifecycle": "start(ChatStartData) -> ( delta(ChatTokenDelta) | event:answer_retract | event:step(ChatStep) | event:narration(ChatNarration) | event:tool_call(ChatToolCall) | event:tool_result(ChatToolResult) | event:citation(ChatCitation) | event:code_output(CodeOutput) | event:code_result(CodeResult) | event:ask_user(ChatAskUser) )* -> done(ChatDoneData) | error(Problem) -> [ event:suggestions(ChatSuggestions) ]?. Exactly one terminal (done|error). Constraints (spec 0006 #429 / #489): at most one ask_user per stream (then finishReason=ask_user, no suggestions); suggestions are OFF the critical path — the terminal done is published FIRST with data.pendingSuggestions=true, then at most one event:suggestions may follow POST-terminal within a bounded server grace window (derived from the suggestions timeout plus a small margin). The post-terminal event does not un-settle the terminal; nothing else may follow done, and a done without pendingSuggestions closes the stream immediately. Speculative streaming (#488): the answer turn's text streams live as `delta` before the turn is proven tool-free; if it then reveals a tool call, one event:answer_retract discards those speculative deltas (they are re-emitted as event:narration) and the turn narrates the rest live. answer_retract can only target the current speculative turn's deltas (there is at most one un-finalised speculative block), and it never appears after the answer is finalised nor after a terminal.",
+    "codeRunSubStream": "A run_python tool_call opens a code-run sub-sequence on the SAME chat stream, correlated by runId (and the originating tool_call's callId): zero or more event:code_output(CodeOutput) chunks in seq order, terminated by exactly one event:code_result(CodeResult) per runId. code_result is a run-level terminal, NOT the chat stream's terminal — the chat stream still ends with its own done|error. The full run record (code, stdout/stderr, resource_usage, sandbox generation) is inspectable at GET /code-runs/{runId}, tenant/owner-scoped (cross-tenant runId -> 404).",
     "subscribe": "After POST /chat/sessions/{id}/messages returns { stream_id }, connect to GET /ws/chat/{stream_id}?access_token=<access JWT>. A browser WebSocket cannot set the Authorization header, so the access token rides the `access_token` query param. The stream is bound to its owner at send time; a missing/invalid token or a foreign/cross-tenant subscriber is denied identically (handshake rejected, no envelope emitted).",
     "mapping": {
       "start.data": "#/$defs/ChatStartData",
@@ -678,21 +393,12 @@
       "done.data": "#/$defs/ChatDoneData"
     }
   },
+
   "oneOf": [
-    {
-      "$ref": "#/$defs/Start"
-    },
-    {
-      "$ref": "#/$defs/Delta"
-    },
-    {
-      "$ref": "#/$defs/Event"
-    },
-    {
-      "$ref": "#/$defs/Done"
-    },
-    {
-      "$ref": "#/$defs/Error"
-    }
+    { "$ref": "#/$defs/Start" },
+    { "$ref": "#/$defs/Delta" },
+    { "$ref": "#/$defs/Event" },
+    { "$ref": "#/$defs/Done" },
+    { "$ref": "#/$defs/Error" }
   ]
 }

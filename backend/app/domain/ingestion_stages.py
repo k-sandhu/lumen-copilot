@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-STAGES = ("detect", "extract", "normalize", "classify", "chunk", "embed", "index")
+STAGES = ("detect", "extract", "ocr", "normalize", "classify", "chunk", "embed", "index")
 
 
 @dataclass(frozen=True, slots=True)
