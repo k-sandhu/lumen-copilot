@@ -299,7 +299,26 @@ pub enum Content {
 }
 impl Node {
     pub fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs.get(name).map(String::as_str)
+        self.attrs
+            .get(name)
+            .or_else(|| {
+                self.attrs
+                    .iter()
+                    .find(|(k, _)| k.ends_with(&format!("}}{name}")))
+                    .map(|(_, v)| v)
+            })
+            .map(String::as_str)
+    }
+    pub fn relationship_attr(&self, name: &str) -> Option<&str> {
+        for ns in [
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "http://purl.oclc.org/ooxml/officeDocument/relationships",
+        ] {
+            if let Some(value) = self.attrs.get(&format!("{{{ns}}}{name}")) {
+                return Some(value);
+            }
+        }
+        None
     }
     pub fn child(&self, name: &str) -> Option<&Node> {
         self.children.iter().find(|n| n.name == name)
@@ -367,7 +386,17 @@ pub fn parse_xml(bytes: &[u8], s: &mut Session) -> Result<Node, CoreError> {
                 };
                 for a in e.attributes() {
                     let a = a.map_err(|_| CoreError::Parse)?;
-                    let key = a.key.local_name().as_ref().to_owned();
+                    if a.key.as_ref() == "xmlns" || a.key.as_ref().starts_with("xmlns:") {
+                        continue;
+                    }
+                    let (namespace, local) = reader.resolver().resolve_attribute(a.key);
+                    let key = match namespace {
+                        ResolveResult::Bound(ns) => {
+                            format!("{{{}}}{}", ns.as_ref(), local.as_ref())
+                        }
+                        ResolveResult::Unbound => local.as_ref().to_owned(),
+                        _ => return Err(CoreError::Parse),
+                    };
                     let value = a
                         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         .map_err(|_| CoreError::Parse)?
