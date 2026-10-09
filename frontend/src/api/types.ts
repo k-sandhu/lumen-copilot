@@ -120,6 +120,9 @@ export interface CollectionList {
 /** Ingestion lifecycle (parse → chunk → embed). */
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
+/** Native-text extraction result (spec 0014). */
+export type IngestionOutcome = 'empty' | 'failed' | 'partial' | 'unsupported' | 'indexed';
+
 export interface SourceLocation {
   kind: 'page' | 'slide' | 'sheet';
   name: string;
@@ -144,6 +147,10 @@ export interface Document {
   /** Zero-based player duration for media; null for ordinary documents. */
   duration_ms: number | null;
   status: DocumentStatus;
+  /** Unknown for legacy documents or unfinished ingestion attempts. */
+  ingestion_outcome?: IngestionOutcome | null;
+  /** True only when this ready document has at least one searchable chunk. */
+  searchable?: boolean;
   /** Failure reason when status is failed. */
   error?: string | null;
   /** Number of indexed chunks (0 until ingestion completes). */

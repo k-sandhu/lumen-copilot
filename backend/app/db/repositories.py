@@ -128,7 +128,7 @@ from app.domain.entities import (
     UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
-from app.domain.ingestion import SourceLocation
+from app.domain.ingestion import ExtractionOutcome, SourceLocation
 from app.domain.recall import MAX_RECALL_TURN_CHARS, clip_recall_text
 from app.domain.scheduling import Cadence, StructuredCadence
 
@@ -2383,7 +2383,11 @@ class DocumentRepository(_TenantScopedRepository):
             .returning(models.Document)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            row.ingestion_metadata = {**(row.ingestion_metadata or {}), "ingestion_outcome": None}
         await self._session.flush()
+        if row is not None:
+            await self._session.refresh(row)
         return to_document(row) if row is not None else None
 
     async def touch_processing(self, document_id: UUID, ingestion_run_id: UUID) -> bool:
@@ -2490,6 +2494,7 @@ class DocumentRepository(_TenantScopedRepository):
         row.status = DocumentStatus.PROCESSING.value
         row.error = None
         row.ingestion_failure = None
+        row.ingestion_metadata = {**(row.ingestion_metadata or {}), "ingestion_outcome": None}
         row.ingestion_attempts += 1
         await self._session.flush()
         await self._session.refresh(row)
@@ -2503,6 +2508,7 @@ class DocumentRepository(_TenantScopedRepository):
         code: str,
         message: str,
         correlation_id: str | None = None,
+        outcome: ExtractionOutcome | None = None,
     ) -> Document | None:
         """Persist a content-safe terminal failure for the owning attempt.
 
@@ -2537,6 +2543,11 @@ class DocumentRepository(_TenantScopedRepository):
         row.error = message
         row.ingestion_failure = failure
         row.ingestion_run_id = None
+        if outcome is not None:
+            row.ingestion_metadata = {
+                **(row.ingestion_metadata or {}),
+                "ingestion_outcome": outcome.value,
+            }
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
@@ -2546,6 +2557,7 @@ class DocumentRepository(_TenantScopedRepository):
         document_id: UUID,
         *,
         expected_attempt: int,
+        outcome: ExtractionOutcome | None = None,
     ) -> Document | None:
         """Publish ``ready`` only for the still-owning processing attempt."""
 
@@ -2566,6 +2578,11 @@ class DocumentRepository(_TenantScopedRepository):
         row.error = None
         row.ingestion_failure = None
         row.ingestion_run_id = None
+        if outcome is not None:
+            row.ingestion_metadata = {
+                **(row.ingestion_metadata or {}),
+                "ingestion_outcome": outcome.value,
+            }
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)

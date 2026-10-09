@@ -1,8 +1,8 @@
 # Documents — collections, upload & viewer (`features/documents`)
 
 The frontend documents slice (issues #49 and #571), built against the **frozen**
-document/media contract and honoring specs 0004 and 0008
-(security & domain invariants). It builds in parallel with the backend (ADR-0006):
+document/media contract and honoring specs 0004 (security & domain invariants), 0008 (media), and 0016
+(native extraction outcomes). It builds in parallel with the backend (ADR-0006):
 conform to the contract, mock the responses in dev and tests.
 
 This slice STACKS on the #48 auth foundation — it reuses the `api/` client (bearer +
@@ -37,13 +37,22 @@ Feature (`features/documents`):
   (server state), which is NOT mirrored here (frontend/AGENTS.md).
 - `model/useUploadDocuments.ts` — bridges the shared multipart manager to the store;
   maps typed failures, cancellation, fresh restart, and resumable retry.
-- `model/presentation.ts` — pure status→tone/label and byte-formatting helpers,
+- `model/presentation.ts` — pure lifecycle and extraction-outcome→tone/label/detail and byte-formatting helpers,
   plus the #89 trust-signal derivation: `ingestSteps` (the parse → chunk → embed →
   ready pipeline projected from `status` + `chunk_count`), `statusDotTone`, and
   `fileKind`. The #119 table polish adds `fileKindTone` (type-badge family),
   `relativeTime`/`documentFreshness` (the Updated column, from `updated_at`),
-  `ownerLabel` ("You" vs. an honest short id — there is NO display-name field on the
-  wire), and `visibility` (the Visibility column, derived from the **real** INV-2
+  `documentStatusPresentation` is shared by the list and viewer: pending/processing
+  takes precedence over an older outcome, and settled documents distinguish no
+  native text, unsupported format, ingestion failure, partial PDF text, and ready
+  documents with indexed text. Its `searchable` value requires a ready lifecycle
+  and positive chunk count, excludes empty/failed/unsupported outcomes, and honors
+  an explicit false wire value. Legacy documents retain their status label unless
+  a ready record has zero chunks; it reads “No indexed text” while its extraction
+  outcome and processing stages remain unknown. Partial PDF
+  text is described as incomplete native coverage because blank pages may be
+  intentional. `ownerLabel` ("You" vs. an honest short id — there is NO display-name
+  field on the wire), and `visibility` (the Visibility column, derived from the **real** INV-2
   owner-only invariant — the MVP backend carries no Confidential/Team/Org taxonomy,
   so we never fabricate one). No I/O — unit-tested directly.
 - `components/CollectionsSidebar.tsx` — list / create / rename / delete (AC-1).
@@ -68,6 +77,8 @@ Feature (`features/documents`):
   timestamps seek after metadata without autoplay, and an expired playback URL is
   refreshed once while preserving time/play state. A
   non-ready document explains it has no preview yet and skips the content fetch.
+  Its status label and extraction explanation use the same presentation helper as
+  the document list.
 - `components/DocumentsPanel.tsx` — the feature root; the `/documents` route
   ([`routes/DocumentsRoute.tsx`](../../routes/DocumentsRoute.tsx)) wraps it in the
   auth guard + app chrome, reachable from the chat shell's Pages overlay.
@@ -92,5 +103,6 @@ with the chat citations UI, not here.
 ## Wiring up with the live BE
 
 Contract-true against focused tests. Live integration must confirm multipart CORS
-exposes ETag without credentials, completion returns one pending `Document`, signed
+exposes ETag without credentials, completion returns one pending `Document`, subsequent reads project extraction
+outcome and searchability, signed
 media GETs support byte ranges, and transcript cursors/timestamps stay player-relative.

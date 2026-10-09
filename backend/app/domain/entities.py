@@ -21,7 +21,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.domain.chat import AskUserQuestion
-from app.domain.ingestion import SourceLocation
+from app.domain.ingestion import ExtractionOutcome, SourceLocation
 from app.domain.scheduling import Cadence
 
 
@@ -763,6 +763,11 @@ class Document:
     duration_ms: int | None = None
     transcript_language: str | None = None
     transcription_model: str | None = None
+
+    @property
+    def ingestion_outcome(self) -> ExtractionOutcome | None:
+        value = (self.ingestion_metadata or {}).get("ingestion_outcome")
+        return ExtractionOutcome(str(value)) if value is not None else None
 
 
 @dataclass(frozen=True, slots=True)

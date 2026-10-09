@@ -75,6 +75,14 @@ class DocumentView:
     document: Document
     chunk_count: int
 
+    @property
+    def searchable(self) -> bool:
+        return (
+            self.document.status is DocumentStatus.READY
+            and self.chunk_count > 0
+            and self.document.ingestion_outcome not in ("empty", "failed", "unsupported")
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DocumentPage:

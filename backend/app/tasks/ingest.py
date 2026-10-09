@@ -68,6 +68,7 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
+from app.domain.ingestion import ExtractionOutcome, native_outcome
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
 from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
@@ -87,6 +88,7 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
+from app.ingestion.parsers import UnsupportedMimeTypeError
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
@@ -382,6 +384,11 @@ async def _ingest_claimed_document(
             str(exc),
             expected_attempt=attempt,
             code="document_parse_error",
+            outcome=(
+                ExtractionOutcome.UNSUPPORTED
+                if isinstance(exc, UnsupportedMimeTypeError)
+                else ExtractionOutcome.FAILED
+            ),
             correlation_id=correlation_id,
         )
 
@@ -413,20 +420,15 @@ async def _ingest_claimed_document(
         )
         if not published:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        async with tenant_session_scope(tenant_id) as session:
-            ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-                document_id, expected_attempt=attempt
-            )
-        if ready is None:
-            await _discard_generation(
-                tenant_id,
-                document_id,
-                attempt=attempt,
-                settings=settings,
-                store=search_store,
-            )
-            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        return IngestionResult(document_id, DocumentStatus.READY, 0)
+        return await _finalize_failure(
+            tenant_id,
+            document_id,
+            "No native text was extracted. Use a text-bearing file or an OCR-enabled workflow.",
+            expected_attempt=attempt,
+            code="document_empty",
+            outcome=ExtractionOutcome.EMPTY,
+            correlation_id=correlation_id,
+        )
 
     try:
         embeddings = await _embed_in_batches(
@@ -493,7 +495,7 @@ async def _ingest_claimed_document(
         return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     async with tenant_session_scope(tenant_id) as session:
         ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-            document_id, expected_attempt=attempt
+            document_id, expected_attempt=attempt, outcome=native_outcome(parsed)
         )
     if ready is None:
         await _discard_generation(
@@ -967,6 +969,7 @@ async def _fail(
     *,
     expected_attempt: int | None = None,
     code: str = "ingestion_retries_exhausted",
+    outcome: ExtractionOutcome = ExtractionOutcome.FAILED,
     correlation_id: str | None = None,
     ingestion_run_id: UUID | None = None,
 ) -> IngestionResult:
@@ -986,6 +989,7 @@ async def _fail(
             document_id,
             expected_attempt=expected_attempt,
             code=code,
+            outcome=outcome,
             message=reason,
             correlation_id=correlation_id,
         )
@@ -1020,6 +1024,7 @@ async def _finalize_failure(
     expected_attempt: int,
     code: str,
     correlation_id: str | None = None,
+    outcome: ExtractionOutcome = ExtractionOutcome.FAILED,
 ) -> IngestionResult:
     """Boundedly recover a transient finalizer transaction failure (R1-003)."""
 
@@ -1032,6 +1037,7 @@ async def _finalize_failure(
                 expected_attempt=expected_attempt,
                 code=code,
                 correlation_id=correlation_id,
+                outcome=outcome,
             )
         except SQLAlchemyError as exc:
             if finalizer_attempt == 1:

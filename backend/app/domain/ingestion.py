@@ -4,9 +4,30 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Literal, cast
 
 LocationKind = Literal["page", "slide", "sheet"]
+
+
+class ExtractionOutcome(str, Enum):
+    EMPTY = "empty"
+    FAILED = "failed"
+    PARTIAL = "partial"
+    UNSUPPORTED = "unsupported"
+    INDEXED = "indexed"
+
+
+def native_outcome(parsed: ParsedDocument) -> ExtractionOutcome:
+    """Describe native text coverage, without diagnosing scans or visual fidelity."""
+    if not parsed.text.strip():
+        return ExtractionOutcome.EMPTY
+    if any(
+        location.kind == "page" and not parsed.text[location.char_start : location.char_end].strip()
+        for location in parsed.locations
+    ):
+        return ExtractionOutcome.PARTIAL
+    return ExtractionOutcome.INDEXED
 
 
 @dataclass(frozen=True, slots=True)
