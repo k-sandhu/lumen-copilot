@@ -23,11 +23,11 @@ materializes upload bytes.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.deps import (
     AuditSinkFactory,
@@ -53,6 +53,16 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
 
 
+class SourceLocationResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["page", "slide", "sheet"]
+    name: str
+    number: int = Field(ge=1)
+    char_start: int = Field(ge=0)
+    char_end: int = Field(ge=0)
+
+
 class DocumentResponse(BaseModel):
     """``#/components/schemas/Document`` — the wire projection of a document."""
 
@@ -71,6 +81,7 @@ class DocumentResponse(BaseModel):
     chunk_count: int
     created_at: datetime
     updated_at: datetime
+    source_locations: list[SourceLocationResponse] = Field(default_factory=list)
 
 
 class DocumentListResponse(BaseModel):
@@ -111,6 +122,16 @@ def _to_response(view: DocumentView) -> DocumentResponse:
         chunk_count=view.chunk_count,
         created_at=d.created_at,
         updated_at=d.updated_at,
+        source_locations=[
+            SourceLocationResponse(
+                kind=location.kind,
+                name=location.name,
+                number=location.number,
+                char_start=location.char_start,
+                char_end=location.char_end,
+            )
+            for location in d.source_locations
+        ],
     )
 
 

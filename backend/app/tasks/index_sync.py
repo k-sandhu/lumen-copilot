@@ -90,6 +90,7 @@ def _to_indexed(
             embedding=chunk.embedding,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
+            source_locations=chunk.source_locations,
             time_start_ms=chunk.time_start_ms,
             time_end_ms=chunk.time_end_ms,
             transcript_segment_id=chunk.transcript_segment_id,

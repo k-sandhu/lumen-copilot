@@ -15,7 +15,7 @@ from app.api.v1.search import _to_citation as search_citation_to_response
 from app.api.v1.search import _to_result as search_result_to_response
 from app.core.config import get_settings
 from app.domain.chat import GroundedCitation
-from app.domain.entities import DocumentKind
+from app.domain.entities import Chunk, DocumentKind
 from app.domain.retrieval import RetrievedPassage
 from app.retrieval.queries import PassageRow, _base_chunk_select, _valid_passage_provenance
 from app.search import IndexedChunk, OpenSearchStore
@@ -168,16 +168,17 @@ def test_index_sync_projection_carries_media_fields() -> None:
         acl_synced_at=None,
         acl_scope_ids=(),
     )
-    chunk = SimpleNamespace(
+    chunk = Chunk(
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         document_id=uuid.uuid4(),
         ord=0,
         text="Hello, my name is John.",
-        embedding=[0.25] * get_settings().llm_embedding_dimensions,
+        embedding=(0.25,) * get_settings().llm_embedding_dimensions,
         embedding_fingerprint=get_settings().embedding_space_fingerprint,
         char_start=0,
         char_end=23,
+        created_at=datetime.now(UTC),
         time_start_ms=1_000,
         time_end_ms=3_000,
         transcript_segment_id=segment_id,
@@ -193,6 +194,7 @@ def test_index_sync_projection_carries_media_fields() -> None:
     assert indexed.time_end_ms == 3_000
     assert indexed.transcript_segment_id == segment_id
     assert indexed.speaker_name == "John"
+    assert indexed.source_locations == ()
 
 
 def test_relational_hydration_selects_authoritative_media_provenance() -> None:

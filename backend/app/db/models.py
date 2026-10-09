@@ -325,6 +325,8 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ingestion_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     # Durable fencing token for one active ingestion claimant. Every heartbeat,
     # checkpoint, and terminal write compares this value so a stale/redelivered
     # worker cannot overwrite a newer run after lease takeover.
@@ -477,6 +479,7 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     embedding_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_locations: Mapped[list[dict[str, object]] | None] = mapped_column(_JSON, nullable=True)
     time_start_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     time_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     transcript_segment_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -23,6 +23,9 @@ work with no network and no I/O beyond the in-memory bytes it is handed.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
+
+from app.domain.ingestion import LocationKind, ParsedDocument, SourceLocation
 
 # Upload-allowlist MIME types (kept in lockstep with #22's
 # ``Settings.upload_allowed_content_types`` default; the task validates against
@@ -41,6 +44,30 @@ SUPPORTED_MIME_TYPES: frozenset[str] = frozenset({_PDF, _DOCX, _PPTX, _XLSX, _TX
 _DOCX_MAX_OUTPUT_CHARS = 2_000_000
 _DOCX_MAX_WORK_UNITS = 100_000
 _DOCX_MAX_TABLE_DEPTH = 32
+
+
+def _render_parts(
+    parts: list[tuple[str, str, bool]],
+    *,
+    kind: LocationKind,
+    separator: str,
+    locations: list[SourceLocation] | None,
+) -> str:
+    """Render participating parts, independently of their text's truthiness."""
+    rendered: list[str] = []
+    offset = 0
+    for number, (name, text, participates) in enumerate(parts, start=1):
+        if participates:
+            if rendered:
+                offset += len(separator)
+            start = offset
+            rendered.append(text)
+            offset += len(text)
+        else:
+            start = offset
+        if locations is not None:
+            locations.append(SourceLocation(kind, name, number, start, offset))
+    return separator.join(rendered)
 
 
 class DocumentParseError(Exception):
@@ -73,16 +100,21 @@ def _parse_text(data: bytes) -> str:
 # (BaseException) are deliberately not caught.
 
 
-def _parse_pdf(data: bytes) -> str:
+def _parse_pdf(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
     """Extract text from a PDF, page by page (``pypdf``, imported lazily)."""
     from pypdf import PdfReader
 
     try:
         reader = PdfReader(io.BytesIO(data))
         pages = [page.extract_text() or "" for page in reader.pages]
+        return _render_parts(
+            [(f"Page {number}", text, True) for number, text in enumerate(pages, start=1)],
+            kind="page",
+            separator="\n\n",
+            locations=locations,
+        )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PDF: {type(exc).__name__}") from exc
-    return "\n\n".join(pages)
 
 
 def _parse_docx(data: bytes) -> str:
@@ -207,7 +239,7 @@ def _parse_docx(data: bytes) -> str:
     return "".join(output)
 
 
-def _parse_pptx(data: bytes) -> str:
+def _parse_pptx(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
     """Extract numbered slides, grouped text, tables and existing notes."""
     from pptx import Presentation
     from pptx.shapes.autoshape import Shape
@@ -250,7 +282,7 @@ def _parse_pptx(data: bytes) -> str:
 
     try:
         presentation = Presentation(io.BytesIO(data))
-        lines: list[str] = []
+        parts: list[tuple[str, str, bool]] = []
         for number, slide in enumerate(presentation.slides, start=1):
             content, has_content = render_shapes(slide.shapes)
             if slide.has_notes_slide:
@@ -258,17 +290,18 @@ def _parse_pptx(data: bytes) -> str:
                 if frame is not None and frame.text.strip():
                     content.extend([f"Notes (Slide {number}):", frame.text])
                     has_content = True
-            if has_content:
-                title_shape = slide.shapes.title
-                title = title_shape.text if title_shape is not None else ""
-                heading = f"Slide {number}" + (f": {title}" if title.strip() else "")
-                lines.extend([heading, *content])
+            title_shape = slide.shapes.title
+            title = title_shape.text if title_shape is not None else ""
+            heading = f"Slide {number}" + (f": {title}" if title.strip() else "")
+            parts.append(
+                (heading, "\n".join([heading, *content]) if has_content else "", has_content)
+            )
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse PPTX: {type(exc).__name__}") from exc
-    return "\n".join(lines)
+    return _render_parts(parts, kind="slide", separator="\n", locations=locations)
 
 
-def _parse_xlsx(data: bytes) -> str:
+def _parse_xlsx(data: bytes, *, locations: list[SourceLocation] | None = None) -> str:
     """Render sheet names, labelled coordinates, formats and formula caches."""
     import zipfile
     from xml.etree import ElementTree
@@ -294,7 +327,7 @@ def _parse_xlsx(data: bytes) -> str:
         try:
             formulas = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
             try:
-                sheets: list[str] = []
+                parts: list[tuple[str, str, bool]] = []
                 with zipfile.ZipFile(io.BytesIO(data)) as archive:
                     for worksheet, formula_sheet in zip(
                         workbook.worksheets, formulas.worksheets, strict=True
@@ -404,18 +437,20 @@ def _parse_xlsx(data: bytes) -> str:
                             heading = [f"Sheet: {worksheet.title}"]
                             if merges:
                                 heading.append("Merged cells: " + ", ".join(merges))
-                            sheets.append("\n".join(heading + rows))
+                            parts.append((worksheet.title, "\n".join(heading + rows), bool(rows)))
+                        else:
+                            parts.append((worksheet.title, "", False))
             finally:
                 formulas.close()
         finally:
             workbook.close()
     except Exception as exc:  # noqa: BLE001 — untrusted bytes; mapped to a typed error
         raise DocumentParseError(f"could not parse XLSX: {type(exc).__name__}") from exc
-    return "\n\n".join(sheets)
+    return _render_parts(parts, kind="sheet", separator="\n\n", locations=locations)
 
 
 # MIME type -> parser. Each value localizes its library import to its own body.
-_PARSERS = {
+_PARSERS: dict[str, Callable[[bytes], str]] = {
     _PDF: _parse_pdf,
     _DOCX: _parse_docx,
     _PPTX: _parse_pptx,
@@ -441,3 +476,18 @@ def parse_document(data: bytes, *, mime_type: str) -> str:
     if parser is None:
         raise UnsupportedMimeTypeError(f"unsupported MIME type for ingestion: {normalized!r}")
     return parser(data)
+
+
+def parse_document_with_locations(data: bytes, *, mime_type: str) -> ParsedDocument:
+    """Extract once, retaining native source-part locations (spec 0015)."""
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    locations: list[SourceLocation] = []
+    if normalized == _PDF:
+        text = _parse_pdf(data, locations=locations)
+    elif normalized == _PPTX:
+        text = _parse_pptx(data, locations=locations)
+    elif normalized == _XLSX:
+        text = _parse_xlsx(data, locations=locations)
+    else:
+        text = parse_document(data, mime_type=mime_type)
+    return ParsedDocument(text, tuple(locations))

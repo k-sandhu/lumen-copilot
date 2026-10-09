@@ -69,7 +69,7 @@ from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
-from app.ingestion import DocumentParseError, chunk_text, parse_document
+from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
@@ -373,7 +373,8 @@ async def _ingest_claimed_document(
         ) from exc
 
     try:
-        text = parse_document(data, mime_type=mime_type)
+        parsed = parse_document_with_locations(data, mime_type=mime_type)
+        text = parsed.text
     except DocumentParseError as exc:
         return await _finalize_failure(
             tenant_id,
@@ -397,6 +398,10 @@ async def _ingest_claimed_document(
                 expected_attempt=attempt,
                 embedding_fingerprint=settings.embedding_space_fingerprint,
             )
+            if persisted is not None:
+                await DocumentRepository(session, tenant_id).set_extraction(
+                    document_id, text=text, locations=parsed.locations
+                )
         if persisted is None:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         published = await _sync_index(
@@ -452,6 +457,7 @@ async def _ingest_claimed_document(
             char_start=chunk.char_start,
             char_end=chunk.char_end,
             embedding=embedding.vector,
+            source_locations=parsed.locations_for_span(chunk.char_start, chunk.char_end),
             embedding_fingerprint=settings.embedding_space_fingerprint,
         )
         for chunk, embedding in zip(chunks, embeddings, strict=True)
@@ -464,6 +470,10 @@ async def _ingest_claimed_document(
                 expected_attempt=attempt,
                 embedding_fingerprint=settings.embedding_space_fingerprint,
             )
+            if persisted is not None:
+                await DocumentRepository(session, tenant_id).set_extraction(
+                    document_id, text=text, locations=parsed.locations
+                )
     except ValueError as exc:
         raise IngestionError(
             "Document re-embedding would change legacy chunk boundaries.",

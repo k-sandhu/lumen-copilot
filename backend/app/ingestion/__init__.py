@@ -20,6 +20,7 @@ from app.ingestion.parsers import (
     DocumentParseError,
     UnsupportedMimeTypeError,
     parse_document,
+    parse_document_with_locations,
 )
 
 # Media helpers are intentionally imported by their concrete module from the
@@ -33,4 +34,5 @@ __all__ = [
     "UnsupportedMimeTypeError",
     "chunk_text",
     "parse_document",
+    "parse_document_with_locations",
 ]

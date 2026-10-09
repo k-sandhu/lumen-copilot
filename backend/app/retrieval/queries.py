@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import models
 from app.db.repositories import to_document
 from app.domain.entities import Document, DocumentStatus
+from app.domain.ingestion import SourceLocation
 from app.retrieval.permissions import AllowSet
 from app.search.filters import acl_freshness_floor
 
@@ -82,6 +83,7 @@ class PassageRow:
     speaker_name: str | None
     ingestion_attempt: int
     embedding_fingerprint: str | None
+    source_locations: tuple[SourceLocation, ...] = ()
 
 
 def _valid_passage_provenance(row: PassageRow) -> bool:
@@ -436,6 +438,7 @@ def _base_chunk_select() -> (
             str | None,
             int,
             str | None,
+            list[dict[str, object]] | None,
         ]
     ]
 ):
@@ -463,6 +466,7 @@ def _base_chunk_select() -> (
             models.Chunk.speaker_name,
             models.Document.ingestion_attempts,
             models.Chunk.embedding_fingerprint,
+            models.Chunk.source_locations,
         )
         .join(models.Document, models.Chunk.document_id == models.Document.id)
         .outerjoin(
@@ -576,6 +580,7 @@ async def load_passages(
         speaker_name,
         ingestion_attempt,
         embedding_fingerprint,
+        locations,
     ) in result.all():
         row = PassageRow(
             chunk_id=cid,
@@ -595,6 +600,7 @@ async def load_passages(
             speaker_name=speaker_name,
             ingestion_attempt=ingestion_attempt,
             embedding_fingerprint=embedding_fingerprint,
+            source_locations=tuple(SourceLocation.from_dict(value) for value in locations or []),
         )
         if _valid_passage_provenance(row):
             rows[cid] = row

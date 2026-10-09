@@ -21,6 +21,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.domain.chat import AskUserQuestion
+from app.domain.ingestion import SourceLocation
 from app.domain.scheduling import Cadence
 
 
@@ -753,6 +754,9 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    source_text: str | None = None
+    source_locations: tuple[SourceLocation, ...] = ()
+    ingestion_metadata: dict[str, object] | None = None
     ingestion_attempts: int = 0
     ingestion_failure: dict[str, object] | None = None
     kind: DocumentKind = DocumentKind.DOCUMENT
@@ -1056,6 +1060,7 @@ class Chunk:
     char_start: int
     char_end: int
     created_at: datetime
+    source_locations: tuple[SourceLocation, ...] = ()
     time_start_ms: int | None = None
     time_end_ms: int | None = None
     transcript_segment_id: UUID | None = None
