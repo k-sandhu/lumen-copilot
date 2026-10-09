@@ -70,6 +70,13 @@ def _rss() -> int:
 
 
 def _child(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload["mime"] == "application/pdf" and payload["arm"] in {
+        "native-extraction",
+        "python-provenance-baseline",
+    }:
+        from tests.eval.docintel.pdf_benchmark import measure
+
+        return measure(payload)
     from app.ingestion.parsers import DocumentParseError, UnsupportedMimeTypeError, parse_document
 
     gold = Gold(
@@ -248,11 +255,23 @@ def _external(manifest: Path) -> Iterator[Fixture]:
             )
 
 
-def run(*, external: Path | None = None, model_control: bool = False) -> dict[str, Any]:
-    fixtures = chain(corpus(), _external(external) if external else ())
+def run(
+    *,
+    external: Path | None = None,
+    model_control: bool = False,
+    formats: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    from tests.eval.docintel.pdf_fixtures import corpus as pdf_corpus
+
+    fixtures = chain(corpus(), pdf_corpus(), _external(external) if external else ())
     rows = []
     for fixture in fixtures:
-        for arm in ("python-baseline", "native-extraction"):
+        if formats is not None and fixture.format not in formats:
+            continue
+        arms = ("python-baseline", "native-extraction")
+        if fixture.format == "pdf":
+            arms += ("python-provenance-baseline",)
+        for arm in arms:
             measured = (
                 _isolated(fixture, arm)
                 if fixture.case != "external-input-budget"
@@ -350,6 +369,7 @@ def main() -> None:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--external", type=Path)
     parser.add_argument("--model-control", action="store_true")
+    parser.add_argument("--format", action="append")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.child:
@@ -357,7 +377,11 @@ def main() -> None:
         return
     if args.report is None:
         parser.error("--report is required")
-    report = run(external=args.external, model_control=args.model_control)
+    report = run(
+        external=args.external,
+        model_control=args.model_control,
+        formats=frozenset(args.format) if args.format else None,
+    )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
