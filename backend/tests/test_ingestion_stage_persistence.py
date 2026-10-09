@@ -98,6 +98,26 @@ async def test_deleted_document_cannot_leave_stage_outputs(sqlite_engine) -> Non
         assert (await session.execute(select(models.IngestionStageOutput))).scalars().all() == []
 
 
+async def test_cache_clear_removes_outputs_and_current_stage_atomically(sqlite_engine) -> None:
+    tenant, document = await fixtures._seed_document(mime_type="text/plain", key="key")
+    async with db_session.tenant_session_scope(tenant) as session:
+        claimed = await DocumentRepository(session, tenant).begin_ingestion(document)
+        assert claimed is not None
+        repo = StageRepository(session, tenant)
+        payload = json.dumps({"text": "exact"})
+        await repo.save(
+            document,
+            StageOutput("extract", "a" * 64, checksum(payload), payload),
+            attempt=claimed.ingestion_attempts,
+        )
+    async with db_session.tenant_session_scope(tenant) as session:
+        await StageRepository(session, tenant).clear(document)
+    async with db_session.tenant_session_scope(tenant) as session:
+        assert await StageRepository(session, tenant).list(document) == []
+        row = await session.get(models.Document, document)
+        assert row is not None and row.ingestion_stage is None
+
+
 async def test_audit_failure_rolls_back_stage_output(sqlite_engine, monkeypatch) -> None:
     tenant, document = await fixtures._seed_document(mime_type="text/plain", key="key")
     async with db_session.tenant_session_scope(tenant) as session:

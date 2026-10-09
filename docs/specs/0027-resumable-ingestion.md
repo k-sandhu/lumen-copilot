@@ -79,6 +79,10 @@ and real platform parity remain unverified under this session's constraints.
   audit failure rolled both back. Reduced output budgets reject oversized cache
   reuse. Migration 0047 upgrade/downgrade DDL and the linear chain were verified
   without a database connection.
+- [x] Atomic cache-clear primitive also resets the current-stage marker:
+  regression failed for a stale marker before the fix and passed afterward.
+  This primitive does not grant an API capability or revoke an active worker;
+  the proposed restart control must perform the attempt fence in its transaction.
 - [~] 2026-10-08: processing GET/POST controls and status projection are proposed,
   awaiting owner review/freeze under ADR-0006. Residual risk: cancellation,
   resume/restart API, associated authorization negatives and control auditing
@@ -90,3 +94,6 @@ and real platform parity remain unverified under this session's constraints.
 - [~] 2026-10-08: no live Postgres/OpenSearch or Docker actions were run, as
   requested. Residual risk: real RLS and index durability need the existing
   live evaluation gates before a human merges.
+- [~] 2026-10-08: the single full offline backend run started at 3713 MiB and
+  was stopped at 2613 MiB, below the full-suite floor. No failing nodes appeared
+  before stopping. Residual risk: full fallback coverage remains CI-only.

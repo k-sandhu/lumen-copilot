@@ -83,12 +83,25 @@ class StageRepository:
         await self._session.flush()
 
     async def clear(self, document_id: UUID) -> None:
+        document = (
+            await self._session.execute(
+                select(models.Document)
+                .where(
+                    models.Document.tenant_id == self._tenant_id, models.Document.id == document_id
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if document is None:
+            return
         await self._session.execute(
             delete(models.IngestionStageOutput).where(
                 models.IngestionStageOutput.tenant_id == self._tenant_id,
                 models.IngestionStageOutput.document_id == document_id,
             )
         )
+        document.ingestion_stage = None
+        await self._session.flush()
 
     async def list(self, document_id: UUID) -> list[StageOutput]:
         rows = (
