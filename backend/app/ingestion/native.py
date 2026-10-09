@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
 from app.domain.native_chunking import ChunkedDocument
+from app.domain.native_normalization import NormalizedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
 
 
@@ -168,5 +169,23 @@ def chunk_canonical(
             ),
             json.dumps(asdict(budget)),
             token._token,
+        )
+    )
+
+
+def normalize_canonical(
+    document: CanonicalDocument,
+    *,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> NormalizedDocument:
+    """Candidate derived normalization; original evidence/spans are retained."""
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return NormalizedDocument.from_json(
+        extension.normalize_document(
+            document.document_json, json.dumps(asdict(budget)), token._token
         )
     )

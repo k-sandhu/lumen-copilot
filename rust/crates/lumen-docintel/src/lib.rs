@@ -36,3 +36,5 @@ pub mod detection;
 pub mod runtime;
 
 pub mod chunking;
+
+pub mod normalization;
