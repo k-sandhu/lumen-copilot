@@ -10,6 +10,11 @@ use std::time::Duration;
 pyo3::create_exception!(lumen_docintel, DocIntelError, PyException);
 pyo3::create_exception!(lumen_docintel, DocIntelInvalidInputError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelUnsupportedError, DocIntelError);
+pyo3::create_exception!(
+    lumen_docintel,
+    DocIntelUnsupportedLegacyFormatError,
+    DocIntelUnsupportedError
+);
 pyo3::create_exception!(lumen_docintel, DocIntelParseError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelBudgetError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelCancelledError, DocIntelError);
@@ -21,6 +26,9 @@ fn map_error(error: CoreError) -> PyErr {
     match error {
         CoreError::InvalidInput => DocIntelInvalidInputError::new_err(message),
         CoreError::Unsupported => DocIntelUnsupportedError::new_err(message),
+        CoreError::UnsupportedLegacyFormat => {
+            DocIntelUnsupportedLegacyFormatError::new_err(message)
+        }
         CoreError::Parse => DocIntelParseError::new_err(message),
         CoreError::Budget => DocIntelBudgetError::new_err(message),
         CoreError::Cancelled => DocIntelCancelledError::new_err(message),
@@ -38,9 +46,14 @@ fn compute<T: Send>(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => {
             let exception = map_error(error.clone());
-            exception
-                .value(py)
-                .setattr("code", format!("docintel_{error:?}").to_ascii_lowercase())?;
+            exception.value(py).setattr(
+                "code",
+                if error == CoreError::UnsupportedLegacyFormat {
+                    "unsupported_legacy_format".to_owned()
+                } else {
+                    format!("docintel_{error:?}").to_ascii_lowercase()
+                },
+            )?;
             Err(exception)
         }
         Err(_) => {
@@ -54,6 +67,18 @@ fn compute<T: Send>(
 #[pyfunction]
 fn core_version() -> &'static str {
     lumen_docintel_core::VERSION
+}
+
+#[pyfunction]
+fn reject_legacy_office(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    budget_json: String,
+) -> PyResult<()> {
+    let bytes = data.as_bytes();
+    compute(py, || {
+        lumen_docintel_core::formats::legacy_office::reject_json(bytes, &budget_json)
+    })
 }
 
 #[pyfunction]
@@ -259,6 +284,11 @@ struct DocumentSession(lumen_docintel_core::runtime::Context);
 
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(
+        "DocIntelUnsupportedLegacyFormatError",
+        m.py().get_type::<DocIntelUnsupportedLegacyFormatError>(),
+    )?;
+    m.add_function(wrap_pyfunction!(reject_legacy_office, m)?)?;
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
     m.add(
         "DocIntelInvalidInputError",

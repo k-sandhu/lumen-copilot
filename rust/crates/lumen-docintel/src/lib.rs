@@ -4,6 +4,7 @@
 pub enum CoreError {
     InvalidInput,
     Unsupported,
+    UnsupportedLegacyFormat,
     Parse,
     Budget,
     Cancelled,
@@ -16,6 +17,7 @@ impl std::fmt::Display for CoreError {
         f.write_str(match self {
             Self::InvalidInput => "invalid native input",
             Self::Unsupported => "unsupported document format",
+            Self::UnsupportedLegacyFormat => "unsupported_legacy_format",
             Self::Parse => "native parsing failed",
             Self::Budget => "document budget exceeded",
             Self::Cancelled => "document computation cancelled",
@@ -37,4 +39,5 @@ pub mod runtime;
 
 pub mod chunking;
 
+pub mod formats;
 pub mod normalization;
