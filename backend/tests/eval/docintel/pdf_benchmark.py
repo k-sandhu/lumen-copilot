@@ -73,9 +73,10 @@ def measure(payload: dict[str, Any]) -> dict[str, Any]:
             for block in document.blocks:
                 if block.table:
                     by_column = {
-                        c.column: c.text
+                        column: c.text
                         for c in block.table.cells
                         if c.header_role in {"column", "both"}
+                        for column in range(c.column, c.column + c.column_span)
                     }
                     pairs.extend(
                         (by_column[c.column], c.text)

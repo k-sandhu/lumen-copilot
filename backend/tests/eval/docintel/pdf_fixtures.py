@@ -47,6 +47,8 @@ def document(contents: list[bytes], *, rotation: int = 0) -> bytes:
 
 
 def corpus() -> list[Fixture]:
+    from tests.eval.docintel.pdf_table_fixtures import corpus as tables
+
     content = b"\n".join(
         [
             text(40, 740, 22, "Title"),
@@ -94,4 +96,4 @@ def corpus() -> list[Fixture]:
             ),
             case="furniture",
         ),
-    ]
+    ] + tables()
