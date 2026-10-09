@@ -1,6 +1,6 @@
 # Presentation candidate extraction v1
 
-Tracking #676; ADR-0026 and canonical schema v1. Pure bytes + limits yields
+Tracking #676; ADR-0027 and canonical schema v1. Pure bytes + limits yields
 canonical blocks. PPTX/PPTM and ODP are candidates only; Python remains live.
 No macros execute; no URLs, external chart data or image OCR are fetched.
 
