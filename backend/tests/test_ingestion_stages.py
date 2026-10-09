@@ -130,3 +130,33 @@ async def test_reduced_output_budget_cannot_reuse_oversized_cache() -> None:
         await CheckpointPipeline(store, max_output_bytes=10).run(
             "extract", upstream="a" * 64, config={}, compute=compute
         )
+
+
+async def test_ocr_incomplete_checkpoint_recomputes_then_reuses_completed_result():
+    import json
+
+    store = Store()
+    pipeline = CheckpointPipeline(store)
+    incomplete = True
+    calls = 0
+
+    async def compute():
+        nonlocal calls
+        calls += 1
+        return {"needs_ocr": incomplete}
+
+    def reusable(output):
+        return json.loads(output.payload_json)["needs_ocr"] is False
+
+    first = await pipeline.run(
+        "ocr", upstream="a" * 64, config={}, compute=compute, reuse_if=reusable
+    )
+    assert json.loads(first.payload_json)["needs_ocr"] is True
+    incomplete = False
+    second = await pipeline.run(
+        "ocr", upstream="a" * 64, config={}, compute=compute, reuse_if=reusable
+    )
+    third = await pipeline.run(
+        "ocr", upstream="a" * 64, config={}, compute=compute, reuse_if=reusable
+    )
+    assert second == third and calls == 2

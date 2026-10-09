@@ -110,6 +110,10 @@ provider/model/profile and current trusted tenant approval/limits determine its
 fingerprint. Ordinary digital text is preserved. Disabled, unavailable or incomplete
 OCR stores needs_ocr and fails with an owner-visible needs_ocr reason before chunk,
 embed or index. Retrying a paid page uses the separate tenant/hash/engine cache;
-restart clears operational stages but never erases paid-page accounting. OCR chunks
+restart clears operational stages but never erases paid-page accounting. Only
+complete OCR checkpoints are eligible for reuse: incomplete outcomes remain
+persisted diagnostics but retry recomputes them against current slots/page cache.
+The stage runner accepts an optional pure reuse predicate; other stages retain
+their existing checksum/fingerprint reuse behavior. OCR chunks
 carry a machine-read marker through permissioned retrieval and live/stored citations.
 The historical seven-stage verification above records #669, not an OCR verification.

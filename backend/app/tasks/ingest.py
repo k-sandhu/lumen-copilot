@@ -526,6 +526,7 @@ async def _ingest_claimed_document(
         upstream=extracted.output_sha256,
         config=ocr_identity(settings, policy),
         compute=ocr_stage,
+        reuse_if=lambda output: json.loads(output.payload_json).get("needs_ocr") is False,
     )
     processed_payload = json.loads(processed.payload_json)
     text = str(processed_payload["text"])

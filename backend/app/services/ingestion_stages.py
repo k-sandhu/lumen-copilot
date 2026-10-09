@@ -52,6 +52,7 @@ class CheckpointPipeline:
         upstream: str,
         config: dict[str, object],
         compute: Callable[[], Awaitable[dict[str, object]]],
+        reuse_if: Callable[[StageOutput], bool] | None = None,
     ) -> StageOutput:
         if stage not in STAGES:
             raise StageOutputInvalid("unknown ingestion stage")
@@ -66,6 +67,7 @@ class CheckpointPipeline:
             cached is not None
             and len(cached.payload_json.encode("utf-8")) <= self._max_output_bytes
             and checksum(cached.payload_json) == cached.output_sha256
+            and (reuse_if is None or reuse_if(cached))
         ):
             await self._store.ensure_owned()
             return cached

@@ -62,6 +62,9 @@ tenant-scoped and follows tenant deletion; broader retention remains an owner de
 4. Add an ocr checkpoint after extraction to #726. Checkpoints include policy and
    provider identities, upstream checksum and canonical output; page cache survives
    downstream faults so completed pages resume without another network call.
+   Completed OCR checkpoints are reusable; incomplete diagnostic checkpoints
+   are re-evaluated on retry so temporary concurrency/pending outcomes cannot
+   permanently mask newly available cached page results.
 5. Offline HTTP fixtures cover success/error annotations, invalid data, timeout,
    response limits, budget/tenant/concurrency denials and cache reuse. Fixtures are
    generated/documented schema examples plus one sanitized generated-page live

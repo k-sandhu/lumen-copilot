@@ -148,8 +148,9 @@ async def test_unexpected_provider_cost_is_recorded_but_not_published():
     assert ledger.starts == 1 and next(iter(ledger.values.values())).cost_usd == Decimal("0.03")
 
 
+@pytest.mark.parametrize("fault_kind", ["embedding", "concurrency"])
 async def test_enabled_ingestion_resumes_after_downstream_fault_without_repayment(
-    sqlite_engine, _offline_index_store, monkeypatch
+    sqlite_engine, _offline_index_store, monkeypatch, fault_kind
 ):
     from sqlalchemy import select
 
@@ -166,9 +167,12 @@ async def test_enabled_ingestion_resumes_after_downstream_fault_without_repaymen
             await session.execute(select(models.User).where(models.User.tenant_id == tenant))
         ).scalar_one()
         admin.roles = ["admin"]
-        await OcrRepository(session, tenant).configure(
-            OcrPolicy(tenant, True, 2, Decimal("0.02"), Decimal("0.01"), 1, admin.id)
-        )
+        policy = OcrPolicy(tenant, True, 2, Decimal("0.02"), Decimal("0.01"), 1, admin.id)
+        repository = OcrRepository(session, tenant)
+        await repository.configure(policy)
+        if fault_kind == "concurrency":
+            # Fixture reservation represents an unrelated in-flight page.
+            await repository.begin("a" * 64, "fixture", policy)
     provider = Provider()
     monkeypatch.setattr("app.tasks.ingest.OpenRouterOcrProvider", lambda settings: provider)
     executor = native.PdfiumExecutor(workers=1)
@@ -178,15 +182,30 @@ async def test_enabled_ingestion_resumes_after_downstream_fault_without_repaymen
     settings = fixtures._settings(
         ocr_enabled=True, ocr_model="fixture-model", OPENROUTER_API_KEY="synthetic"
     )
-    with pytest.raises(IngestionError):
-        await ingest_document_async(
-            tenant,
-            doc,
-            settings=settings,
-            object_store=store,
-            gateway=fixtures._FakeGateway(fail=True),
+    if fault_kind == "embedding":
+        with pytest.raises(IngestionError):
+            await ingest_document_async(
+                tenant,
+                doc,
+                settings=settings,
+                object_store=store,
+                gateway=fixtures._FakeGateway(fail=True),
+            )
+        assert provider.pages == [1]
+    else:
+        first = await ingest_document_async(
+            tenant, doc, settings=settings, object_store=store, gateway=fixtures._FakeGateway()
         )
-    assert provider.pages == [1]
+        assert first.status is DocumentStatus.FAILED and provider.pages == []
+        async with tenant_session_scope(tenant) as session:
+            stages = await StageRepository(session, tenant).list(doc)
+            assert (
+                json.loads(next(s for s in stages if s.stage == "ocr").payload_json)["ocr_reason"]
+                == "ocr_concurrency"
+            )
+            await OcrRepository(session, tenant).finish(
+                "a" * 64, "fixture", None, "fixture_cancelled"
+            )
     result = await ingest_document_async(
         tenant, doc, settings=settings, object_store=store, gateway=fixtures._FakeGateway()
     )
@@ -208,4 +227,4 @@ async def test_enabled_ingestion_resumes_after_downstream_fault_without_repaymen
         ocr = next(s for s in stages if s.stage == "ocr")
         assert json.loads(ocr.payload_json)["machine_read_spans"]
         policy = (await session.execute(select(models.OcrTenantPolicy))).scalar_one()
-        assert policy.pages_used == 1
+        assert policy.pages_used == (2 if fault_kind == "concurrency" else 1)

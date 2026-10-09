@@ -54,7 +54,9 @@ across ingestion retries. Original source bytes are unchanged.
 The provider owns all OpenRouter request/annotation shapes. It reads only file
 annotation text, including annotations returned when chat inference fails;
 exact separate parser envelope parts are removed without normalizing recognized
-text. No boxes or confidence are invented. The canonical OCR origin, engine,
+text. No boxes or confidence are invented. Incomplete OCR checkpoints are re-evaluated on retry so a temporary occupied
+slot cannot permanently mask newly completed page cache entries. Complete
+checkpoints remain reusable. The canonical OCR origin, engine,
 nullable confidence, page regions and exact Unicode code-point spans are saved
 in the `ocr` checkpoint between extraction and normalization. Chunks overlapping
 OCR evidence carry the machine-read marker into streamed and stored citations.
@@ -96,7 +98,10 @@ OCR may contain recognition errors.
   removed for this broad run; its five OCR worker tests passed separately.
   The final native-unavailability/counter-width fixes additionally passed 125
   focused ingestion/provider/accounting/migration tests (three live cases
-  deselected). Three inherited unmarked RLS cases probed unreachable localhost
+  deselected). The final complete/incomplete checkpoint reuse regression run
+  passed 132 tests, including six native OCR cases with one worker. It proves
+  recovery after a concurrency slot becomes available as well as completed
+  checkpoint/page reuse after an embedding fault. Three inherited unmarked RLS cases probed unreachable localhost
   before skipping; no database was created/modified. Follow-up #749 tracks the
   gate. Future offline runs must also exclude `tests/test_rls.py` until fixed.
 - 2026-10-09: ruff lint/format and mypy (212 app files) passed. Frontend lint
