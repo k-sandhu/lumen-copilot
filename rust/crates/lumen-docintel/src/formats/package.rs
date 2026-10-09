@@ -502,7 +502,7 @@ pub fn generation(bytes: &[u8], parser: &str, source: &str) -> Generation {
         dependency_versions: [
             ("zip".to_owned(), "8.6.0".to_owned()),
             ("quick-xml".to_owned(), "0.42.0".to_owned()),
-            ("sha2".to_owned(), "0.11.0".to_owned()),
+            ("sha2".to_owned(), "0.10.9".to_owned()),
         ]
         .into(),
         ..Generation::default()
