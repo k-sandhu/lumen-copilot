@@ -1,6 +1,6 @@
 # Workbook candidate extraction v1
 
-Tracking: #674. ADR-0026/canonical v1; no production dispatch or cutover change.
+Tracking: #674. ADR-0027/canonical v1; no production dispatch or cutover change.
 Pure bytes + limits returns canonical structure; Python keeps the live path.
 XLSX/XLSM values use pinned calamine; ODS uses bounded quick-xml, and legacy XLS
 uses calamine after bounded compound-file/BIFF preflight. No macro is executed.
