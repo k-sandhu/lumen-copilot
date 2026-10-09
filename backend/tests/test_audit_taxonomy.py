@@ -51,6 +51,7 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "document.upload_expired",
         "document.uploaded",
         "document.transcribed",
+        "document.processing_stage_completed",
         "document.viewed",
         "document.downloaded",
         "document.deleted",

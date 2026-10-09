@@ -342,6 +342,7 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "native_ingestion_chunk_tokens",
         "native_ingestion_chunk_chars",
         "native_ingestion_overlap_chars",
+        "ingestion_checkpoint_max_output_bytes",
         "opensearch_timeout_seconds",
         "redbeat_key_prefix",
         "redbeat_lock_timeout_seconds",
