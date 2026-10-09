@@ -1,0 +1,104 @@
+{
+  "rows": [
+    {
+      "fixture": "csv-facts",
+      "sha256": "8929780b4cda2c51fc7bf5393de03c3e6ad0d407917736530933b033ebac12e1",
+      "format": "csv",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 2.1599989850074053e-05,
+      "input_bytes_per_second": 2361112.2206071387,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23273472,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "csv-facts",
+      "sha256": "8929780b4cda2c51fc7bf5393de03c3e6ad0d407917736530933b033ebac12e1",
+      "format": "csv",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.009650700027123094,
+      "input_bytes_per_second": 5284.5907402225275,
+      "peak_rss_bytes": 23928832,
+      "peak_rss_increment_bytes": 479232,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    },
+    {
+      "fixture": "tsv-facts",
+      "sha256": "199c8bce7d1585165c54f2d6e1188c797cba06d70e6461b1c882618f52bdcd57",
+      "format": "tsv",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 2.0299979951232672e-05,
+      "input_bytes_per_second": 2068967.5606034105,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23375872,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "tsv-facts",
+      "sha256": "199c8bce7d1585165c54f2d6e1188c797cba06d70e6461b1c882618f52bdcd57",
+      "format": "tsv",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.006937100028153509,
+      "input_bytes_per_second": 6054.403112186261,
+      "peak_rss_bytes": 23994368,
+      "peak_rss_increment_bytes": 544768,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "answer_quality": "unmeasured"
+}

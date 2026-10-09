@@ -34,3 +34,5 @@ pub mod canonical;
 pub mod detection;
 
 pub mod runtime;
+
+pub mod formats;

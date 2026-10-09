@@ -1001,6 +1001,16 @@ class Settings(PasswordHashingSettings):
     # corpus without a code change. Invariant: 0 <= overlap < size (validated).
     # Native computation knobs; no parser is promoted by these settings (#666).
     native_ingestion_threads: int = Field(default=2, ge=1, le=64)
+    native_csv_enabled: bool = False
+    native_csv_shadow: bool = False
+
+    @property
+    def effective_upload_content_types(self) -> frozenset[str]:
+        """Only landed, installed and explicitly enabled candidates add types."""
+        from app.ingestion.candidates import upload_types
+
+        return upload_types(self)
+
     native_ingestion_max_documents: int = Field(default=1, ge=1, le=128)
     native_ingestion_max_memory_bytes: int = Field(default=128 * 1024 * 1024, ge=1)
     native_ingestion_max_input_bytes: int = Field(default=32 * 1024 * 1024, ge=1)

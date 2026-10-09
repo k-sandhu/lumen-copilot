@@ -312,6 +312,9 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "mcp_rate_max_per_window",
         "mcp_rate_window_seconds",
         "media_max_duration_seconds",
+        # Non-secret parser deployment switches; credentials stay forbidden.
+        "native_csv_enabled",
+        "native_csv_shadow",
         # Non-secret CPU/resource limits, not stateful infrastructure or credentials.
         "native_ingestion_threads",
         "native_ingestion_max_documents",
