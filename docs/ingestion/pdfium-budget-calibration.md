@@ -88,8 +88,12 @@ paired Python arm). No ground-truth fidelity or coverage parity is claimed.
 - [x] Full offline backend CI at calibration commit 69ef3aa: 3,656 passed,
   190 skipped, one xfailed; lint/format and mypy passed. Five-platform native,
   installed-wheel, fidelity and CI Docker packaging gates passed at that commit.
-- [~] 2026-10-09: final renderer-scratch delta and aggregate artifacts await final
-  CI; residual risk: broad/platform regression coverage at final head pending.
+- [x] Final code head 7a86f13: backend/full offline suite, frontend, all five
+  platform wheels, fidelity and isolated Docker packaging passed in CI.
+  [Backend](https://github.com/k-sandhu/lumen-copilot/actions/runs/37953255131)
+  and [native](https://github.com/k-sandhu/lumen-copilot/actions/runs/37953255152).
+  The final renderer-scratch delta also passed 11 focused local regressions,
+  Rust formatting and Clippy; aggregate reports above are from that code head.
 - [~] 2026-10-09: live Postgres/OpenSearch and local Docker excluded by user;
   residual risk: deployment integration and held-out fidelity remain unverified.
 
