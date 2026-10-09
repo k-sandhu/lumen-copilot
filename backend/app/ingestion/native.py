@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
+from app.domain.native_chunking import ChunkedDocument
+from app.domain.native_normalization import NormalizedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
 from app.ingestion._pdf_pool import PdfProcessPool, PdfWorkerError  # noqa: F401
 
@@ -344,3 +346,57 @@ def parse_pdf_candidate(
             "native_unavailable" if isinstance(error, NativeUnavailableError) else "native_failed"
         )
         return PdfCandidateResult(baseline, "python", native_error=code)
+def chunk_canonical(
+    document: CanonicalDocument,
+    *,
+    settings: Settings,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> ChunkedDocument:
+    """Explicit candidate computation; production routing remains in #687."""
+    from app.ingestion.tokenizer_artifact import load_tokenizer_artifact
+
+    if settings.native_ingestion_tokenizer_model != settings.llm_embedding_model:
+        raise ValueError("tokenizer model must match the configured embedding model")
+    artifact = load_tokenizer_artifact(
+        settings.native_ingestion_tokenizer_path,
+        sha256=settings.native_ingestion_tokenizer_sha256,
+    )
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return ChunkedDocument.from_json(
+        extension.chunk_document(
+            document.document_json,
+            artifact,
+            json.dumps(
+                {
+                    "max_tokens": settings.native_ingestion_chunk_tokens,
+                    "max_chars": settings.native_ingestion_chunk_chars,
+                    "overlap_chars": settings.native_ingestion_overlap_chars,
+                    "embedding_model": settings.llm_embedding_model,
+                }
+            ),
+            json.dumps(asdict(budget)),
+            token._token,
+        )
+    )
+
+
+def normalize_canonical(
+    document: CanonicalDocument,
+    *,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> NormalizedDocument:
+    """Candidate derived normalization; original evidence/spans are retained."""
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return NormalizedDocument.from_json(
+        extension.normalize_document(
+            document.document_json, json.dumps(asdict(budget)), token._token
+        )
+    )
