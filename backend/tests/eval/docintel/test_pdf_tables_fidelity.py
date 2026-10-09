@@ -12,7 +12,8 @@ from tests.eval.docintel.metrics import Score, require_fidelity
 from tests.eval.docintel.pdf_table_fixtures import corpus
 
 
-def test_pdf_table_fidelity_and_explicit_false_positive_denominator() -> None:
+@pytest.mark.parametrize("arm", ["native-extraction", "pdfium-extraction"])
+def test_pdf_table_fidelity_and_explicit_false_positive_denominator(arm: str) -> None:
     pytest.importorskip("lumen_docintel")
     negatives = 0
     false_positives = 0
@@ -22,7 +23,7 @@ def test_pdf_table_fidelity_and_explicit_false_positive_denominator() -> None:
                 "data": base64.b64encode(fixture.data).decode(),
                 "mime": fixture.mime,
                 "gold": asdict(fixture.gold),
-                "arm": "native-extraction",
+                "arm": arm,
             }
         )
         require_fidelity(Score(**result["score"]), format_name="pdf")

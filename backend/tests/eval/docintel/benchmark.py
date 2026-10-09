@@ -73,6 +73,7 @@ def _child(payload: dict[str, Any]) -> dict[str, Any]:
     if payload["mime"] == "application/pdf" and payload["arm"] in {
         "native-extraction",
         "python-provenance-baseline",
+        "pdfium-extraction",
     }:
         from tests.eval.docintel.pdf_benchmark import measure
 
@@ -262,15 +263,18 @@ def run(
     formats: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     from tests.eval.docintel.pdf_fixtures import corpus as pdf_corpus
+    from tests.eval.docintel.pdfium_fixtures import corpus as pdfium_corpus
 
-    fixtures = chain(corpus(), pdf_corpus(), _external(external) if external else ())
+    fixtures = chain(
+        corpus(), pdf_corpus(), pdfium_corpus(), _external(external) if external else ()
+    )
     rows = []
     for fixture in fixtures:
         if formats is not None and fixture.format not in formats:
             continue
         arms = ("python-baseline", "native-extraction")
         if fixture.format == "pdf":
-            arms += ("python-provenance-baseline",)
+            arms += ("python-provenance-baseline", "pdfium-extraction")
         for arm in arms:
             measured = (
                 _isolated(fixture, arm)

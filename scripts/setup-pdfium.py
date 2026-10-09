@@ -70,7 +70,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--destination",
         type=Path,
-        default=ROOT / "rust/crates/lumen-docintel-py/pdfium",
+        default=ROOT
+        / "rust/crates/lumen-docintel-py/pdfium-wheel-data/platlib/lumen_docintel/pdfium",
     )
     args = parser.parse_args()
     install(args.platform, args.destination)

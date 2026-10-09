@@ -11,3 +11,4 @@
 **/.env.*
 .git/
 rust/crates/lumen-docintel-py/pdfium/
+rust/crates/lumen-docintel-py/pdfium-wheel-data/

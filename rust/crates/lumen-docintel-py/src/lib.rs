@@ -155,7 +155,12 @@ struct CancellationToken(lumen_docintel_core::runtime::Cancellation);
 
 /// Private worker entry; the facade establishes OS limits before invoking it.
 #[pyfunction]
-fn _extract_pdfium_worker(py: Python<'_>, data: &Bound<'_, PyBytes>, library: String, budget_json: String) -> PyResult<String> {
+fn _extract_pdfium_worker(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    library: String,
+    budget_json: String,
+) -> PyResult<String> {
     let bytes = data.as_bytes();
     compute(py, || {
         let context = lumen_docintel_core::runtime::context_json(&budget_json, Default::default())?;
@@ -253,7 +258,10 @@ struct DocumentSession(lumen_docintel_core::runtime::Context);
 
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("DocIntelEncryptedError", m.py().get_type::<DocIntelEncryptedError>())?;
+    m.add(
+        "DocIntelEncryptedError",
+        m.py().get_type::<DocIntelEncryptedError>(),
+    )?;
     m.add_function(wrap_pyfunction!(_extract_pdfium_worker, m)?)?;
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
     m.add(

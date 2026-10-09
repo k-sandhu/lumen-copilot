@@ -1,9 +1,9 @@
 name: Rust ingestion foundation
 on:
   pull_request:
-    paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+    paths: ['rust/**', 'backend/**', 'scripts/*pdfium*.py', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
   push:
-    paths: ['rust/**', 'backend/**', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
+    paths: ['rust/**', 'backend/**', 'scripts/*pdfium*.py', 'docker-compose.yml', '.github/workflows/rust-ingestion.yml']
 concurrency:
   group: rust-ingestion-${{ github.ref }}
   cancel-in-progress: true
@@ -17,12 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-14]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     env:
       CARGO_BUILD_JOBS: '2'
       RUSTUP_TOOLCHAIN: '1.99.0'
       CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+      PYTEST_ADDOPTS: '-n 2'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -32,6 +33,8 @@ jobs:
         run: |
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
           python -m pip install uv==0.11.18 maturin==1.15.0
+      - name: Verify pinned PDFium distribution and retain native notices
+        run: python scripts/setup-pdfium.py
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -40,7 +43,7 @@ jobs:
             cargo-target
             ~/.cache/uv
             ~/AppData/Local/uv/cache
-          key: rust-${{ runner.os }}-1.99-py312-${{ hashFiles('rust/Cargo.lock', 'backend/pyproject.toml') }}
+          key: rust-${{ matrix.os }}-1.99-py312-${{ hashFiles('rust/Cargo.lock', 'rust/pdfium-binaries.json', 'backend/pyproject.toml') }}
       - name: Rust fast gates
         working-directory: rust
         run: |
@@ -60,9 +63,15 @@ jobs:
           uv run --project backend --extra dev --extra native python -c "import glob,pytest; raise SystemExit(pytest.main(glob.glob('backend/tests/test_native_*.py') + ['backend/tests/test_connector_conformance.py::test_settings_classification_is_complete', 'backend/tests/test_connector_conformance.py::test_settings_completeness_guard_bites_on_an_unclassified_field', '-m', 'not live']))"
       - name: Release wheel
         run: maturin build --release --locked --manifest-path rust/crates/lumen-docintel-py/Cargo.toml --interpreter python --out wheelhouse
+      - name: Exercise installed release wheel without source-tree binaries
+        run: |
+          python -m venv wheel-test
+          if [ "$RUNNER_OS" = 'Windows' ]; then wheel_python=wheel-test/Scripts/python; else wheel_python=wheel-test/bin/python; fi
+          "$wheel_python" -m pip install wheelhouse/*.whl
+          "$wheel_python" scripts/check-pdfium-wheel.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-${{ runner.os }}
+          name: native-${{ matrix.os }}
           path: wheelhouse/*.whl
 
   fidelity-benchmark:
@@ -79,6 +88,7 @@ jobs:
         run: |
           rustup toolchain install 1.99.0 --profile minimal
           python -m pip install uv==0.11.18
+          python scripts/setup-pdfium.py
       - name: Synthetic fidelity gate and isolated baseline report
         working-directory: backend
         env:
@@ -86,6 +96,7 @@ jobs:
           RUSTUP_TOOLCHAIN: '1.99.0'
           RUN_LIVE: '0'
           OPENROUTER_API_KEY: ''
+          PYTEST_ADDOPTS: '-n 2'
         run: |
           uv sync --extra dev --extra native
           uv run --extra dev --extra native ruff check tests/eval/docintel

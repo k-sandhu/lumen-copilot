@@ -298,7 +298,15 @@ pub fn extract_with_context(
         // Retain all reservations with their owned per-page result until assembly.
         ctx.allocate(256, || (page_text, memory))
     })?;
-    assemble(bytes, &pages, &extracted.iter().map(|u| &u.value.0).collect::<Vec<_>>(), metadata, ctx, &mut memory, false)
+    assemble(
+        bytes,
+        &pages,
+        &extracted.iter().map(|u| &u.value.0).collect::<Vec<_>>(),
+        metadata,
+        ctx,
+        &mut memory,
+        false,
+    )
 }
 
 fn assemble(
@@ -341,7 +349,7 @@ fn assemble(
                 .unwrap_or(blocks.len());
             blocks.insert(index, candidate.block);
         }
-        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
+        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if page_text.needs_ocr || blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
         document.blocks.extend(blocks);
     }
     let normalization_hooks = layout::furniture(&mut document, pages, ctx)?;
@@ -374,7 +382,14 @@ fn assemble(
     }
     document.generation = Generation {
         source_sha256: Some(format!("{:x}", hash.finalize())),
-        parser_id: Some(if pdfium {"rust-pdfium"} else {"rust-pdf-bounded"}.into()),
+        parser_id: Some(
+            if pdfium {
+                "rust-pdfium"
+            } else {
+                "rust-pdf-bounded"
+            }
+            .into(),
+        ),
         parser_version: Some(crate::VERSION.into()),
         build_id: Some(format!(
             "{:x}",
@@ -387,14 +402,18 @@ fn assemble(
                 include_str!("pdfium.rs")
             ))
         )),
-        dependency_versions: if pdfium { BTreeMap::from([
-            ("pdfium-render".into(), "0.9.4".into()),
-            ("pdfium".into(), "chromium/7881".into()),
-            ("sha2".into(), "0.10.9".into()),
-        ]) } else { BTreeMap::from([
-            ("flate2".into(), "1.1.10".into()),
-            ("sha2".into(), "0.10.9".into()),
-        ]) },
+        dependency_versions: if pdfium {
+            BTreeMap::from([
+                ("pdfium-render".into(), "0.9.4".into()),
+                ("pdfium".into(), "chromium/7881".into()),
+                ("sha2".into(), "0.10.9".into()),
+            ])
+        } else {
+            BTreeMap::from([
+                ("flate2".into(), "1.1.10".into()),
+                ("sha2".into(), "0.10.9".into()),
+            ])
+        },
         diagnostics: Some(
             json!({"normalization_hooks":normalization_hooks,"pages":diagnostics,"metadata":metadata["metadata"],"outline":metadata["outline"],"coordinate_policy":"unrotated_source_points_bottom_left","box_policy":if pdfium {"pdfium_loose_char_bounds"} else {"advance_width_heuristic"},"annotation_policy":"exclude_annotations_and_widgets","furniture_policy":"retain_evidence_exclude_in_normalization","runtime":ctx.stats()}),
         ),
@@ -444,7 +463,11 @@ pub fn extract_json(bytes: &[u8], ctx: &Context, runtime: &Runtime) -> Result<St
     let document = extract_with_context(bytes, ctx, runtime)?;
     serialize(document, bytes.len(), ctx)
 }
-fn serialize(mut document: Document, input_bytes: usize, ctx: &Context) -> Result<String, CoreError> {
+fn serialize(
+    mut document: Document,
+    input_bytes: usize,
+    ctx: &Context,
+) -> Result<String, CoreError> {
     let size = document
         .blocks
         .iter()

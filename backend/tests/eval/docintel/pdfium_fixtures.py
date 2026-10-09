@@ -7,6 +7,7 @@ import re
 import struct
 import zlib
 
+from tests.eval.docintel.fixtures import Fixture
 from tests.eval.docintel.pdf_fixtures import document, objects, text
 
 
@@ -85,7 +86,7 @@ def cid(value: str, *, rotation: int = 0, unmapped: bool = False) -> bytes:
         + b"\nendbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end"
     )
     indices = list(range(1, len(value) + 1))
-    if all(0x0590 <= ord(c) <= 0x08ff for c in value):
+    if all(0x0590 <= ord(c) <= 0x08FF for c in value):
         # Paint visual order left-to-right. PDFium's bidi pass yields logical text.
         indices.reverse()
     encoded = "".join(f"{i:04x}" for i in indices)
@@ -122,3 +123,28 @@ def annotations() -> bytes:
             + b"\nendstream",
         ]
     )
+
+
+def corpus() -> list[Fixture]:
+    from tests.eval.docintel.metrics import Gold
+
+    cases = [
+        ("object-xref-streams", object_stream(), "Object stream text"),
+        ("incremental", incremental(), "Latest revision"),
+        ("cid-tounicode", cid("CID text"), "CID text"),
+        ("cjk", cid("漢字中文"), "漢字中文"),
+        ("rtl", cid("שלום"), "שלום"),
+        ("supplementary", cid("A😀B"), "A😀B"),
+        ("rotated-cid", cid("漢字", rotation=90), "漢字"),
+    ]
+    return [
+        Fixture(
+            f"pdfium-{name}",
+            "pdf",
+            "application/pdf",
+            data,
+            Gold(facts=(value,), regions=(("page", 1, value, None),)),
+            case=name,
+        )
+        for name, data, value in cases
+    ]

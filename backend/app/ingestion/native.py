@@ -135,7 +135,8 @@ def _pdfium_library() -> str:
     # use the same downloader destination. No system-library search or latest URL.
     roots = [
         Path(str(extension.__file__)).parent / "pdfium",
-        Path(__file__).resolve().parents[3] / "rust/crates/lumen-docintel-py/pdfium",
+        Path(__file__).resolve().parents[3]
+        / "rust/crates/lumen-docintel-py/pdfium-wheel-data/platlib/lumen_docintel/pdfium",
     ]
     for root in roots:
         pin = root / "pin.json"
@@ -301,6 +302,7 @@ def parse_pdf_candidate(
     mode: Literal["python", "shadow", "native"] = "python",
     executor: NativeExecutor | PdfiumExecutor | None = None,
     budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
 ) -> PdfCandidateResult:
     """Independent PDF opt-in seam for #669/#687; existing parsers stay authoritative.
 
@@ -316,7 +318,11 @@ def parse_pdf_candidate(
         return PdfCandidateResult(parse_document(data, mime_type="application/pdf"), "python")
     baseline = parse_document(data, mime_type="application/pdf") if mode == "shadow" else ""
     try:
-        document = (executor or _default_pdf_executor(os.getpid())).extract_pdf(data, budget=budget)
+        if executor is None and not native_available():
+            raise NativeUnavailableError("native ingestion extension is unavailable")
+        document = (executor or _default_pdf_executor(os.getpid())).extract_pdf(
+            data, budget=budget, cancellation=cancellation
+        )
         if mode == "native":
             if json.loads(document.generation_json)["outcome"] != "indexed":
                 raise PdfNeedsOcrError("PDF pages need OCR")

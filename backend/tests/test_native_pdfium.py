@@ -145,13 +145,27 @@ def test_hard_hang_deadline_and_crash_replacement(monkeypatch: pytest.MonkeyPatc
 
 
 def test_cancellation_terminates_non_cooperative_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from app.ingestion import _pdf_pool
     from app.ingestion.native import CancellationHandle, PdfiumExecutor, PdfWorkerError
 
     executor = PdfiumExecutor(workers=1)
     token = CancellationHandle()
     _replace_worker(monkeypatch, "import time; time.sleep(60)")
+    entered = threading.Event()
+    original_read = _pdf_pool.read_exact
+
+    def observed_read(stream: object, size: int) -> bytes:
+        value = original_read(stream, size)  # type: ignore[arg-type]
+        if value == b"R":
+            entered.set()
+        return value
+
+    monkeypatch.setattr(_pdf_pool, "read_exact", observed_read)
     with ThreadPoolExecutor(max_workers=1) as threads:
         future = threads.submit(executor.extract_pdf, b"%PDF-1.7", cancellation=token)
+        assert entered.wait(timeout=5)
         token.cancel()
         with pytest.raises(PdfWorkerError, match="cancelled"):
             future.result(timeout=5)
@@ -166,8 +180,63 @@ def test_pool_memory_configuration_and_os_memory_limit() -> None:
     script = (
         "from app.ingestion._pdf_worker import apply_memory_limit; "
         "apply_memory_limit(96*1024*1024); blocks=[]\n"
-        "try:\n while True: blocks.append(bytearray(8*1024*1024))\n"
+        "try:\n for _ in range(24): blocks.append(bytearray(8*1024*1024))\n"
         "except MemoryError:\n print('limited')"
     )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=10)
     assert b"limited" in result.stdout
+
+
+def test_queued_document_has_deadline_and_cancellation() -> None:
+    from app.domain.native_runtime import RuntimeBudget
+    from app.ingestion.native import CancellationHandle, PdfiumExecutor, PdfWorkerError
+
+    executor = PdfiumExecutor(workers=1)
+    assert executor._pool._slots.acquire(blocking=False)
+    try:
+        with pytest.raises(PdfWorkerError, match="timed_out"):
+            executor.extract_pdf(b"%PDF-1.7", budget=RuntimeBudget(timeout_ms=50))
+        token = CancellationHandle()
+        token.cancel()
+        with pytest.raises(PdfWorkerError, match="cancelled"):
+            executor.extract_pdf(b"%PDF-1.7", cancellation=token)
+    finally:
+        executor._pool._slots.release()
+
+
+def test_pdfium_accounting_limits_are_typed_and_shadow_keeps_python() -> None:
+    from app.domain.native_runtime import RuntimeBudget
+    from app.ingestion.native import PdfiumExecutor, PdfWorkerError, parse_pdf_candidate
+
+    data = document([text(40, 700, 12, "Evidence")])
+    budget = RuntimeBudget(max_memory_bytes=128)
+    with pytest.raises(PdfWorkerError, match="budget"):
+        PdfiumExecutor().extract_pdf(data, budget=budget)
+    shadow = parse_pdf_candidate(data, mode="shadow", budget=budget)
+    assert shadow.text == "Evidence"
+    assert shadow.native_error == "native_failed"
+
+
+def test_hostile_recursive_form_is_bounded_and_never_empty_success() -> None:
+    from app.domain.native_runtime import RuntimeBudget
+    from app.ingestion.native import PdfiumExecutor, PdfWorkerError
+    from tests.eval.docintel.pdf_fixtures import objects
+
+    data = objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /XObject << /Loop 5 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length 8 >>\nstream\n/Loop Do\nendstream",
+            b"<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] "
+            b"/Resources << /XObject << /Loop 5 0 R >> >> /Length 8 >>\n"
+            b"stream\n/Loop Do\nendstream",
+        ]
+    )
+    try:
+        result = PdfiumExecutor().extract_pdf(data, budget=RuntimeBudget(timeout_ms=1000))
+    except PdfWorkerError as error:
+        assert error.code in {"budget", "parse_error", "timed_out", "worker_crashed"}
+    else:
+        assert json.loads(result.generation_json)["outcome"] == "needs_ocr"

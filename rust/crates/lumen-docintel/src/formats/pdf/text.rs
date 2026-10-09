@@ -20,6 +20,7 @@ pub(super) struct Glyph {
 }
 #[derive(Default)]
 pub(super) struct PageText {
+    pub needs_ocr: bool,
     pub glyphs: Vec<Glyph>,
     pub has_images: bool,
     pub lines: Vec<[f64; 4]>,

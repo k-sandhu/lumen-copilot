@@ -48,4 +48,5 @@ target/
 *.so
 *.dylib
 rust/crates/lumen-docintel-py/pdfium/
+rust/crates/lumen-docintel-py/pdfium-wheel-data/
 *.dll

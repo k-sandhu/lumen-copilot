@@ -53,9 +53,14 @@ def measure(payload: dict[str, Any]) -> dict[str, Any]:
             )
             outcome = extraction_outcome = "indexed" if text.strip() else "empty"
         else:
-            from app.ingestion.native import NativeExecutor
+            from app.ingestion.native import NativeExecutor, PdfiumExecutor
 
-            document = NativeExecutor(threads=payload.get("threads") or 2).extract_pdf(data)
+            executor = (
+                PdfiumExecutor(workers=1)
+                if payload["arm"] == "pdfium-extraction"
+                else NativeExecutor(threads=payload.get("threads") or 2)
+            )
+            document = executor.extract_pdf(data)
             text = document.rendered_text
             generation = json.loads(document.generation_json)
             parser_identity = {
@@ -109,6 +114,8 @@ def measure(payload: dict[str, Any]) -> dict[str, Any]:
         }
     )
     peak = _rss()
+    if payload["arm"] == "pdfium-extraction" and "executor" in locals():
+        peak = max(peak, executor.peak_rss_bytes)
     return {
         "arm": payload["arm"],
         "outcome": outcome,

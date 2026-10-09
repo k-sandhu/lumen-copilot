@@ -91,8 +91,10 @@ class PdfProcessPool:
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
             assert process.stdin is not None and process.stdout is not None
-            output_cap = min(
-                budget.max_memory_bytes // 2, budget.max_output_chars * 16 + 1024 * 1024
+            # Reserve a small control-frame allowance even with a tiny document
+            # budget so the child can return a typed limit instead of broken IPC.
+            output_cap = max(
+                4096, min(budget.max_memory_bytes // 2, budget.max_output_chars * 16 + 1024 * 1024)
             )
             config = json.dumps(
                 {
