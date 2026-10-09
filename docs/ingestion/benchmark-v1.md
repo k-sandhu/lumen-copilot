@@ -43,3 +43,9 @@ notebooks. Legacy DOC/XLS/PPT/MSG fixtures are generated CFB recognition envelop
 not complete native-format fidelity documents; valid legacy fidelity corpora and
 conversion evaluation remain gated on #678/#697. They are explicitly marked
 recognition-only and never scored as successful extraction controls.
+
+Peak RSS uses the current address-space `VmHWM` on Linux, Windows
+`GetProcessMemoryInfo` and `ru_maxrss` on macOS. Linux avoids carrying a
+fork/exec predecessor's rusage watermark into the fixture measurement.
+These OS high-water measurements are estimates, not enforced resident-memory
+limits. See the [Linux kernel proc field definitions](https://docs.kernel.org/filesystems/proc.html).

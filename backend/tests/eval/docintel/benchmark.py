@@ -21,6 +21,13 @@ _MAX_INPUT = 32 * 1024 * 1024
 
 
 def _rss() -> int:
+    if sys.platform == "linux":
+        # Per-address-space peak avoids a fork/exec predecessor's rusage watermark.
+        with Path("/proc/self/status").open(encoding="utf-8") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+        raise RuntimeError("process peak memory metric unavailable")
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes

@@ -118,3 +118,23 @@ def test_gold_tracks_blank_pdf_parts_and_nested_attachment_facts() -> None:
     assert fixtures["pdf-columns"].gold.native_regions == 3
     assert "AttachmentFact" in fixtures["zip-nested"].gold.facts
     assert "AttachmentFact" in fixtures["eml-facts"].gold.facts
+
+
+def test_linux_peak_uses_current_address_space_high_water(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from tests.eval.docintel.benchmark import _rss
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setitem(
+        sys.modules,
+        "resource",
+        SimpleNamespace(RUSAGE_SELF=0, getrusage=lambda _: SimpleNamespace(ru_maxrss=999999)),
+    )
+    monkeypatch.setattr(
+        Path, "open", lambda *args, **kwargs: io.StringIO("Name: python\nVmHWM: 42 kB\n")
+    )
+    assert _rss() == 42 * 1024
