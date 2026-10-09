@@ -30,7 +30,7 @@ cd rust
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo deny --config deny.toml check licenses advisories
+cargo deny --config deny.toml check
 ```
 
 The extension uses PyO3's Python 3.12 stable ABI. Cargo tests omit the extension
@@ -47,6 +47,9 @@ CI builds Windows/macOS/Linux wheels and exercises bridge tests offline.
 Dependency licenses: PyO3 MIT OR Apache-2.0; maturin MIT OR Apache-2.0 (build).
 The lockfile and cargo-deny policy cover the transitive Rust graph. No parser,
 network/storage client or OCR engine is introduced in this foundation.
+The full dependency gate checks licenses, advisories, bans and sources. Local
+workspace path dependencies also carry an exact version to satisfy the wildcard
+ban and detect an unintended core/bridge version mismatch.
 
 References: [PyO3](https://pyo3.rs/), [maturin configuration](https://www.maturin.rs/config),
 [uv optional path dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/).
