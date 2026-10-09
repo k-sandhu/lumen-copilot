@@ -39,3 +39,11 @@ bridge reuses serde_json 1.0.151 (MIT OR Apache-2.0).
 - [s] 2026-10-08: live gates excluded by task; residual risk: no deployed round-trip.
 
 Strict mypy using backend/pyproject.toml: 9 changed source files passed.
+
+The shared seam now calls the Python baseline lazily, blocks incomplete cutover
+results, and checks wheel capabilities before admitting upload types. Budget-aware
+detection #728 remains a production promotion prerequisite.
+
+[x] 2026-10-09: shared routing regression checks: 19 targeted Python tests passed;
+4 Rust tests passed after the ZIP-signature regression failed for the expected
+reason. Ordinary text beginning with PK remains text.

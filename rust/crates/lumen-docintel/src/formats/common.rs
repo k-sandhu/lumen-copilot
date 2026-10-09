@@ -2,7 +2,7 @@
 use crate::{
     CoreError,
     canonical::{Block, Document, Generation, SourceRegion, render},
-    detection::{DecodedText, detect},
+    detection::{DecodedText, decode_text},
     runtime::{Budget, Cancellation, Context, Reservation},
 };
 use serde_json::Value;
@@ -77,8 +77,26 @@ impl Session {
 pub fn decoded(bytes: &[u8], s: &mut Session) -> Result<DecodedText, CoreError> {
     s.ctx.checkpoint()?;
     // Reserve the bounded decoder/detection workspace before dependency calls.
-    let detection = detect(bytes, None)?;
-    detection.decoded.ok_or(CoreError::Unsupported)
+    if bytes.starts_with(b"%PDF-")
+        || [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"]
+            .iter()
+            .any(|magic| bytes.starts_with(*magic))
+        || bytes.starts_with(b"\xd0\xcf\x11\xe0")
+        || bytes.starts_with(b"\x1f\x8b")
+        || infer::get(bytes).is_some_and(|kind| kind.mime_type().starts_with("image/"))
+    {
+        return Err(CoreError::Unsupported);
+    }
+    let decoded = decode_text(bytes)?;
+    let controls = decoded
+        .text
+        .chars()
+        .filter(|c| c.is_control() && !matches!(c, '\r' | '\n' | '\t'))
+        .count();
+    if controls.saturating_mul(100) > decoded.text.chars().count() {
+        return Err(CoreError::Unsupported);
+    }
+    Ok(decoded)
 }
 pub fn region(name: impl Into<String>) -> SourceRegion {
     SourceRegion {

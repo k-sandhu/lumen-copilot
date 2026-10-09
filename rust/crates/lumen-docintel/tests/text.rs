@@ -84,3 +84,14 @@ proptest! {
   }
  }
 }
+
+#[test]
+fn ordinary_zip_initial_letters_remain_text() {
+    let doc = parse(
+        b"PK means a supplied source label",
+        Limits::default(),
+        Mode::Text,
+    )
+    .unwrap();
+    assert_eq!(doc.blocks[0].text, "PK means a supplied source label");
+}
