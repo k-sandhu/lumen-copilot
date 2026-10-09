@@ -251,7 +251,9 @@ def _odf(kind: str) -> bytes:
             '<office:presentation><draw:page draw:name="Intro"><draw:fram'
             "e><draw:text-box><text:p>Intro</text:p><text:p>North -120 kg"
             "</text:p></draw:text-box></draw:frame></draw:page><draw:page"
-            ' draw:name="PageTwo"/></office:presentation>'
+            ' draw:name="PageTwo"><draw:frame><draw:text-box>'
+            "<text:p>PageTwo</text:p></draw:text-box></draw:frame>"
+            "</draw:page></office:presentation>"
         ),
     }[kind]
     xml = (
@@ -311,7 +313,15 @@ def corpus() -> list[Fixture]:
             "application/pdf",
             _pdf(),
             Gold(
-                facts=gold.facts, associations=gold.associations, order=gold.order, native_regions=3
+                facts=gold.facts + ("RightColumn",),
+                associations=gold.associations,
+                order=("Intro", "North", "RightColumn", "PageTwo"),
+                native_regions=3,
+                regions=(
+                    ("page", 1, "Intro", None),
+                    ("page", 2, "PageTwo", None),
+                    ("page", 3, "", None),
+                ),
             ),
         ),
         Fixture(
