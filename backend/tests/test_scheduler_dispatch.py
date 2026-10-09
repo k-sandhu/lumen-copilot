@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
-from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -42,6 +41,7 @@ from app.domain.scheduling import cadence_from_cron
 from app.services.assistants_service import config_from_assistant
 from app.tasks import scheduler
 from tests._audit_helpers import RecordingDurableAuditTransactions
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -97,7 +97,7 @@ async def ctx(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Ctx]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
             alice = await UserRepository(seed, ta.id).create(

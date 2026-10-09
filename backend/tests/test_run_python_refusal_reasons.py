@@ -54,7 +54,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
 from app.core.errors import DependencyError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -100,6 +99,7 @@ from app.services.tools.types import (
     ToolContext,
     ToolDefinition,
 )
+from tests._db_helpers import copy_sqlite_schema
 from tests._disclosure import assert_control_neutral, control_neutral_violations
 from tests._sandbox_helpers import sandbox_settings
 
@@ -139,7 +139,7 @@ async def world() -> AsyncIterator[_World]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as session:
             tenant = await TenantRepository(session).create(name="Acme")

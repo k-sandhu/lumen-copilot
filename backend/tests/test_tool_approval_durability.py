@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.auth.principal import Principal
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChatSessionRepository,
@@ -39,6 +38,8 @@ from app.services.audit import AuditSink
 from app.services.tools.gate import PolicyApprovalGate
 from app.services.tools.runner import ToolRunner, hash_args
 from app.services.tools.types import ToolContext
+from tests._db_helpers import copy_sqlite_schema
+from tests._live_helpers import isolated_live_url, worker_database_name
 from tests.test_sandbox_tool_runner import _FakeRunner, _ok_result, _World
 
 
@@ -59,9 +60,12 @@ from tests.test_sandbox_tool_runner import _FakeRunner, _ok_result, _World
 async def world(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[_World]:
     if request.param == "postgres":
         url = os.environ["DATABASE_URL"]
-        assert url.endswith("@localhost:47182/lumentest_pr559")
+        assert url == isolated_live_url(
+            "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr559"
+        )
         engine = create_async_engine(
-            url, connect_args={"server_settings": {"role": "lumentest_pr559_r2"}}
+            url,
+            connect_args={"server_settings": {"role": worker_database_name("lumentest_pr559_r2")}},
         )
     else:
         url = f"sqlite+aiosqlite:///{(tmp_path / 'approval.db').as_posix()}"
@@ -70,7 +74,7 @@ async def world(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator
     try:
         if request.param == "sqlite":
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(copy_sqlite_schema)
         async with factory() as session:
             if request.param == "postgres":
                 flags = (

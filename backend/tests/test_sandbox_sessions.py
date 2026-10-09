@@ -9,7 +9,6 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     SandboxSessionRepository,
@@ -20,6 +19,7 @@ from app.domain.entities import Role, SandboxSessionStatus
 from app.sandbox.runner import build_container_flags
 from app.sandbox.service import PackagePolicyError, validate_requested_packages
 from app.sandbox.spec import SandboxSessionSpec
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -33,7 +33,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as value:
             yield value
@@ -53,9 +53,7 @@ async def _chat(session: AsyncSession, *, tenant_name: str, email: str) -> tuple
 
 
 async def test_one_durable_session_is_reused_per_chat(session: AsyncSession) -> None:
-    tenant, owner, chat = await _chat(
-        session, tenant_name="Acme", email="alice@acme.test"
-    )
+    tenant, owner, chat = await _chat(session, tenant_name="Acme", email="alice@acme.test")
     chats = ChatSessionRepository(session, tenant.id)
     second_chat = await chats.create(owner_id=owner.id, model="openrouter:test/model")
     repo = SandboxSessionRepository(session, tenant.id)
@@ -79,9 +77,7 @@ async def test_one_durable_session_is_reused_per_chat(session: AsyncSession) -> 
 
 
 async def test_session_repository_is_tenant_scoped(session: AsyncSession) -> None:
-    tenant_a, owner_a, chat_a = await _chat(
-        session, tenant_name="Acme", email="alice@acme.test"
-    )
+    tenant_a, owner_a, chat_a = await _chat(session, tenant_name="Acme", email="alice@acme.test")
     tenant_b, _, _ = await _chat(session, tenant_name="Globex", email="bob@globex.test")
     created = await SandboxSessionRepository(session, tenant_a.id).get_or_create(
         owner_id=owner_a.id,
@@ -93,9 +89,7 @@ async def test_session_repository_is_tenant_scoped(session: AsyncSession) -> Non
 
 
 async def test_reset_advances_generation_and_close_is_durable(session: AsyncSession) -> None:
-    tenant, owner, chat = await _chat(
-        session, tenant_name="Acme", email="alice@acme.test"
-    )
+    tenant, owner, chat = await _chat(session, tenant_name="Acme", email="alice@acme.test")
     repo = SandboxSessionRepository(session, tenant.id)
     created = await repo.get_or_create(
         owner_id=owner.id, chat_session_id=chat.id, image_digest="python@sha256:abc"
@@ -114,9 +108,7 @@ async def test_reset_advances_generation_and_close_is_durable(session: AsyncSess
 
 
 async def test_error_state_recovers_with_a_fresh_generation(session: AsyncSession) -> None:
-    tenant, owner, chat = await _chat(
-        session, tenant_name="Acme", email="alice@acme.test"
-    )
+    tenant, owner, chat = await _chat(session, tenant_name="Acme", email="alice@acme.test")
     repo = SandboxSessionRepository(session, tenant.id)
     created = await repo.get_or_create(
         owner_id=owner.id, chat_session_id=chat.id, image_digest="python@sha256:abc"
@@ -163,14 +155,12 @@ def test_package_policy_canonicalizes_allows_and_denies() -> None:
         denied=(),
     ) == ("numpy==2.1.0", "pandas[excel]>=2")
 
-    assert validate_requested_packages(
-        ("scipy==1.14.0",), allowed=("*",), denied=()
-    ) == ("scipy==1.14.0",)
+    assert validate_requested_packages(("scipy==1.14.0",), allowed=("*",), denied=()) == (
+        "scipy==1.14.0",
+    )
 
     with pytest.raises(PackagePolicyError, match="requests"):
-        validate_requested_packages(
-            ("requests==2.32.3",), allowed=("*",), denied=("requests",)
-        )
+        validate_requested_packages(("requests==2.32.3",), allowed=("*",), denied=("requests",))
 
     with pytest.raises(PackagePolicyError, match="not-a-requirement"):
         validate_requested_packages(
