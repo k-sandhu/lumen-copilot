@@ -97,3 +97,7 @@ and real platform parity remain unverified under this session's constraints.
 - [~] 2026-10-08: the single full offline backend run started at 3713 MiB and
   was stopped at 2613 MiB, below the full-suite floor. No failing nodes appeared
   before stopping. Residual risk: full fallback coverage remains CI-only.
+
+The grounded offline upload/chat fixture explicitly configures the dimension of
+its deterministic embedding adapter. Checkpoint validation continues to require
+uniform finite vectors of the configured width; production defaults are unchanged.
