@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -60,6 +59,7 @@ from tests._audit_helpers import (
     denial_context,
     denial_context_from_session,
 )
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -222,7 +222,7 @@ async def ctx(
     monkeypatch.setattr("app.db.session.get_sessionmaker", lambda settings=None: factory)
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
             tb = await TenantRepository(seed).create(name="Globex")

@@ -194,9 +194,7 @@ def _parse_field(spec: str, low: int, high: int) -> frozenset[int]:
             except ValueError as exc:
                 raise InvalidCronError(f"Invalid cron field value: {part!r}.") from exc
         if start < low or end > high or start > end:
-            raise InvalidCronError(
-                f"Cron field value out of range [{low},{high}]: {part!r}."
-            )
+            raise InvalidCronError(f"Cron field value out of range [{low},{high}]: {part!r}.")
         values.update(range(start, end + 1, step))
     if not values:
         raise InvalidCronError(f"Cron field matched nothing: {spec!r}.")
