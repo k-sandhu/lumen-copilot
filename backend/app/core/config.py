@@ -973,6 +973,8 @@ class Settings(BaseSettings):
     # characters. Defaults are a reasonable passage size for retrieval; tune per
     # corpus without a code change. Invariant: 0 <= overlap < size (validated).
     # Native computation knobs; no parser is promoted by these settings (#666).
+    native_epub_enabled: bool = False
+    native_epub_shadow: bool = False
     native_html_enabled: bool = False
     native_html_shadow: bool = False
 
