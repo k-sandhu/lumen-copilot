@@ -37,7 +37,6 @@ class OpenRouterOcrProvider:
         payload = {
             "model": settings.ocr_model,
             "max_tokens": 1,
-            "usage": {"include": True},
             "messages": [
                 {
                     "role": "user",
@@ -139,6 +138,7 @@ class OpenRouterOcrProvider:
                     cost,
                     tokens("prompt_tokens"),
                     tokens("completion_tokens"),
+                    raw.get("model") if isinstance(raw.get("model"), str) else settings.ocr_model,
                 )
         except httpx.TimeoutException:
             raise OcrError("ocr_timeout") from None

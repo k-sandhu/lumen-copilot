@@ -54,7 +54,9 @@ def test_artifact_allowlist_retains_formats_outside_media_uploads() -> None:
     # Media upload support can make the document set numerically larger; the
     # security boundary is that artifact-only output formats do not become
     # ingestible documents merely because both features use object storage.
-    artifact_only = {"text/csv", "application/json", "image/png", "image/svg+xml", "text/html"}
+    artifact_only = {"text/csv", "application/json", "image/svg+xml", "text/html"}
+    # Standalone raster images are OCR inputs under #695.
+    assert "image/png" in s.upload_allowed_content_types
     assert artifact_only <= s.artifact_allowed_content_types
     assert artifact_only.isdisjoint(s.upload_allowed_content_types)
 

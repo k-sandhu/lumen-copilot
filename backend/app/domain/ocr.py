@@ -28,6 +28,7 @@ class OcrResult:
     cost_usd: Decimal | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    reported_model: str | None = None
 
 
 class OcrProvider(Protocol):

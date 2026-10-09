@@ -60,7 +60,7 @@ jobs:
         run: |
           uv sync --project backend --extra dev --extra native
           uv run --project backend --extra dev --extra native python -c "import lumen_docintel; assert lumen_docintel.core_version() == '0.1.0'"
-          uv run --project backend --extra dev --extra native python -c "import glob,pytest; raise SystemExit(pytest.main(glob.glob('backend/tests/test_native_*.py') + ['backend/tests/test_pdf_isolation_policy.py', 'backend/tests/test_connector_conformance.py::test_settings_classification_is_complete', 'backend/tests/test_connector_conformance.py::test_settings_completeness_guard_bites_on_an_unclassified_field', '-m', 'not live']))"
+          uv run --project backend --extra dev --extra native python -c "import glob,pytest; raise SystemExit(pytest.main(glob.glob('backend/tests/test_native_*.py') + ['backend/tests/test_ocr_native.py', 'backend/tests/test_pdf_isolation_policy.py', 'backend/tests/test_connector_conformance.py::test_settings_classification_is_complete', 'backend/tests/test_connector_conformance.py::test_settings_completeness_guard_bites_on_an_unclassified_field', '-m', 'not live']))"
       - name: Release wheel
         run: maturin build --release --locked --manifest-path rust/crates/lumen-docintel-py/Cargo.toml --interpreter python --out wheelhouse
       - name: Exercise installed release wheel without source-tree binaries

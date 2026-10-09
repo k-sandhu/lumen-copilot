@@ -37,6 +37,9 @@ The cache key is (tenant, SHA-256 of submitted one-page bytes, engine/profile).
 No cross-tenant cache reuse. Reserve a page and the total ceiling in a short durable
 transaction under a tenant policy lock, and commit a content-free OCR intent audit
 before dispatch. Known results and actual usage commit before canonical merging.
+Reported costs above the reservation are recorded and fail closed before publication;
+subsequent admission uses that actual spend. A local reservation is not a provider
+price cap: owners must provision a restricted key/model with an adequate ceiling.
 The same page is never dispatched twice automatically, including concurrent
 workers and ingestion retries. An ambiguous timeout/crash keeps its reservation
 and blocks repeat payment; operator reconciliation is required. A missing cost
@@ -66,8 +69,12 @@ tenant-scoped and follows tenant deletion; broader retention remains an owner de
 #696 evaluates a self-hosted engine for offline deployment, boxes and language
 coverage behind the same OcrProvider domain types. Handwriting remains out of scope.
 No new service, vendor SDK or production parser promotion is introduced.
-New direct Rust dependency: image (MIT OR Apache-2.0), with only selected codecs;
-its pinned transitive licenses/advisories require cargo-deny verification.
+New direct Rust dependencies: image 0.25.8 (MIT OR Apache-2.0), with only
+selected codecs, and tiff 0.10.3 (MIT) for rejecting extra frames.
+`cargo deny check` passed on 2026-10-09 for the pinned graph (duplicate-version
+warnings remain allowed by the existing policy). Image decode reserves 24 bytes
+per pixel, four input copies and 4 MiB scratch before allocation; the isolated
+worker additionally bounds non-cooperative codec/native work.
 
 The optional live probe is not required: maximum two generated single-page requests
 and $0.02 total if performed. Never retain keys or third-party document content.

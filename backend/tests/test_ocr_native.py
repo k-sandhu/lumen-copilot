@@ -3,6 +3,7 @@
 import io
 import json
 import struct
+import sys
 import zlib
 from decimal import Decimal
 from uuid import uuid4
@@ -17,7 +18,8 @@ from app.services.ocr import OcrService
 from tests.eval.docintel.pdfium_fixtures import document, text
 
 pytestmark = pytest.mark.skipif(
-    not native.native_available(), reason="optional native extension unavailable"
+    not native.native_available() or sys.platform not in {"win32", "linux"},
+    reason="optional native extension unavailable",
 )
 BUDGET = RuntimeBudget(
     max_work_units=5_000_000, max_memory_bytes=256 * 1024 * 1024, max_output_chars=2_000_000
@@ -109,3 +111,31 @@ def test_standalone_png_is_one_page_and_hostile_input_is_contained():
     with pytest.raises(native.PdfWorkerError):
         executor.prepare_ocr_page(b"corrupt", page=1, image=True, budget=BUDGET)
     assert executor.prepare_ocr_page(png(), page=1, image=True, budget=BUDGET).startswith(b"%PDF-")
+
+
+async def test_preprocessing_budget_is_typed_and_never_dispatches():
+    canonical = native.image_canonical(png())
+    provider = Provider()
+    ledger = Ledger()
+
+    def rejected(page):
+        raise native.PdfWorkerError("budget")
+
+    result, reason = await OcrService(provider, ledger).run(canonical, rejected)
+    assert reason == "ocr_preprocess_budget"
+    assert result.rendered_text == "" and provider.pages == [] and ledger.starts == 0
+
+
+async def test_unexpected_provider_cost_is_recorded_but_not_published():
+    canonical = native.image_canonical(png())
+
+    class ExpensiveProvider(Provider):
+        async def recognize(self, page):
+            return OcrResult("generated text", self.engine_id, cost_usd=Decimal("0.03"))
+
+    ledger = Ledger()
+    result, reason = await OcrService(ExpensiveProvider(), ledger).run(
+        canonical, lambda page: b"%PDF-generated"
+    )
+    assert reason == "ocr_cost_exceeded" and result.rendered_text == ""
+    assert ledger.starts == 1 and next(iter(ledger.values.values())).cost_usd == Decimal("0.03")

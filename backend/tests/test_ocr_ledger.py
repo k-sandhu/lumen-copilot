@@ -94,3 +94,40 @@ async def test_concurrency_and_page_budgets_are_durable(sqlite_engine):
     )
     with pytest.raises(OcrError, match="ocr_budget"):
         await ledger.begin("c" * 64, "fixture", 3, policy)
+
+
+async def test_missing_intent_audit_rolls_back_reservation(sqlite_engine, monkeypatch):
+    tenant, doc, attempt, policy = await setup()
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr("app.tasks.ocr.AuditSink.emit", fail)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await DurableOcrLedger(tenant, doc, attempt).begin("a" * 64, "fixture", 1, policy)
+    async with tenant_session_scope(tenant) as session:
+        assert (await session.execute(select(models.OcrPageCache))).scalars().all() == []
+        row = (await session.execute(select(models.OcrTenantPolicy))).scalar_one()
+        assert row.pages_used == 0 and row.cost_used_microusd == 0 and row.active_calls == 0
+
+
+async def test_non_admin_cannot_approve_external_ocr(sqlite_engine):
+    tenant, doc, attempt, policy = await setup()
+    async with tenant_session_scope(tenant) as session:
+        admin = (
+            await session.execute(select(models.User).where(models.User.id == policy.approved_by))
+        ).scalar_one()
+        admin.roles = ["member"]
+        with pytest.raises(OcrError, match="ocr_approval_required"):
+            await OcrRepository(session, tenant).configure(policy)
+
+
+async def test_cost_budget_blocks_before_dispatch(sqlite_engine):
+    from dataclasses import replace
+
+    tenant, doc, attempt, policy = await setup()
+    policy = replace(policy, budget_usd=Decimal("0.001"))
+    async with tenant_session_scope(tenant) as session:
+        await OcrRepository(session, tenant).configure(policy)
+    with pytest.raises(OcrError, match="ocr_budget"):
+        await DurableOcrLedger(tenant, doc, attempt).begin("a" * 64, "fixture", 1, policy)

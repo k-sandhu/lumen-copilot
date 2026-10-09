@@ -47,20 +47,40 @@ fn refuses_digital_pages_and_duplicate_results() {
     assert!(merge(scanned(), vec![result.clone(), result]).is_err());
 }
 
-
 #[test]
 fn image_codecs_produce_one_page_pdf_and_obey_budgets() {
-    use lumen_docintel_core::{ocr_image,runtime::{Context,Budget,Cancellation}};
+    use lumen_docintel_core::{
+        ocr_image,
+        runtime::{Budget, Cancellation, Context},
+    };
     use std::io::Cursor;
-    for format in [image::ImageFormat::Png,image::ImageFormat::Jpeg,image::ImageFormat::WebP,image::ImageFormat::Tiff] {
-        let image=image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2,2,image::Rgb([30,40,50])));
-        let mut bytes=Cursor::new(Vec::new());image.write_to(&mut bytes,format).unwrap();
-        let ctx=Context::new(Budget::default(),Cancellation::default()).unwrap();
-        let result=ocr_image::wrap(bytes.get_ref(),&ctx).unwrap_or_else(|e| panic!("{format:?}: {e:?}"));
-        let raw:serde_json::Value=serde_json::from_str(&result).unwrap();
-        assert_eq!(raw["page"],1);
+    for format in [
+        image::ImageFormat::Png,
+        image::ImageFormat::Jpeg,
+        image::ImageFormat::WebP,
+        image::ImageFormat::Tiff,
+    ] {
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([30, 40, 50]),
+        ));
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, format).unwrap();
+        let ctx = Context::new(Budget::default(), Cancellation::default()).unwrap();
+        let result =
+            ocr_image::wrap(bytes.get_ref(), &ctx).unwrap_or_else(|e| panic!("{format:?}: {e:?}"));
+        let raw: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(raw["page"], 1);
         assert!(raw["pdf_hex"].as_str().unwrap().starts_with("255044462d"));
-        let tiny=Context::new(Budget{max_memory_bytes:1,..Budget::default()},Cancellation::default()).unwrap();
-        assert!(ocr_image::wrap(bytes.get_ref(),&tiny).is_err());
+        let tiny = Context::new(
+            Budget {
+                max_memory_bytes: 1,
+                ..Budget::default()
+            },
+            Cancellation::default(),
+        )
+        .unwrap();
+        assert!(ocr_image::wrap(bytes.get_ref(), &tiny).is_err());
     }
 }

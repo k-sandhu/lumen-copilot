@@ -198,7 +198,7 @@ export function ChatView() {
                 openViewer({
                   documentId: citation.documentId,
                   documentName: citation.documentName,
-                  machineRead: citation.machine_read,
+                  machineRead: citation.machineRead,
                   charStart: citation.charStart,
                   charEnd: citation.charEnd,
                   snippet: citation.snippet,
@@ -267,6 +267,7 @@ export function ChatView() {
                   id: `${viewer.url}:${viewer.charStart}`,
                   documentId: viewer.documentId,
                   documentName: viewer.documentName,
+                  machineRead: viewer.machineRead,
                   chunkId: '',
                   snippet: viewer.snippet,
                   charStart: viewer.charStart,
@@ -285,6 +286,7 @@ export function ChatView() {
                   id: `${viewer.documentId}:${viewer.charStart}`,
                   documentId: viewer.documentId,
                   documentName: viewer.documentName,
+                  machineRead: viewer.machineRead,
                   chunkId: '',
                   snippet: viewer.snippet,
                   charStart: viewer.charStart,
@@ -323,6 +325,7 @@ interface ActiveSessionProps {
   openViewer: (target: {
     documentId: string;
     documentName: string;
+    machineRead?: boolean;
     charStart: number;
     charEnd: number;
     snippet: string;
@@ -580,6 +583,7 @@ function ActiveSession({
       openViewer({
         documentId: c.documentId,
         documentName: c.documentName,
+        machineRead: c.machineRead,
         charStart: c.charStart,
         charEnd: c.charEnd,
         snippet: c.snippet,

@@ -65,7 +65,7 @@ async def test_fault_at_every_stage_boundary_resumes_without_duplicate_outputs(
         assert calls[name] == prior[name] == 1
     if boundary == "after_commit":
         assert calls[stage] == 1
-    assert len(store.rows) == 7
+    assert len(store.rows) == len(STAGES)
 
 
 async def test_downstream_config_change_reuses_extraction_but_invalidates_dependents() -> None:

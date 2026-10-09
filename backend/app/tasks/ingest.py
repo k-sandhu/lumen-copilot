@@ -420,7 +420,7 @@ async def _ingest_claimed_document(
         compute=detect_stage,
     )
 
-    ledger = DurableOcrLedger(tenant_id, document_id, attempt)
+    ledger = DurableOcrLedger(tenant_id, document_id, attempt, model=settings.ocr_model)
     # Pure text controls avoid even a policy DB read; OCR is a PDF/image capability.
     eligible = mime_type.split(";", 1)[0].strip().lower() in {
         "application/pdf",

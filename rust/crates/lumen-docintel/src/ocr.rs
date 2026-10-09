@@ -100,10 +100,11 @@ pub fn merge(mut doc: Document, results: Vec<OcrText>) -> Result<Document, CoreE
     let rendered = canonical::render(doc.clone())?;
     let translate = |position: usize| -> Result<usize, CoreError> {
         for span in &old.spans {
-            if span.char_start <= position && position <= span.char_end {
-                if let Some(new) = rendered.spans.iter().find(|s| s.block_id == span.block_id) {
-                    return Ok(new.char_start + position - span.char_start);
-                }
+            if span.char_start <= position
+                && position <= span.char_end
+                && let Some(new) = rendered.spans.iter().find(|s| s.block_id == span.block_id)
+            {
+                return Ok(new.char_start + position - span.char_start);
             }
         }
         if position == 0 {

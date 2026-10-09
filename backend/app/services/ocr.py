@@ -10,7 +10,7 @@ from collections.abc import Callable
 from app.core.config import Settings
 from app.domain.canonical import CanonicalDocument
 from app.domain.ocr import OcrError, OcrLedger, OcrPage, OcrProvider
-from app.ingestion.native import merge_ocr
+from app.ingestion.native import PdfWorkerError, merge_ocr
 
 
 class OcrService:
@@ -50,7 +50,18 @@ class OcrService:
                             )
                             raise
                         # Unexpected interruption leaves pending durable intent; no repeat charge.
-                        await self._ledger.finish(digest, self._provider.engine_id, result, None)
+                        exceeded = (
+                            result.cost_usd is not None
+                            and result.cost_usd > policy.per_page_ceiling_usd
+                        )
+                        await self._ledger.finish(
+                            digest,
+                            self._provider.engine_id,
+                            result,
+                            "ocr_cost_exceeded" if exceeded else None,
+                        )
+                if result.cost_usd is not None and result.cost_usd > policy.per_page_ceiling_usd:
+                    raise OcrError("ocr_cost_exceeded")
                 converted.append(
                     {
                         "page": page,
@@ -61,6 +72,9 @@ class OcrService:
                 )
             except OcrError as exc:
                 reason = exc.code
+                break
+            except PdfWorkerError as exc:
+                reason = "ocr_preprocess_" + exc.code
                 break
         return merge_ocr(document, converted) if converted else document, reason
 
