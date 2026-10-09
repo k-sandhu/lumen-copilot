@@ -34,6 +34,10 @@ assertion was corrected (10 classification-search tests passed); the inherited
 settings partition failure was corrected separately in #742 (383 connector checks
 passed, 9 capability skips). Ruff, mypy (218 files), API type generation and Compose
 configuration validation passed. No live calls or datastore tests ran.
+After integrating #745's separately tracked singleton correction, 42 scoped
+search/stage/persistence/authorization/index-sync tests passed. Four contract
+projection regressions passed for null method and decimal accounting (including
+scientific notation), after failing first. API types were regenerated again.
 
 [~] 2026-10-09: final full-suite verification relies on CI under the one-full-run
 limit. Residual risk: broader final-state interactions remain unverified locally.

@@ -3822,11 +3822,11 @@ components:
         taxonomy_version: { type: string, maxLength: 64 }
         rules_version: { type: string, maxLength: 64 }
         prompt_version: { type: string, maxLength: 64 }
-        method: { type: [string, "null"], enum: [rules, decisions, structured_output, override, "null"] }
+        method: { type: [string, "null"], enum: [rules, decisions, structured_output, override, null] }
         methods: { type: array, items: { type: string }, maxItems: 4 }
         requested_model: { type: string, maxLength: 256 }
         reported_models: { type: array, items: { type: string, maxLength: 256 }, maxItems: 4 }
-        total_cost_usd: { type: [string, "null"], pattern: "^[0-9]+(\\.[0-9]+)?$" }
+        total_cost_usd: { type: [string, "null"], pattern: "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$" }
         review_required: { type: boolean }
         rule_ids: { type: array, items: { type: string }, maxItems: 64 }
         override_actor: { type: string, format: uuid }
