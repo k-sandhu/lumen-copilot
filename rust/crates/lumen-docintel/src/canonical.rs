@@ -1,6 +1,8 @@
 //! Canonical schema v1, with Python-compatible Unicode code-point offsets.
 use crate::CoreError;
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 
 pub const MAX_JSON_BYTES: usize = 32 * 1024 * 1024;
@@ -365,10 +367,88 @@ pub fn render(document: Document) -> Result<RenderedDocument, CoreError> {
     })
 }
 
+/// Check shape without building collections. Compact JSON must not amplify into
+/// unbounded serde/model allocations before validation gets a chance to run.
+fn check_json_shape(input: &str) -> Result<(), CoreError> {
+    let remaining = (128usize * 1024 * 1024)
+        .checked_sub(32 * 1024 * 1024 + input.len().saturating_mul(2))
+        .ok_or(CoreError::Budget)?;
+    let max_nodes = (remaining / 512).min(100_000);
+    let count = Cell::new(0usize);
+    let exhausted = Cell::new(false);
+    #[derive(Clone, Copy)]
+    struct Shape<'a> {
+        count: &'a Cell<usize>,
+        exhausted: &'a Cell<bool>,
+        limit: usize,
+    }
+    impl<'de> DeserializeSeed<'de> for Shape<'_> {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            if self.count.get() == self.limit {
+                self.exhausted.set(true);
+                return Err(serde::de::Error::custom("model shape budget"));
+            }
+            self.count.set(self.count.get() + 1);
+            d.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Shape<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("bounded document JSON")
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while seq.next_element_seed(self)?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while map.next_key::<IgnoredAny>()?.is_some() {
+                map.next_value_seed(self)?;
+            }
+            Ok(())
+        }
+    }
+    let mut parser = serde_json::Deserializer::from_str(input);
+    Shape {
+        count: &count,
+        exhausted: &exhausted,
+        limit: max_nodes,
+    }
+    .deserialize(&mut parser)
+    .map_err(|_| {
+        if exhausted.get() {
+            CoreError::Budget
+        } else {
+            CoreError::InvalidInput
+        }
+    })?;
+    parser.end().map_err(|_| CoreError::InvalidInput)
+}
+
 pub fn render_json(input: &str) -> Result<String, CoreError> {
     if input.len() > MAX_JSON_BYTES {
         return Err(CoreError::Budget);
     }
+    check_json_shape(input)?;
     let document = serde_json::from_str(input).map_err(|_| CoreError::InvalidInput)?;
     serde_json::to_string(&render(document)?).map_err(|_| CoreError::Internal)
 }

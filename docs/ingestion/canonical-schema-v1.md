@@ -43,3 +43,13 @@ Parity tests pass each current Python format's exact extracted text into a
 single Rust paragraph and compare the retained rendering side by side. This
 checks the model/offset boundary, not native format extraction fidelity. No Rust
 format parser is claimed; #670 reports unavailable candidate arms explicitly.
+
+The JSON boundary preflights collections without constructing the model. Its
+initial profile caps 100,000 JSON values and conservatively reserves 32 MiB of
+headroom plus twice input bytes plus 512 bytes per JSON value against 128 MiB.
+This includes an allowance for validation/render/serialization structures; it
+is an estimate, not a process RSS cap. The node cap tightens as input grows.
+Oversized compact metadata/cell arrays fail typed Budget before their model
+collections allocate. This can reject a shape below the separate block-count
+ceiling; changing the profile requires measured evaluation. Tests never print
+whole document JSON on budget failures.
