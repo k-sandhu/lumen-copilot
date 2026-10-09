@@ -43,3 +43,5 @@ promotion gates. Residual risk: production budget/structure/evaluation coverage.
 [x] 2026-10-09: refreshed text dependency; notebook/text Rust checks pass
 (10 tests). Rebuilt native wheel; 4 installed notebook/text Python checks pass.
 Nested Markdown cells inherit distinct code/list units and workspace budgets.
+
+The candidate routing controls `native_notebook_enabled`, `native_notebook_shadow` are explicitly classified as nonsecret deployment configuration in the connector conformance policy. The settings completeness guard verifies this classification; infrastructure credentials and test-only password hashing remain forbidden.
