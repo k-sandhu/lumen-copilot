@@ -284,8 +284,7 @@ async def test_first_tool_fragment_emits_the_classification_signal(
         ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
     ]
     kinds = [
-        "signal" if e.tool_call_started else ("text" if e.text else "terminal")
-        for e in events
+        "signal" if e.tool_call_started else ("text" if e.text else "terminal") for e in events
     ]
     # Exactly one signal, after the first text and before the second.
     assert kinds == ["text", "signal", "text", "terminal"]
@@ -366,10 +365,7 @@ async def test_anthropic_single_message_gets_one_breakpoint(
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
     _ = [
-        ev
-        async for ev in gw.stream_tools(
-            [ChatMessage(role=Role.USER, content="q")], tools=_TOOLS
-        )
+        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
     ]
     wire = captured["messages"]
     assert len(wire) == 1 and _has_cache_control(wire[0])
@@ -637,13 +633,9 @@ async def test_no_base_route_needs_openrouter_prefix(
     ):
         _ = [
             ev
-            async for ev in gw.stream_tools(
-                _CONVO, tools=_TOOLS, model=model, cache_key="sess-3"
-            )
+            async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, model=model, cache_key="sess-3")
         ]
-        assert all(
-            isinstance(m.get("content"), str) for m in captured["messages"]
-        ), model
+        assert all(isinstance(m.get("content"), str) for m in captured["messages"]), model
         assert "extra_body" not in captured, model
 
     # The openrouter/-prefixed forms of the same upstreams: directives on.

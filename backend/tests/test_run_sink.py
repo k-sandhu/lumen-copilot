@@ -81,8 +81,12 @@ async def test_transcript_sink_outcome_failed_with_typed_error() -> None:
             envelopes.error(
                 "s1",
                 1,
-                {"title": "Bad Gateway", "status": 502, "code": "model_unavailable",
-                 "detail": "The model was unavailable."},
+                {
+                    "title": "Bad Gateway",
+                    "status": 502,
+                    "code": "model_unavailable",
+                    "detail": "The model was unavailable.",
+                },
             ),
         ],
     )
