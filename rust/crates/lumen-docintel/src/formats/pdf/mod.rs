@@ -433,7 +433,7 @@ fn finish_document(
             "partial"
         };
     }
-    memory.reserve(
+    let _render_scratch = ctx.reserve(
         bytes.len().min(64 * 1024)
             + document
                 .blocks

@@ -80,3 +80,6 @@ never enter reports or logs. Failed documents remain in coverage denominators.
 Merge gate: hold until measured against the baseline evaluation; a human merges.
 Owner decisions remain production budgets, cutover thresholds, OCR, password
 policy and acceptance of annotation exclusion/heuristic reading order.
+
+Budget calibration, measured distributions and remaining coverage categories:
+[pdfium-budget-calibration.md](pdfium-budget-calibration.md) (#739).
