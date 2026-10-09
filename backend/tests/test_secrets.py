@@ -35,7 +35,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.crypto import SecretDecryptionError, SecretsCipher, generate_master_key
 from app.core.errors import NotFoundError, ValidationError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     SecretRepository,
@@ -46,6 +45,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import Role, SecretKind
 from app.services.audit import AuditSink
 from app.services.secrets_service import SecretsService
+from tests._db_helpers import copy_sqlite_schema
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -66,7 +66,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as sess:
             yield sess
@@ -180,9 +180,7 @@ async def test_internal_get_round_trips_plaintext(
     svc = _secrets_service(session, tenant_id=tenant_a, owner_id=user_a)
 
     plaintext = "hosted-search-key-9f8e7d"
-    ref = await svc.store_secret(
-        name="search", kind=SecretKind.SEARCH_API, plaintext=plaintext
-    )
+    ref = await svc.store_secret(name="search", kind=SecretKind.SEARCH_API, plaintext=plaintext)
     got = await svc.get_secret_plaintext(ref.id)
     assert got == plaintext
 
@@ -266,9 +264,9 @@ async def test_cross_tenant_get_is_404(
     user_a = await _make_user(session, tenant_a, "a@x.test")
     user_b = await _make_user(session, tenant_b, "b@y.test")
 
-    ref = await _secrets_service(
-        session, tenant_id=tenant_a, owner_id=user_a
-    ).store_secret(name="a-secret", kind=SecretKind.MCP_AUTH, plaintext="a-only-value")
+    ref = await _secrets_service(session, tenant_id=tenant_a, owner_id=user_a).store_secret(
+        name="a-secret", kind=SecretKind.MCP_AUTH, plaintext="a-only-value"
+    )
 
     svc_b = _secrets_service(session, tenant_id=tenant_b, owner_id=user_b)
     with pytest.raises(NotFoundError):
@@ -285,9 +283,9 @@ async def test_non_owner_same_tenant_get_is_404(
     user_a = await _make_user(session, tenant_a, "a@x.test")
     user_b = await _make_user(session, tenant_a, "b@x.test")
 
-    ref = await _secrets_service(
-        session, tenant_id=tenant_a, owner_id=user_a
-    ).store_secret(name="a-secret", kind=SecretKind.MCP_AUTH, plaintext="a-value-1234")
+    ref = await _secrets_service(session, tenant_id=tenant_a, owner_id=user_a).store_secret(
+        name="a-secret", kind=SecretKind.MCP_AUTH, plaintext="a-value-1234"
+    )
 
     svc_b = _secrets_service(session, tenant_id=tenant_a, owner_id=user_b)
     with pytest.raises(NotFoundError):
@@ -306,9 +304,9 @@ async def test_tenant_admin_may_access_and_delete_any_secret(
     user_a = await _make_user(session, tenant_a, "a@x.test")
     admin = await _make_user(session, tenant_a, "admin@x.test")
 
-    ref = await _secrets_service(
-        session, tenant_id=tenant_a, owner_id=user_a
-    ).store_secret(name="a-secret", kind=SecretKind.MCP_AUTH, plaintext="value-admin-reads")
+    ref = await _secrets_service(session, tenant_id=tenant_a, owner_id=user_a).store_secret(
+        name="a-secret", kind=SecretKind.MCP_AUTH, plaintext="value-admin-reads"
+    )
 
     svc_admin = _secrets_service(
         session, tenant_id=tenant_a, owner_id=admin, roles=(Role.MEMBER, Role.ADMIN)
@@ -340,9 +338,9 @@ async def test_repository_lookup_by_owner_name_is_tenant_scoped(
     """
     tenant_a, tenant_b = two_tenants
     user_a = await _make_user(session, tenant_a, "a@x.test")
-    ref = await _secrets_service(
-        session, tenant_id=tenant_a, owner_id=user_a
-    ).store_secret(name="mcp", kind=SecretKind.MCP_AUTH, plaintext="handle-value-1234")
+    ref = await _secrets_service(session, tenant_id=tenant_a, owner_id=user_a).store_secret(
+        name="mcp", kind=SecretKind.MCP_AUTH, plaintext="handle-value-1234"
+    )
 
     in_tenant = await SecretRepository(session, tenant_a).get_by_owner_name(
         owner_id=user_a, name="mcp"
@@ -426,9 +424,9 @@ async def test_denied_access_emits_permission_denied_audit(
     user_a = await _make_user(session, tenant_a, "a@x.test")
     user_b = await _make_user(session, tenant_a, "b@x.test")
 
-    ref = await _secrets_service(
-        session, tenant_id=tenant_a, owner_id=user_a
-    ).store_secret(name="k", kind=SecretKind.MCP_AUTH, plaintext="a-value-9999")
+    ref = await _secrets_service(session, tenant_id=tenant_a, owner_id=user_a).store_secret(
+        name="k", kind=SecretKind.MCP_AUTH, plaintext="a-value-9999"
+    )
 
     svc_b = _secrets_service(session, tenant_id=tenant_a, owner_id=user_b)
     with pytest.raises(NotFoundError):

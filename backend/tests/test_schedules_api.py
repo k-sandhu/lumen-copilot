@@ -29,7 +29,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session
 from app.auth import hash_password
-from app.db.base import Base
 from app.db.repositories import (
     AssistantRepository,
     AssistantVersionRepository,
@@ -45,6 +44,7 @@ from app.domain.entities import (
 from app.main import create_app
 from app.services.assistants_service import config_from_assistant
 from tests._audit_helpers import RecordingDurableAuditTransactions
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -87,7 +87,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         yield async_sessionmaker(bind=engine, expire_on_commit=False)
     finally:
         await engine.dispose()

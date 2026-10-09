@@ -223,6 +223,7 @@ FORBIDDEN_SETTINGS: dict[str, str] = {
     "openrouter_api_key": "Lumen's LLM-provider API key",
     "sandbox_runner_token": "Lumen's sandbox-runner credential — never connector-owned",
     "jwt_secret": "Lumen's token-signing key",
+    "test_fast_password_hashing": "Lumen's password-hashing policy — never connector-owned",
     "secrets_encryption_key": (
         "the vault's master key — reading it is the secrets-service prohibition "
         "through another door"

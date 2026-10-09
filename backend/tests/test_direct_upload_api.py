@@ -22,7 +22,6 @@ from app.auth import hash_password
 from app.core.config import get_settings
 from app.core.errors import DependencyError, NotFoundError
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     CollectionRepository,
     DocumentRepository,
@@ -45,6 +44,7 @@ from app.services.document_upload_service import DocumentUploadService
 from app.storage import MultipartUpload, StoredObjectMetadata, UploadedPart
 from app.tasks.upload_janitor import sweep_expired_uploads_async
 from tests._audit_helpers import RecordingDurableAuditTransactions
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -154,7 +154,7 @@ async def sessionmaker(
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(copy_sqlite_schema)
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     async with factory() as seed:
         tenant_a = await TenantRepository(seed).create(name="Acme")
