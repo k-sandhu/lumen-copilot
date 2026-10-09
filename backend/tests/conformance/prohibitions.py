@@ -313,6 +313,8 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "mcp_rate_window_seconds",
         "media_max_duration_seconds",
         # Non-secret CPU/resource limits, not stateful infrastructure or credentials.
+        "native_text_enabled",
+        "native_text_shadow",
         "native_ingestion_threads",
         "native_ingestion_max_documents",
         "native_ingestion_max_memory_bytes",

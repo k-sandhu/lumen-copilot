@@ -61,3 +61,5 @@ intact canonical code block. Clippy/all-targets, rebuilt wheel and 3 installed
 text Python checks pass. Markdown reserves conservative tree workspace before
 pulldown-cmark allocates; tight memory budgets fail before dependency parsing.
 Generation diagnostics record text/Markdown/code mode explicitly.
+
+The candidate routing controls `native_text_enabled`, `native_text_shadow` are explicitly classified as nonsecret deployment configuration in the connector conformance policy. The settings completeness guard verifies this classification; infrastructure credentials and test-only password hashing remain forbidden.

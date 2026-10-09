@@ -1,4 +1,4 @@
-# ADR-0026 — Rust ingestion core behind the Python backend
+# ADR-0027 — Rust ingestion core behind the Python backend
 
 Status: **Proposed — sponsor-directed foundation; human acceptance and baseline evaluation required before merge.**
 
@@ -124,8 +124,8 @@ it. Compose build context changes must preserve source mounts and entrypoints.
 Measure image size and elapsed build time; a local Docker build requires at
 least 6000 MiB available RAM. Do not start/stop containers for this foundation.
 
-Scoped Rust CI in #663 is explicitly authorized by this task, without deciding
-the repo-wide OD-7 pipeline: shared Cargo/uv caches; `cargo fmt --check`,
+Scoped Rust CI in #663 extends the accepted repo-wide offline gates from
+[ADR-0026](0026-continuous-integration.md): shared Cargo/uv caches; `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
 `cargo deny check licenses advisories`, maturin build and Python import/bridge
 smoke on Windows/macOS/Linux. Tests are offline, with no provider/database/search
