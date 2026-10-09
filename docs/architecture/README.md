@@ -11,7 +11,6 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 
 | ADR | Title | Status |
 |---|---|---|
-| [0028](0028-hierarchical-document-classification.md) | Hierarchical document classification | Proposed — evaluation gated |
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
 | [0002](0002-multi-harness-agent-roles.md) | Multi-harness agent role model | Accepted |
 | [0003](0003-application-stack.md) | Application stack (closes OD-2) | Accepted |
@@ -37,5 +36,6 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 | [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2 and claim-linked answers | Proposed |
 | [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
 | [0026](0026-continuous-integration.md) | Offline backend and frontend CI gates, locked dependencies, caches, and bounded test workers | Accepted |
+| [0028](0028-hierarchical-document-classification.md) | Hierarchical document classification | Proposed — evaluation gated |
 
 > The remaining `.claude/` harness work (OD-6 remainder) is tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). CI (OD-7) closed through #655 and ADR-0026. Each costly, non-obvious choice gets its own ADR before code lands.
