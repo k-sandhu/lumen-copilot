@@ -40,3 +40,6 @@ were changed. Residual risk: deployment behavior remains unverified.
 [~] 2026-10-09: production promotion awaits budget-aware detection #728,
 canonical stage integration #667–#669, held-out fidelity/performance evaluation
 and human merge. Residual risk: caller budgets and production chunk fidelity.
+
+[x] 2026-10-09: integrated the updated HTML dependency; EPUB/HTML Rust
+regressions pass (8 tests), including binary saved-page root rejection.
