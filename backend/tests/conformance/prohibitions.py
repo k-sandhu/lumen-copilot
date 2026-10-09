@@ -315,6 +315,8 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         # Non-secret CPU/resource limits, not stateful infrastructure or credentials.
         "native_html_enabled",
         "native_html_shadow",
+        "native_epub_enabled",
+        "native_epub_shadow",
         "native_ingestion_threads",
         "native_ingestion_max_documents",
         "native_ingestion_max_memory_bytes",

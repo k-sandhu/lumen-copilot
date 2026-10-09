@@ -57,6 +57,23 @@ fn core_version() -> &'static str {
 }
 
 #[pyfunction]
+fn extract_epub(
+    py: Python<'_>,
+    data: Py<PyBytes>,
+    budget_json: String,
+    _mime: String,
+) -> PyResult<String> {
+    let bytes = data.bind(py).as_bytes();
+    compute(py, || {
+        let budget = serde_json::from_str::<lumen_docintel_core::runtime::Budget>(&budget_json)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let doc = lumen_docintel_core::formats::epub::parse(bytes, budget.into())?;
+        serde_json::to_string(&lumen_docintel_core::canonical::render(doc)?)
+            .map_err(|_| CoreError::Internal)
+    })
+}
+
+#[pyfunction]
 fn extract_html(
     py: Python<'_>,
     data: Py<PyBytes>,
@@ -277,6 +294,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DocumentSession>()?;
     m.add_class::<Handshake>()?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_epub, m)?)?;
     m.add_function(wrap_pyfunction!(extract_html, m)?)?;
     m.add_function(wrap_pyfunction!(_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(_test_panic, m)?)?;
