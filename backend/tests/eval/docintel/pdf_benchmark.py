@@ -27,6 +27,7 @@ def measure(payload: dict[str, Any]) -> dict[str, Any]:
     accounted = None
     tables = 0
     boxes = 0
+    parser_identity = None
     try:
         data = base64.b64decode(payload["data"], validate=True)
         if len(data) > 32 * 1024 * 1024:
@@ -57,6 +58,16 @@ def measure(payload: dict[str, Any]) -> dict[str, Any]:
             document = NativeExecutor(threads=payload.get("threads") or 2).extract_pdf(data)
             text = document.rendered_text
             generation = json.loads(document.generation_json)
+            parser_identity = {
+                key: generation[key]
+                for key in (
+                    "parser_id",
+                    "parser_version",
+                    "build_id",
+                    "source_sha256",
+                    "dependency_versions",
+                )
+            }
             extraction_outcome = generation["outcome"]
             outcome = "indexed" if extraction_outcome == "indexed" else "failed"
             code = None if outcome == "indexed" else "needs_ocr"
@@ -110,6 +121,7 @@ def measure(payload: dict[str, Any]) -> dict[str, Any]:
         "peak_accounted_bytes": accounted,
         "table_count": tables,
         "box_count": boxes,
+        "parser_identity": parser_identity,
         "input_bytes_per_second": len(data) / elapsed if elapsed else None,
         "output_chars_per_second": len(text) / elapsed if elapsed else None,
         "score": asdict(
