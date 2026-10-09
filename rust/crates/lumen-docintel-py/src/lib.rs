@@ -162,10 +162,23 @@ fn _extract_pdfium_worker(
     budget_json: String,
 ) -> PyResult<String> {
     let bytes = data.as_bytes();
-    compute(py, || {
-        let context = lumen_docintel_core::runtime::context_json(&budget_json, Default::default())?;
-        lumen_docintel_core::formats::pdf::pdfium::extract_json(bytes, &library, &context)
-    })
+    let context = compute(py, || {
+        lumen_docintel_core::runtime::context_json(&budget_json, Default::default())
+    })?;
+    let result = compute(py, || {
+        let result =
+            lumen_docintel_core::formats::pdf::pdfium::extract_json(bytes, &library, &context);
+        if matches!(result, Err(CoreError::Budget)) && context.stats().limit.is_none() {
+            return Err(context.structural_limit());
+        }
+        result
+    });
+    if let Err(error) = &result {
+        error
+            .value(py)
+            .setattr("diagnostics_json", context.stats_json().map_err(map_error)?)?;
+    }
+    result
 }
 #[pymethods]
 impl CancellationToken {
@@ -200,10 +213,18 @@ impl NativeRuntime {
     ) -> PyResult<String> {
         let bytes = data.as_bytes();
         let cancellation = token.0.clone();
-        compute(py, || {
-            let context = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+        let context = compute(py, || {
+            lumen_docintel_core::runtime::context_json(&budget_json, cancellation)
+        })?;
+        let result = compute(py, || {
             lumen_docintel_core::formats::pdf::extract_json(bytes, &context, &self.0)
-        })
+        });
+        if let Err(error) = &result {
+            error
+                .value(py)
+                .setattr("diagnostics_json", context.stats_json().map_err(map_error)?)?;
+        }
+        result
     }
     fn open_document(
         &self,

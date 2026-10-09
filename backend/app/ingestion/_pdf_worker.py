@@ -12,6 +12,46 @@ from typing import IO, Any
 _JOB: Any = None
 
 
+def safe_counters(raw: object) -> dict[str, int | str | None]:
+    """Allowlist control telemetry, never forward arbitrary native diagnostics."""
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    result: dict[str, int | str | None] = {}
+    for key in (
+        "pages",
+        "glyphs",
+        "peak_accounted_bytes",
+        "work_units",
+        "output_chars",
+        "source_input_bytes",
+        "max_page_rulings",
+    ):
+        value = raw.get(key, 0)
+        if type(value) is int and 0 <= value <= 2**63 - 1:
+            result[key] = value
+    limit = raw.get("limit")
+    result["limit"] = (
+        limit
+        if isinstance(limit, str)
+        and limit
+        in {
+            "memory",
+            "work",
+            "output",
+            "input",
+            "time",
+            "structure",
+            "cancelled",
+            "panic",
+            "admission",
+            "table_rulings",
+            "table_cells",
+        }
+        else None
+    )
+    return result
+
+
 def apply_memory_limit(cap: int) -> None:
     global _JOB
     if cap < 1:
@@ -173,11 +213,20 @@ def main() -> None:
             "DocIntelUnsupportedError": "unsupported",
             "DocIntelBudgetError": "budget",
             "DocIntelCancelledError": "cancelled",
+            "DocIntelPanicError": "native_panic",
+            "DocIntelInvalidInputError": "invalid_structure",
+            "DocIntelInternalError": "native_internal",
             "MemoryError": "memory_limit",
         }.get(type(error).__name__, "worker_failed")
         if type(error).__name__ == "PdfWorkerError":
             code = str(error.code)  # type: ignore[attr-defined]
-        encoded = json.dumps({"code": code, "peak_rss_bytes": peak_rss()}).encode()
+        try:
+            counters = safe_counters(json.loads(getattr(error, "diagnostics_json", "{}")))
+        except (ValueError, TypeError):
+            counters = {}
+        encoded = json.dumps(
+            {"code": code, "peak_rss_bytes": peak_rss(), "diagnostics": counters}
+        ).encode()
     write_frame(output, encoded)
 
 

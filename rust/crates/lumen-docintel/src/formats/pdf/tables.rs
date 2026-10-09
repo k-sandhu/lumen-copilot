@@ -190,8 +190,9 @@ fn ruled(page: &Page, text: &PageText, m: &mut Memory) -> Result<Vec<Candidate>,
                 && ((l[0] - l[2]).abs() > 2. || (l[1] - l[3]).abs() > 2.)
         })
         .collect();
-    if lines.len() > 512 {
-        return Err(CoreError::Budget);
+    m.ctx.pdf_rulings(lines.len());
+    if lines.len() > 2048 {
+        return Err(m.ctx.pdf_ruling_limit());
     }
     m.ctx.work(lines.len() * lines.len())?;
     m.reserve(lines.len() * 256)?;
@@ -241,7 +242,7 @@ fn ruled(page: &Page, text: &PageText, m: &mut Memory) -> Result<Vec<Candidate>,
         m.ctx.work(count)?;
         m.reserve(count * 2048 + text.glyphs.len() * 512)?;
         if count > 10000 {
-            return Err(CoreError::Budget);
+            return Err(m.ctx.pdf_cell_limit());
         }
         let outer = bbox(page, xs[0], ys[rows], xs[columns], ys[0]);
         let vertical = |x: f64, top: f64, bottom: f64| {

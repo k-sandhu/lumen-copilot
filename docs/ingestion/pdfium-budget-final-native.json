@@ -1,0 +1,192 @@
+{
+  "pdf_documents": 64,
+  "skipped_over_100_mib": 0,
+  "unreadable_entries": 0,
+  "engines": {
+    "pdfium": {
+      "parsed": 38,
+      "needs_ocr": 15,
+      "unsupported": 2,
+      "failed": 9,
+      "timed_out": 0,
+      "pages": 1501,
+      "characters": 6538240,
+      "seconds": 46.064273599826265,
+      "peak_rss_bytes": 249151488,
+      "error_codes": {
+        "parse_error": 3,
+        "budget": 5,
+        "invalid_structure": 1,
+        "encrypted": 2
+      },
+      "budget_limits": {
+        "table_rulings": 2,
+        "output": 3
+      },
+      "ocr_page_reasons": {
+        "image_only": 15,
+        "unusable_glyphs": 140,
+        "blank_or_empty": 4
+      }
+    }
+  },
+  "agreement": {},
+  "workers_max": 2,
+  "work_units_max": 20000000,
+  "python_complete_pdfium_gaps": {},
+  "counter_distributions": {
+    "pdfium": {
+      "pages": {
+        "p50": 7,
+        "p95": 112,
+        "max": 311
+      },
+      "glyphs": {
+        "p50": 33132,
+        "p95": 515239,
+        "max": 1177150
+      },
+      "peak_accounted_bytes": {
+        "p50": 8227199,
+        "p95": 112679643,
+        "max": 232758031
+      },
+      "work_units": {
+        "p50": 221882,
+        "p95": 8307117,
+        "max": 12102941
+      },
+      "output_chars": {
+        "p50": 33124,
+        "p95": 709680,
+        "max": 1236579
+      },
+      "source_input_bytes": {
+        "p50": 363726,
+        "p95": 3086212,
+        "max": 12876838
+      },
+      "max_page_rulings": {
+        "p50": 12,
+        "p95": 456,
+        "max": 996
+      }
+    }
+  },
+  "failure_counter_distributions": {
+    "pdfium": {
+      "unattributed": {
+        "pages": {
+          "p50": 4,
+          "p95": 49,
+          "max": 49
+        },
+        "glyphs": {
+          "p50": 11631,
+          "p95": 222220,
+          "max": 222220
+        },
+        "peak_accounted_bytes": {
+          "p50": 6632007,
+          "p95": 26907107,
+          "max": 26907107
+        },
+        "work_units": {
+          "p50": 57781,
+          "p95": 1786360,
+          "max": 1786360
+        },
+        "output_chars": {
+          "p50": 11563,
+          "p95": 222869,
+          "max": 222869
+        },
+        "source_input_bytes": {
+          "p50": 789627,
+          "p95": 4434643,
+          "max": 4434643
+        },
+        "max_page_rulings": {
+          "p50": 52,
+          "p95": 846,
+          "max": 846
+        }
+      },
+      "table_rulings": {
+        "pages": {
+          "p50": 33,
+          "p95": 86,
+          "max": 86
+        },
+        "glyphs": {
+          "p50": 143811,
+          "p95": 458272,
+          "max": 458272
+        },
+        "peak_accounted_bytes": {
+          "p50": 51479524,
+          "p95": 59772718,
+          "max": 59772718
+        },
+        "work_units": {
+          "p50": 1319400,
+          "p95": 10749177,
+          "max": 10749177
+        },
+        "output_chars": {
+          "p50": 128496,
+          "p95": 443339,
+          "max": 443339
+        },
+        "source_input_bytes": {
+          "p50": 26196128,
+          "p95": 31959786,
+          "max": 31959786
+        },
+        "max_page_rulings": {
+          "p50": 2060,
+          "p95": 3713,
+          "max": 3713
+        }
+      },
+      "output": {
+        "pages": {
+          "p50": 456,
+          "p95": 913,
+          "max": 913
+        },
+        "glyphs": {
+          "p50": 1988777,
+          "p95": 1994168,
+          "max": 1994168
+        },
+        "peak_accounted_bytes": {
+          "p50": 143254881,
+          "p95": 161445936,
+          "max": 161445936
+        },
+        "work_units": {
+          "p50": 10046958,
+          "p95": 10091694,
+          "max": 10091694
+        },
+        "output_chars": {
+          "p50": 2000000,
+          "p95": 2000000,
+          "max": 2000000
+        },
+        "source_input_bytes": {
+          "p50": 14189927,
+          "p95": 23440660,
+          "max": 23440660
+        },
+        "max_page_rulings": {
+          "p50": 8,
+          "p95": 122,
+          "max": 122
+        }
+      }
+    }
+  },
+  "method": "cold recycled workers; pages/chars include partial OCR outcomes; time includes startup and IPC; exact agreement normalizes NFC/whitespace; token Dice is multiset overlap, not fidelity"
+}

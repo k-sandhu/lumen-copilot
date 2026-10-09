@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from app.domain.native_runtime import RuntimeBudget
-from app.ingestion._pdf_worker import read_exact, read_frame, write_frame
+from app.ingestion._pdf_worker import read_exact, read_frame, safe_counters, write_frame
 
 
 class Cancellation(Protocol):
@@ -23,9 +23,10 @@ class Cancellation(Protocol):
 class PdfWorkerError(Exception):
     """Stable safe error; never attach document/native exception payloads."""
 
-    def __init__(self, code: str, *, peak_rss_bytes: int = 0) -> None:
+    def __init__(self, code: str, *, peak_rss_bytes: int = 0, diagnostics: object = None) -> None:
         self.code = code
         self.peak_rss_bytes = peak_rss_bytes
+        self.diagnostics = safe_counters(diagnostics)
         super().__init__(f"PDF worker: {code}")
 
 
@@ -151,6 +152,9 @@ class PdfProcessPool:
                     "cancelled",
                     "memory_limit",
                     "worker_failed",
+                    "native_panic",
+                    "invalid_structure",
+                    "native_internal",
                 }:
                     raise ValueError
                 result = raw.get("result")
@@ -159,7 +163,7 @@ class PdfProcessPool:
             except (ValueError, TypeError, KeyError, AttributeError):
                 raise PdfWorkerError("worker_protocol") from None
             if code is not None:
-                raise PdfWorkerError(code, peak_rss_bytes=peak)
+                raise PdfWorkerError(code, peak_rss_bytes=peak, diagnostics=raw.get("diagnostics"))
             return str(result), peak
         finally:
             if process is not None:
