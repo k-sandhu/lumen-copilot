@@ -55,7 +55,7 @@ jobs:
         working-directory: rust
         run: |
           cargo install cargo-deny --version 0.20.2 --locked
-          cargo deny --config deny.toml check licenses advisories
+          cargo deny --config deny.toml check licenses advisories bans sources
       - name: Build and exercise wheel
         run: |
           uv sync --project backend --extra dev --extra native

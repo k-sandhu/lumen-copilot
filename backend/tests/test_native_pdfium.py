@@ -292,3 +292,20 @@ def test_two_process_slots_extract_parallel_documents() -> None:
         )
     assert "Object stream text" in results[0].rendered_text
     assert "A😀B" in results[1].rendered_text
+
+
+def test_invalid_worker_frame_is_typed_and_slot_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ingestion.native import PdfiumExecutor, PdfWorkerError
+
+    executor = PdfiumExecutor(workers=1)
+    with monkeypatch.context() as patch:
+        _replace_worker(
+            patch,
+            "from app.ingestion._pdf_worker import write_frame; "
+            "write_frame(sys.stdout.buffer, b'invalid-json'); sys.stdin.buffer.read()",
+        )
+        with pytest.raises(PdfWorkerError, match="worker_protocol"):
+            executor.extract_pdf(document([text(40, 700, 12, "Generated")]))
+    assert "Healthy" in executor.extract_pdf(document([text(40, 700, 12, "Healthy")])).rendered_text

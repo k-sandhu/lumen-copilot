@@ -138,11 +138,29 @@ class PdfProcessPool:
                 if isinstance(failures[0], PdfWorkerError):
                     raise failures[0]
                 raise PdfWorkerError("worker_crashed")
-            raw = json.loads(response[0])
-            peak = int(raw.get("peak_rss_bytes", 0))
-            if raw["code"] is not None:
-                raise PdfWorkerError(raw["code"], peak_rss_bytes=peak)
-            return str(raw["result"]), peak
+            try:
+                raw = json.loads(response[0])
+                peak = int(raw["peak_rss_bytes"])
+                code = raw["code"]
+                if peak < 0 or code not in {
+                    None,
+                    "encrypted",
+                    "parse_error",
+                    "unsupported",
+                    "budget",
+                    "cancelled",
+                    "memory_limit",
+                    "worker_failed",
+                }:
+                    raise ValueError
+                result = raw.get("result")
+                if code is None and not isinstance(result, str):
+                    raise ValueError
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise PdfWorkerError("worker_protocol") from None
+            if code is not None:
+                raise PdfWorkerError(code, peak_rss_bytes=peak)
+            return str(result), peak
         finally:
             if process is not None:
                 if process.poll() is None:
