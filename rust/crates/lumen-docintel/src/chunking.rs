@@ -220,7 +220,7 @@ pub fn chunk_document(
     tokenizer.with_padding(None);
     let hash = format!("{:x}", Sha256::digest(tokenizer_json.as_bytes()));
     let identity = format!(
-        "{}:sha256:{hash}:tokenizers-0.22.2",
+        "{}:sha256:{hash}:tokenizers-0.23.2",
         settings.embedding_model
     );
     document.generation.tokenizer_id = Some(identity.clone());

@@ -1,5 +1,6 @@
 [advisories]
 yanked = "deny"
+ignore = [{ id = "RUSTSEC-2024-0436", reason = "Reviewed 2026-10-08: tokenizers 0.23.2 uses paste 1.0.15 only for compile-time type/identifier macros; no document-input execution. Owner k-sandhu; expires 2026-11-07; scoped/expiry test in tests/dependency_review.rs; see docs/ingestion/dependency-review-667.md" }]
 
 [licenses]
 confidence-threshold = 0.95
