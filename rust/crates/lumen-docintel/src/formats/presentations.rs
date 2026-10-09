@@ -726,10 +726,8 @@ fn odf_box(n: &Node) -> Option<BoundingBox> {
             (v, 72.0 / 25.4)
         } else if let Some(v) = text.strip_suffix("in") {
             (v, 72.0)
-        } else if let Some(v) = text.strip_suffix("pt") {
-            (v, 1.0)
         } else {
-            return None;
+            (text.strip_suffix("pt")?, 1.0)
         };
         number
             .parse::<f64>()
