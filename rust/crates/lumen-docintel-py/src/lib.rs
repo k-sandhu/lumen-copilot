@@ -11,6 +11,7 @@ pyo3::create_exception!(lumen_docintel, DocIntelError, PyException);
 pyo3::create_exception!(lumen_docintel, DocIntelInvalidInputError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelUnsupportedError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelParseError, DocIntelError);
+pyo3::create_exception!(lumen_docintel, DocIntelEncryptedError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelBudgetError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelCancelledError, DocIntelError);
 pyo3::create_exception!(lumen_docintel, DocIntelInternalError, DocIntelError);
@@ -22,6 +23,7 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::InvalidInput => DocIntelInvalidInputError::new_err(message),
         CoreError::Unsupported => DocIntelUnsupportedError::new_err(message),
         CoreError::Parse => DocIntelParseError::new_err(message),
+        CoreError::Encrypted => DocIntelEncryptedError::new_err(message),
         CoreError::Budget => DocIntelBudgetError::new_err(message),
         CoreError::Cancelled => DocIntelCancelledError::new_err(message),
         CoreError::Internal => DocIntelInternalError::new_err(message),
@@ -150,6 +152,16 @@ fn detect_format(
 #[pyclass(name = "CancellationToken", skip_from_py_object)]
 #[derive(Clone, Default)]
 struct CancellationToken(lumen_docintel_core::runtime::Cancellation);
+
+/// Private worker entry; the facade establishes OS limits before invoking it.
+#[pyfunction]
+fn _extract_pdfium_worker(py: Python<'_>, data: &Bound<'_, PyBytes>, library: String, budget_json: String) -> PyResult<String> {
+    let bytes = data.as_bytes();
+    compute(py, || {
+        let context = lumen_docintel_core::runtime::context_json(&budget_json, Default::default())?;
+        lumen_docintel_core::formats::pdf::pdfium::extract_json(bytes, &library, &context)
+    })
+}
 #[pymethods]
 impl CancellationToken {
     #[new]
@@ -158,6 +170,9 @@ impl CancellationToken {
     }
     fn cancel(&self) {
         self.0.cancel();
+    }
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
     }
 }
 
@@ -238,6 +253,8 @@ struct DocumentSession(lumen_docintel_core::runtime::Context);
 
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("DocIntelEncryptedError", m.py().get_type::<DocIntelEncryptedError>())?;
+    m.add_function(wrap_pyfunction!(_extract_pdfium_worker, m)?)?;
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
     m.add(
         "DocIntelInvalidInputError",

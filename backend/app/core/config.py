@@ -1007,6 +1007,10 @@ class Settings(PasswordHashingSettings):
     native_ingestion_max_output_chars: int = Field(default=2_000_000, ge=1)
     native_ingestion_max_work_units: int = Field(default=100_000, ge=1)
     native_ingestion_timeout_ms: int = Field(default=30_000, ge=1)
+    # Zero selects min(cores, 2, pool budget / per-worker OS cap), after fork.
+    native_pdf_workers: int = Field(default=0, ge=0, le=64)
+    native_pdf_worker_memory_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    native_pdf_pool_memory_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
 
     ingestion_chunk_size: int = Field(default=1200, alias="INGESTION_CHUNK_SIZE")
     ingestion_chunk_overlap: int = Field(default=200, alias="INGESTION_CHUNK_OVERLAP")

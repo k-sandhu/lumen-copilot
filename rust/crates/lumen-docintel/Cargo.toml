@@ -21,6 +21,7 @@ cfb.workspace = true
 rayon.workspace = true
 flate2.workspace = true
 sha2.workspace = true
+pdfium-render.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

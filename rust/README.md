@@ -92,3 +92,27 @@ continuation joining. Exact native page maps address disjoint table-text ranges;
 cell boxes retain their original page. No additional crate or binary is added.
 See [table acceptance](../docs/ingestion/pdf-tables-v1.md) and
 [table benchmark](../docs/ingestion/pdf-tables-benchmark.json).
+
+PDFium candidate (#722): Windows developer binary setup is one command from
+the repo root (Python 3.12+): `python scripts/setup-pdfium.py`. It verifies the
+pinned chromium/7881 archive and installs the library plus complete notices into
+the ignored wheel-asset directory. Then use the existing `uv sync` command above
+to build/rebuild the extension. CI and Docker run the same downloader before
+building wheels; there are no runtime downloads or system-library lookups.
+
+`parse_pdf_candidate` uses PDFium only in its explicit shadow/native modes.
+`PdfiumExecutor` supervises recycled process slots, separate from rayon; construct
+after fork. `configured_pdfium_executor(Settings)` exposes `native_pdf_workers`
+(0 = auto), `native_pdf_worker_memory_bytes` (256 MiB OS cap) and
+`native_pdf_pool_memory_bytes` (512 MiB pool cap). Celery concurrency multiplies
+the total cap. These are engineering defaults, not approved production budgets.
+The original `NativeExecutor.extract_pdf` remains the bounded evaluation baseline;
+there is no automatic engine fallback after a failed extraction.
+
+Opt-in local aggregate probe (from `backend/`, path supplied by the evaluator):
+`uv run --extra dev --extra native python -m tests.eval.docintel.pdf_corpus_probe
+--corpus-directory <directory> --workers 2`. It streams inputs, ignores suffixes,
+skips PDFs over 100 MiB and emits aggregates only. Do not use the older external
+manifest benchmark for private documents: that mode records input identities.
+See [acceptance contract](../docs/ingestion/pdfium-engine-v1.md),
+[binary pins](pdfium-binaries.json) and [native notices](NOTICE.pdfium).

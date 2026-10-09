@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 [tool.maturin]
 module-name = "lumen_docintel"
 features = ["pyo3/extension-module"]
+include = [{ path = "pdfium/**", format = "wheel" }]
 
 [tool.uv]
 cache-keys = [{ file = "../../Cargo.toml" }, { file = "../../Cargo.lock" }, { file = "Cargo.toml" }, { file = "src/**/*.rs" }, { file = "../lumen-docintel/src/**/*.rs" }]

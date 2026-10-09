@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from importlib import import_module
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Literal
 
@@ -15,6 +18,7 @@ if TYPE_CHECKING:
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
+from app.ingestion._pdf_pool import PdfProcessPool, PdfWorkerError  # noqa: F401
 
 
 def _extension() -> ModuleType | None:
@@ -74,8 +78,122 @@ class CancellationHandle:
     def cancel(self) -> None:
         self._token.cancel()
 
+    def is_cancelled(self) -> bool:
+        return bool(self._token.is_cancelled())
+
 
 _DEFAULT_BUDGET = RuntimeBudget()
+
+
+def _pdf_worker_extract(data: bytes, library: str, budget: dict[str, int], engine: str) -> str:
+    """Private child-only native entry. OS limits precede this import."""
+    if engine == "pypdf":
+        import io
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            raise PdfWorkerError("encrypted")
+        pages: list[str] = []
+        count = 0
+        for page in reader.pages:
+            if len(pages) >= budget["max_work_units"]:
+                raise MemoryError
+            value = page.extract_text() or ""
+            count += len(value)
+            if count > budget["max_output_chars"]:
+                raise MemoryError
+            pages.append(value)
+        return json.dumps(
+            {
+                "rendered_text": "\n\n".join(pages),
+                "pages": len(pages),
+                "outcome": "needs_ocr" if any(not p.strip() for p in pages) else "indexed",
+            },
+            ensure_ascii=False,
+        )
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    if engine == "pdfium":
+        return str(extension._extract_pdfium_worker(data, library, json.dumps(budget)))
+    if engine == "in_core":
+        return str(
+            extension.Runtime(1, 1).extract_pdf(
+                data, json.dumps(budget), extension.CancellationToken()
+            )
+        )
+    raise ValueError("invalid PDF engine")
+
+
+def _pdfium_library() -> str:
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    # Wheels carry their verified library alongside the extension. Editable builds
+    # use the same downloader destination. No system-library search or latest URL.
+    roots = [
+        Path(str(extension.__file__)).parent / "pdfium",
+        Path(__file__).resolve().parents[3] / "rust/crates/lumen-docintel-py/pdfium",
+    ]
+    for root in roots:
+        pin = root / "pin.json"
+        if pin.is_file():
+            manifest = json.loads(pin.read_text(encoding="utf-8"))
+            if manifest["release"] == "chromium/7881":
+                library = root / manifest["library"]
+                if library.is_file():
+                    return str(library.resolve())
+    raise NativeUnavailableError("verified PDFium binary is unavailable")
+
+
+class PdfiumExecutor:
+    """Create after Celery forks; one supervised pool per worker child."""
+
+    def __init__(
+        self,
+        *,
+        workers: int | None = None,
+        memory_cap_bytes: int = 256 * 1024 * 1024,
+        total_memory_bytes: int = 512 * 1024 * 1024,
+        engine: Literal["pdfium", "in_core"] = "pdfium",
+    ) -> None:
+        if engine not in {"pdfium", "in_core"}:
+            raise ValueError("invalid PDF engine")
+        self._library = _pdfium_library() if engine == "pdfium" else ""
+        self._engine = engine
+        self._pool = PdfProcessPool(
+            workers=workers,
+            memory_cap_bytes=memory_cap_bytes,
+            total_memory_bytes=total_memory_bytes,
+        )
+        self.peak_rss_bytes = 0
+
+    def extract_pdf(
+        self,
+        data: bytes,
+        *,
+        budget: RuntimeBudget = _DEFAULT_BUDGET,
+        cancellation: CancellationHandle | None = None,
+    ) -> CanonicalDocument:
+        result, peak = self._pool.extract(
+            data,
+            library=self._library,
+            engine=self._engine,
+            budget=budget,
+            cancellation=cancellation,
+        )
+        self.peak_rss_bytes = peak
+        return CanonicalDocument.from_render_json(result)
+
+
+@lru_cache(maxsize=1)
+def _default_pdf_executor(worker_pid: int) -> PdfiumExecutor:
+    """Fork-aware lazy default; all documents in one Celery child share its slots."""
+    from app.core.config import get_settings
+
+    return configured_pdfium_executor(get_settings())[0]
 
 
 class NativeExecutor:
@@ -145,6 +263,23 @@ def configured_native_executor(settings: Settings) -> tuple[NativeExecutor, Runt
     return executor, budget
 
 
+def configured_pdfium_executor(settings: Settings) -> tuple[PdfiumExecutor, RuntimeBudget]:
+    """Inert pool configuration for opt-in PDF orchestration after fork."""
+    executor = PdfiumExecutor(
+        workers=settings.native_pdf_workers or None,
+        memory_cap_bytes=settings.native_pdf_worker_memory_bytes,
+        total_memory_bytes=settings.native_pdf_pool_memory_bytes,
+    )
+    budget = RuntimeBudget(
+        max_input_bytes=settings.native_ingestion_max_input_bytes,
+        max_memory_bytes=settings.native_ingestion_max_memory_bytes,
+        max_output_chars=settings.native_ingestion_max_output_chars,
+        max_work_units=settings.native_ingestion_max_work_units,
+        timeout_ms=settings.native_ingestion_timeout_ms,
+    )
+    return executor, budget
+
+
 @dataclass(frozen=True, slots=True)
 class PdfCandidateResult:
     text: str
@@ -164,7 +299,7 @@ def parse_pdf_candidate(
     data: bytes,
     *,
     mode: Literal["python", "shadow", "native"] = "python",
-    executor: NativeExecutor | None = None,
+    executor: NativeExecutor | PdfiumExecutor | None = None,
     budget: RuntimeBudget = _DEFAULT_BUDGET,
 ) -> PdfCandidateResult:
     """Independent PDF opt-in seam for #669/#687; existing parsers stay authoritative.
@@ -181,7 +316,7 @@ def parse_pdf_candidate(
         return PdfCandidateResult(parse_document(data, mime_type="application/pdf"), "python")
     baseline = parse_document(data, mime_type="application/pdf") if mode == "shadow" else ""
     try:
-        document = (executor or NativeExecutor()).extract_pdf(data, budget=budget)
+        document = (executor or _default_pdf_executor(os.getpid())).extract_pdf(data, budget=budget)
         if mode == "native":
             if json.loads(document.generation_json)["outcome"] != "indexed":
                 raise PdfNeedsOcrError("PDF pages need OCR")

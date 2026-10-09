@@ -10,3 +10,4 @@
 **/.env
 **/.env.*
 .git/
+rust/crates/lumen-docintel-py/pdfium/

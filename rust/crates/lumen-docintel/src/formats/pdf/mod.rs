@@ -1,5 +1,6 @@
 //! Budgeted PDF candidate. Supported subsets fail closed; Python stays live.
 mod layout;
+pub mod pdfium;
 mod syntax;
 mod tables;
 mod text;
@@ -297,13 +298,24 @@ pub fn extract_with_context(
         // Retain all reservations with their owned per-page result until assembly.
         ctx.allocate(256, || (page_text, memory))
     })?;
+    assemble(bytes, &pages, &extracted.iter().map(|u| &u.value.0).collect::<Vec<_>>(), metadata, ctx, &mut memory, false)
+}
+
+fn assemble(
+    bytes: &[u8],
+    pages: &[Page<'_>],
+    extracted: &[&text::PageText],
+    metadata: serde_json::Value,
+    ctx: &Context,
+    memory: &mut Memory,
+    pdfium: bool,
+) -> Result<Document, CoreError> {
     let mut document = Document::default();
     let mut diagnostics = vec![];
-    for (page, unit) in pages.iter().zip(extracted.iter()) {
+    for (page, page_text) in pages.iter().zip(extracted.iter()) {
         ctx.work(1)?;
-        let page_text = &unit.value.0;
         memory.reserve(page_text.glyphs.len() * 512 + 1024)?;
-        let mut candidates = tables::detect(page, page_text, &mut memory)?;
+        let mut candidates = tables::detect(page, page_text, memory)?;
         candidates.sort_by(|a, b| {
             b.bbox
                 .y1
@@ -332,8 +344,8 @@ pub fn extract_with_context(
         diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
         document.blocks.extend(blocks);
     }
-    let normalization_hooks = layout::furniture(&mut document, &pages, ctx)?;
-    let _joined_segments = tables::join(&mut document, &pages, &mut memory)?;
+    let normalization_hooks = layout::furniture(&mut document, pages, ctx)?;
+    let _joined_segments = tables::join(&mut document, pages, memory)?;
     let table_segments = tables::table_segments(&document, ctx)?;
     let mut outcome = "indexed";
     let missing = diagnostics
@@ -362,7 +374,7 @@ pub fn extract_with_context(
     }
     document.generation = Generation {
         source_sha256: Some(format!("{:x}", hash.finalize())),
-        parser_id: Some("rust-pdf-bounded".into()),
+        parser_id: Some(if pdfium {"rust-pdfium"} else {"rust-pdf-bounded"}.into()),
         parser_version: Some(crate::VERSION.into()),
         build_id: Some(format!(
             "{:x}",
@@ -371,21 +383,26 @@ pub fn extract_with_context(
                 include_str!("syntax.rs"),
                 include_str!("text.rs"),
                 include_str!("layout.rs"),
-                include_str!("tables.rs")
+                include_str!("tables.rs"),
+                include_str!("pdfium.rs")
             ))
         )),
-        dependency_versions: BTreeMap::from([
+        dependency_versions: if pdfium { BTreeMap::from([
+            ("pdfium-render".into(), "0.9.4".into()),
+            ("pdfium".into(), "chromium/7881".into()),
+            ("sha2".into(), "0.10.9".into()),
+        ]) } else { BTreeMap::from([
             ("flate2".into(), "1.1.10".into()),
             ("sha2".into(), "0.10.9".into()),
-        ]),
+        ]) },
         diagnostics: Some(
-            json!({"normalization_hooks":normalization_hooks,"pages":diagnostics,"metadata":metadata["metadata"],"outline":metadata["outline"],"coordinate_policy":"unrotated_source_points_bottom_left","box_policy":"advance_width_heuristic","furniture_policy":"retain_evidence_exclude_in_normalization","runtime":ctx.stats()}),
+            json!({"normalization_hooks":normalization_hooks,"pages":diagnostics,"metadata":metadata["metadata"],"outline":metadata["outline"],"coordinate_policy":"unrotated_source_points_bottom_left","box_policy":if pdfium {"pdfium_loose_char_bounds"} else {"advance_width_heuristic"},"annotation_policy":"exclude_annotations_and_widgets","furniture_policy":"retain_evidence_exclude_in_normalization","runtime":ctx.stats()}),
         ),
         outcome: Some(outcome.into()),
         ..Generation::default()
     };
     let rendered = canonical::render(document.clone())?;
-    for page in &pages {
+    for page in pages {
         let spans: Vec<_> = rendered
             .spans
             .iter()
@@ -424,7 +441,10 @@ pub fn extract_with_context(
     Ok(document)
 }
 pub fn extract_json(bytes: &[u8], ctx: &Context, runtime: &Runtime) -> Result<String, CoreError> {
-    let mut document = extract_with_context(bytes, ctx, runtime)?;
+    let document = extract_with_context(bytes, ctx, runtime)?;
+    serialize(document, bytes.len(), ctx)
+}
+fn serialize(mut document: Document, input_bytes: usize, ctx: &Context) -> Result<String, CoreError> {
     let size = document
         .blocks
         .iter()
@@ -440,7 +460,7 @@ pub fn extract_json(bytes: &[u8], ctx: &Context, runtime: &Runtime) -> Result<St
         })
         .sum::<usize>()
         + document.source_parts.len() * 2048
-        + bytes.len() * 2;
+        + input_bytes * 2;
     // Covers the retained domain model, rendered clone, serde growth and JSON.
     let _json = ctx.reserve(size.checked_mul(4).ok_or(CoreError::Budget)?)?;
     if let Some(diagnostics) = document.generation.diagnostics.as_mut() {

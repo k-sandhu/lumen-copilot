@@ -31,16 +31,15 @@ pub(super) fn lines(text: &PageText, ctx: &Context) -> Result<Vec<Line>, CoreErr
     let mut glyphs: Vec<&Glyph> = text.glyphs.iter().collect();
     ctx.work(glyphs.len() / 64 + 1)?;
     glyphs.sort_by(|a, b| {
-        b.bbox
-            .y0
-            .total_cmp(&a.bbox.y0)
+        b.baseline.unwrap_or(b.bbox.y0)
+            .total_cmp(&a.baseline.unwrap_or(a.bbox.y0))
             .then(a.bbox.x0.total_cmp(&b.bbox.x0))
     });
     let mut rows: Vec<Vec<&Glyph>> = vec![];
     for glyph in glyphs {
         ctx.work(1)?;
         if let Some(row) = rows.last_mut()
-            && (row[0].bbox.y0 - glyph.bbox.y0).abs() < row[0].size.min(glyph.size) * 0.35
+            && (row[0].baseline.unwrap_or(row[0].bbox.y0) - glyph.baseline.unwrap_or(glyph.bbox.y0)).abs() < row[0].size.min(glyph.size) * 0.35
         {
             row.push(glyph);
         } else {
@@ -51,10 +50,16 @@ pub(super) fn lines(text: &PageText, ctx: &Context) -> Result<Vec<Line>, CoreErr
     for mut row in rows {
         ctx.work(1)?;
         row.sort_by(|a, b| a.bbox.x0.total_cmp(&b.bbox.x0));
+        let rtl = row.iter().any(|g| g.text.chars().any(|c| matches!(c as u32, 0x0590..=0x08ff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff)));
+        if rtl && row.iter().all(|g| g.source_order.is_some()) {
+            row.sort_by_key(|g| g.source_order);
+        }
         let mut line: Option<Line> = None;
         for glyph in row {
             ctx.work(1)?;
-            let gap = line.as_ref().map_or(0., |l| glyph.bbox.x0 - l.bbox.x1);
+            let gap = line.as_ref().map_or(0., |l| if rtl {
+                (glyph.bbox.x0 - l.bbox.x1).max(l.bbox.x0 - glyph.bbox.x1)
+            } else { glyph.bbox.x0 - l.bbox.x1 });
             if gap > glyph.size * 2.5
                 && let Some(l) = line.take()
                 && !l.text.trim().is_empty()

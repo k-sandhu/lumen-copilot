@@ -47,3 +47,5 @@ target/
 *.pyd
 *.so
 *.dylib
+rust/crates/lumen-docintel-py/pdfium/
+*.dll
