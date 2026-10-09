@@ -227,11 +227,18 @@ fn valid_region(region: &SourceRegion) -> bool {
     true
 }
 
-fn validate_table(table: &Table, comparisons: &mut usize) -> Result<(), CoreError> {
+fn validate_table(table: &Table, origin_cells: &mut usize) -> Result<(), CoreError> {
     if table.rows == 0 || table.columns == 0 {
         return Err(CoreError::InvalidInput);
     }
-    let mut rectangles = vec![];
+    // Bound event/active-set allocation before constructing either collection.
+    *origin_cells = origin_cells
+        .checked_add(table.cells.len())
+        .ok_or(CoreError::Budget)?;
+    if *origin_cells > 100_000 {
+        return Err(CoreError::Budget);
+    }
+    let mut events = Vec::with_capacity(table.cells.len() * 2);
     for cell in &table.cells {
         let end_row = cell
             .row
@@ -251,16 +258,29 @@ fn validate_table(table: &Table, comparisons: &mut usize) -> Result<(), CoreErro
         {
             return Err(CoreError::InvalidInput);
         }
-        for &(r, c, re, ce) in &rectangles {
-            *comparisons += 1;
-            if *comparisons > 100_000 {
-                return Err(CoreError::Budget);
-            }
-            if cell.row < re && r < end_row && cell.column < ce && c < end_column {
-                return Err(CoreError::InvalidInput);
-            }
+        // End events sort before starts at a shared row: touching is legal.
+        events.push((cell.row, 1u8, cell.column, end_column));
+        events.push((end_row, 0u8, cell.column, end_column));
+    }
+    events.sort_unstable();
+    let mut active: BTreeMap<usize, usize> = BTreeMap::new();
+    for (_, kind, column, end_column) in events {
+        if kind == 0 {
+            active.remove(&column);
+            continue;
         }
-        rectangles.push((cell.row, cell.column, end_row, end_column));
+        if active
+            .range(..=column)
+            .next_back()
+            .is_some_and(|(_, end)| *end > column)
+            || active
+                .range(column..)
+                .next()
+                .is_some_and(|(start, _)| *start < end_column)
+        {
+            return Err(CoreError::InvalidInput);
+        }
+        active.insert(column, end_column);
     }
     Ok(())
 }
@@ -275,7 +295,7 @@ pub fn render(document: Document) -> Result<RenderedDocument, CoreError> {
     let mut ids = HashMap::with_capacity(document.blocks.len());
     let mut chars: usize = document.blocks.len().saturating_sub(1).saturating_mul(2);
     let mut bytes = chars;
-    let mut comparisons = 0;
+    let mut origin_cells = 0;
     for (n, block) in document.blocks.iter().enumerate() {
         if block.id.is_empty()
             || ids.insert(block.id.as_str(), n).is_some()
@@ -298,7 +318,7 @@ pub fn render(document: Document) -> Result<RenderedDocument, CoreError> {
             return Err(CoreError::Budget);
         }
         if let Some(table) = &block.table {
-            validate_table(table, &mut comparisons)?;
+            validate_table(table, &mut origin_cells)?;
         }
     }
     // Iterative color walk: O(blocks), no recursive stack for hostile hierarchy.
