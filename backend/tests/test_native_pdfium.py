@@ -309,3 +309,23 @@ def test_invalid_worker_frame_is_typed_and_slot_is_replaced(
         with pytest.raises(PdfWorkerError, match="worker_protocol"):
             executor.extract_pdf(document([text(40, 700, 12, "Generated")]))
     assert "Healthy" in executor.extract_pdf(document([text(40, 700, 12, "Healthy")])).rendered_text
+
+
+def test_default_pdf_executor_honors_configured_document_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import config
+    from app.ingestion import native
+
+    configured = config.get_settings().model_copy(update={"native_ingestion_max_memory_bytes": 128})
+    monkeypatch.setattr(config, "get_settings", lambda: configured)
+    native._default_pdf_executor.cache_clear()
+    try:
+        result = native.parse_pdf_candidate(
+            document([text(40, 700, 12, "Evidence")]), mode="shadow"
+        )
+        assert result.text == "Evidence"
+        assert result.canonical is None
+        assert result.native_error == "native_failed"
+    finally:
+        native._default_pdf_executor.cache_clear()

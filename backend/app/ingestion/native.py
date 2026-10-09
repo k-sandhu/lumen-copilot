@@ -190,11 +190,11 @@ class PdfiumExecutor:
 
 
 @lru_cache(maxsize=1)
-def _default_pdf_executor(worker_pid: int) -> PdfiumExecutor:
+def _default_pdf_executor(worker_pid: int) -> tuple[PdfiumExecutor, RuntimeBudget]:
     """Fork-aware lazy default; all documents in one Celery child share its slots."""
     from app.core.config import get_settings
 
-    return configured_pdfium_executor(get_settings())[0]
+    return configured_pdfium_executor(get_settings())
 
 
 class NativeExecutor:
@@ -301,7 +301,7 @@ def parse_pdf_candidate(
     *,
     mode: Literal["python", "shadow", "native"] = "python",
     executor: NativeExecutor | PdfiumExecutor | None = None,
-    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    budget: RuntimeBudget | None = None,
     cancellation: CancellationHandle | None = None,
 ) -> PdfCandidateResult:
     """Independent PDF opt-in seam for #669/#687; existing parsers stay authoritative.
@@ -320,8 +320,15 @@ def parse_pdf_candidate(
     try:
         if executor is None and not native_available():
             raise NativeUnavailableError("native ingestion extension is unavailable")
-        document = (executor or _default_pdf_executor(os.getpid())).extract_pdf(
-            data, budget=budget, cancellation=cancellation
+        selected: NativeExecutor | PdfiumExecutor
+        if executor is None:
+            selected, configured_budget = _default_pdf_executor(os.getpid())
+        else:
+            selected, configured_budget = executor, _DEFAULT_BUDGET
+        document = selected.extract_pdf(
+            data,
+            budget=budget if budget is not None else configured_budget,
+            cancellation=cancellation,
         )
         if mode == "native":
             if json.loads(document.generation_json)["outcome"] != "indexed":

@@ -14,7 +14,9 @@ Python supervises a bounded pool of execution slots, creating a fresh worker
 process and PDFium instance for each document. Recycling on every document avoids
 native state leakage and guarantees replacement after crash, timeout or cancellation.
 Default width is min(CPU count, 2, total memory budget / per-worker cap); reject a
-configuration that cannot fund one worker. Slots include startup, parsing and
+configuration that cannot fund one worker. The default facade uses configured
+native document budgets; an explicit per-document budget takes precedence.
+Slots include startup, parsing and
 IPC. No documents queue without a deadline. Windows workers enter a Job Object
 with process memory and kill-on-close limits before accepting bytes. Linux workers set
 RLIMIT_AS before accepting bytes; deployments must additionally
