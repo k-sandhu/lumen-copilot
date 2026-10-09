@@ -6,8 +6,10 @@ This is explicit native candidate computation; live Python parsing is unchanged.
 Canonical evidence and its spans stay byte-for-byte/code-point-for-code-point
 intact. Normalized block text is a separate derived representation with block
 lineage, never assigned original citation offsets. The generation records the
-normalizer policy/build, language-detector identity and diagnostics. #669 persists
-these outputs; #628's existing administrator surface can project them additively.
+normalizer policy/build, language-detector identity and diagnostics. Operational
+stage persistence belongs to #669; persisting these native candidate outputs
+requires the approved format integration in #687. The administrator surface owned
+by #628 can project retained diagnostics additively.
 
 Policy: NFC rather than NFKC; preserve numbers, identifiers, unit symbols,
 table grids/cells and code. Normalize CRLF to LF in prose; collapse horizontal
