@@ -3958,6 +3958,9 @@ components:
                 - { required: [speaker_id] }
                 - { required: [speaker_name] }
       properties:
+        machine_read:
+          type: boolean
+          description: True when the cited passage overlaps OCR text; label as machine-read.
         id: { type: string, format: uuid }
         document_id: { type: string, format: uuid }
         document_name: { type: string }
