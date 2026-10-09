@@ -101,7 +101,10 @@ def test_write_tier_tool_with_approval_is_allowed() -> None:
 def test_tool_definition_requires_a_name() -> None:
     with pytest.raises(ValueError, match="non-empty name"):
         ToolDefinition(
-            name="  ", description="d", json_schema={}, handler=_noop_handler  # type: ignore[arg-type]
+            name="  ",
+            description="d",
+            json_schema={},
+            handler=_noop_handler,  # type: ignore[arg-type]
         )
 
 
