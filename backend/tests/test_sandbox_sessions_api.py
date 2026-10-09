@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api.deps import get_db_session, get_settings_dep
 from app.auth import hash_password
 from app.core.errors import DependencyError
-from app.db.base import Base
 from app.db.repositories import (
     ChatSessionRepository,
     CodeRunRepository,
@@ -31,6 +30,7 @@ from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
 from app.sandbox.tool_runner import ChatSandboxToolRunner
+from tests._db_helpers import copy_sqlite_schema
 from tests._sandbox_helpers import sandbox_settings
 
 import app.db.models  # noqa: F401  isort: skip
@@ -121,14 +121,16 @@ async def sessionmaker_fixture(tmp_path: Path) -> AsyncIterator[async_sessionmak
     the worst way for it to surface. pytest owns the lifecycle of `tmp_path` and does
     not fail a test when cleanup lags behind a background thread.
     """
-    database_file = tmp_path / f".test-sandbox-api-{uuid4()}.sqlite3"
+    # tmp_path already isolates tests/workers; a short filename also keeps the
+    # native SQLite path below Windows' limit on long worktree scratch roots.
+    database_file = tmp_path / "sandbox.db"
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{database_file.as_posix()}",
         connect_args={"check_same_thread": False},
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as session:
             acme = await TenantRepository(session).create(name="Acme")

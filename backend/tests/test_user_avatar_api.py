@@ -29,10 +29,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_db_session, get_object_store_dep
 from app.auth import hash_password
-from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.main import create_app
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 from app.storage.keys import assert_key_owned_by, build_avatar_key
@@ -115,7 +115,7 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as seed:
             ta = await TenantRepository(seed).create(name="Acme")
@@ -197,9 +197,7 @@ async def test_put_avatar_uploads_and_returns_url(
     assert set(body) == {"avatar_url"}
     assert isinstance(body["avatar_url"], str) and body["avatar_url"]
     # Stored under tenant A / alice's user-id prefix (the isolation + ownership seam).
-    assert any(
-        key.startswith(f"{seeded.tenant_a}/{seeded.alice_id}/") for key in store.objects
-    )
+    assert any(key.startswith(f"{seeded.tenant_a}/{seeded.alice_id}/") for key in store.objects)
 
 
 async def test_me_returns_avatar_url_null_before_and_set_after(
@@ -281,9 +279,7 @@ async def test_avatar_is_per_user_same_and_other_tenant(
         assert me.json()["avatar_url"] is None
 
 
-async def test_one_user_cannot_affect_anothers_avatar(
-    client: AsyncClient, seeded: _Seeded
-) -> None:
+async def test_one_user_cannot_affect_anothers_avatar(client: AsyncClient, seeded: _Seeded) -> None:
     # Bob clearing his own avatar leaves Alice's avatar intact (each acts on their own).
     alice = await _login(client, seeded.alice_email)
     await client.put("/api/v1/me/avatar", headers=_auth(alice), files=_avatar_file())
