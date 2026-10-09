@@ -1,6 +1,6 @@
 # PDF extraction candidate — issues #671 and #672
 
-ADR-0026 candidate decision, 2026-10-08. Production selection remains subject to
+ADR-0027 candidate decision, 2026-10-08. Production selection remains subject to
 the owner's held-out baseline evaluation. Python pypdf stays authoritative by default.
 
 ## Engine comparison
