@@ -95,6 +95,7 @@ _ALL_TABLES = _MVP_TABLES | {
     "transcription_checkpoints",
     # 0044 lossless connector-revision rollback archive.
     "embedding_legacy_archive_0044",
+    "ingestion_stage_outputs",
 }
 
 
@@ -127,6 +128,24 @@ def test_every_revision_id_fits_alembic_version_column() -> None:
         )
 
 
+def test_offline_ingestion_checkpoints_round_trip(capsys) -> None:
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0046_message_source_provenance:0047_ingestion_stages", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "create table ingestion_stage_outputs" in up
+    assert "foreign key(tenant_id, document_id)" in up
+    assert "references documents (tenant_id, id) on delete cascade" in up
+    assert "unique (tenant_id, document_id, stage)" in up
+    assert "force row level security" in up
+    assert "create policy ingestion_stage_outputs_tenant" in up
+    command.downgrade(cfg, "0047_ingestion_stages:0046_message_source_provenance", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop table ingestion_stage_outputs" in down
+    assert "drop column ingestion_stage" in down
+
+
 def test_migration_chain_is_linear_single_head() -> None:
     """The chain is linear 0001 → … → 0013 with a SINGLE head (ADR-0008 §4).
 
@@ -135,7 +154,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0046_message_source_provenance"]
+    assert list(script.get_heads()) == ["0047_ingestion_stages"]
     provenance = script.get_revision("0046_message_source_provenance")
     assert provenance is not None
     assert provenance.down_revision == "0045_embedding_contract"

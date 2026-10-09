@@ -62,7 +62,11 @@ class CheckpointPipeline:
             )
         )
         cached = await self._store.get(stage, fingerprint)
-        if cached is not None and checksum(cached.payload_json) == cached.output_sha256:
+        if (
+            cached is not None
+            and len(cached.payload_json.encode("utf-8")) <= self._max_output_bytes
+            and checksum(cached.payload_json) == cached.output_sha256
+        ):
             await self._store.ensure_owned()
             return cached
         self._boundary("before_compute", stage)

@@ -1,6 +1,7 @@
 # Resumable ingestion stages — #669
 
-Status: proposed wire contract; ADR-0006 review/freeze precedes endpoint code.
+Status: durable stage implementation; proposed wire contract. ADR-0006
+review/freeze precedes endpoint code.
 
 Python owns orchestration, authorization, storage/network/model calls, audit and
 generation activation. Persist detect, extract, normalize, classify, chunk, embed
@@ -9,6 +10,8 @@ and each stage's own configuration/build plus upstream artifact checksum. Cache
 data is operational, not a new historical-citation retention policy. A source or
 parser change invalidates extraction; chunker/embedding-only changes reuse it.
 Successful outputs/checksums commit together under the document's attempt fence.
+Canonical finite JSON is bounded by `INGESTION_CHECKPOINT_MAX_OUTPUT_BYTES`
+(default 32 MiB per artifact); lowering it also rejects oversized cached outputs.
 Only one current output per document/stage is retained; changing a stage deletes
 its stale downstream outputs in the same transaction. Restart clears all cached
 stages atomically; document deletion cascades. Raw object bytes stay in storage.
@@ -17,7 +20,8 @@ Existing Python extraction/chunking remains authoritative. Normalize/classify
 stages explicitly preserve that output when no approved implementation is enabled;
 unknown classification is recorded as unknown, never invented. Native candidate
 normalization/chunking remains separate and optional until #687's format approval.
-Fingerprint actual returned embedding model/dimension; reject invalid vectors
+Retain actual returned embedding model/dimension in the checksummed stage output;
+cache requests by configured embedding-space identity. Reject invalid vectors
 before replacement. Index synchronization refreshes and rechecks the attempt before
 ready. Retry always republishes index visibility for its new attempt; cached index
 success cannot bypass readiness. Empty native text stays non-searchable under the
@@ -62,3 +66,27 @@ and stale-worker fencing, restart/delete cleanup, no duplicate active chunks or
 orphan stage outputs, tenant/visibility/role/auth/input negatives, and audit rollback.
 Offline SQLite/fakes validate application behavior. Live Postgres RLS/index refresh
 and real platform parity remain unverified under this session's constraints.
+
+## Implementation and verification
+
+- [x] Durable seven-stage cache, checksum validation, downstream invalidation,
+  attempt fencing and deletion cleanup: offline SQLite/task tests passed,
+  including faults before computation, after computation and after commit at
+  all seven stages. Index retry reuses embeddings and republishes visibility.
+  The broader targeted run passed 523 tests (9 skipped, 3 live tests deselected);
+  the final embedding-validation/task persistence run passed all 63 tests.
+- [x] Stage output and content-free audit envelope commit together: injected
+  audit failure rolled both back. Reduced output budgets reject oversized cache
+  reuse. Migration 0047 upgrade/downgrade DDL and the linear chain were verified
+  without a database connection.
+- [~] 2026-10-08: processing GET/POST controls and status projection are proposed,
+  awaiting owner review/freeze under ADR-0006. Residual risk: cancellation,
+  resume/restart API, associated authorization negatives and control auditing
+  are not implemented; #669 remains partial.
+- [~] 2026-10-08: #629/#630/#640 integration remains a merge dependency. The
+  foundation's existing empty-document outcome and historical chunk replacement
+  guard are preserved here. Residual risk: reconcile these stacked Python-path
+  changes and migration ownership before merging.
+- [~] 2026-10-08: no live Postgres/OpenSearch or Docker actions were run, as
+  requested. Residual risk: real RLS and index durability need the existing
+  live evaluation gates before a human merges.

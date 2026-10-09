@@ -115,3 +115,18 @@ async def test_corrupted_cached_output_is_recomputed() -> None:
     )
     await pipeline.run("extract", upstream="a" * 64, config={}, compute=compute)
     assert calls == 2
+
+
+async def test_reduced_output_budget_cannot_reuse_oversized_cache() -> None:
+    from app.domain.ingestion_stages import StageOutputInvalid
+
+    store = Store()
+
+    async def compute():
+        return {"text": "a" * 100}
+
+    await CheckpointPipeline(store).run("extract", upstream="a" * 64, config={}, compute=compute)
+    with pytest.raises(StageOutputInvalid, match="budget"):
+        await CheckpointPipeline(store, max_output_bytes=10).run(
+            "extract", upstream="a" * 64, config={}, compute=compute
+        )
