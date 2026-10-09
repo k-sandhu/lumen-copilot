@@ -57,3 +57,18 @@ dependency's 0047; origin/main's latest revision was 0046 at allocation time.
 Public fixtures are synthetic only. Live RLS/search and real-document egress remain
 owner/evaluation gates. Media retains ADR-0023's transcription path; classification
 of its transcript uses the same work record after transcription.
+
+Verification (2026-10-09): targeted offline stage/security/accounting/migration/
+ordinary-ingestion/media/gateway tests passed 135 tests; full `mypy app` passed
+218 source files and Ruff passed. Rust Clippy and the 4 classification tests passed,
+and the native extension was rebuilt. Offline migration DDL verifies reversible
+0048 and forced tenant RLS without connecting to a database.
+
+- [~] 2026-10-09: the one full backend-suite attempt started at 2559 MiB but
+  was stopped after final lint exposed a missing checksum-guard import. The
+  import is fixed and 135 affected tests passed; residual risk: remaining
+  fallback coverage is CI-only under the one-full-run-per-PR limit.
+- [~] 2026-10-09: no live model, PostgreSQL/OpenSearch or Docker runtime actions
+  were performed. Residual risk: live isolation, deployment scheduling and real
+  corpus calibration remain evaluation/owner merge gates. Classification stays
+  disabled without approved tenant policy and checked tokenizer artifacts.
