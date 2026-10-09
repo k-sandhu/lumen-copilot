@@ -132,7 +132,7 @@ def _service(
         ),
         request_id=extract_request_id(request) or "unknown",
         source_ip=request.client.host if request.client else "unknown",
-        allowed_content_types=settings.upload_allowed_content_types,
+        allowed_content_types=settings.effective_upload_content_types,
         max_document_bytes=settings.max_upload_bytes,
         max_media_bytes=settings.max_media_upload_bytes,
         part_size_bytes=settings.upload_part_size_bytes,
