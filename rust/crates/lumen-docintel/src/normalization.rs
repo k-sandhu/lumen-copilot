@@ -88,8 +88,7 @@ fn derived_prose(text: &str, ctx: &Context) -> Result<String, CoreError> {
                 .replace('ﬂ', "fl")
                 .replace('ﬃ', "ffi")
                 .replace('ﬄ', "ffl")
-                .replace('ﬅ', "st")
-                .replace('ﬆ', "st");
+                .replace(['ﬅ', 'ﬆ'], "st");
             output.extend(expanded.nfc());
         } else {
             output.push_str(token);
