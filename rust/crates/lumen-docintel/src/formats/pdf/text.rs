@@ -475,6 +475,7 @@ fn interpret(
     let mut args: Vec<Value> = vec![];
     let mut stack = vec![];
     let mut path: Vec<(f64, f64)> = vec![];
+    let mut pending_lines: Vec<[f64; 4]> = vec![];
     while at < data.len() {
         m.ctx.work(1)?;
         let mut r = Reader {
@@ -640,7 +641,7 @@ fn interpret(
                     let end = state.ctm.point(n[0], n[1]);
                     if let Some(start) = path.last() {
                         m.reserve(64)?;
-                        out.lines.push([start.0, start.1, end.0, end.1]);
+                        pending_lines.push([start.0, start.1, end.0, end.1]);
                     }
                     m.reserve(64)?;
                     path.push(end);
@@ -656,11 +657,30 @@ fn interpret(
                     m.reserve(256)?;
                     for i in 0..4 {
                         let (a, b) = (pts[i], pts[(i + 1) % 4]);
-                        out.lines.push([a.0, a.1, b.0, b.1]);
+                        pending_lines.push([a.0, a.1, b.0, b.1]);
                     }
                 }
-                "S" | "s" | "h" | "n" | "f" | "f*" | "F" | "B" | "B*" | "b" | "b*" => {
+                "h" => {
                     numbers(&args, 0)?;
+                    if let Some((first, last)) = path.first().zip(path.last()) {
+                        m.reserve(64)?;
+                        pending_lines.push([last.0, last.1, first.0, first.1]);
+                    }
+                }
+                "S" | "s" | "n" | "f" | "f*" | "F" | "B" | "B*" | "b" | "b*" => {
+                    numbers(&args, 0)?;
+                    if matches!(op.as_str(), "s" | "b" | "b*")
+                        && let Some((first, last)) = path.first().zip(path.last())
+                    {
+                        m.reserve(64)?;
+                        pending_lines.push([last.0, last.1, first.0, first.1]);
+                    }
+                    if matches!(op.as_str(), "S" | "s" | "B" | "B*" | "b" | "b*") {
+                        m.reserve(pending_lines.len() * 64)?;
+                        out.lines.append(&mut pending_lines);
+                    } else {
+                        pending_lines.clear();
+                    }
                     path.clear();
                 }
                 "w" | "J" | "j" | "M" | "G" | "g" | "i" => {

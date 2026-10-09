@@ -85,3 +85,10 @@ replaces Python text. Stage wiring and production cutover remain #669/#687.
 See [engine evaluation](../docs/ingestion/pdf-engine-evaluation.md) and generated
 [layout benchmark](../docs/ingestion/pdf-layout-benchmark.json). Supported-subset
 coverage must be evaluated before promotion; broader coverage is tracked in #722.
+
+PDF tables (#672) add painted-rule and conservative alignment detection, sparse
+and spanning origin cells, header-labelled rendering and geometry/header-gated
+continuation joining. Exact native page maps address disjoint table-text ranges;
+cell boxes retain their original page. No additional crate or binary is added.
+See [table acceptance](../docs/ingestion/pdf-tables-v1.md) and
+[table benchmark](../docs/ingestion/pdf-tables-benchmark.json).

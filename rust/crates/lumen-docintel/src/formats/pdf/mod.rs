@@ -1,6 +1,7 @@
 //! Budgeted PDF candidate. Supported subsets fail closed; Python stays live.
 mod layout;
 mod syntax;
+mod tables;
 mod text;
 use crate::{
     CoreError,
@@ -302,11 +303,38 @@ pub fn extract_with_context(
         ctx.work(1)?;
         let page_text = &unit.value.0;
         memory.reserve(page_text.glyphs.len() * 512 + 1024)?;
-        let blocks = layout::blocks(page, page_text, ctx)?;
-        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"outcome":if blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
+        let mut candidates = tables::detect(page, page_text, &mut memory)?;
+        candidates.sort_by(|a, b| {
+            b.bbox
+                .y1
+                .total_cmp(&a.bbox.y1)
+                .then(a.bbox.x0.total_cmp(&b.bbox.x0))
+        });
+        let remaining = tables::remaining(page_text, &candidates, ctx)?;
+        let mut blocks = layout::blocks(page, &remaining, ctx)?;
+        let summaries: Vec<_> = candidates
+            .iter()
+            .map(|c| json!({"columns":c.edges,"rows":c.block.table.as_ref().unwrap().rows}))
+            .collect();
+        for (i, mut candidate) in candidates.into_iter().enumerate() {
+            candidate.block.id = format!("pdf/p{}/t{}", page.number, i + 1);
+            let index = blocks
+                .iter()
+                .position(|b| {
+                    let bbox = b.regions[0].bbox.as_ref().unwrap();
+                    bbox.y1 < candidate.bbox.y1
+                        && bbox.x0 >= candidate.bbox.x0 - 12.
+                        && bbox.x0 <= candidate.bbox.x1
+                })
+                .unwrap_or(blocks.len());
+            blocks.insert(index, candidate.block);
+        }
+        diagnostics.push(json!({"number":page.number,"width":page.width,"height":page.height,"rotation":page.rotation,"glyph_count":page_text.glyphs.len(),"has_images":page_text.has_images,"tables":summaries,"outcome":if blocks.is_empty(){PageOutcome::NeedsOcr}else{PageOutcome::Extracted}}));
         document.blocks.extend(blocks);
     }
     let normalization_hooks = layout::furniture(&mut document, &pages, ctx)?;
+    let _joined_segments = tables::join(&mut document, &pages, &mut memory)?;
+    let table_segments = tables::table_segments(&document, ctx)?;
     let mut outcome = "indexed";
     let missing = diagnostics
         .iter()
@@ -342,7 +370,8 @@ pub fn extract_with_context(
                 include_str!("mod.rs"),
                 include_str!("syntax.rs"),
                 include_str!("text.rs"),
-                include_str!("layout.rs")
+                include_str!("layout.rs"),
+                include_str!("tables.rs")
             ))
         )),
         dependency_versions: BTreeMap::from([
@@ -366,7 +395,17 @@ pub fn extract_with_context(
                     .iter()
                     .any(|r| r.kind == Some(PartKind::Page) && r.number == Some(page.number))
             })
-            .map(|(s, _)| s)
+            .flat_map(|(s, b)| {
+                if let Some(segments) = table_segments.get(&b.id) {
+                    segments
+                        .iter()
+                        .filter(|segment| segment.0 == page.number)
+                        .map(|segment| (s.char_start + segment.1, s.char_start + segment.2))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![(s.char_start, s.char_end)]
+                }
+            })
             .collect();
         let fallback = document
             .source_parts
@@ -376,8 +415,8 @@ pub fn extract_with_context(
             kind: PartKind::Page,
             name: format!("Page {}", page.number),
             number: page.number,
-            char_start: spans.first().map_or(fallback, |s| s.char_start),
-            char_end: spans.last().map_or(fallback, |s| s.char_end),
+            char_start: spans.first().map_or(fallback, |s| s.0),
+            char_end: spans.last().map_or(fallback, |s| s.1),
         });
     }
     canonical::render(document.clone())?;
@@ -385,15 +424,29 @@ pub fn extract_with_context(
     Ok(document)
 }
 pub fn extract_json(bytes: &[u8], ctx: &Context, runtime: &Runtime) -> Result<String, CoreError> {
-    let document = extract_with_context(bytes, ctx, runtime)?;
+    let mut document = extract_with_context(bytes, ctx, runtime)?;
     let size = document
         .blocks
         .iter()
-        .map(|b| b.text.len() * 16 + 4096)
+        .map(|b| {
+            b.text.len() * 16
+                + 4096
+                + b.table.as_ref().map_or(0, |t| {
+                    t.cells
+                        .iter()
+                        .map(|c| c.text.len() * 16 + 2048)
+                        .sum::<usize>()
+                })
+        })
         .sum::<usize>()
         + document.source_parts.len() * 2048
         + bytes.len() * 2;
-    let _json = ctx.reserve(size)?;
+    // Covers the retained domain model, rendered clone, serde growth and JSON.
+    let _json = ctx.reserve(size.checked_mul(4).ok_or(CoreError::Budget)?)?;
+    if let Some(diagnostics) = document.generation.diagnostics.as_mut() {
+        diagnostics["runtime"] =
+            serde_json::to_value(ctx.stats()).map_err(|_| CoreError::Internal)?;
+    }
     let rendered = canonical::render(document)?;
     let result = serde_json::to_string(&rendered).map_err(|_| CoreError::Internal)?;
     ctx.checkpoint()?;
