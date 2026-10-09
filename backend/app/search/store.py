@@ -43,6 +43,7 @@ import httpx
 from app.core.config import Settings
 from app.core.errors import DependencyError
 from app.core.logging import get_logger
+from app.domain.classification import ClassificationFilter, ClassificationMetadata
 from app.search.filters import SearchAllowFilter
 
 log = get_logger(__name__)
@@ -93,6 +94,7 @@ class IndexedChunk:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    classification: ClassificationMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +128,17 @@ def _acl_mapping_properties() -> dict[str, Any]:
         "acl_principals": {"type": "keyword"},
         "acl_synced_at": {"type": "date"},
         "acl_scope_ids": {"type": "keyword"},
+    }
+
+
+def _classification_mapping_properties() -> dict[str, Any]:
+    return {
+        "classification_path": {"type": "keyword"},
+        "classification_ancestors": {"type": "keyword"},
+        "classification_facets": {"type": "keyword"},
+        "classification_taxonomy_version": {"type": "keyword"},
+        "classification_confidence": {"type": "double"},
+        "classification_method": {"type": "keyword"},
     }
 
 
@@ -175,6 +188,7 @@ def _index_body(dimensions: int, embedding_fingerprint: str) -> dict[str, Any]:
                 "char_start": {"type": "integer"},
                 "char_end": {"type": "integer"},
                 **_media_mapping_properties(),
+                **_classification_mapping_properties(),
                 "ingestion_attempt": {"type": "long"},
                 "embedding_fingerprint": {"type": "keyword"},
                 # Mirrored source ACL (ADR-0019 §2) — the engine half of the
@@ -213,6 +227,7 @@ def _hybrid_body(
     k: int,
     collection_ids: Sequence[UUID] | None = None,
     document_ids: Sequence[UUID] | None = None,
+    classification: ClassificationFilter | None = None,
 ) -> dict[str, Any]:
     """The hybrid query body with the permission filter in BOTH legs.
 
@@ -231,6 +246,11 @@ def _hybrid_body(
         filters.append({"terms": {"collection_id": sorted(str(c) for c in collection_ids)}})
     if document_ids:
         filters.append({"terms": {"document_id": sorted(str(d) for d in document_ids)}})
+    if classification is not None:
+        if classification.taxonomy_prefix is not None:
+            filters.append({"term": {"classification_ancestors": classification.taxonomy_prefix}})
+        for key, value in sorted(classification.facets):
+            filters.append({"term": {"classification_facets": f"{key}:{str(value).lower()}"}})
     return {
         "size": k,
         "_source": [
@@ -535,6 +555,7 @@ class OpenSearchStore:
                 "properties": {
                     **_acl_mapping_properties(),
                     **_media_mapping_properties(),
+                    **_classification_mapping_properties(),
                 }
             },
         )
@@ -704,6 +725,18 @@ class OpenSearchStore:
                 doc["speaker_id"] = chunk.speaker_id
             if chunk.speaker_name is not None:
                 doc["speaker_name"] = chunk.speaker_name
+            if chunk.classification is not None:
+                metadata = chunk.classification
+                doc.update(
+                    classification_path=metadata.path,
+                    classification_ancestors=list(metadata.ancestors),
+                    classification_facets=[
+                        f"{key}:{str(value).lower()}" for key, value in metadata.facets
+                    ],
+                    classification_taxonomy_version=metadata.taxonomy_version,
+                    classification_confidence=metadata.confidence,
+                    classification_method=metadata.method,
+                )
             # A pending-embedding chunk indexes without the knn_vector field —
             # BM25-searchable now, kNN-matchable once re-synced with a vector.
             if chunk.embedding is not None:
@@ -911,6 +944,7 @@ class OpenSearchStore:
         k: int,
         collection_ids: Sequence[UUID] | None = None,
         document_ids: Sequence[UUID] | None = None,
+        classification: ClassificationFilter | None = None,
     ) -> list[SearchHit]:
         """Run the permission-filtered hybrid query (BM25 ⊕ kNN), best first.
 
@@ -933,6 +967,7 @@ class OpenSearchStore:
                 k=k,
                 collection_ids=collection_ids,
                 document_ids=document_ids,
+                classification=classification,
             ),
             params={
                 "search_pipeline": self._pipeline,

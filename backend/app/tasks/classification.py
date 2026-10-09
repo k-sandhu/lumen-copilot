@@ -269,6 +269,10 @@ async def classify_document_async(
                     "taxonomy_version": work.taxonomy_version,
                 },
             )
+    if published:
+        from app.tasks.index_sync import enqueue_index_sync
+
+        enqueue_index_sync(tenant_id, document_id)
     return published
 
 

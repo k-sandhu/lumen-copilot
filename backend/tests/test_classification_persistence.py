@@ -19,6 +19,12 @@ sqlite_engine = fixtures.sqlite_engine
 _offline_index_store = fixtures._offline_index_store
 
 
+@pytest.fixture(autouse=True)
+def offline_classification_index_enqueue(monkeypatch):
+    # Classification repair is independent of the broker and ingestion readiness.
+    monkeypatch.setattr("app.tasks.index_sync.enqueue_index_sync", lambda *_: None)
+
+
 async def seed():
     tenant, document = await fixtures._seed_document(mime_type="text/plain", key="key")
     async with db_session.tenant_session_scope(tenant) as s:

@@ -37,8 +37,10 @@ import structlog
 
 from app.core.config import Settings, get_settings
 from app.core.errors import DependencyError
+from app.db.classification import ClassificationRepository
 from app.db.repositories import ChunkRepository, DocumentRepository
 from app.db.session import tenant_session_scope
+from app.domain.classification import ClassificationMetadata
 from app.domain.entities import Chunk, Document, DocumentStatus
 from app.search import IndexedChunk, OpenSearchStore
 from app.tasks.celery_app import celery_app
@@ -66,6 +68,7 @@ def _to_indexed(
     chunks: list[Chunk],
     *,
     embedding_fingerprint: str,
+    classification: ClassificationMetadata | None = None,
 ) -> list[IndexedChunk]:
     """Project db rows into the engine's write shape (ids + text + vector + spans).
 
@@ -101,6 +104,7 @@ def _to_indexed(
             acl_principals=document.acl_principals or (),
             acl_synced_at=document.acl_synced_at,
             acl_scope_ids=document.acl_scope_ids or (),
+            classification=classification,
         )
         for chunk in chunks
     ]
@@ -146,6 +150,11 @@ async def sync_document_index_async(
             if document is not None
             else []
         )
+        classification = (
+            await ClassificationRepository(session, tenant_id).metadata_for_documents([document_id])
+            if document is not None
+            else {}
+        ).get(document_id)
 
     owns_store = store is None
     active = store or OpenSearchStore.from_settings(settings)
@@ -219,6 +228,7 @@ async def sync_document_index_async(
             document,
             chunks,
             embedding_fingerprint=settings.embedding_space_fingerprint,
+            classification=classification,
         )
         try:
             await active.upsert_chunks(

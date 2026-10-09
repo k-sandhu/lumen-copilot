@@ -3802,7 +3802,7 @@ components:
         is the product of selected conditional probabilities; it is uncalibrated.
         Overrides have no model confidence. Missing cost is unknown, never zero.
       properties:
-        status: { type: string, enum: [pending, running, classified, incomplete, unclassified, override] }
+        status: { type: string, enum: [pending, processing, classified, incomplete, unclassified, override] }
         revision: { type: integer, minimum: 0 }
         reason: { type: [string, "null"], maxLength: 128 }
         retryable: { type: boolean }
@@ -3830,6 +3830,8 @@ components:
         review_required: { type: boolean }
         rule_ids: { type: array, items: { type: string }, maxItems: 64 }
         override_actor: { type: string, format: uuid }
+        input_fingerprint: { type: string, pattern: "^[a-f0-9]{64}$" }
+        extraction_id: { type: string, maxLength: 64 }
 
     DocumentList:
       type: object
