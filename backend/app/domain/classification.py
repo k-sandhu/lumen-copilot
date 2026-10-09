@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+PROMPT_VERSION = "classification-1.1"
+
 
 @dataclass(frozen=True, slots=True)
 class ClassificationWork:
