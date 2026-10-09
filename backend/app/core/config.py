@@ -16,7 +16,7 @@ import hashlib
 import json
 import re
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -222,13 +222,11 @@ def _string_set(value: object) -> object:
     return frozenset(item.strip() for item in text.split(",") if item.strip())
 
 
-class Settings(BaseSettings):
-    """Strongly-typed runtime configuration, sourced from the environment.
+class PasswordHashingSettings(BaseSettings):
+    """Import-time hashing policy, independent of service configuration (#655).
 
-    Field names map to the env vars defined in the repo-root ``.env.example``
-    and consumed by ``docker-compose.yml``. Defaults exist only for values that
-    are genuinely optional for the skeleton to boot (e.g. a blank LLM key);
-    infrastructure URLs are required so misconfiguration fails fast.
+    Full Settings inherits these fields and their gate so auth imports and
+    application startup use identical environment/dotenv parsing and validation.
     """
 
     model_config = SettingsConfigDict(
@@ -238,6 +236,36 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    environment: str = Field(default="local", alias="ENVIRONMENT")
+    # None selects fast cost only in the explicit test environment. An explicit
+    # true outside test is a configuration error; false always keeps real cost.
+    test_fast_password_hashing: bool | None = Field(
+        default=None, alias="TEST_FAST_PASSWORD_HASHING"
+    )
+
+    @model_validator(mode="after")
+    def _gate_test_password_hashing(self) -> Self:
+        if self.test_fast_password_hashing and self.environment != "test":
+            raise ValueError("TEST_FAST_PASSWORD_HASHING is allowed only in ENVIRONMENT=test")
+        if self.test_fast_password_hashing is None:
+            self.test_fast_password_hashing = self.environment == "test"
+        return self
+
+
+def get_password_hashing_settings() -> PasswordHashingSettings:
+    """Resolve only hashing policy; never construct/cache application Settings."""
+    return PasswordHashingSettings()
+
+
+class Settings(PasswordHashingSettings):
+    """Strongly-typed runtime configuration, sourced from the environment.
+
+    Field names map to the env vars defined in the repo-root ``.env.example``
+    and consumed by ``docker-compose.yml``. Defaults exist only for values that
+    are genuinely optional for the skeleton to boot (e.g. a blank LLM key);
+    infrastructure URLs are required so misconfiguration fails fast.
+    """
+
     # --- Service identity (surfaced by /health) ---
     service_name: str = "lumen-copilot-backend"
     # Sourced once from the package version (app.__version__, mirroring
@@ -246,8 +274,7 @@ class Settings(BaseSettings):
     # literal. Override per-deploy via the VERSION env var if needed.
     version: str = _APP_VERSION
 
-    # --- Environment / observability ---
-    environment: str = Field(default="local", alias="ENVIRONMENT")
+    # --- Observability (environment is inherited with the hashing policy) ---
     log_level: str = Field(default="info", alias="LOG_LEVEL")
 
     # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
