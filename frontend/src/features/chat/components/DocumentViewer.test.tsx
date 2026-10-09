@@ -166,3 +166,11 @@ describe('DocumentViewer (authenticated content load — INV-4)', () => {
     });
   });
 });
+
+
+it('labels OCR citations as machine-read', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(accessResponse());
+  render(<DocumentViewer citation={{ ...CITATION, machineRead: true }} onClose={() => {}} />);
+  expect(screen.getByText(/Machine-read/)).toBeInTheDocument();
+  await screen.findByTitle('Preview of Q4 strategy.pdf');
+});

@@ -147,6 +147,7 @@
         "documentName": { "type": "string" },
         "chunkId": { "type": "string", "format": "uuid" },
         "snippet": { "type": "string" },
+        "machineRead": { "type": "boolean", "description": "OCR evidence; label machine-read." },
         "charStart": { "type": "integer", "minimum": 0 },
         "charEnd": { "type": "integer", "minimum": 0 },
         "timeStartMs": { "type": "integer", "minimum": 0 },

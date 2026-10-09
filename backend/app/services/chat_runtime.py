@@ -150,6 +150,8 @@ def _citation_event_data(citation: GroundedCitation) -> dict[str, object]:
         "charStart": citation.char_start,
         "charEnd": citation.char_end,
     }
+    if citation.machine_read:
+        payload["machineRead"] = True
     if citation.score is not None:
         payload["score"] = citation.score
     if start is not None and end is not None:
@@ -2819,6 +2821,7 @@ class ChatRuntime:
                     transcript_segment_id=citation.transcript_segment_id,
                     speaker_id=citation.speaker_id,
                     speaker_name=citation.speaker_name,
+                    machine_read=citation.machine_read,
                 )
             )
         return stored

@@ -12,6 +12,7 @@ use crate::{
 };
 use pdfium_render::prelude::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 fn error(e: PdfiumError) -> CoreError {
@@ -266,4 +267,176 @@ fn rules(
         }
     }
     Ok(())
+}
+
+/// Single-page PDF preprocessing, private OS-limited worker only.
+pub fn split_page(
+    bytes: &[u8],
+    library: &str,
+    page: usize,
+    ctx: &Context,
+) -> Result<String, CoreError> {
+    ctx.input(bytes.len())?;
+    let _memory = ctx.reserve(bytes.len().checked_mul(8).ok_or(CoreError::Budget)?)?;
+    if page == 0 || !bytes.starts_with(b"%PDF-") {
+        return Err(CoreError::InvalidInput);
+    }
+    let pdfium = Pdfium::new(Pdfium::bind_to_library(library).map_err(|_| CoreError::Unsupported)?);
+    let source = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(error)?;
+    if !matches!(
+        source.permissions().security_handler_revision(),
+        Ok(PdfSecurityHandlerRevision::Unprotected)
+    ) {
+        return Err(CoreError::Encrypted);
+    }
+    if page > source.pages().len() as usize {
+        return Err(CoreError::InvalidInput);
+    }
+    ctx.work(1)?;
+    let mut destination = pdfium.create_new_pdf().map_err(error)?;
+    destination
+        .pages_mut()
+        .copy_page_from_document(&source, (page - 1) as i32, 0)
+        .map_err(error)?;
+    ctx.checkpoint()?;
+    let mut output = destination.save_to_bytes().map_err(error)?;
+    // PDFium generates random trailer IDs on every save. Stabilize only its own
+    // unencrypted output, retaining byte lengths and all xref offsets.
+    let mut identity = Sha256::new();
+    identity.update(bytes);
+    identity.update(page.to_be_bytes());
+    let digest = identity.finalize();
+    stable_trailer_ids(&mut output, &digest[..16])?;
+    stable_creation_date(&mut output, ctx)?;
+    let _output = ctx.reserve(output.len().checked_mul(3).ok_or(CoreError::Budget)?)?;
+    ctx.output(output.len())?;
+    let hex = output
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    serde_json::to_string(&json!({"page":page,"pdf_hex":hex})).map_err(|_| CoreError::Internal)
+}
+
+fn stable_trailer_ids(output: &mut [u8], identity: &[u8]) -> Result<(), CoreError> {
+    let trailer = output
+        .windows(7)
+        .rposition(|w| w == b"trailer")
+        .ok_or(CoreError::Parse)?;
+    let id = output[trailer..]
+        .windows(3)
+        .position(|w| w == b"/ID")
+        .ok_or(CoreError::Parse)?;
+    let mut at = trailer + id + 3;
+    let skip = |at: &mut usize, data: &[u8]| {
+        while data.get(*at).is_some_and(u8::is_ascii_whitespace) {
+            *at += 1;
+        }
+    };
+    skip(&mut at, output);
+    if output.get(at) != Some(&b'[') {
+        return Err(CoreError::Parse);
+    }
+    at += 1;
+    let hex = identity
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<String>();
+    for _ in 0..2 {
+        skip(&mut at, output);
+        if output.get(at) != Some(&b'<') {
+            return Err(CoreError::Parse);
+        }
+        at += 1;
+        let end = at.checked_add(hex.len()).ok_or(CoreError::Budget)?;
+        if output.get(end) != Some(&b'>')
+            || !output
+                .get(at..end)
+                .is_some_and(|v| v.iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(CoreError::Parse);
+        }
+        output[at..end].copy_from_slice(hex.as_bytes());
+        at = end + 1;
+    }
+    skip(&mut at, output);
+    if output.get(at) != Some(&b']') {
+        return Err(CoreError::Parse);
+    }
+    Ok(())
+}
+
+fn stable_creation_date(output: &mut [u8], ctx: &Context) -> Result<(), CoreError> {
+    // The fresh PDFium document's Info dictionary is emitted before page objects.
+    // Resolve its trailer reference so source stream text is never rewritten.
+    let trailer = output
+        .windows(7)
+        .rposition(|w| w == b"trailer")
+        .ok_or(CoreError::Parse)?;
+    let mut memory = Memory::new(ctx.clone());
+    let mut reader = super::syntax::Reader {
+        data: output,
+        at: trailer + 7,
+        memory: &mut memory,
+    };
+    let value = reader.value(0, true)?;
+    let (number, generation) = value.dict()?.get("Info").ok_or(CoreError::Parse)?.key()?;
+    let header = format!("{number} {generation} obj");
+    let start = output
+        .windows(header.len())
+        .position(|w| w == header.as_bytes())
+        .ok_or(CoreError::Parse)?;
+    let end = start
+        + output[start..]
+            .windows(6)
+            .position(|w| w == b"endobj")
+            .ok_or(CoreError::Parse)?;
+    let marker = b"/CreationDate(D:";
+    let date = start
+        + output[start..end]
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .ok_or(CoreError::Parse)?
+        + marker.len();
+    let end_date = date.checked_add(14).ok_or(CoreError::Budget)?;
+    if output.get(end_date) != Some(&b')')
+        || end_date >= end
+        || !output[date..end_date].iter().all(u8::is_ascii_digit)
+    {
+        return Err(CoreError::Parse);
+    }
+    output[date..end_date].copy_from_slice(b"19700101000000");
+    Ok(())
+}
+
+#[cfg(test)]
+mod ocr_identity_tests {
+    use super::*;
+    #[test]
+    fn creation_date_changes_only_fresh_info_metadata() {
+        let ctx = crate::runtime::context_json("{}", Default::default()).unwrap();
+        let mut output = b"3 0 obj\n<</CreationDate(D:20261009100000)/Creator(PDFium)>>\nendobj\n4 0 obj (/CreationDate(D:20261009200000)) endobj\ntrailer <</Info 3 0 R>>".to_vec();
+        let original_len = output.len();
+        stable_creation_date(&mut output, &ctx).unwrap();
+        assert_eq!(output.len(), original_len);
+        assert!(output.windows(14).any(|w| w == b"19700101000000"));
+        assert!(output.windows(14).any(|w| w == b"20261009200000"));
+    }
+    #[test]
+    fn stabilizes_only_generated_trailer_ids_without_shifting_offsets() {
+        let original = b"1 0 obj (/ID untouched) endobj\ntrailer << /ID[<0123456789ABCDEF0123456789ABCDEF><FEDCBA9876543210FEDCBA9876543210>] >>\nstartxref\n42\n%%EOF";
+        let mut output = original.to_vec();
+        stable_trailer_ids(&mut output, &[0xAB; 16]).unwrap();
+        assert_eq!(output.len(), original.len());
+        assert!(output.starts_with(b"1 0 obj (/ID untouched) endobj"));
+        assert!(output.ends_with(b"startxref\n42\n%%EOF"));
+        let mut again = output.clone();
+        stable_trailer_ids(&mut again, &[0xAB; 16]).unwrap();
+        assert_eq!(again, output);
+        assert_eq!(
+            stable_trailer_ids(&mut b"trailer << /ID[<bad>] >>".to_vec(), &[0; 16]),
+            Err(CoreError::Parse)
+        );
+    }
 }

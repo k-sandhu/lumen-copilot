@@ -137,6 +137,41 @@ fn render_document(py: Python<'_>, document_json: String) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn normalize_document(
+    py: Python<'_>,
+    document_json: String,
+    budget_json: String,
+    token: &CancellationToken,
+) -> PyResult<String> {
+    let cancellation = token.0.clone();
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+        lumen_docintel_core::normalization::normalize_json(&document_json, &ctx)
+    })
+}
+
+#[pyfunction]
+fn chunk_document(
+    py: Python<'_>,
+    document_json: String,
+    tokenizer_json: String,
+    settings_json: String,
+    budget_json: String,
+    token: &CancellationToken,
+) -> PyResult<String> {
+    let cancellation = token.0.clone();
+    compute(py, || {
+        let context = lumen_docintel_core::runtime::context_json(&budget_json, cancellation)?;
+        lumen_docintel_core::chunking::chunk_json(
+            &document_json,
+            &tokenizer_json,
+            &settings_json,
+            &context,
+        )
+    })
+}
+
+#[pyfunction]
 #[pyo3(signature = (data, declared_mime=None))]
 fn detect_format(
     py: Python<'_>,
@@ -256,6 +291,31 @@ impl NativeRuntime {
 #[pyclass(frozen)]
 struct DocumentSession(lumen_docintel_core::runtime::Context);
 
+#[pyfunction]
+fn merge_ocr(py: Python<'_>, document: String, results: String) -> PyResult<String> {
+    compute(py, || {
+        lumen_docintel_core::ocr::merge_json(&document, &results)
+    })
+}
+#[pyfunction]
+fn _prepare_ocr_worker(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    library: String,
+    page: usize,
+    budget_json: String,
+) -> PyResult<String> {
+    let bytes = data.as_bytes();
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::context_json(&budget_json, Default::default())?;
+        if page == 0 {
+            lumen_docintel_core::ocr_image::wrap(bytes, &ctx)
+        } else {
+            lumen_docintel_core::formats::pdf::pdfium::split_page(bytes, &library, page, &ctx)
+        }
+    })
+}
+
 #[pymodule]
 fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
@@ -263,6 +323,8 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<DocIntelEncryptedError>(),
     )?;
     m.add_function(wrap_pyfunction!(_extract_pdfium_worker, m)?)?;
+    m.add_function(wrap_pyfunction!(_prepare_ocr_worker, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_ocr, m)?)?;
     m.add("DocIntelError", m.py().get_type::<DocIntelError>())?;
     m.add(
         "DocIntelInvalidInputError",
@@ -293,6 +355,8 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<DocIntelPanicError>(),
     )?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_document, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(wrap_pyfunction!(detect_format, m)?)?;
     m.add_class::<CancellationToken>()?;
     m.add_class::<NativeRuntime>()?;

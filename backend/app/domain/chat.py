@@ -45,6 +45,7 @@ class GroundedCitation:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    machine_read: bool = False
 
     @classmethod
     def from_passage(cls, passage: RetrievedPassage) -> GroundedCitation:
@@ -69,6 +70,7 @@ class GroundedCitation:
             transcript_segment_id=passage.transcript_segment_id,
             speaker_id=passage.speaker_id,
             speaker_name=passage.speaker_name,
+            machine_read=passage.machine_read,
         )
 
 

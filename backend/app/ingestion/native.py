@@ -17,8 +17,11 @@ if TYPE_CHECKING:
 
 from app.domain.canonical import CanonicalDocument
 from app.domain.document_detection import DetectedDocument
+from app.domain.native_chunking import ChunkedDocument
+from app.domain.native_normalization import NormalizedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
-from app.ingestion._pdf_pool import PdfProcessPool, PdfWorkerError  # noqa: F401
+from app.ingestion._pdf_pool import PdfProcessPool
+from app.ingestion._pdf_pool import PdfWorkerError as PdfWorkerError
 
 
 def _extension() -> ModuleType | None:
@@ -116,6 +119,14 @@ def _pdf_worker_extract(data: bytes, library: str, budget: dict[str, int], engin
     extension = _extension()
     if extension is None:
         raise NativeUnavailableError("native ingestion extension is unavailable")
+    if engine.startswith("ocr_page:"):
+        return str(
+            extension._prepare_ocr_worker(
+                data, library, int(engine.split(":")[1]), json.dumps(budget)
+            )
+        )
+    if engine == "ocr_image":
+        return str(extension._prepare_ocr_worker(data, library, 0, json.dumps(budget)))
     if engine == "pdfium":
         return str(extension._extract_pdfium_worker(data, library, json.dumps(budget)))
     if engine == "in_core":
@@ -187,6 +198,22 @@ class PdfiumExecutor:
         )
         self.peak_rss_bytes = peak
         return CanonicalDocument.from_render_json(result)
+
+    def prepare_ocr_page(
+        self,
+        data: bytes,
+        *,
+        page: int,
+        image: bool = False,
+        budget: RuntimeBudget = _DEFAULT_BUDGET,
+    ) -> bytes:
+        result, _peak = self._pool.extract(
+            data,
+            library=self._library,
+            engine="ocr_image" if image else f"ocr_page:{page}",
+            budget=budget,
+        )
+        return bytes.fromhex(json.loads(result)["pdf_hex"])
 
 
 @lru_cache(maxsize=1)
@@ -344,3 +371,145 @@ def parse_pdf_candidate(
             "native_unavailable" if isinstance(error, NativeUnavailableError) else "native_failed"
         )
         return PdfCandidateResult(baseline, "python", native_error=code)
+
+
+def chunk_canonical(
+    document: CanonicalDocument,
+    *,
+    settings: Settings,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> ChunkedDocument:
+    """Explicit candidate computation; production routing remains in #687."""
+    from app.ingestion.tokenizer_artifact import load_tokenizer_artifact
+
+    if settings.native_ingestion_tokenizer_model != settings.llm_embedding_model:
+        raise ValueError("tokenizer model must match the configured embedding model")
+    artifact = load_tokenizer_artifact(
+        settings.native_ingestion_tokenizer_path,
+        sha256=settings.native_ingestion_tokenizer_sha256,
+    )
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return ChunkedDocument.from_json(
+        extension.chunk_document(
+            document.document_json,
+            artifact,
+            json.dumps(
+                {
+                    "max_tokens": settings.native_ingestion_chunk_tokens,
+                    "max_chars": settings.native_ingestion_chunk_chars,
+                    "overlap_chars": settings.native_ingestion_overlap_chars,
+                    "embedding_model": settings.llm_embedding_model,
+                }
+            ),
+            json.dumps(asdict(budget)),
+            token._token,
+        )
+    )
+
+
+def normalize_canonical(
+    document: CanonicalDocument,
+    *,
+    budget: RuntimeBudget = _DEFAULT_BUDGET,
+    cancellation: CancellationHandle | None = None,
+) -> NormalizedDocument:
+    """Candidate derived normalization; original evidence/spans are retained."""
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    token = cancellation or CancellationHandle()
+    return NormalizedDocument.from_json(
+        extension.normalize_document(
+            document.document_json, json.dumps(asdict(budget)), token._token
+        )
+    )
+
+
+def merge_ocr(document: CanonicalDocument, results: list[dict[str, object]]) -> CanonicalDocument:
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    return CanonicalDocument.from_render_json(
+        extension.merge_ocr(
+            document.document_json, json.dumps(results, ensure_ascii=False, allow_nan=False)
+        )
+    )
+
+
+def image_canonical(data: bytes) -> CanonicalDocument:
+    import hashlib
+
+    return render_canonical(
+        json.dumps(
+            {
+                "generation": {
+                    "source_sha256": hashlib.sha256(data).hexdigest(),
+                    "outcome": "needs_ocr",
+                    "diagnostics": {"pages": [{"number": 1, "outcome": "needs_ocr"}]},
+                },
+                "source_parts": [
+                    {"kind": "page", "number": 1, "name": "Page 1", "char_start": 0, "char_end": 0}
+                ],
+            }
+        )
+    )
+
+
+OCR_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/tiff"})
+
+
+def extract_ocr_candidate(data: bytes, *, mime_type: str, enabled: bool) -> dict[str, object]:
+    """Preserve Python native controls; opt-in candidate supplies richer page diagnostics."""
+    from app.ingestion.parsers import DocumentParseError, parse_document
+
+    mime = mime_type.split(";", 1)[0].strip().lower()
+    if mime in OCR_IMAGE_TYPES:
+        document = image_canonical(data) if enabled and native_available() else None
+        return {
+            "text": "",
+            "needs_ocr": True,
+            "canonical_json": document.document_json if document else None,
+        }
+    if mime != "application/pdf":
+        return {
+            "text": parse_document(data, mime_type=mime_type),
+            "needs_ocr": False,
+            "canonical_json": None,
+        }
+    if enabled and native_available():
+        try:
+            executor, budget = _default_pdf_executor(os.getpid())
+            document = executor.extract_pdf(data, budget=budget)
+        except (PdfWorkerError, NativeUnavailableError) as error:
+            return {
+                "text": "",
+                "needs_ocr": True,
+                "canonical_json": None,
+                "ocr_reason": "ocr_extract_" + error.code
+                if isinstance(error, PdfWorkerError)
+                else "ocr_native_unavailable",
+            }
+        return {
+            "text": document.rendered_text,
+            "needs_ocr": json.loads(document.generation_json)["outcome"] != "indexed",
+            "canonical_json": document.document_json,
+        }
+    # Existing Python extraction is authoritative while the OCR arm is disabled.
+    import io
+
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except Exception:
+        raise DocumentParseError("PDF could not be parsed") from None
+    return {
+        "text": "\n\n".join(pages),
+        "needs_ocr": any(not p.strip() for p in pages),
+        "canonical_json": None,
+    }

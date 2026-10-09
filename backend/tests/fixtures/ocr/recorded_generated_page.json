@@ -1,0 +1,32 @@
+{
+  "model": "google/gemma-3-27b-it",
+  "usage": {},
+  "error": {
+    "code": 429,
+    "metadata": {
+      "file_annotations": [
+        {
+          "type": "file",
+          "file": {
+            "hash": "generated-page-hash",
+            "name": "page-0001.pdf",
+            "content": [
+              {
+                "type": "text",
+                "text": "<file name=\"page-0001.pdf\">"
+              },
+              {
+                "type": "text",
+                "text": "LUMEN OCR GENERATED PAGE\n\nInvoice total 123.45\n\nReference ABC-695"
+              },
+              {
+                "type": "text",
+                "text": "</file>"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

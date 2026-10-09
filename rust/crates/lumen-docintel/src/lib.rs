@@ -37,4 +37,11 @@ pub mod detection;
 
 pub mod runtime;
 
+pub mod chunking;
 pub mod formats;
+
+pub mod normalization;
+
+pub mod ocr;
+
+pub mod ocr_image;

@@ -77,6 +77,7 @@ export function DocumentViewer({
             {citation.timeStartMs !== undefined
               ? `Cited at ${formatMediaTimestamp(citation.timeStartMs)}`
               : `Cited passage · characters ${citation.charStart}–${citation.charEnd}`}
+            {citation.machineRead ? ' · Machine-read' : ''}
             {citation.speakerName ? ` · ${citation.speakerName} (inferred)` : ''}
           </p>
         </div>

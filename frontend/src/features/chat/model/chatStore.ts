@@ -18,6 +18,7 @@ import type { KnowledgeMode } from '@/api';
 export interface ViewerTarget {
   documentId: string;
   documentName: string;
+  machineRead?: boolean;
   charStart: number;
   charEnd: number;
   snippet: string;

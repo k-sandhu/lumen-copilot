@@ -259,6 +259,7 @@ class RetrievalService:
                     transcript_segment_id=row.transcript_segment_id,
                     speaker_id=row.speaker_id,
                     speaker_name=row.speaker_name,
+                    machine_read=row.machine_read,
                 )
             )
         return passages

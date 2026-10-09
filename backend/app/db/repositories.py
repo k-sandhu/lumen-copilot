@@ -2921,6 +2921,8 @@ class ChunkInput:
     speaker_name: str | None = None
     embedding_fingerprint: str | None = None
 
+    machine_read: bool = False
+
 
 class ChunkRepository(_TenantScopedRepository):
     """Chunks (passages + embeddings) within one tenant (#21 ingestion)."""
@@ -3144,6 +3146,7 @@ class ChunkRepository(_TenantScopedRepository):
                 transcript_segment_id=chunk.transcript_segment_id,
                 speaker_id=chunk.speaker_id,
                 speaker_name=chunk.speaker_name,
+                machine_read=chunk.machine_read,
                 embedding_fingerprint=chunk.embedding_fingerprint,
             )
             for ordinal, chunk in enumerate(chunks)
@@ -4300,6 +4303,8 @@ class CitationView:
     #: kept so a claim's provenance stays visible rather than silently vanishing.
     redacted: bool = False
 
+    machine_read: bool = False
+
     def redact(self) -> CitationView:
         """This citation with everything disclosing removed, shell intact."""
         return replace(
@@ -4458,6 +4463,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Chunk.machine_read,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -4486,6 +4492,7 @@ class CitationRepository(_TenantScopedRepository):
                 snippet=row[11],
                 document_id=row[12],
                 document_name=row[13],
+                machine_read=row[14],
             )
             for row in rows
         ]
@@ -4540,6 +4547,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Chunk.machine_read,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -4568,6 +4576,7 @@ class CitationRepository(_TenantScopedRepository):
                 snippet=row[11],
                 document_id=row[12],
                 document_name=row[13],
+                machine_read=row[14],
             )
             for row in rows
         ]
@@ -4599,6 +4608,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Chunk.machine_read,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -4629,6 +4639,7 @@ class CitationRepository(_TenantScopedRepository):
                     snippet=row[11],
                     document_id=row[12],
                     document_name=row[13],
+                    machine_read=row[14],
                 )
             )
         return grouped

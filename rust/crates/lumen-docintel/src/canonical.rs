@@ -31,6 +31,7 @@ pub enum Origin {
     Source,
     Heuristic,
     Derived,
+    Ocr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

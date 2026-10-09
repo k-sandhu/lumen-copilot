@@ -120,6 +120,7 @@ const RELOADED_MESSAGES = {
           snippet: 'Revenue grew 12% year over year.',
           char_start: 50,
           char_end: 90,
+          machine_read: true,
         },
       ],
       created_at: '2026-06-18T00:01:05Z',
@@ -246,10 +247,15 @@ describe('ChatView (critical flow)', () => {
           snippet: 'Revenue grew 12% year over year.',
           charStart: 50,
           charEnd: 90,
+          machineRead: true,
         },
       });
     });
     expect(screen.getByText(/Revenue was up 12%\./)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /citation 1: Q4 report\.pdf/i }));
+    expect(useChatStore.getState().viewer?.machineRead).toBe(true);
+    expect(screen.getByText(/machine-read/i)).toBeInTheDocument();
 
     // Done → reload from the server (now returns the persisted assistant turn).
     messagesState = RELOADED_MESSAGES;
@@ -274,6 +280,7 @@ describe('ChatView (critical flow)', () => {
     await user.click(citeButton);
     const viewer = await screen.findByRole('region', { name: /cited document: Q4 report\.pdf/i });
     expect(within(viewer).getByText(/characters 50–90/i)).toBeInTheDocument();
+    expect(within(viewer).getByText(/machine-read/i)).toBeInTheDocument();
   });
 
   it('treats a WS error as terminal with a Retry (AC-5)', async () => {
