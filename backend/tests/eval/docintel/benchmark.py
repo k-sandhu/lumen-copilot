@@ -167,6 +167,8 @@ def _isolated(fixture: Fixture, arm: str) -> dict[str, Any]:
 
 def _external(manifest: Path) -> list[Fixture]:
     # Caller supplies only authorized local files and annotations. Report never includes paths/text.
+    if manifest.stat().st_size > 4 * 1024 * 1024:
+        raise ValueError("external manifest exceeds 4 MiB annotation budget")
     rows = json.loads(manifest.read_text(encoding="utf-8"))
     result = []
     for row in rows:
