@@ -46,3 +46,24 @@ async def test_disabled_ocr_has_visible_typed_outcome(
         stages = await StageRepository(session, tenant).list(doc)
         assert [s.stage for s in stages] == ["detect", "extract", "ocr"]
         assert json.loads(stages[-1].payload_json)["ocr_reason"] == "ocr_disabled"
+
+
+@pytest.mark.parametrize("kind", ["budget", "unavailable"])
+def test_native_extraction_failure_keeps_typed_ocr_outcome(monkeypatch, kind):
+    from app.ingestion import native
+
+    monkeypatch.setattr(native, "native_available", lambda: True)
+
+    def rejected(pid):
+        if kind == "budget":
+            raise native.PdfWorkerError("budget")
+        raise native.NativeUnavailableError("binary unavailable")
+
+    monkeypatch.setattr(native, "_default_pdf_executor", rejected)
+    result = native.extract_ocr_candidate(
+        b"%PDF-generated", mime_type="application/pdf", enabled=True
+    )
+    assert result["needs_ocr"] is True and result["canonical_json"] is None
+    assert result["ocr_reason"] == (
+        "ocr_extract_budget" if kind == "budget" else "ocr_native_unavailable"
+    )

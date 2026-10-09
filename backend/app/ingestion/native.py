@@ -481,8 +481,18 @@ def extract_ocr_candidate(data: bytes, *, mime_type: str, enabled: bool) -> dict
             "canonical_json": None,
         }
     if enabled and native_available():
-        executor, budget = _default_pdf_executor(os.getpid())
-        document = executor.extract_pdf(data, budget=budget)
+        try:
+            executor, budget = _default_pdf_executor(os.getpid())
+            document = executor.extract_pdf(data, budget=budget)
+        except (PdfWorkerError, NativeUnavailableError) as error:
+            return {
+                "text": "",
+                "needs_ocr": True,
+                "canonical_json": None,
+                "ocr_reason": "ocr_extract_" + error.code
+                if isinstance(error, PdfWorkerError)
+                else "ocr_native_unavailable",
+            }
         return {
             "text": document.rendered_text,
             "needs_ocr": json.loads(document.generation_json)["outcome"] != "indexed",

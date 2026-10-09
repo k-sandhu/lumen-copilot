@@ -2269,13 +2269,13 @@ class OcrTenantPolicy(TenantScopedMixin, TimestampMixin, Base):
         Boolean, nullable=False, default=False, server_default=false()
     )
     approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    page_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    pages_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    page_limit: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    pages_used: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     budget_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     cost_used_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     ceiling_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=10000)
     concurrency: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    active_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_calls: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
 
 class OcrPageCache(TenantScopedMixin, TimestampMixin, Base):

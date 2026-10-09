@@ -100,7 +100,12 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
-from app.ingestion.native import _default_pdf_executor, extract_ocr_candidate, render_canonical
+from app.ingestion.native import (
+    NativeUnavailableError,
+    _default_pdf_executor,
+    extract_ocr_candidate,
+    render_canonical,
+)
 from app.ingestion.stage_identity import parser_identity
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.llm.ocr import OpenRouterOcrProvider
@@ -484,10 +489,14 @@ async def _ingest_claimed_document(
             return payload
         raw = payload.get("canonical_json")
         if not isinstance(raw, str):
+            payload["ocr_reason"] = payload.get("ocr_reason") or "ocr_native_unavailable"
+            return payload
+        try:
+            document = render_canonical(raw)
+            executor, budget = _default_pdf_executor(os.getpid())
+        except NativeUnavailableError:
             payload["ocr_reason"] = "ocr_native_unavailable"
             return payload
-        document = render_canonical(raw)
-        executor, budget = _default_pdf_executor(os.getpid())
 
         def prepare(page: int) -> bytes:
             return executor.prepare_ocr_page(

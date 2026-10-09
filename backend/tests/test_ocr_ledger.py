@@ -131,3 +131,16 @@ async def test_cost_budget_blocks_before_dispatch(sqlite_engine):
         await OcrRepository(session, tenant).configure(policy)
     with pytest.raises(OcrError, match="ocr_budget"):
         await DurableOcrLedger(tenant, doc, attempt).begin("a" * 64, "fixture", 1, policy)
+
+
+def test_counter_widths_match_bigint_migration():
+    from sqlalchemy import BigInteger
+
+    for name in (
+        "page_limit",
+        "pages_used",
+        "budget_microusd",
+        "cost_used_microusd",
+        "active_calls",
+    ):
+        assert isinstance(models.OcrTenantPolicy.__table__.c[name].type, BigInteger)
