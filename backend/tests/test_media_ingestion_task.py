@@ -18,7 +18,6 @@ import app.db.session as db_session
 import app.tasks.ingest as ingest_module
 from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS, Settings
 from app.core.errors import DependencyError
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     ChunkRepository,
@@ -40,6 +39,7 @@ from app.ingestion.media import (
     infer_speaker_names,
 )
 from app.search import IndexedChunk
+from tests._db_helpers import copy_sqlite_schema
 
 
 @pytest_asyncio.fixture
@@ -50,7 +50,7 @@ async def sqlite_engine() -> AsyncIterator[None]:
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(copy_sqlite_schema)
     old_engine = db_session._engine
     old_maker = db_session._sessionmaker
     db_session._engine = engine

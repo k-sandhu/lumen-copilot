@@ -34,7 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
-from app.db.base import Base
 from app.db.repositories import (
     AuditEventRepository,
     TenantRepository,
@@ -49,6 +48,7 @@ from app.services.tools.impls.write_file import _write_file
 from app.services.tools.types import ToolContext
 from app.storage.keys import assert_artifact_key_owned_by, build_artifact_key
 from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
+from tests._db_helpers import copy_sqlite_schema
 
 # Importing models registers them on Base.metadata for create_all.
 import app.db.models  # noqa: F401  isort: skip
@@ -154,7 +154,7 @@ async def world() -> AsyncIterator[_World]:
     )
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(copy_sqlite_schema)
         factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with factory() as session:
             tenant = await TenantRepository(session).create(name="Acme")
