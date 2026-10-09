@@ -81,3 +81,16 @@ def test_shadow_and_old_wheel_keep_admission_closed(monkeypatch: pytest.MonkeyPa
     assert "application/json" not in settings.effective_upload_content_types
     with pytest.raises(DocumentParseError):
         parse_document(b"{}", mime_type="application/json", settings=settings)
+
+
+def test_numeric_precision_survives_python_view() -> None:
+    pytest.importorskip("lumen_docintel")
+    data = b'{"integer":18446744073709551617,"decimal":0.12345678901234567890123456789}'
+    doc = native.extract_candidate(data, family="json", mime="application/json")
+    fields = json.loads(doc.generation_json)["diagnostics"]["records"][0]["fields"]
+    assert fields[0]["value"] == 18446744073709551617
+    for field, expected in zip(
+        fields, ("18446744073709551617", "0.12345678901234567890123456789"), strict=True
+    ):
+        assert field["number_text"] == expected
+        assert expected in doc.rendered_text

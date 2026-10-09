@@ -61,3 +61,13 @@ caller-budget routing, specialized format selection and persisted structure.
 diagnostics. Eight Rust and 7 installed structured Python tests now pass, with
 clippy/all-targets and Ruff green. Inline composition follow-up: #736. Shared
 binary-signature helper is identical to the other format branches.
+
+[x] 2026-10-09: numeric precision regression failed before enabling serde_json
+arbitrary_precision. Ten structured, five canonical and four detection Rust
+tests now pass; 16 installed structured/canonical Python tests pass. Clippy,
+Ruff and all four cargo-deny checks pass; the Windows native wheel was rebuilt.
+JSON/JSONL numeric fields retain a precision-preserving `number_text` string
+alongside the typed numeric `value`, with exact rendered value spans. Python's
+JSON view retains arbitrary integers but converts decimal numeric values to
+binary floats; consumers requiring decimal precision must use `number_text`.
+No additional crate or licence was introduced by the serde_json feature.

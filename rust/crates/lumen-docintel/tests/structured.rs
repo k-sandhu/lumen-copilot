@@ -164,3 +164,35 @@ fn streamed_records_and_xml_stay_bounded() {
     assert_eq!(jsonl::parse(lines.as_bytes(), l), Err(CoreError::Budget));
     assert_eq!(xml::parse(source.as_bytes(), l), Err(CoreError::Budget));
 }
+
+#[test]
+fn json_numbers_preserve_precision_and_python_safe_text() {
+    let source = br#"{"integer":18446744073709551617,"decimal":0.12345678901234567890123456789}"#;
+    let d = json::parse(source, Limits::default()).unwrap();
+    assert!(d.blocks[0].text.contains("18446744073709551617"));
+    assert!(d.blocks[0].text.contains("0.12345678901234567890123456789"));
+    let fields = &d.generation.diagnostics.as_ref().unwrap()["records"][0]["fields"];
+    assert_eq!(fields[0]["number_text"], "18446744073709551617");
+    assert_eq!(fields[1]["number_text"], "0.12345678901234567890123456789");
+    assert_eq!(fields[0]["value"].to_string(), "18446744073709551617");
+    let wire = serde_json::to_string(&d).unwrap();
+    assert!(
+        lumen_docintel_core::canonical::render_json(&wire)
+            .unwrap()
+            .contains("18446744073709551617")
+    );
+}
+proptest! {
+ #[test]
+ fn arbitrary_integer_value_offsets(value in any::<u128>()) {
+  let spelling=value.to_string();
+  let source=format!("{{\"n\":{spelling}}}");
+  let d=json::parse(source.as_bytes(),Limits::default()).unwrap();
+  let field=&d.generation.diagnostics.as_ref().unwrap()["records"][0]["fields"][0];
+  prop_assert_eq!(field["value"].to_string(),spelling.clone());
+  prop_assert_eq!(field["number_text"].as_str(),Some(spelling.as_str()));
+  let start=field["value_start"].as_u64().unwrap() as usize;
+  let end=field["value_end"].as_u64().unwrap() as usize;
+  prop_assert_eq!(d.blocks[0].text.chars().skip(start).take(end-start).collect::<String>(),spelling);
+ }
+}

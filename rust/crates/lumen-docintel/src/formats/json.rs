@@ -54,7 +54,14 @@ fn leaves(
             text.push_str(" = ");
             let start = *chars - value_text.chars().count();
             text.push_str(&value_text);
-            fields.push(json!({"path":path,"value":value,"value_start":start,"value_end":*chars}));
+            let mut field =
+                json!({"path":path,"value":value,"value_start":start,"value_end":*chars});
+            // Keep a precision-preserving string alongside the numeric JSON value:
+            // Python consumers may otherwise round decimal numbers to binary floats.
+            if value.is_number() {
+                field["number_text"] = Value::String(value_text);
+            }
+            fields.push(field);
         }
     }
     Ok(())
