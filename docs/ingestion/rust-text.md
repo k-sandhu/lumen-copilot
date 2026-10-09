@@ -47,3 +47,17 @@ detection #728 remains a production promotion prerequisite.
 [x] 2026-10-09: shared routing regression checks: 19 targeted Python tests passed;
 4 Rust tests passed after the ZIP-signature regression failed for the expected
 reason. Ordinary text beginning with PK remains text.
+
+[x] 2026-10-09: five Rust tests passed, including intact source-code Unicode,
+line provenance and exact-offset properties. Pure code extraction preserves
+JSON-like and comma-bearing code literally. Configured routing remains strict:
+ambiguous source/literal-text heuristics require the policy resolution in #735
+before production promotion; no MIME override of content detection was added.
+
+[x] 2026-10-09: nested list/code regression failed before correction. Eight Rust
+tests now pass, including nested Markdown Unicode/source-line properties,
+heading siblings and list continuation order. Code inside lists is a distinct
+intact canonical code block. Clippy/all-targets, rebuilt wheel and 3 installed
+text Python checks pass. Markdown reserves conservative tree workspace before
+pulldown-cmark allocates; tight memory budgets fail before dependency parsing.
+Generation diagnostics record text/Markdown/code mode explicitly.

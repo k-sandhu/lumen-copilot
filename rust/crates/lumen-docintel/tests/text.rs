@@ -34,6 +34,55 @@ fn markdown_roles_code_and_lines() {
     assert_eq!(code.heading_path, vec!["Intro"]);
 }
 #[test]
+fn nested_lists_and_code_keep_distinct_source_units() {
+    let source = "- Outer\n  - Inner\n\n  ```rust\n  let x = 1;\n  let y = 2;\n  ```\n";
+    let doc = parse(source.as_bytes(), Limits::default(), Mode::Markdown).unwrap();
+    let outer = doc
+        .blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::List && b.text == "Outer")
+        .unwrap();
+    let inner = doc
+        .blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::List && b.text == "Inner")
+        .unwrap();
+    assert_eq!(inner.parent_id.as_deref(), Some(outer.id.as_str()));
+    let code = doc
+        .blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::Code)
+        .unwrap();
+    assert_eq!(code.text, "let x = 1;\nlet y = 2;\n");
+    assert_eq!(code.parent_id.as_deref(), Some(outer.id.as_str()));
+    assert_eq!(code.regions[0].name.as_deref(), Some("lines:4-7"));
+}
+#[test]
+fn markdown_siblings_continuations_and_workspace_budget() {
+    let source = "# One\n\n# Two\n\n- Outer\n\n  ```rust\n  code\n  ```\n\n  tail\n  second\n";
+    let doc = parse(source.as_bytes(), Limits::default(), Mode::Markdown).unwrap();
+    assert!(doc.blocks[1].parent_id.is_none());
+    let tail = doc
+        .blocks
+        .iter()
+        .find(|b| b.text == "tail\nsecond")
+        .unwrap();
+    assert_eq!(tail.regions[0].name.as_deref(), Some("lines:11-12"));
+    let code = doc
+        .blocks
+        .iter()
+        .position(|b| b.kind == BlockKind::Code)
+        .unwrap();
+    assert_eq!(doc.blocks[code + 1].text, "tail\nsecond");
+    let dense = "*x* ".repeat(1000);
+    let mut l = Limits::default();
+    l.budget.max_memory_bytes = 64 * 1024;
+    assert_eq!(
+        parse(dense.as_bytes(), l, Mode::Markdown),
+        Err(CoreError::Budget)
+    );
+}
+#[test]
 fn encoding_binary_and_limits() {
     let doc = parse(
         b"\xef\xbb\xbfhello\rworld\xff",
@@ -72,6 +121,32 @@ fn encoding_binary_and_limits() {
     );
 }
 proptest! {
+ #[test]
+ fn nested_markdown_code_has_exact_unicode_spans_and_source_lines(lines in prop::collection::vec("[a-zé東京🦀]{1,20}",1..20)) {
+  let body=lines.iter().map(|line|format!("  {line}")).collect::<Vec<_>>().join("\n");
+  let source=format!("# Intro\n\n- Outer\n  - Inner\n\n  ```rust\n{body}\n  ```\n");
+  let r=render(parse(source.as_bytes(),Limits::default(),Mode::Markdown).unwrap()).unwrap();
+  let code=r.document.blocks.iter().find(|b|b.kind==BlockKind::Code).unwrap();
+  let expected_text=format!("{}\n",lines.join("\n"));
+  prop_assert_eq!(&code.text,&expected_text);
+  let expected_lines=format!("lines:6-{}",lines.len()+7);
+  prop_assert_eq!(code.regions[0].name.as_deref(),Some(expected_lines.as_str()));
+  prop_assert_eq!(&code.heading_path,&vec!["Intro".to_string()]);
+  for (b,span) in r.document.blocks.iter().zip(&r.spans){prop_assert_eq!(r.rendered_text.chars().skip(span.char_start).take(span.char_end-span.char_start).collect::<String>(),b.text.clone());}
+ }
+ #[test]
+ fn intact_source_code_unicode_and_line_regions(lines in prop::collection::vec("[a-zé東京🦀,{}]{1,20}",1..20)) {
+  let input=lines.join("\r\n");
+  let r=render(parse(input.as_bytes(),Limits::default(),Mode::Code("rust")).unwrap()).unwrap();
+  prop_assert_eq!(r.document.blocks.len(),1);
+  prop_assert_eq!(r.document.blocks[0].kind,BlockKind::Code);
+  prop_assert_eq!(&r.document.blocks[0].text,&lines.join("\n"));
+  let expected=format!("lines:1-{}",lines.len());
+  prop_assert_eq!(r.document.blocks[0].regions[0].name.as_deref(),Some(expected.as_str()));
+  prop_assert_eq!(r.document.blocks[0].regions[1].name.as_deref(),Some("language:rust"));
+  let span=&r.spans[0];
+  prop_assert_eq!(r.rendered_text.chars().skip(span.char_start).take(span.char_end-span.char_start).collect::<String>(),lines.join("\n"));
+ }
  #[test]
  fn unicode_exact_offsets_and_line_provenance(lines in prop::collection::vec("[a-zé東京🦀]{1,20}",1..20)) {
   let source=lines.join("\r\n\r\n");
