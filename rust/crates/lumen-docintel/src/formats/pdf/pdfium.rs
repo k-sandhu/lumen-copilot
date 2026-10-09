@@ -57,7 +57,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
             ctx.work(1)?;
             depth += 1;
             if depth > 32 {
-                return Err(CoreError::Budget);
+                return Err(ctx.structural_limit());
             }
             parent = node.parent();
         }
@@ -68,6 +68,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
     let mut pages = vec![];
     let mut texts = vec![];
     for (index, page) in document.pages().iter().enumerate() {
+        ctx.pdf_page();
         ctx.work(1)?;
         memory.reserve(1024)?;
         let rotation = match page.rotation().map_err(error)? {
@@ -88,6 +89,7 @@ pub fn extract_json(bytes: &[u8], library: &str, ctx: &Context) -> Result<String
         let mut unusable = false;
         let mut high_surrogate: Option<u16> = None;
         for ch in text.chars().iter() {
+            ctx.pdf_glyph();
             ctx.work(1)?;
             // PDFium's synthetic breaks can have no Unicode mapping. They are
             // layout artifacts, not evidence of an unmapped source glyph.
@@ -214,7 +216,7 @@ fn rules(
 ) -> Result<(), CoreError> {
     memory.ctx.work(1)?;
     if depth > 32 {
-        return Err(CoreError::Budget);
+        return Err(memory.ctx.structural_limit());
     }
     if object.as_image_object().is_some() {
         out.has_images = true;
