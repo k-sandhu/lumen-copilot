@@ -55,9 +55,13 @@ from app.services.tools.impls.recall import _read_conversation
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import ToolContext
 from app.services.transcript_recall import SessionTranscriptReader
+from tests._live_helpers import isolated_live_url, worker_database_name
 from tests.test_transcript_recall import _NAME_WITHHOLD_CASES
 
-_URL = "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr570"
+_URL = isolated_live_url(
+    "postgresql+asyncpg://lumen:lumen_local_dev@localhost:47182/lumentest_pr570"
+)
+_LIVE_DB = worker_database_name(_URL.rsplit("/", 1)[-1])
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
