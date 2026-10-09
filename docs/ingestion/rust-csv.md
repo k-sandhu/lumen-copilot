@@ -2,7 +2,7 @@
 
 The pure parser streams records from decoded bytes. Comma, semicolon, tab and
 pipe dialects are scored outside quotes. Unique nonnumeric first-row labels are
-heuristic headers; otherwise labels are derived `C1`â€¦ . Original fields remain
+heuristic headers; otherwise labels are derived C1, C2 and so on.
 in canonical cells; formula-like values are inert strings, never formulas.
 Ragged rows remain visible with a diagnostic and a partial outcome. Column type
 inference is heuristic metadata, not a value conversion. Record numbers and
@@ -36,3 +36,12 @@ Merge gate: hold until measured against the baseline evaluation; a human merges.
 
 New crates: csv 1.4.0 (MIT OR Unlicense), sha2 0.11.0 (MIT OR Apache-2.0).
 The bridge also uses existing serde_json 1.0.151 (MIT OR Apache-2.0).
+
+Ragged widths are compared with the initial record, while canonical table width
+retains the maximum observed width. Partial results are blocked from cutover.
+The shared seam checks wheel capabilities and computes the Python baseline lazily.
+Production promotion also holds for budget-aware detection #728.
+
+[x] 2026-10-09: ragged regression failed before the fix; 4 Rust tests then
+passed, clippy/all-targets and Ruff passed. Wheel rebuilt/imported; 7 targeted
+CSV/detection Python tests passed, including incomplete cutover and old wheels.

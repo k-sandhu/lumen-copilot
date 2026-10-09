@@ -6,6 +6,16 @@ use lumen_docintel_core::{
 use proptest::prelude::*;
 
 #[test]
+fn ragged_rows_compare_against_initial_width() {
+    let d = parse(b"A,B\n1,2,3\n4,5,6\n7,8\n", Limits::default()).unwrap();
+    assert_eq!(
+        d.generation.diagnostics.as_ref().unwrap()["ragged_rows"],
+        serde_json::json!([2, 3])
+    );
+    assert_eq!(d.blocks[0].table.as_ref().unwrap().columns, 3);
+}
+
+#[test]
 fn dialects_labels_locations_and_inert_formulas() {
     for delimiter in [',', ';', '\t', '|'] {
         let input = format!("Name{delimiter}Amount\n\"café\n東京\"{delimiter}=1+2\n");

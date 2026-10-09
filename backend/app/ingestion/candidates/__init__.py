@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
 from pkgutil import iter_modules
@@ -27,7 +28,7 @@ def candidates() -> tuple[Candidate, ...]:
 
 
 def upload_types(settings: Settings) -> frozenset[str]:
-    from app.ingestion.native import native_available
+    from app.ingestion.native import candidate_available, native_available
 
     registered = candidates()
     gated = frozenset(mime for c in registered for mime in c.mimes) - {
@@ -37,33 +38,53 @@ def upload_types(settings: Settings) -> frozenset[str]:
     enabled = frozenset(
         mime
         for c in registered
-        if getattr(settings, f"native_{c.family}_enabled", False) and native_available()
+        if getattr(settings, f"native_{c.family}_enabled", False)
+        and native_available()
+        and candidate_available(c.family)
         for mime in c.mimes
     )
     return (settings.upload_allowed_content_types - gated) | enabled
 
 
-def configured_parse(data: bytes, mime: str, settings: Settings, baseline: str | None) -> str:
+def configured_parse(
+    data: bytes, mime: str, settings: Settings, baseline: Callable[[], str] | None
+) -> str:
     """Cutover is explicit; a shadow failure cannot change the baseline result."""
+    import json
+
     import structlog
 
     from app.domain.native_runtime import RuntimeBudget
     from app.ingestion import native
     from app.ingestion.parsers import DocumentParseError
 
+    cached: str | None = None
+
+    def baseline_text() -> str | None:
+        nonlocal cached
+        if cached is None and baseline is not None:
+            cached = baseline()
+        return cached
+
+    attempted_cutover = False
     for candidate in candidates():
         if mime not in candidate.mimes:
             continue
         enabled = getattr(settings, f"native_{candidate.family}_enabled", False)
         shadow = getattr(settings, f"native_{candidate.family}_shadow", False)
+        attempted_cutover = attempted_cutover or enabled
         if not enabled and not shadow:
-            break
+            continue
         try:
+            if len(data) > settings.native_ingestion_max_input_bytes:
+                raise DocumentParseError("native input budget exceeded")
             if not native.native_available():
                 raise native.NativeUnavailableError("native ingestion extension is unavailable")
             detected = native.detect_content(data, declared_mime=mime)
             if detected.format not in candidate.formats:
-                raise DocumentParseError("content does not match candidate format")
+                continue
+            if not native.candidate_available(candidate.family):
+                raise native.NativeUnavailableError("native candidate is unavailable")
             document = native.extract_candidate(
                 data,
                 family=candidate.family,
@@ -77,14 +98,17 @@ def configured_parse(data: bytes, mime: str, settings: Settings, baseline: str |
                 ),
             )
             if enabled:
+                if json.loads(document.generation_json).get("outcome") not in {"success", "empty"}:
+                    raise DocumentParseError("native candidate extraction is incomplete")
                 return document.rendered_text
+            live = baseline_text()
             structlog.get_logger().info(
                 "native_ingestion_shadow",
                 family=candidate.family,
-                baseline_available=baseline is not None,
-                equal=document.rendered_text == baseline,
+                baseline_available=live is not None,
+                equal=document.rendered_text == live,
                 candidate_chars=len(document.rendered_text),
-                baseline_chars=len(baseline) if baseline is not None else None,
+                baseline_chars=len(live) if live is not None else None,
             )
         except Exception as exc:  # noqa: BLE001 — optional candidate boundary
             if enabled:
@@ -95,6 +119,9 @@ def configured_parse(data: bytes, mime: str, settings: Settings, baseline: str |
                 error_type=type(exc).__name__,
             )
         break
-    if baseline is None:
+    if attempted_cutover:
+        raise DocumentParseError("content has no matching enabled native parser")
+    live = baseline_text()
+    if live is None:
         raise DocumentParseError("format has no enabled parser")
-    return baseline
+    return live

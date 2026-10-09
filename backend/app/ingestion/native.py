@@ -29,6 +29,12 @@ def native_available() -> bool:
     return _extension() is not None
 
 
+def candidate_available(family: str) -> bool:
+    """An older installed wheel may lack a newly landed candidate."""
+    extension = _extension()
+    return extension is not None and callable(getattr(extension, f"extract_{family}", None))
+
+
 class NativeUnavailableError(Exception):
     """The optional computation extension has not been installed."""
 

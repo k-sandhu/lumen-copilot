@@ -4,6 +4,10 @@ Turns the stored bytes of an uploaded document into plain text for chunking +
 embedding. Only the upload allowlist (spec 0004 / #22 ``UPLOAD_ALLOWED_CONTENT_TYPES``)
 is supported: PDF, DOCX, PPTX, XLSX, ``text/plain``, ``text/markdown``.
 
+Optional native candidates add configuration-gated formats when ``Settings`` is
+supplied. A call without settings remains the unchanged Python baseline. Shadow
+comparison preserves Python results; cutover rejects incomplete outcomes.
+
 **Dependency localization (ADR-0004 implementation note).** Each format's parser
 library (``pypdf`` / ``python-docx`` / ``python-pptx`` / ``openpyxl``) is imported
 **lazily, inside its small helper**, so:
@@ -445,7 +449,9 @@ def parse_document(data: bytes, *, mime_type: str, settings: Settings | None = N
     if settings is not None:
         from app.ingestion.candidates import configured_parse
 
-        return configured_parse(data, normalized, settings, parser(data) if parser else None)
+        return configured_parse(
+            data, normalized, settings, (lambda: parser(data)) if parser else None
+        )
     if parser is None:
         raise UnsupportedMimeTypeError(f"unsupported MIME type for ingestion: {normalized!r}")
     return parser(data)

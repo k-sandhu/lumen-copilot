@@ -99,7 +99,7 @@ pub fn parse(bytes: &[u8], limits: Limits) -> Result<Document, CoreError> {
                 })
                 .collect();
             types = vec!["empty"; record.len()];
-        } else if record.len() != table.columns {
+        } else if record.len() != headers.len() {
             ragged.push(row);
         }
         table.columns = table.columns.max(record.len());
