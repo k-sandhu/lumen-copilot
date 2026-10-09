@@ -441,6 +441,51 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /documents/{documentId}/classification:
+    parameters:
+      - { $ref: "#/components/parameters/DocumentId" }
+    get:
+      operationId: getDocumentClassification
+      summary: Inspect a document's classification (proposal; pending owner review).
+      description: >
+        Requires current document visibility, including source ACL freshness.
+        Foreign and invisible documents return 404. Audited read. No cached
+        excerpts, source text, provider credentials or hidden-document counts.
+        Null means classification has not been scheduled. Never changes visibility.
+      tags: [documents]
+      responses:
+        "200":
+          description: Classification projection, or null before scheduling.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/DocumentClassification" }
+                  - { type: "null" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: overrideDocumentClassification
+      summary: Override a classification (proposal; pending owner review).
+      description: >
+        Requires current visibility AND document ownership or tenant admin role;
+        admin does not bypass ACLs. Mutation and audit commit together. A stale
+        revision returns 409. The override survives automatic reclassification.
+        Search metadata repair is queued after commit; readiness is independent.
+      tags: [documents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClassificationOverride" }
+      responses:
+        "204": { description: Override and audit committed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /documents/{documentId}/processing:
     parameters:
       - { $ref: "#/components/parameters/DocumentId" }
@@ -927,6 +972,25 @@ paths:
         omitted (prefer "no answer" over an unsourced claim, mission filter #2).
       tags: [search]
       parameters:
+        - name: taxonomy_prefix
+          in: query
+          schema: { $ref: "#/components/schemas/TaxonomyPath" }
+          description: >
+            Proposal pending owner review. Exact node or descendants at slash
+            boundaries; ANDed after permissions. Unclassified documents excluded.
+        - name: classification_facet
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 32
+            uniqueItems: true
+            items: { type: string, pattern: "^[a-z][a-z0-9_]*:(true|false)$" }
+          description: >
+            Proposal pending owner review. Repeated facet_id:true or facet_id:false;
+            all predicates must match. Unknown is neither true nor false. Unknown
+            facet IDs and conflicting values return 422. No forbidden facet counts.
         - name: q
           in: query
           required: true
@@ -3685,6 +3749,87 @@ components:
           description: Number of indexed chunks (0 until ingestion completes).
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        classification:
+          description: Optional permissioned classification; proposal pending owner review.
+          oneOf:
+            - { $ref: "#/components/schemas/DocumentClassification" }
+            - { type: "null" }
+
+    TaxonomyPath:
+      type: string
+      maxLength: 512
+      pattern: "^[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*){0,3}$"
+
+    ClassificationOverride:
+      type: object
+      additionalProperties: false
+      required: [path, taxonomy_version, reason, expected_revision]
+      properties:
+        path: { $ref: "#/components/schemas/TaxonomyPath" }
+        taxonomy_version: { type: string, maxLength: 64 }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        expected_revision: { type: integer, minimum: 0 }
+
+    ClassificationLevel:
+      type: object
+      additionalProperties: false
+      required: [path, probabilities, confidence, conditional]
+      properties:
+        path: { $ref: "#/components/schemas/TaxonomyPath" }
+        probabilities:
+          type: object
+          maxProperties: 64
+          additionalProperties: { type: number, minimum: 0, maximum: 1 }
+          description: Conditional sibling probabilities summing to one.
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        conditional: { type: boolean, const: true }
+
+    ClassificationFacet:
+      type: object
+      additionalProperties: false
+      required: [value, probability]
+      properties:
+        value: { type: [boolean, "null"] }
+        probability: { type: [number, "null"], minimum: 0, maximum: 1 }
+
+    DocumentClassification:
+      type: object
+      additionalProperties: false
+      required: [status, revision]
+      description: >
+        Pending work can retain the last completed result with its original
+        taxonomy version. Incomplete results retain completed levels. Confidence
+        is the product of selected conditional probabilities; it is uncalibrated.
+        Overrides have no model confidence. Missing cost is unknown, never zero.
+      properties:
+        status: { type: string, enum: [pending, running, classified, incomplete, unclassified, override] }
+        revision: { type: integer, minimum: 0 }
+        reason: { type: [string, "null"], maxLength: 128 }
+        retryable: { type: boolean }
+        path:
+          oneOf:
+            - { $ref: "#/components/schemas/TaxonomyPath" }
+            - { type: "null" }
+        levels:
+          type: array
+          maxItems: 4
+          items: { $ref: "#/components/schemas/ClassificationLevel" }
+        confidence: { type: [number, "null"], minimum: 0, maximum: 1 }
+        facets:
+          type: object
+          maxProperties: 32
+          additionalProperties: { $ref: "#/components/schemas/ClassificationFacet" }
+        taxonomy_version: { type: string, maxLength: 64 }
+        rules_version: { type: string, maxLength: 64 }
+        prompt_version: { type: string, maxLength: 64 }
+        method: { type: [string, "null"], enum: [rules, decisions, structured_output, override, "null"] }
+        methods: { type: array, items: { type: string }, maxItems: 4 }
+        requested_model: { type: string, maxLength: 256 }
+        reported_models: { type: array, items: { type: string, maxLength: 256 }, maxItems: 4 }
+        total_cost_usd: { type: [string, "null"], pattern: "^[0-9]+(\\.[0-9]+)?$" }
+        review_required: { type: boolean }
+        rule_ids: { type: array, items: { type: string }, maxItems: 64 }
+        override_actor: { type: string, format: uuid }
 
     DocumentList:
       type: object
