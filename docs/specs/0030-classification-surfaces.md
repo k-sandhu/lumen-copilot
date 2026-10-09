@@ -26,4 +26,14 @@ Internal search implementation acceptance criteria:
 arguments and processing-profile application await owner contract freeze and
 profile configuration approval. Residual risk: internal capabilities have no
 user-facing entry point; class-dependent processing is not enabled. ADR-0028
-requires review/calibration before applying processing profiles.
+  requires review/calibration before applying processing profiles.
+
+Verification: 66 scoped offline checks passed. The full offline run reported
+3758 passed, 18 skipped, 1 existing xfailed and two failures. The new clock-sensitive
+assertion was corrected (10 classification-search tests passed); the inherited
+settings partition failure was corrected separately in #742 (383 connector checks
+passed, 9 capability skips). Ruff, mypy (218 files), API type generation and Compose
+configuration validation passed. No live calls or datastore tests ran.
+
+[~] 2026-10-09: final full-suite verification relies on CI under the one-full-run
+limit. Residual risk: broader final-state interactions remain unverified locally.
