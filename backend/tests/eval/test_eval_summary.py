@@ -78,17 +78,13 @@ def test_summarized_session_follow_up_stays_grounded_and_cited() -> None:
     """The gate (positive): the digest line carries the doc id, the faithful
     model re-fetches + answers, and both metrics hold at 1.0."""
     owner = uuid.uuid4()
-    texts = _assembled(
-        (f"{_DOC_NAME} (document_id {_DOC_ID}; cited chunk(s): {uuid.uuid4()})",)
-    )
+    texts = _assembled((f"{_DOC_NAME} (document_id {_DOC_ID}; cited chunk(s): {uuid.uuid4()})",))
     # The summary segment is really in the assembled prompt…
     assert any("[Conversation memory" in t for t in texts)
     observed = _observed(_faithful_model_answer(texts), owner)
     assert groundedness(observed) is True
     assert (
-        citation_correctness(
-            observed, expected_passage=_EVIDENCE, expected_document_name=_DOC_NAME
-        )
+        citation_correctness(observed, expected_passage=_EVIDENCE, expected_document_name=_DOC_NAME)
         is True
     )
 

@@ -15,7 +15,6 @@ from sqlalchemy.pool import StaticPool
 from app.core.config import get_settings
 from app.core.errors import DependencyError, NotFoundError
 from app.db import models
-from app.db.base import Base
 from app.db.repositories import (
     CollectionRepository,
     DocumentUploadRepository,
@@ -26,6 +25,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import DocumentUploadState, Role
 from app.storage import StoredObjectMetadata
 from app.tasks.upload_janitor import sweep_expired_uploads_async
+from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -64,7 +64,7 @@ async def test_janitor_expires_abandoned_and_recovers_completed_object(
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(copy_sqlite_schema)
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     store = _Store()
     now = datetime.now(UTC)
@@ -198,7 +198,7 @@ async def test_janitor_isolates_storage_failure_to_one_candidate(
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(copy_sqlite_schema)
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     store = _Store()
     now = datetime.now(UTC)
@@ -282,7 +282,7 @@ async def test_janitor_rejection_commits_system_audit_with_failed_state(
 ) -> None:
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(copy_sqlite_schema)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     store = _Store()
     now = datetime.now(UTC)

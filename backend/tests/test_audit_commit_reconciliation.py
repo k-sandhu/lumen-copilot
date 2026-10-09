@@ -12,10 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from app.db.audit_transactions import DurableAuditTransactions
-from app.db.base import Base
 from app.db.repositories import AuditEventRepository, TenantRepository
 from app.domain.audit import AuditAction
 from app.domain.entities import AuditOutcome
+from tests._db_helpers import copy_sqlite_schema
 
 
 @pytest.mark.parametrize(
@@ -42,7 +42,7 @@ async def test_ambiguous_commit_reconciles_same_identity_and_releases_capacity(
     try:
         for db in (engine, caller_engine):
             async with db.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
+                await connection.run_sync(copy_sqlite_schema)
         async with factory() as seed:
             tenant = await TenantRepository(seed).create(name="R4-001")
             await seed.commit()
