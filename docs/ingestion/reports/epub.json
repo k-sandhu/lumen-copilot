@@ -1,0 +1,55 @@
+{
+  "rows": [
+    {
+      "fixture": "epub-facts",
+      "sha256": "8f687eae1558262b83183d5df18b072f5c6769f13f563f7853b2ea3512bc2fb5",
+      "format": "epub",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 3.8100057281553745e-05,
+      "input_bytes_per_second": 35380524.23487138,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23613440,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "epub-facts",
+      "sha256": "8f687eae1558262b83183d5df18b072f5c6769f13f563f7853b2ea3512bc2fb5",
+      "format": "epub",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.025234200002159923,
+      "input_bytes_per_second": 53419.56550572706,
+      "peak_rss_bytes": 24580096,
+      "peak_rss_increment_bytes": 1110016,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "answer_quality": "unmeasured"
+}
