@@ -268,6 +268,11 @@ class Settings(PasswordHashingSettings):
 
     # --- Service identity (surfaced by /health) ---
     service_name: str = "lumen-copilot-backend"
+    classification_taxonomy_version: str = Field(default="1.0.0", alias="CLASSIFICATION_TAXONOMY_VERSION")
+    classification_tokenizer_path: str = Field(default="", alias="CLASSIFICATION_TOKENIZER_PATH")
+    classification_tokenizer_sha256: str = Field(default="", alias="CLASSIFICATION_TOKENIZER_SHA256")
+    classification_tokenizer_model: str = Field(default="", alias="CLASSIFICATION_TOKENIZER_MODEL")
+    classification_sweep_interval_seconds: float = Field(default=60, gt=0, alias="CLASSIFICATION_SWEEP_INTERVAL_SECONDS")
     # Sourced once from the package version (app.__version__, mirroring
     # pyproject.toml) so the value served by /health and the OpenAPI title cannot
     # drift from the package when someone bumps the release — not a re-typed

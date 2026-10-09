@@ -47,6 +47,8 @@ class AuditAction(str, enum.Enum):
     DOCUMENT_UPLOADED = "document.uploaded"
     DOCUMENT_TRANSCRIBED = "document.transcribed"
     DOCUMENT_PROCESSING_STAGE_COMPLETED = "document.processing_stage_completed"
+    DOCUMENT_CLASSIFICATION_UPDATED = "document.classification_updated"
+    CLASSIFICATION_POLICY_UPDATED = "classification.policy_updated"
     DOCUMENT_VIEWED = "document.viewed"
     DOCUMENT_DOWNLOADED = "document.downloaded"
     DOCUMENT_DELETED = "document.deleted"

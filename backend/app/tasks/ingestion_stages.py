@@ -50,3 +50,15 @@ class DurableStageStore:
                     "output_sha256": output.output_sha256,
                 },
             )
+            if output.stage == "extract":
+                from app.core.config import get_settings
+                from app.tasks.classification import schedule_in_transaction
+
+                await schedule_in_transaction(
+                    session,
+                    self._tenant,
+                    self._document,
+                    input_json=output.payload_json,
+                    extraction_id=output.output_sha256,
+                    taxonomy_version=get_settings().classification_taxonomy_version,
+                )

@@ -57,6 +57,9 @@ _MVP_TABLES = {
 # preferences/saved-search/recent tables (0009–0011, epic #144), and
 # tool_invocations (0013, issue #207 — the governed tool platform trace).
 _ALL_TABLES = _MVP_TABLES | {
+    "classification_policies",
+    "document_classifications",
+    "classification_spend",
     "refresh_tokens",
     "sources",
     "grants",
@@ -155,7 +158,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0047_ingestion_stages"]
+    assert list(script.get_heads()) == ["0048_classification"]
     provenance = script.get_revision("0046_message_source_provenance")
     assert provenance is not None
     assert provenance.down_revision == "0045_embedding_contract"

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -38,6 +39,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -2242,3 +2244,54 @@ class SessionSummary(TenantScopedMixin, TimestampMixin, Base):
     # read path can redact names of no-longer-permitted documents (#446 f.1).
     mentioned_documents: Mapped[dict[str, str] | None] = mapped_column(_JSON, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ClassificationPolicy(TenantScopedMixin, TimestampMixin, Base):
+    __tablename__ = "classification_policies"
+    id: Mapped[uuid.UUID] = _pk()
+    __table_args__ = (UniqueConstraint("tenant_id", name="uq_classification_policy_tenant"),)
+    controls: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False)
+
+
+class DocumentClassification(TenantScopedMixin, TimestampMixin, Base):
+    __tablename__ = "document_classifications"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "document_id", name="uq_classification_document"),
+        ForeignKeyConstraint(
+            ["tenant_id", "document_id"],
+            ["documents.tenant_id", "documents.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("revision >= 0 AND retries >= 0", name="ck_classification_counters"),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    extraction_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    taxonomy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    override_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    override_actor: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    override_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+
+class ClassificationSpend(TenantScopedMixin, TimestampMixin, Base):
+    __tablename__ = "classification_spend"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    ceiling_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    attempt: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False)
+    usage: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    __table_args__ = (
+        CheckConstraint(
+            "ceiling_usd > 0 AND (cost_usd IS NULL OR cost_usd >= 0)",
+            name="ck_classification_spend",
+        ),
+    )

@@ -103,6 +103,11 @@ while structural checks still reject every unclassified active target route.
 
 ## 3. Invariants → negative-test categories
 
+Classification (#692) adds `document.classification_updated` (scheduled,
+completed or override) and `classification.policy_updated`. Success and their
+content-free audit commit atomically; denials use the durable canonical context.
+No source excerpt, override reason, credentials or personal-data values enter audit.
+
 Resumable ingestion (#669) adds `document.processing_stage_completed`: each
 new completed operational stage and its safe stage/fingerprint/checksum audit
 commit in one tenant-bound transaction. The system actor has no client address.

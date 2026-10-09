@@ -57,6 +57,14 @@ fn core_version() -> &'static str {
 }
 
 #[pyfunction]
+fn classification_token_count(py: Python<'_>, input: String, artifact: String) -> PyResult<usize> {
+    compute(py, || {
+        let ctx = lumen_docintel_core::runtime::Context::new(lumen_docintel_core::runtime::Budget::default(), lumen_docintel_core::runtime::Cancellation::default())?;
+        lumen_docintel_core::classification::count_request_tokens(&input, &artifact, &ctx)
+    })
+}
+
+#[pyfunction]
 fn _test_error(py: Python<'_>) -> PyResult<()> {
     compute(py, || Err(CoreError::InvalidInput))
 }
@@ -345,6 +353,7 @@ fn lumen_docintel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_document, m)?)?;
     m.add_function(wrap_pyfunction!(classification_features, m)?)?;
+    m.add_function(wrap_pyfunction!(classification_token_count, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(wrap_pyfunction!(detect_format, m)?)?;
     m.add_class::<CancellationToken>()?;

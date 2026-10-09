@@ -448,12 +448,12 @@ async def _ingest_claimed_document(
     )
 
     async def classify_stage() -> dict[str, object]:
-        return {"classification": None, "policy": "unknown-until-approved"}
+        return {"classification": None, "policy": "independent-classification-queue-1"}
 
-    classified = await stages.run(
+    await stages.run(
         "classify",
         upstream=normalized.output_sha256,
-        config={"policy": "unknown-until-approved"},
+        config={"policy": "independent-classification-queue-1"},
         compute=classify_stage,
     )
 
@@ -471,9 +471,7 @@ async def _ingest_claimed_document(
 
     chunked = await stages.run(
         "chunk",
-        upstream=hashlib.sha256(
-            (classified.output_sha256 + normalized.output_sha256).encode()
-        ).hexdigest(),
+        upstream=normalized.output_sha256,
         config={
             "size": settings.ingestion_chunk_size,
             "overlap": settings.ingestion_chunk_overlap,
@@ -931,6 +929,22 @@ async def _persist_media_result(
         )
         if persisted_chunks is None:
             raise IngestionLeaseLost
+
+        from app.tasks.classification import schedule_in_transaction
+
+        classification_input = json.dumps(
+            {"text": "\n".join(s.text for s in persisted_segments), "format": "transcript"},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        await schedule_in_transaction(
+            session,
+            tenant_id,
+            document_id,
+            input_json=classification_input,
+            extraction_id=hashlib.sha256(classification_input.encode()).hexdigest(),
+            taxonomy_version=settings.classification_taxonomy_version,
+        )
 
         if not was_transcribed:
             await AuditSink(AuditEventRepository(session, tenant_id)).emit(

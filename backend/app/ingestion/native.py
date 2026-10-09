@@ -32,6 +32,13 @@ def native_available() -> bool:
     return _extension() is not None
 
 
+def classification_token_count(text: str, tokenizer_json: str) -> int:
+    extension = _extension()
+    if extension is None:
+        raise NativeUnavailableError("native ingestion extension is unavailable")
+    return int(extension.classification_token_count(text, tokenizer_json))
+
+
 class NativeUnavailableError(Exception):
     """The optional computation extension has not been installed."""
 

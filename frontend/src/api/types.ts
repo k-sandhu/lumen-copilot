@@ -716,6 +716,8 @@ export const AUDIT_EVENT_TYPES = [
   'document.deleted',
   'document.downloaded',
   'document.processing_stage_completed',
+  'document.classification_updated',
+  'classification.policy_updated',
   'document.transcribed',
   'document.upload_aborted',
   'document.upload_expired',
