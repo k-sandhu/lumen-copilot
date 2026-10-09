@@ -1,0 +1,55 @@
+{
+  "rows": [
+    {
+      "fixture": "ipynb-facts",
+      "sha256": "e34680910ea39f69e490b074a1a76d32dccf3a0baf8e1069e9515a9f1684df8d",
+      "format": "ipynb",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 3.300001844763756e-05,
+      "input_bytes_per_second": 7848480.461032638,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23244800,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "ipynb-facts",
+      "sha256": "e34680910ea39f69e490b074a1a76d32dccf3a0baf8e1069e9515a9f1684df8d",
+      "format": "ipynb",
+      "language": "en",
+      "expected": "indexed",
+      "arm": "native-candidate",
+      "outcome": "failed",
+      "code": "DocIntelParseError",
+      "seconds": 0.008830900012981147,
+      "input_bytes_per_second": 29328.833937569,
+      "peak_rss_bytes": 23695360,
+      "peak_rss_increment_bytes": 225280,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "failed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "answer_quality": "unmeasured"
+}

@@ -1,0 +1,49 @@
+{
+  "rows": [
+    {
+      "fixture": "valid-generated-notebook",
+      "sha256": "9924d3e1f9072d34cea90c53cfca8ee610268e02f70588d0fd0d563beea6d855",
+      "arm": "python-baseline",
+      "outcome": "unsupported",
+      "code": "unsupported_format",
+      "seconds": 2.2799998987466097e-05,
+      "input_bytes_per_second": 10394737.30372912,
+      "output_chars_per_second": 0.0,
+      "peak_rss_bytes": 23728128,
+      "peak_accounted_bytes": null,
+      "threads": null,
+      "peak_rss_increment_bytes": 0,
+      "score": {
+        "fact_coverage": 0.0,
+        "table_association": 0.0,
+        "reading_order": 0.0,
+        "exact_offsets": 0.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "unsupported"
+      }
+    },
+    {
+      "fixture": "valid-generated-notebook",
+      "sha256": "9924d3e1f9072d34cea90c53cfca8ee610268e02f70588d0fd0d563beea6d855",
+      "arm": "native-candidate",
+      "outcome": "indexed",
+      "code": null,
+      "seconds": 0.011470099969301373,
+      "input_bytes_per_second": 20662.41799411582,
+      "peak_rss_bytes": 23961600,
+      "peak_rss_increment_bytes": 233472,
+      "score": {
+        "fact_coverage": 1.0,
+        "table_association": 1.0,
+        "reading_order": 1.0,
+        "exact_offsets": 1.0,
+        "cell_header_association": 1.0,
+        "native_provenance": 1.0,
+        "outcome": "indexed"
+      }
+    }
+  ],
+  "promotion": "held for owner evaluation",
+  "measurement": "tiny in-process correctness sample; no performance claim"
+}
