@@ -1,5 +1,6 @@
 """Generated-only OCR preprocessing and canonical evidence, one isolated worker."""
 
+import asyncio
 import io
 import json
 import struct
@@ -15,7 +16,11 @@ from app.domain.native_runtime import RuntimeBudget
 from app.domain.ocr import OcrPolicy, OcrResult
 from app.ingestion import native
 from app.services.ocr import OcrService
+from tests import test_ingestion_task as fixtures
 from tests.eval.docintel.pdfium_fixtures import document, text
+
+sqlite_engine = fixtures.sqlite_engine
+_offline_index_store = fixtures._offline_index_store
 
 pytestmark = pytest.mark.skipif(
     not native.native_available() or sys.platform not in {"win32", "linux"},
@@ -82,6 +87,8 @@ async def test_only_scanned_page_is_split_and_paid_once():
         for s, b in zip(result.spans, result.blocks, strict=True)
     )
     # Re-extract/split the same source for a new ingestion attempt: stable hash and cache hit.
+    # Cross a clock second to exercise fresh PDFium wrapper CreationDate as well.
+    await asyncio.sleep(1.1)
     repeated = native.PdfiumExecutor(workers=1).prepare_ocr_page(data, page=2, budget=BUDGET)
     assert repeated == prepare(2)
     again, _ = await service.run(canonical, prepare)
@@ -139,3 +146,66 @@ async def test_unexpected_provider_cost_is_recorded_but_not_published():
     )
     assert reason == "ocr_cost_exceeded" and result.rendered_text == ""
     assert ledger.starts == 1 and next(iter(ledger.values.values())).cost_usd == Decimal("0.03")
+
+
+async def test_enabled_ingestion_resumes_after_downstream_fault_without_repayment(
+    sqlite_engine, _offline_index_store, monkeypatch
+):
+    from sqlalchemy import select
+
+    from app.db import models
+    from app.db.ingestion_stages import StageRepository
+    from app.db.ocr import OcrRepository
+    from app.db.session import tenant_session_scope
+    from app.domain.entities import DocumentStatus
+    from app.tasks.ingest import IngestionError, ingest_document_async
+
+    tenant, doc = await fixtures._seed_document(mime_type="image/png", key="scan")
+    async with tenant_session_scope(tenant) as session:
+        admin = (
+            await session.execute(select(models.User).where(models.User.tenant_id == tenant))
+        ).scalar_one()
+        admin.roles = ["admin"]
+        await OcrRepository(session, tenant).configure(
+            OcrPolicy(tenant, True, 2, Decimal("0.02"), Decimal("0.01"), 1, admin.id)
+        )
+    provider = Provider()
+    monkeypatch.setattr("app.tasks.ingest.OpenRouterOcrProvider", lambda settings: provider)
+    executor = native.PdfiumExecutor(workers=1)
+    monkeypatch.setattr("app.tasks.ingest._default_pdf_executor", lambda pid: (executor, BUDGET))
+    store = fixtures._FakeObjectStore()
+    store.put(str(tenant), "scan", png())
+    settings = fixtures._settings(
+        ocr_enabled=True, ocr_model="fixture-model", OPENROUTER_API_KEY="synthetic"
+    )
+    with pytest.raises(IngestionError):
+        await ingest_document_async(
+            tenant,
+            doc,
+            settings=settings,
+            object_store=store,
+            gateway=fixtures._FakeGateway(fail=True),
+        )
+    assert provider.pages == [1]
+    result = await ingest_document_async(
+        tenant, doc, settings=settings, object_store=store, gateway=fixtures._FakeGateway()
+    )
+    assert result.status is DocumentStatus.READY and provider.pages == [1]
+    async with tenant_session_scope(tenant) as session:
+        chunks = (
+            (
+                await session.execute(
+                    select(models.Chunk).where(
+                        models.Chunk.tenant_id == tenant, models.Chunk.document_id == doc
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert chunks and all(c.machine_read for c in chunks)
+        stages = await StageRepository(session, tenant).list(doc)
+        ocr = next(s for s in stages if s.stage == "ocr")
+        assert json.loads(ocr.payload_json)["machine_read_spans"]
+        policy = (await session.execute(select(models.OcrTenantPolicy))).scalar_one()
+        assert policy.pages_used == 1

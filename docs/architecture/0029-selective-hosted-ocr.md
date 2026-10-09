@@ -34,8 +34,10 @@ processing must not be represented as offline or as having verified retention,
 regional guarantees or zero retention. Owners decide deployment/provider terms.
 
 The cache key is (tenant, SHA-256 of submitted one-page bytes, engine/profile).
-PDFium-generated trailer IDs are replaced with deterministic source/page IDs
-before hashing or dispatch, preserving byte lengths and cross-reference offsets.
+PDFium-generated trailer IDs are replaced with deterministic source/page IDs,
+and the fresh wrapper creation date is fixed before hashing or dispatch,
+preserving byte lengths and cross-reference offsets. Source content and its
+original metadata are never rewritten by this wrapper-metadata operation.
 No cross-tenant cache reuse. Reserve a page and the total ceiling in a short durable
 transaction under a tenant policy lock, and commit a content-free OCR intent audit
 before dispatch. Known results and actual usage commit before canonical merging.
@@ -62,7 +64,10 @@ tenant-scoped and follows tenant deletion; broader retention remains an owner de
    downstream faults so completed pages resume without another network call.
 5. Offline HTTP fixtures cover success/error annotations, invalid data, timeout,
    response limits, budget/tenant/concurrency denials and cache reuse. Fixtures are
-   generated/documented schema examples, not claimed recordings of live traffic.
+   generated/documented schema examples plus one sanitized generated-page live
+   recording. The recorded 429 chat response still returned parser annotations;
+   exact separate file-envelope parts are removed inside the provider, leaving
+   recognized code points unchanged. Missing usage retains the reserved ceiling.
 6. Rust property tests verify exact offsets with supplementary Unicode/combining
    marks and preserve native controls. PDF/image preprocessing remains isolated.
 

@@ -309,6 +309,7 @@ pub fn split_page(
     identity.update(page.to_be_bytes());
     let digest = identity.finalize();
     stable_trailer_ids(&mut output, &digest[..16])?;
+    stable_creation_date(&mut output, ctx)?;
     let _output = ctx.reserve(output.len().checked_mul(3).ok_or(CoreError::Budget)?)?;
     ctx.output(output.len())?;
     let hex = output
@@ -366,9 +367,62 @@ fn stable_trailer_ids(output: &mut [u8], identity: &[u8]) -> Result<(), CoreErro
     Ok(())
 }
 
+fn stable_creation_date(output: &mut [u8], ctx: &Context) -> Result<(), CoreError> {
+    // The fresh PDFium document's Info dictionary is emitted before page objects.
+    // Resolve its trailer reference so source stream text is never rewritten.
+    let trailer = output
+        .windows(7)
+        .rposition(|w| w == b"trailer")
+        .ok_or(CoreError::Parse)?;
+    let mut memory = Memory::new(ctx.clone());
+    let mut reader = super::syntax::Reader {
+        data: output,
+        at: trailer + 7,
+        memory: &mut memory,
+    };
+    let value = reader.value(0, true)?;
+    let (number, generation) = value.dict()?.get("Info").ok_or(CoreError::Parse)?.key()?;
+    let header = format!("{number} {generation} obj");
+    let start = output
+        .windows(header.len())
+        .position(|w| w == header.as_bytes())
+        .ok_or(CoreError::Parse)?;
+    let end = start
+        + output[start..]
+            .windows(6)
+            .position(|w| w == b"endobj")
+            .ok_or(CoreError::Parse)?;
+    let marker = b"/CreationDate(D:";
+    let date = start
+        + output[start..end]
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .ok_or(CoreError::Parse)?
+        + marker.len();
+    let end_date = date.checked_add(14).ok_or(CoreError::Budget)?;
+    if output.get(end_date) != Some(&b')')
+        || end_date >= end
+        || !output[date..end_date].iter().all(u8::is_ascii_digit)
+    {
+        return Err(CoreError::Parse);
+    }
+    output[date..end_date].copy_from_slice(b"19700101000000");
+    Ok(())
+}
+
 #[cfg(test)]
 mod ocr_identity_tests {
     use super::*;
+    #[test]
+    fn creation_date_changes_only_fresh_info_metadata() {
+        let ctx = crate::runtime::context_json("{}", Default::default()).unwrap();
+        let mut output = b"3 0 obj\n<</CreationDate(D:20261009100000)/Creator(PDFium)>>\nendobj\n4 0 obj (/CreationDate(D:20261009200000)) endobj\ntrailer <</Info 3 0 R>>".to_vec();
+        let original_len = output.len();
+        stable_creation_date(&mut output, &ctx).unwrap();
+        assert_eq!(output.len(), original_len);
+        assert!(output.windows(14).any(|w| w == b"19700101000000"));
+        assert!(output.windows(14).any(|w| w == b"20261009200000"));
+    }
     #[test]
     fn stabilizes_only_generated_trailer_ids_without_shifting_offsets() {
         let original = b"1 0 obj (/ID untouched) endobj\ntrailer << /ID[<0123456789ABCDEF0123456789ABCDEF><FEDCBA9876543210FEDCBA9876543210>] >>\nstartxref\n42\n%%EOF";

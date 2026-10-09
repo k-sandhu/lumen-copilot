@@ -97,7 +97,7 @@ async def test_timeout_is_typed_and_does_not_retry():
     assert calls == 1
 
 
-async def test_response_is_bounded_and_malformed_cost_is_not_accepted():
+async def test_response_is_bounded():
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"x" * 20))
     ) as client:
@@ -128,3 +128,48 @@ async def test_duplicate_annotation_hash_is_deduplicated():
         )
         result = await provider.recognize(OcrPage(1, b"%PDF-generated"))
     assert result.text == "Generated café 😀 e\u0301"
+
+
+@pytest.mark.parametrize("cost", ["NaN", "Infinity", -1, True, "invalid"])
+async def test_malformed_cost_is_not_accepted(cost):
+    payload = json.loads((FIXTURES / "success.json").read_text(encoding="utf-8"))
+    payload["usage"]["cost"] = cost
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
+    ) as client:
+        provider = OpenRouterOcrProvider(
+            Settings(OPENROUTER_API_KEY="synthetic", ocr_enabled=True, ocr_model="fixture-model"),
+            http_client=client,
+        )
+        with pytest.raises(OcrError, match="ocr_malformed_response"):
+            await provider.recognize(OcrPage(1, b"%PDF-generated"))
+
+
+async def test_recorded_generated_page_recovers_without_inference_or_usage():
+    payload = json.loads((FIXTURES / "recorded_generated_page.json").read_text(encoding="utf-8"))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(429, json=payload))
+    ) as client:
+        result = await OpenRouterOcrProvider(
+            Settings(OPENROUTER_API_KEY="synthetic", ocr_enabled=True, ocr_model="fixture-model"),
+            http_client=client,
+        ).recognize(OcrPage(1, b"%PDF-generated"))
+    assert result.text == "LUMEN OCR GENERATED PAGE\n\nInvoice total 123.45\n\nReference ABC-695"
+    assert result.cost_usd is None and result.input_tokens is None
+    assert result.confidence is None
+
+
+@pytest.mark.parametrize(
+    "body", [" café 😀 e\u0301\n", '<file name="page-0001.pdf">literal</file>']
+)
+async def test_wrapper_removal_preserves_exact_body_codepoints(body):
+    payload = json.loads((FIXTURES / "recorded_generated_page.json").read_text(encoding="utf-8"))
+    payload["error"]["metadata"]["file_annotations"][0]["file"]["content"][1]["text"] = body
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(429, json=payload))
+    ) as client:
+        result = await OpenRouterOcrProvider(
+            Settings(OPENROUTER_API_KEY="synthetic", ocr_enabled=True, ocr_model="fixture-model"),
+            http_client=client,
+        ).recognize(OcrPage(1, b"%PDF-generated"))
+    assert result.text == body

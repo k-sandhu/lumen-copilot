@@ -20,7 +20,8 @@ from app.domain.document_detection import DetectedDocument
 from app.domain.native_chunking import ChunkedDocument
 from app.domain.native_normalization import NormalizedDocument
 from app.domain.native_runtime import ComputedUnits, RuntimeBudget
-from app.ingestion._pdf_pool import PdfProcessPool, PdfWorkerError as PdfWorkerError
+from app.ingestion._pdf_pool import PdfProcessPool
+from app.ingestion._pdf_pool import PdfWorkerError as PdfWorkerError
 
 
 def _extension() -> ModuleType | None:

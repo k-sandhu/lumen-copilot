@@ -101,6 +101,15 @@ class OpenRouterOcrProvider:
                             if not isinstance(part.get("text"), str):
                                 raise OcrError("ocr_malformed_response")
                             text_parts.append(part["text"])
+                    # Recorded parser responses include synthetic file envelope parts.
+                    # Remove only exact, separate wrapper parts for our submitted name;
+                    # never trim or parse markup within the actual recognized text.
+                    if (
+                        len(text_parts) >= 3
+                        and text_parts[0] == f'<file name="page-{page.number:04d}.pdf">'
+                        and text_parts[-1] == "</file>"
+                    ):
+                        text_parts = text_parts[1:-1]
                     text = "".join(text_parts)
                     if file["hash"] in texts and texts[file["hash"]] != text:
                         raise OcrError("ocr_malformed_response")

@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-09",
+  "status": 429,
+  "requests": 1,
+  "generated_text": "LUMEN OCR GENERATED PAGE\nInvoice total 123.45\nReference ABC-695",
+  "model": "google/gemma-3-27b-it",
+  "request_sha256": "e80bedf9eecee9fe3ee72ac6f1cdda49a27dba23e15b062c819f5918deed7cdd",
+  "sanitized": "No key, provider headers, generation id, model answer or image URLs retained.",
+  "routing_max_price_per_million_usd": {
+    "prompt": 0.1,
+    "completion": 0.2
+  },
+  "billing_note": "Parser price is documented as $0.002/page ($0.0022 US); the response omitted usage/cost. No exact charge receipt is claimed. The single-request worst-case bound from the 131072-token model context and probe routing cap is under $0.016."
+}
