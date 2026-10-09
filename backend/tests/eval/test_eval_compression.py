@@ -122,9 +122,7 @@ def test_post_compaction_answer_stays_grounded_and_citation_correct() -> None:
     observed = _observed(_faithful_model_answer(compacted), owner)
     assert groundedness(observed) is True
     assert (
-        citation_correctness(
-            observed, expected_passage=_EVIDENCE, expected_document_name=_DOC_NAME
-        )
+        citation_correctness(observed, expected_passage=_EVIDENCE, expected_document_name=_DOC_NAME)
         is True
     )
 
