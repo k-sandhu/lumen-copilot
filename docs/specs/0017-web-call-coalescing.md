@@ -17,3 +17,16 @@ before advancing the ordered persistence drain. Another active consumer may
 finish the shared execution. Provider errors remain typed and honest; empty
 provider results differ from malformed/unusable provider output. External live
 smoke is opt-in; fixtures exercise normalization without network dependencies.
+
+R2 acceptance criteria (review R1-001 / R1-002):
+
+- A batch infrastructure failure aborts the ordered persistence coordinator and
+  wakes its waiters before reaping workers. Cancelled peers never wait on a failed
+  ordinal. The runtime emits one error terminal and rolls back the answer; a
+  consumer cancelled in a surviving batch still records its own cancellation.
+- An empty SearXNG HTTP-200 response with `unresponsive_engines` is a retryable
+  failure, classified as rate limited, blocked, timeout, or unavailable. Inspect
+  at most 64 engine entries and 256 characters per diagnostic; never expose raw
+  diagnostics. Mixed failures use rate limited, blocked, then timeout precedence;
+  unknown/malformed nonempty metadata falls back to unavailable. Useful partial
+  results and genuine empty responses remain reusable.

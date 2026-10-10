@@ -216,6 +216,7 @@ class ToolRunner:
         # answer terminates) — an abandoned ordinal never leaves a live waiter.
         self._persist_gate = asyncio.Condition()
         self._next_persist_ordinal = 0
+        self._persistence_aborted = False
         self._web_executions: dict[str, _WebExecution] = {}
         self._web_origins: dict[str, str] = {}
 
@@ -233,6 +234,18 @@ class ToolRunner:
         abort-the-batch error path upholds this).
         """
         return next(self._ordinal)
+
+    async def abort_persistence(self) -> None:
+        """Release ordered waiters when the dispatcher aborts the whole answer.
+
+        Cancel workers before calling this, so an in-progress write releases the
+        condition lock. No cancelled peer may persist into the failed answer's
+        transaction or wait on an ordinal whose call scope never opened.
+        Individual consumer cancellation in a surviving batch does not abort it.
+        """
+        async with self._persist_gate:
+            self._persistence_aborted = True
+            self._persist_gate.notify_all()
 
     def is_concurrency_safe(self, name: str) -> bool:
         """Whether ``name`` may join the turn's concurrent read-only batch (#412).
@@ -756,7 +769,11 @@ class ToolRunner:
             ),
         }
         async with self._persist_gate:
-            await self._persist_gate.wait_for(lambda: self._next_persist_ordinal == ordinal)
+            await self._persist_gate.wait_for(
+                lambda: self._persistence_aborted or self._next_persist_ordinal == ordinal
+            )
+            if self._persistence_aborted:
+                raise asyncio.CancelledError
             try:
                 if invoked_event_id is None:
                     await self._audit.emit(

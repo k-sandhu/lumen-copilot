@@ -104,13 +104,41 @@ def _parse_published(value: object) -> datetime | None:
         return None
 
 
+def _raise_engine_failure(failures: object) -> None:
+    """Reject empty searches with upstream faults, without leaking diagnostics.
+
+    SearXNG's JSON envelope translates failures into [engine, diagnostic] pairs,
+    sometimes prefixed with 'Suspended:'. Bound inspection even for a malformed
+    provider; unknown/localized errors safely remain retryable unavailability.
+    """
+    if isinstance(failures, list) and not failures:
+        return
+    reasons: set[str] = set()
+    if isinstance(failures, list):
+        for entry in failures[:64]:
+            if not isinstance(entry, list) or len(entry) < 2 or not isinstance(entry[1], str):
+                continue
+            diagnostic = entry[1][:256].casefold()
+            if "too many requests" in diagnostic or "rate limit" in diagnostic:
+                reasons.add("rate_limited")
+            if any(word in diagnostic for word in ("captcha", "access denied", "blocked")):
+                reasons.add("blocked")
+            if "timeout" in diagnostic or "timed out" in diagnostic:
+                reasons.add("timeout")
+    if "rate_limited" in reasons:
+        raise WebSearchRateLimited("search provider engines rate limited")
+    reason = next((r for r in ("blocked", "timeout") if r in reasons), "unavailable")
+    raise WebSearchUnavailable("search provider engines failed", reason=reason)
+
+
 def map_searxng_results(payload: Any, *, k: int) -> tuple[WebSearchResult, ...]:  # noqa: ANN401
     """Map a SearXNG JSON body into the ordered domain results (top-``k``).
 
     Reads the provider's ``results`` array (``title`` / ``url`` / ``content`` →
     ``snippet`` / ``publishedDate``), drops any entry without an ``http(s)`` URL,
     and truncates to ``k`` in provider-rank order. A valid empty array is an
-    honest empty result. Malformed output and entirely blocked result URLs
+    honest empty result only when no engine failures are reported. Useful partial
+    results remain usable. Malformed output and entirely blocked result URLs
     raise distinct safe errors rather than masquerading as no evidence.
     """
     if not isinstance(payload, dict):
@@ -122,6 +150,8 @@ def map_searxng_results(payload: Any, *, k: int) -> tuple[WebSearchResult, ...]:
         raise WebSearchUnavailable(
             "search provider omitted the results array", reason="parse_error"
         )
+    if not raw_results:
+        _raise_engine_failure(payload.get("unresponsive_engines", []))
     mapped: list[WebSearchResult] = []
     blocked = False
     for entry in raw_results:

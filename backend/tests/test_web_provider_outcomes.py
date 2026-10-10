@@ -3,7 +3,12 @@
 import httpx
 import pytest
 
-from app.search_web.client import SearxngClient, WebSearchUnavailable, map_searxng_results
+from app.search_web.client import (
+    SearxngClient,
+    WebSearchRateLimited,
+    WebSearchUnavailable,
+    map_searxng_results,
+)
 
 
 @pytest.mark.parametrize("payload", [{}, {"results": "wrong"}, [], {"results": [None]}])
@@ -37,3 +42,48 @@ async def test_provider_timeout_is_classified() -> None:
         with pytest.raises(WebSearchUnavailable) as error:
             await provider.search("query", k=3)
         assert error.value.reason == "timeout"
+
+
+@pytest.mark.parametrize(
+    ("failures", "reason"),
+    [
+        ([["google", "timeout"], ["bing", "timeout"]], "timeout"),
+        ([["google", "Suspended: timeout"]], "timeout"),
+        ([["google", "CAPTCHA"], ["bing", "timeout"]], "blocked"),
+        ([["google", "access denied"]], "blocked"),
+        ([["google", "Suspended: too many requests"], ["bing", "CAPTCHA"]], "rate_limited"),
+        ([["google", "rate limit exceeded"]], "rate_limited"),
+        ([["google", "unexpected crash"]], "unavailable"),
+        ([["google", "private diagnostic"]], "unavailable"),
+        ([None], "unavailable"),
+        ([["google"]], "unavailable"),
+        ([["google", 42]], "unavailable"),
+        ("malformed", "unavailable"),
+        (None, "unavailable"),
+        ([["google", "x" * 256 + "timeout"]], "unavailable"),
+        ([["google", "unknown"]] * 64 + [["bing", "timeout"]], "unavailable"),
+    ],
+)
+def test_empty_response_with_engine_faults_is_typed(failures: object, reason: str) -> None:
+    expected = WebSearchRateLimited if reason == "rate_limited" else WebSearchUnavailable
+    with pytest.raises(expected) as error:
+        map_searxng_results({"results": [], "unresponsive_engines": failures}, k=3)
+    if reason != "rate_limited":
+        assert error.value.reason == reason
+    assert "google" not in str(error.value) and "private diagnostic" not in str(error.value)
+
+
+@pytest.mark.parametrize("failures", [[], [["google", "timeout"]], "malformed"])
+def test_partial_results_survive_engine_failures(failures: object) -> None:
+    results = map_searxng_results(
+        {
+            "results": [{"url": "https://example.org/rfc", "title": "RFC", "content": "evidence"}],
+            "unresponsive_engines": failures,
+        },
+        k=3,
+    )
+    assert len(results) == 1 and results[0].snippet == "evidence"
+
+
+def test_empty_response_with_no_engine_faults_is_honest() -> None:
+    assert map_searxng_results({"results": [], "unresponsive_engines": []}, k=3) == ()

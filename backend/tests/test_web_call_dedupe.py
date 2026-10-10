@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.auth.principal import Principal
+from app.core.config import Settings
 from app.db import models
 from app.db.base import Base
 from app.db.repositories import (
@@ -26,8 +28,11 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import Role
 from app.domain.llm import ToolCall
 from app.domain.tools import RiskTier, ToolHandlerResult
+from app.search_web.client import SearxngClient
+from app.search_web.service import WebSearchService
 from app.services.audit import AuditSink
 from app.services.tools import runner as runner_module
+from app.services.tools.impls import web_search as web_search_impl
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import ToolContext, ToolDefinition
 
@@ -378,6 +383,74 @@ async def test_failed_web_search_is_not_cached_and_next_call_retries(
     invocation_count, audit_count, _ = await _counts(world)
     assert invocation_count == 2
     assert audit_count == 4
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "error"),
+    [
+        ("timeout", "web_search_timeout"),
+        ("Suspended: too many requests", "web_search_rate_limited"),
+        ("CAPTCHA", "web_search_blocked"),
+        ("access denied", "web_search_blocked"),
+        ("HTTP connection error", "web_search_unavailable"),
+    ],
+)
+async def test_upstream_engine_failure_is_not_cached_as_empty_success(
+    world: _World, monkeypatch: pytest.MonkeyPatch, diagnostic: str, error: str
+) -> None:
+    """R1-002: real adapter → service → handler → runner, then identical retry."""
+    requests = 0
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "results": [],
+                "unresponsive_engines": [["private engine", diagnostic]] if requests == 1 else [],
+            },
+        )
+
+    class AllowLimiter:
+        async def try_acquire_async(self, tenant_id: uuid.UUID) -> bool:
+            return True
+
+    settings = Settings(_env_file=None, WEB_SEARCH_ENABLED=True)
+    monkeypatch.setattr(web_search_impl, "get_settings", lambda: settings)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        service = WebSearchService(
+            tenant_id=world.tenant_id,
+            client=SearxngClient(
+                "https://provider.invalid", timeout_seconds=1, user_agent="test", client=client
+            ),
+            rate_limiter=AllowLimiter(),
+            default_k=3,
+            max_k=3,
+            fetch_top_n=0,
+            user_agent="test",
+        )
+        monkeypatch.setattr(web_search_impl, "build_web_search_service", lambda *a, **kw: service)
+        runner = _runner(world)
+        failed = await runner.run(call=_call("upstream-failure"), context=world.context)
+        retry = await runner.run(call=_call("retry"), context=world.context)
+        reused = await runner.run(call=_call("reuse-empty"), context=world.context)
+
+    assert not failed.ok and failed.error == error
+    assert "private engine" not in str(failed)
+    assert diagnostic not in failed.content
+    assert requests == 2, "upstream failure must retry; genuine empty success must coalesce"
+    assert retry.ok and retry.payload["reason"] == "provider_empty"
+    assert reused.ok and reused.summary.startswith("Reused identical web search:")
+    invocation_count, audit_count, _ = await _counts(world)
+    assert (invocation_count, audit_count) == (3, 6)
+    events = list((await world.session.execute(select(models.AuditEvent))).scalars())
+    result_events = [e for e in events if e.action == AuditAction.TOOL_RESULT.value]
+    assert [e.event_metadata["execution_call_id"] for e in result_events] == [
+        "upstream-failure",
+        "retry",
+        "retry",
+    ]
 
 
 async def test_cancelling_web_search_releases_producer_and_leaves_no_background_tasks(

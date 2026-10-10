@@ -3442,6 +3442,103 @@ async def test_denial_only_batch_opens_no_call_scopes(ctx: _Ctx) -> None:
     assert [by_hash[hash_args({"a": n})].ordinal for n in (1, 2)] == [0, 1]
 
 
+async def test_scope_failure_reaps_cancelled_peer_without_waiting_on_failed_ordinal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-001: the actual dispatcher must finish cleanup after bind_tenant fails."""
+    from sqlalchemy import select
+
+    from app.db import models
+    from app.services import chat_runtime as runtime_module
+    from app.services.tools.runner import ToolRunner
+
+    entered = asyncio.Event()
+    reaped = asyncio.Event()
+    stalled: asyncio.Future[asyncio.Task[Any]] = asyncio.get_running_loop().create_future()
+
+    class ObservedCondition(asyncio.Condition):
+        async def wait(self) -> bool:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() and not stalled.done():
+                stalled.set_result(task)
+            return await super().wait()
+
+    class ObservedRunner(ToolRunner):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._persist_gate = ObservedCondition()
+
+    class BlockedRetrieval(_FakeRetrieval):
+        async def search_text(self, **kwargs: Any) -> list[RetrievedPassage]:
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                reaped.set()
+            return []  # pragma: no cover
+
+    original_bind = runtime_module.bind_tenant
+    binds = 0
+
+    async def fail_first_call_scope(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+        nonlocal binds
+        binds += 1
+        if binds == 2:  # runtime scope is first; ordinal 0's scope is second
+            await entered.wait()  # ordinal 1 is executing before ordinal 0 fails
+            raise RuntimeError("scope binding failed")
+        await original_bind(session, tenant_id)
+
+    monkeypatch.setattr(runtime_module, "bind_tenant", fail_first_call_scope)
+    monkeypatch.setattr(runtime_module, "ToolRunner", ObservedRunner)
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=tuple(
+                        ToolCall(id=f"c{i}", name="search_text", arguments={"query": f"q{i}"})
+                        for i in (1, 2)
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            _answer_turn(),
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=BlockedRetrieval([]), backplane=backplane)
+    answer_task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    try:
+        # Completion races a structural deadlock signal, never an elapsed-time limit.
+        done, _ = await asyncio.wait((answer_task, stalled), return_when=asyncio.FIRST_COMPLETED)
+        assert answer_task in done, "cancelled peer waited on ordinal 0 after its scope failed"
+        assert await answer_task is False
+    finally:
+        if stalled.done():
+            stalled.result().cancel()  # reap the intentionally broken path on red/revert runs
+        else:
+            stalled.cancel()
+        await asyncio.gather(answer_task, return_exceptions=True)
+
+    assert entered.is_set() and reaped.is_set()
+    envs = await _drain(backplane, stream_id)
+    assert [env["type"] for env in envs if env["type"] in {"done", "error"}] == ["error"]
+    assert "scope binding failed" not in str(envs)
+    async with ctx.sessionmaker() as session:
+        for model in (models.ToolInvocation, models.Message, models.AuditEvent):
+            rows = list((await session.execute(select(model))).scalars())
+            assert rows == [], f"aborted answer left {model.__name__} records"
+
+
 async def test_mid_batch_cancellation_aborts_atomically_with_one_terminal(ctx: _Ctx) -> None:
     """Mid-batch cancellation (finding 3, the honest v1 contract): after one
     result is already on the wire, cancelling the answer task reaps every
