@@ -152,12 +152,22 @@ async def _web_search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
             error=ERROR_WEB_RATE_LIMITED,
             summary="rate limited",
         )
-    except WebSearchUnavailable:
+    except WebSearchUnavailable as exc:
         return ToolHandlerResult(
-            content="Web search is currently unavailable. Answer from the connected documents.",
+            content={
+                "parse_error": (
+                    "Web provider returned unusable results. "
+                    "Try a different query or connected documents."
+                ),
+                "timeout": "Web provider timed out. Retry once or answer from connected documents.",
+                "blocked": "Web provider or returned URLs were blocked. Use a different source.",
+            }.get(
+                exc.reason,
+                "Web search is currently unavailable. Answer from the connected documents.",
+            ),
             ok=False,
-            error=ERROR_WEB_UNAVAILABLE,
-            summary="provider unavailable",
+            error=f"web_search_{exc.reason}",
+            summary=f"provider {exc.reason}",
         )
     except Exception:  # noqa: BLE001 — never leak a vendor error; the runner logs the type
         return ToolHandlerResult(
@@ -170,7 +180,14 @@ async def _web_search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
     if not results:
         return ToolHandlerResult(
             content="No web results were found for that query.",
-            summary="0 results",
+            summary="provider empty: 0 results",
+            hit_count=0,
+            payload={
+                "sourceType": "web",
+                "resultCount": 0,
+                "results": [],
+                "reason": "provider_empty",
+            },
         )
     return ToolHandlerResult(
         content=_render(results),
