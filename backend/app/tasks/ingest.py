@@ -19,14 +19,14 @@ Pipeline (all slow/burst work — never the request path, backend/AGENTS.md):
 5. **Persist** the chunks (text + embedding vector + offsets + tenant + document
    + ordinal) via the #44 ``ChunkRepository``, tenant-scoped, **idempotently**
    (a re-run *replaces* the document's chunks — AC-5).
-6. **Advance status** ``pending → processing → ready`` and set ``chunk_count``;
-   any parse/embed/persist failure marks the document ``failed`` with the reason
-   (AC-6) and **does not crash silently**.
-7. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
+6. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
    chunk docs in OpenSearch via :func:`app.tasks.index_sync.sync_document_index_async`
    — retrieval serves from the engine (single-store), so ``ready`` must imply
    retrievable. An engine fault is a *transient* fault like storage/model: the
    run fails and Celery retries the (idempotent) pipeline as a unit.
+7. **Activate ready** only after acknowledged publication, with the expected
+   attempt CAS. Empty native extraction clears chunks and refreshed generations,
+   then fails with an actionable message; it never publishes an empty Ready row.
 
 Idempotency, retry-with-backoff, and dead-lettering (backend/AGENTS.md): the
 task replaces (never duplicates) chunks; transient faults (storage/model/db
@@ -408,20 +408,17 @@ async def _ingest_claimed_document(
         )
         if not published:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        async with tenant_session_scope(tenant_id) as session:
-            ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-                document_id, expected_attempt=attempt
-            )
-        if ready is None:
-            await _discard_generation(
-                tenant_id,
-                document_id,
-                attempt=attempt,
-                settings=settings,
-                store=search_store,
-            )
-            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        return IngestionResult(document_id, DocumentStatus.READY, 0)
+        # Cleanup must acknowledge completion before this permanent failure is
+        # finalized. A cleanup fault remains retryable; the attempt fence keeps
+        # an old empty delivery from overwriting a newer successful ingestion.
+        return await _finalize_failure(
+            tenant_id,
+            document_id,
+            "No native text was extracted. Use a text-bearing file or an OCR-enabled workflow.",
+            expected_attempt=attempt,
+            code="no_native_text",
+            correlation_id=correlation_id,
+        )
 
     try:
         embeddings = await _embed_in_batches(
@@ -935,6 +932,7 @@ async def _sync_index(
             expected_attempt=expected_attempt,
             settings=settings,
             store=store,
+            refresh=True,
             require_search_visibility=True,
         )
         return not result.superseded

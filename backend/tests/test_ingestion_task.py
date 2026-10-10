@@ -838,7 +838,7 @@ async def test_docx_extraction_limit_fails_before_chunking_or_embedding(
         assert await ChunkRepository(session, tenant_id).list_for_document(document_id) == []
 
 
-async def test_empty_document_is_ready_with_zero_chunks(sqlite_engine: None) -> None:
+async def test_empty_document_is_failed_with_zero_chunks(sqlite_engine: None) -> None:
     settings = _settings()
     store = _FakeObjectStore()
     gateway = _FakeGateway()
@@ -857,8 +857,9 @@ async def test_empty_document_is_ready_with_zero_chunks(sqlite_engine: None) -> 
         object_store=store,
         gateway=gateway,  # type: ignore[arg-type]
     )
-    assert result.status is DocumentStatus.READY
+    assert result.status is DocumentStatus.FAILED
     assert result.chunk_count == 0
+    assert "No native text" in (result.error or "")
     # And no chunks were left behind / created.
     async with db_session.session_scope() as session:
         chunks = await ChunkRepository(session, tenant_id).list_for_document(document_id)
