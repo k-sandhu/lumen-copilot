@@ -3566,7 +3566,7 @@ components:
     # --- Documents ----------------------------------------------------------
     DocumentStatus:
       type: string
-      description: Ingestion lifecycle.
+      description: Ingestion lifecycle. Ready means nonempty chunks synchronized with retrieval refresh visibility; empty native extraction is failed.
       enum: [pending, processing, ready, failed]
 
     DocumentKind:

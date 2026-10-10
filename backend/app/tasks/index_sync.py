@@ -125,8 +125,8 @@ async def sync_document_index_async(
 
     ``store`` is injectable for tests/backfill; when omitted the store is built
     from settings and closed here. ``refresh=True`` makes the result immediately
-    searchable — for tests only; production paths leave the engine's refresh
-    cadence alone.
+    searchable. Ingestion opts in before activating ready; asynchronous repair
+    and backfill callers may retain the default engine refresh cadence.
 
     Raises:
         DependencyError: the engine is unreachable or rejected the write. The
