@@ -2690,6 +2690,7 @@ class ChatRuntime:
                 # invariant — no finalise waiter survives the abort.
                 for task in tasks:
                     task.cancel()
+                await runner.abort_persistence()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
             # The fanned-out retrieval audits (call order), now that the
