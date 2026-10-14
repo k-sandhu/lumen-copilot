@@ -5938,6 +5938,29 @@ class AuditEventRepository(_TenantScopedRepository):
     gated in ``services/`` (INV-5), not here.
     """
 
+    async def restore_context_rejected(self, events: Sequence[AuditEvent]) -> None:
+        """Append trusted records from a rolled-back context-rejected transaction."""
+        if any(event.tenant_id != self._tenant_id for event in events):
+            raise ValueError("Audit record tenant does not match the repository.")
+        for event in events:
+            self._session.add(
+                models.AuditEvent(
+                    id=event.id,
+                    tenant_id=self._tenant_id,
+                    actor_id=event.actor_id,
+                    action=event.action,
+                    resource_type=event.resource_type,
+                    resource_id=event.resource_id,
+                    outcome=event.outcome.value,
+                    request_id=event.request_id,
+                    source_origin=event.source_origin,
+                    source_ip=event.source_ip,
+                    event_metadata=event.metadata,
+                    ts=event.ts,
+                )
+            )
+        await self._session.flush()
+
     async def record(
         self,
         *,
@@ -6135,6 +6158,50 @@ class ToolInvocationRepository(_TenantScopedRepository):
     the caller (the runner, within the chat runtime's transaction) owns the commit
     so the invocation row lands atomically with the answer turn it belongs to.
     """
+
+    async def restore_context_rejected(self, records: Sequence[ToolInvocation]) -> None:
+        """Retain completed traces without a reference to the absent assistant row."""
+        if any(record.tenant_id != self._tenant_id for record in records):
+            raise ValueError("Invocation tenant does not match the repository.")
+        session_ids = {record.session_id for record in records if record.session_id is not None}
+        surviving_sessions: set[UUID] = set()
+        if session_ids:
+            # The owner may delete a chat after the failed answer rolls back.
+            # Resolve parents in this tenant and hold key-share locks through
+            # the recovery commit: DELETE must not slip between this read and
+            # the invocation INSERT. A later DELETE uses ON DELETE SET NULL.
+            surviving_sessions.update(
+                await self._session.scalars(
+                    select(models.ChatSession.id)
+                    .where(
+                        models.ChatSession.tenant_id == self._tenant_id,
+                        models.ChatSession.id.in_(session_ids),
+                    )
+                    .order_by(models.ChatSession.id)
+                    .with_for_update(read=True, key_share=True)
+                )
+            )
+        for record in records:
+            self._session.add(
+                models.ToolInvocation(
+                    id=record.id,
+                    tenant_id=self._tenant_id,
+                    session_id=(
+                        record.session_id if record.session_id in surviving_sessions else None
+                    ),
+                    message_id=None,
+                    run_id=record.run_id,
+                    tool_name=record.tool_name,
+                    args_hash=record.args_hash,
+                    ok=record.ok,
+                    error=record.error,
+                    result_summary=record.result_summary,
+                    ordinal=record.ordinal,
+                    duration_ms=record.duration_ms,
+                    created_at=record.created_at,
+                )
+            )
+        await self._session.flush()
 
     async def record(
         self,
