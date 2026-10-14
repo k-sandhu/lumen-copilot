@@ -147,6 +147,17 @@ class StreamEvent:
     tool_call_started: bool = False
 
 
+@dataclass(slots=True)
+class StreamClosure:
+    """Per-stream evidence that the adapter's upstream close hook succeeded.
+
+    Missing, failed or still-pending cleanup stays false. The adapter records
+    the outcome; callers never inspect a provider wrapper or vendor exception.
+    """
+
+    closed: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class Embedding:
     """An embedding vector for a single input."""
