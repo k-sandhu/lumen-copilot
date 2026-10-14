@@ -128,6 +128,28 @@ class AuditSink:
             metadata=metadata,
         )
 
+    async def restore_context_rejected(self, events: Sequence[AuditEvent]) -> None:
+        """Restore trusted turn records after rollback, in the caller's new transaction.
+
+        This is not an external event-import API. The runtime supplies only
+        records returned by this sink during its own rejected turn. Revalidate
+        their envelopes and tenant before the repository restores their original
+        identities, timestamps and safe metadata.
+        """
+        for event in events:
+            if event.tenant_id != self._repository.tenant_id:
+                raise ValueError("Audit record tenant does not match the sink.")
+            validate_envelope(
+                tenant_id=event.tenant_id,
+                action=event.action,
+                resource_type=event.resource_type,
+                outcome=event.outcome,
+                resource_id=event.resource_id or "",
+                request_id=event.request_id or "",
+                source_ip=event.source_ip or event.source_origin,
+            )
+        await self._repository.restore_context_rejected(events)
+
 
 async def emit_permission_denied(
     audit: AuditSink,
