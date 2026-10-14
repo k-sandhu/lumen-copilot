@@ -91,9 +91,7 @@ describe('DocumentList', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       jsonResponse({ items: [doc({ owner_id: 'someone-else-123' })], next_cursor: null }),
     );
-    renderWithQuery(
-      <DocumentList collectionId="col-1" currentUserId="u-1" onOpen={() => {}} />,
-    );
+    renderWithQuery(<DocumentList collectionId="col-1" currentUserId="u-1" onOpen={() => {}} />);
     await screen.findByText('msa.pdf');
     const table = screen.getByRole('table');
     expect(within(table).queryByText('You')).not.toBeInTheDocument();
@@ -117,6 +115,62 @@ describe('DocumentList', () => {
     expect(await screen.findByText(/could not parse the pdf/i)).toBeInTheDocument();
     const table = screen.getByRole('table');
     expect(within(table).getByText('Failed')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['empty', 'No native text', /no native text was extracted/i],
+    ['unsupported', 'Unsupported format', /format is not supported/i],
+    ['failed', 'Ingestion failed', /could not be indexed/i],
+    ['partial', 'Partial native text', /some pdf pages have no native text/i],
+    ['indexed', 'Ready', /native text is indexed and searchable/i],
+  ] as const)(
+    'explains the %s extraction outcome in the status cell',
+    async (ingestion_outcome, label, explanation) => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        jsonResponse({
+          items: [
+            doc({
+              status: ['empty', 'unsupported', 'failed'].includes(ingestion_outcome)
+                ? 'failed'
+                : 'ready',
+              ingestion_outcome,
+              searchable: !['empty', 'unsupported', 'failed'].includes(ingestion_outcome),
+              chunk_count: ingestion_outcome === 'empty' ? 0 : 5,
+            }),
+          ],
+          next_cursor: null,
+        }),
+      );
+      renderWithQuery(<DocumentList collectionId="col-1" onOpen={() => {}} />);
+      const table = await screen.findByRole('table');
+      expect(await within(table).findByText(label)).toBeInTheDocument();
+      expect(within(table).getByRole('button', { name: explanation })).toBeInTheDocument();
+    },
+  );
+
+  it('keeps queued status ahead of stale extraction outcomes and labels legacy zero-chunk text as unknown', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        items: [
+          doc({ status: 'processing', ingestion_outcome: 'indexed', searchable: true }),
+          doc({ id: 'empty-legacy', filename: 'empty.txt', chunk_count: 0 }),
+        ],
+        next_cursor: null,
+      }),
+    );
+    renderWithQuery(<DocumentList collectionId="col-1" onOpen={() => {}} />);
+    const table = await screen.findByRole('table');
+    const processingRow = within(table).getByText('msa.pdf').closest('tr');
+    expect(processingRow).toHaveTextContent('Embedding…');
+    expect(processingRow).not.toHaveTextContent('Ready');
+    const legacyRow = within(table).getByText('empty.txt').closest('tr');
+    expect(legacyRow).toHaveTextContent('No indexed text');
+    expect(legacyRow).not.toHaveTextContent(/searchable/i);
+    expect(
+      within(legacyRow as HTMLElement).getByRole('button', {
+        name: /extraction outcome is unknown/i,
+      }),
+    ).toBeInTheDocument();
   });
 
   it('does not make a non-ready row openable', async () => {
@@ -182,9 +236,7 @@ describe('DocumentList', () => {
     await user.click(screen.getByRole('button', { name: /delete msa.pdf/i }));
     const dialog = await screen.findByRole('alertdialog');
     expect(within(dialog).getByText(/delete document\?/i)).toBeInTheDocument();
-    expect(
-      fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE'),
-    ).toBe(false);
+    expect(fetchSpy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(false);
 
     // Confirming fires DELETE /documents/doc-1.
     await user.click(within(dialog).getByRole('button', { name: /^delete$/i }));
