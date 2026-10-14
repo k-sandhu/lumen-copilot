@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.connectors.web.fetch import UrlBlockedError, validate_url_syntactic
 from app.domain.web_search import WebSearchResult
 
 
@@ -35,6 +36,14 @@ class WebSearchUnavailable(WebSearchError):
     adapter cannot parse. The ``web_search`` tool maps this to an ``ok=False``
     result (the model reads it; the run continues) rather than crashing the stream.
     """
+
+    def __init__(self, message: str, *, reason: str = "unavailable") -> None:
+        super().__init__(message)
+        self.reason = (
+            reason
+            if reason in {"unavailable", "parse_error", "timeout", "blocked"}
+            else "unavailable"
+        )
 
 
 class WebSearchRateLimited(WebSearchError):
@@ -65,10 +74,13 @@ def _only_https_or_http(url: str) -> str | None:
     ``connectors/web/fetch.py`` chokepoint would reject it anyway, but filtering
     here keeps the returned set clean and every ``url`` a real web address.
     """
-    parts = urlsplit(url)
-    if parts.scheme.lower() not in {"http", "https"}:
-        return None
-    if not parts.hostname:
+    try:
+        parts = urlsplit(url)
+        validate_url_syntactic(url)
+        if parts.username is not None or parts.password is not None:
+            return None
+        _ = parts.port
+    except (ValueError, UrlBlockedError):
         return None
     return url
 
@@ -92,21 +104,56 @@ def _parse_published(value: object) -> datetime | None:
         return None
 
 
+def _raise_engine_failure(failures: object) -> None:
+    """Reject empty searches with upstream faults, without leaking diagnostics.
+
+    SearXNG's JSON envelope translates failures into [engine, diagnostic] pairs,
+    sometimes prefixed with 'Suspended:'. Bound inspection even for a malformed
+    provider; unknown/localized errors safely remain retryable unavailability.
+    """
+    if isinstance(failures, list) and not failures:
+        return
+    reasons: set[str] = set()
+    if isinstance(failures, list):
+        for entry in failures[:64]:
+            if not isinstance(entry, list) or len(entry) < 2 or not isinstance(entry[1], str):
+                continue
+            diagnostic = entry[1][:256].casefold()
+            if "too many requests" in diagnostic or "rate limit" in diagnostic:
+                reasons.add("rate_limited")
+            if any(word in diagnostic for word in ("captcha", "access denied", "blocked")):
+                reasons.add("blocked")
+            if "timeout" in diagnostic or "timed out" in diagnostic:
+                reasons.add("timeout")
+    if "rate_limited" in reasons:
+        raise WebSearchRateLimited("search provider engines rate limited")
+    reason = next((r for r in ("blocked", "timeout") if r in reasons), "unavailable")
+    raise WebSearchUnavailable("search provider engines failed", reason=reason)
+
+
 def map_searxng_results(payload: Any, *, k: int) -> tuple[WebSearchResult, ...]:  # noqa: ANN401
     """Map a SearXNG JSON body into the ordered domain results (top-``k``).
 
     Reads the provider's ``results`` array (``title`` / ``url`` / ``content`` →
     ``snippet`` / ``publishedDate``), drops any entry without an ``http(s)`` URL,
-    and truncates to ``k`` in provider-rank order. Anything the adapter cannot make
-    sense of is treated as "no results" (an empty tuple), never an exception —
-    the caller distinguishes empty from unavailable.
+    and truncates to ``k`` in provider-rank order. A valid empty array is an
+    honest empty result only when no engine failures are reported. Useful partial
+    results remain usable. Malformed output and entirely blocked result URLs
+    raise distinct safe errors rather than masquerading as no evidence.
     """
     if not isinstance(payload, dict):
-        raise WebSearchUnavailable("search provider returned a non-object JSON body")
+        raise WebSearchUnavailable(
+            "search provider returned a non-object JSON body", reason="parse_error"
+        )
     raw_results = payload.get("results")
     if not isinstance(raw_results, list):
-        return ()
+        raise WebSearchUnavailable(
+            "search provider omitted the results array", reason="parse_error"
+        )
+    if not raw_results:
+        _raise_engine_failure(payload.get("unresponsive_engines", []))
     mapped: list[WebSearchResult] = []
+    blocked = False
     for entry in raw_results:
         if not isinstance(entry, dict):
             continue
@@ -115,6 +162,7 @@ def map_searxng_results(payload: Any, *, k: int) -> tuple[WebSearchResult, ...]:
             continue
         safe_url = _only_https_or_http(url)
         if safe_url is None:
+            blocked = True
             continue
         title = entry.get("title")
         snippet = entry.get("content")
@@ -128,6 +176,11 @@ def map_searxng_results(payload: Any, *, k: int) -> tuple[WebSearchResult, ...]:
         )
         if len(mapped) >= k:
             break
+    if raw_results and not mapped:
+        raise WebSearchUnavailable(
+            "search provider returned no usable results",
+            reason="blocked" if blocked else "parse_error",
+        )
     return tuple(mapped)
 
 
@@ -173,16 +226,24 @@ class SearxngClient:
                     params=params,
                     headers={"User-Agent": self._user_agent, "Accept": "application/json"},
                 )
+            except httpx.TimeoutException as exc:
+                raise WebSearchUnavailable("search provider timed out", reason="timeout") from exc
             except httpx.HTTPError as exc:
                 raise WebSearchUnavailable(
                     f"search provider request failed: {type(exc).__name__}"
                 ) from exc
+            if response.status_code == 429:
+                raise WebSearchRateLimited("search provider rate limited")
+            if response.status_code == 403:
+                raise WebSearchUnavailable("search provider blocked the request", reason="blocked")
             if response.status_code // 100 != 2:
                 raise WebSearchUnavailable(f"search provider returned HTTP {response.status_code}")
             try:
                 payload = response.json()
             except ValueError as exc:
-                raise WebSearchUnavailable("search provider returned invalid JSON") from exc
+                raise WebSearchUnavailable(
+                    "search provider returned invalid JSON", reason="parse_error"
+                ) from exc
         finally:
             if owns_client:
                 await active.aclose()
