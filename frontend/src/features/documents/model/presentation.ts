@@ -34,6 +34,97 @@ export function statusLabel(status: DocumentStatus): string {
   }
 }
 
+export interface DocumentStatusPresentation {
+  label: string;
+  tone: StatusTone;
+  detail?: string;
+  searchable: boolean;
+}
+
+/**
+ * Project lifecycle + extraction metadata into one honest status for the list
+ * and viewer. A live attempt always wins over the outcome from a prior attempt.
+ * Legacy documents keep their lifecycle label except ready rows with no chunks,
+ * whose extraction outcome remains unknown and is shown as no indexed text.
+ * Searchability is never inferred for an empty document or one with no chunks.
+ */
+export function documentStatusPresentation(doc: Document): DocumentStatusPresentation {
+  const searchable =
+    doc.status === 'ready' &&
+    doc.chunk_count > 0 &&
+    doc.ingestion_outcome !== 'empty' &&
+    doc.ingestion_outcome !== 'failed' &&
+    doc.ingestion_outcome !== 'unsupported' &&
+    doc.searchable !== false;
+
+  if (isIngesting(doc.status)) {
+    return {
+      label: statusLabel(doc.status),
+      tone: 'pending',
+      searchable: false,
+    };
+  }
+
+  if (doc.status === 'ready' && doc.chunk_count === 0 && !doc.ingestion_outcome) {
+    return {
+      label: 'No indexed text',
+      tone: 'degraded',
+      detail:
+        'There are no indexed passages available. This document’s extraction outcome is unknown.',
+      searchable: false,
+    };
+  }
+
+  switch (doc.ingestion_outcome) {
+    case 'empty':
+      return {
+        label: 'No native text',
+        tone: 'degraded',
+        detail: 'No native text was extracted. This document is not searchable.',
+        searchable: false,
+      };
+    case 'unsupported':
+      return {
+        label: 'Unsupported format',
+        tone: 'danger',
+        detail: 'This file format is not supported for native text extraction.',
+        searchable: false,
+      };
+    case 'failed':
+      return {
+        label: 'Ingestion failed',
+        tone: 'danger',
+        detail: doc.error ?? 'The document could not be indexed. Try uploading it again.',
+        searchable: false,
+      };
+    case 'partial':
+      return {
+        label: 'Partial native text',
+        tone: 'degraded',
+        detail: searchable
+          ? 'Some PDF pages have no native text. Blank pages can be intentional; extracted text is searchable.'
+          : 'Some PDF pages have no native text. Blank pages can be intentional.',
+        searchable,
+      };
+    case 'indexed':
+      return {
+        label: doc.status === 'failed' ? 'Failed' : statusLabel(doc.status),
+        tone: doc.status === 'failed' ? 'danger' : statusTone(doc.status),
+        detail: searchable
+          ? 'Native text is indexed and searchable.'
+          : 'Native text was extracted, but no searchable passages are available.',
+        searchable,
+      };
+    default:
+      return {
+        label: statusLabel(doc.status),
+        tone: statusTone(doc.status),
+        detail: doc.status === 'failed' ? (doc.error ?? undefined) : undefined,
+        searchable,
+      };
+  }
+}
+
 /** True while a document is still being ingested (drives polling + spinners). */
 export function isIngesting(status: DocumentStatus): boolean {
   return status === 'pending' || status === 'processing';
@@ -94,7 +185,11 @@ export function fileKindTone(doc: Pick<Document, 'filename' | 'mime_type'>): Fil
   const mime = doc.mime_type.toLowerCase();
   if (kind === 'pdf' || mime.includes('pdf')) return 'pdf';
   if (['doc', 'docx', 'rtf', 'odt'].includes(kind) || mime.includes('word')) return 'doc';
-  if (['xls', 'xlsx', 'csv', 'ods'].includes(kind) || mime.includes('sheet') || mime.includes('csv'))
+  if (
+    ['xls', 'xlsx', 'csv', 'ods'].includes(kind) ||
+    mime.includes('sheet') ||
+    mime.includes('csv')
+  )
     return 'sheet';
   if (['ppt', 'pptx', 'odp'].includes(kind) || mime.includes('presentation')) return 'slide';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(kind) || mime.startsWith('image/'))
@@ -198,7 +293,7 @@ export interface IngestStep {
   key: 'parse' | 'chunk' | 'embed' | 'ready';
   label: string;
   /** Where this stage stands given the document's current status. */
-  state: 'done' | 'active' | 'pending' | 'failed';
+  state: 'done' | 'active' | 'pending' | 'failed' | 'unknown';
 }
 
 /**
@@ -213,11 +308,16 @@ export interface IngestStep {
  */
 export function ingestSteps(doc: Pick<Document, 'status' | 'chunk_count'>): IngestStep[] {
   const chunked = doc.chunk_count > 0;
+  const readyWithoutChunks = doc.status === 'ready' && !chunked;
   const labels: Record<IngestStep['key'], string> = {
-    parse: 'Parsed',
-    chunk: chunked ? `Chunked into ${doc.chunk_count} passages` : 'Chunked into passages',
-    embed: 'Embedded',
-    ready: 'Indexed & permission-scoped',
+    parse: readyWithoutChunks ? 'Parse status unknown' : 'Parsed',
+    chunk: readyWithoutChunks
+      ? 'Chunk status unknown'
+      : chunked
+        ? `Chunked into ${doc.chunk_count} passages`
+        : 'Chunked into passages',
+    embed: readyWithoutChunks ? 'Embedding status unknown' : 'Embedded',
+    ready: readyWithoutChunks ? 'No indexed text' : 'Indexed & permission-scoped',
   };
 
   // Per-status completion frontier: how many stages are fully done.
@@ -231,7 +331,7 @@ export function ingestSteps(doc: Pick<Document, 'status' | 'chunk_count'>): Inge
       doneThrough = chunked ? 2 : 1;
       break;
     case 'ready':
-      doneThrough = 4;
+      doneThrough = readyWithoutChunks ? 0 : 4;
       break;
     case 'failed':
       doneThrough = chunked ? 2 : 0;
@@ -241,7 +341,9 @@ export function ingestSteps(doc: Pick<Document, 'status' | 'chunk_count'>): Inge
   const keys: IngestStep['key'][] = ['parse', 'chunk', 'embed', 'ready'];
   return keys.map((key, i) => {
     let state: IngestStep['state'];
-    if (i < doneThrough) {
+    if (readyWithoutChunks) {
+      state = 'unknown';
+    } else if (i < doneThrough) {
       state = 'done';
     } else if (doc.status === 'failed' && i === doneThrough) {
       state = 'failed';
