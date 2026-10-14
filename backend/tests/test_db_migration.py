@@ -107,6 +107,26 @@ def _alembic_config(url: str | None = None) -> Config:
     return cfg
 
 
+def test_offline_ingestion_locations_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The renumbered provenance revision still adds nullable fields and reverses."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0046_message_source_provenance:0047_ingestion_locations", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table documents add column source_text text;" in up
+    assert "alter table documents add column ingestion_metadata jsonb;" in up
+    assert "alter table chunks add column source_locations jsonb;" in up
+
+    command.downgrade(cfg, "0047_ingestion_locations:0046_message_source_provenance", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table chunks drop column source_locations;" in down
+    assert "alter table documents drop column ingestion_metadata;" in down
+    assert "alter table documents drop column source_text;" in down
+
+
 def test_metadata_covers_every_mvp_table() -> None:
     """The ORM registry and the spec-0004 table list agree."""
     assert set(Base.metadata.tables) == _ALL_TABLES
@@ -129,14 +149,17 @@ def test_every_revision_id_fits_alembic_version_column() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0013 with a SINGLE head (ADR-0008 §4).
+    """The migration chain has a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0046_message_source_provenance"]
+    assert list(script.get_heads()) == ["0047_ingestion_locations"]
+    locations = script.get_revision("0047_ingestion_locations")
+    assert locations is not None
+    assert locations.down_revision == "0046_message_source_provenance"
     provenance = script.get_revision("0046_message_source_provenance")
     assert provenance is not None
     assert provenance.down_revision == "0045_embedding_contract"

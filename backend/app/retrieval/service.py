@@ -254,6 +254,7 @@ class RetrievalService:
                     char_start=row.char_start,
                     char_end=row.char_end,
                     score=hit.score,
+                    source_locations=row.source_locations,
                     time_start_ms=row.time_start_ms,
                     time_end_ms=row.time_end_ms,
                     transcript_segment_id=row.transcript_segment_id,

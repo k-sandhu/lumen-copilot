@@ -3569,6 +3569,18 @@ components:
       description: Ingestion lifecycle.
       enum: [pending, processing, ready, failed]
 
+    SourceLocation:
+      type: object
+      additionalProperties: false
+      required: [kind, name, number, char_start, char_end]
+      description: Exact half-open source-part span into retained extracted text. Backend guarantees 0 <= char_start <= char_end <= source length. An empty span denotes a blank part. The existing document text endpoint may return a truncated prefix of that source.
+      properties:
+        kind: { type: string, enum: [page, slide, sheet] }
+        name: { type: string }
+        number: { type: integer, minimum: 1 }
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 0 }
+
     DocumentKind:
       type: string
       description: Processing/viewer family derived from the validated MIME type.
@@ -3593,6 +3605,10 @@ components:
           minimum: 0
           description: Player-relative media duration; null for ordinary documents.
         status: { $ref: "#/components/schemas/DocumentStatus" }
+        source_locations:
+          type: array
+          description: Permissioned source-part map. Empty or absent means unknown until re-ingestion; never inferred for legacy documents.
+          items: { $ref: "#/components/schemas/SourceLocation" }
         error:
           type: [string, "null"]
           description: Failure reason when status is failed.
@@ -3621,7 +3637,7 @@ components:
       properties:
         text:
           type: string
-          description: The extracted plain text (parser output, chunk-reassembled).
+          description: The retained extracted plain text; legacy documents fall back to chunk reconstruction.
         chunk_count:
           type: integer
           minimum: 0
