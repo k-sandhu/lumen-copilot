@@ -225,6 +225,49 @@ class _RecordingInvoker:
         return self._result
 
 
+@pytest.mark.parametrize("direct", [False, True], ids=["runner", "bridge"])
+async def test_nullable_object_union_rejects_undeclared_payload_before_mcp(
+    world: _World, direct: bool
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    from app.domain.tool_schema import strict_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"payload": {"type": ["object", "null"]}},
+        "required": ["payload"],
+    }
+    server = _server(
+        tenant_id=world.tenant_id,
+        owner_id=world.user_id,
+        tools=[{"name": "probe", "input_schema": schema, "read_only": True}],
+    )
+    invoker = _RecordingInvoker()
+    tools = tools_for_servers([server], invoker)
+    definition = next(iter(tools.values()))
+    args = {"payload": {"unadvertised": "value"}}
+    if direct:
+        result = await definition.handler(args, _context(world))
+    else:
+        runner, audit = _make_runner(world, allowed=frozenset(tools), extra_tools=tools)
+        result = await runner.run(
+            call=ToolCall(id="nullable-object", name=definition.name, arguments=args),
+            context=_context(world),
+        )
+        assert {event.action for event in await audit.list_recent()} == {
+            "tool.invoked",
+            "tool.result",
+        }
+        assert len(await _all_invocations(world)) == 1
+    assert result.ok is False and result.error == ERROR_BAD_ARGS
+    assert invoker.calls == []
+    projected = strict_schema(schema)
+    assert not Draft202012Validator(projected).is_valid(args)
+    assert Draft202012Validator(projected).is_valid({"payload": {}})
+    assert Draft202012Validator(projected).is_valid({"payload": None})
+
+
 # --- bridge: namespacing + tiering ------------------------------------------
 
 
@@ -543,11 +586,11 @@ async def test_extra_tools_do_not_shadow_the_static_registry(world: _World) -> N
 # --- arg-validation unit coverage -------------------------------------------
 
 
-def test_validate_args_allows_unknown_schema_shapes() -> None:
-    # An empty schema imposes no constraint; a schema the check does not understand
-    # is permitted through (the server validates authoritatively).
+def test_validate_args_closes_object_schemas_and_allows_empty_schema() -> None:
+    # An empty schema imposes no constraint; object schemas reject undeclared fields.
     assert mcp_bridge._validate_args({"anything": 1}, {}) is None
-    assert mcp_bridge._validate_args({"x": 1}, {"type": "object"}) is None
+    assert mcp_bridge._validate_args({}, {"type": "object"}) is None
+    assert mcp_bridge._validate_args({"x": 1}, {"type": "object"}) is not None
     # bool is NOT an integer (a common JSON-Schema trap).
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     assert mcp_bridge._validate_args({"n": True}, schema) is not None

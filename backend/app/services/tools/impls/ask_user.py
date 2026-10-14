@@ -22,7 +22,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.domain.chat import (
+    ASK_USER_MAX_DESCRIPTION_CHARS,
+    ASK_USER_MAX_LABEL_CHARS,
     ASK_USER_MAX_OPTIONS,
+    ASK_USER_MAX_QUESTION_CHARS,
     ASK_USER_MIN_OPTIONS,
     AskUserQuestion,
     AskUserValidationError,
@@ -91,6 +94,8 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "properties": {
                 "question": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": ASK_USER_MAX_QUESTION_CHARS,
                     "description": "The single clarifying question to show the user.",
                 },
                 "options": {
@@ -98,32 +103,38 @@ TOOLS: tuple[ToolDefinition, ...] = (
                     "minItems": ASK_USER_MIN_OPTIONS,
                     "maxItems": ASK_USER_MAX_OPTIONS,
                     "description": (
-                        "Mutually exclusive choices. The chosen label is sent back "
-                        "verbatim as the user's reply."
+                        "Provide 2-4 mutually exclusive choices. The chosen label "
+                        "is sent back verbatim as the user's reply."
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
                             "label": {
                                 "type": "string",
+                                "minLength": 1,
+                                "maxLength": ASK_USER_MAX_LABEL_CHARS,
                                 "description": "The choice text (a complete answer).",
                             },
                             "description": {
                                 "type": "string",
+                                "maxLength": ASK_USER_MAX_DESCRIPTION_CHARS,
                                 "description": "Optional one-line elaboration.",
                             },
                         },
                         "required": ["label"],
+                        "additionalProperties": False,
                     },
                 },
                 "allow_free_text": {
                     "type": "boolean",
                     "description": (
-                        "Whether a typed custom reply is also a good answer " "(default true)."
+                        "Whether a typed custom reply is also a good answer (default true)."
                     ),
+                    "default": True,
                 },
             },
             "required": ["question", "options"],
+            "additionalProperties": False,
         },
         handler=_ask_user,
         risk_tier=RiskTier.T0,

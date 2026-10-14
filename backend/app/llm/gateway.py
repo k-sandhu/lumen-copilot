@@ -54,6 +54,7 @@ from app.domain.llm import (
     Transcription,
 )
 from app.llm.tool_names import ToolNameMap
+from app.llm.tool_wire import wire_tools
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -529,17 +530,7 @@ class LLMGateway:
     @staticmethod
     def _to_wire_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
         """Render domain tool specs into the OpenAI/LiteLLM ``tools`` array."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
-            }
-            for t in tools
-        ]
+        return wire_tools(tools)
 
     async def chat(
         self,

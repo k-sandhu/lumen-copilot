@@ -1396,7 +1396,9 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     import sys
     import types as _types
 
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     def _raise(**_kw: object) -> int:
         raise RuntimeError("no tokenizer in test")
@@ -1407,12 +1409,19 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     gateway = _RecordingGetDocGateway(ctx.document_id)
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
-    # Measured wire costs (byte counter): base (grounded prompt + question + the
-    # 4 tool schemas) ≈ 3709; each get_document turn adds ≈ 2708 full / ≈ 573
-    # digested (digest_chars=150). Budget 9000 (fallback 10024 − 1024 margin)
-    # sits BETWEEN the 4-turn full requirement (~14541) and the digested floor
-    # with the newest result whole (~8136): the loop MUST compact to proceed,
-    # and compaction is sufficient — the pre-#415 code refused here.
+    # Count the current projected fixed schemas instead of baking in native
+    # schema bytes. Each document turn adds ~2708 full / ~573 digested bytes.
+    # The 5500-byte live allowance fits three digests plus the newest full result,
+    # but cannot fit four full results: compaction is necessary and sufficient.
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="read the big doc"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=lambda text: len(text.encode("utf-8")),
+    )
+    budget = fixed_cost + 5500
     runtime = _runtime(
         ctx,
         gateway=gateway,
@@ -1420,7 +1429,7 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
         backplane=backplane,
         default_max_tool_turns=4,
         context_config=ContextConfig(
-            fallback_max_input_tokens=10024,
+            fallback_max_input_tokens=budget + 1024,
             output_headroom_tokens=0,
             compaction_digest_chars=150,
             compaction_chunk_size=2,
@@ -1438,11 +1447,11 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
-    budget = 10024 - 1024
     # Every payload stayed within budget, compaction actually happened, and the
     # run completed with a normal answer — no context_too_large refusal.
     assert all(e <= budget for e in gateway.estimates), gateway.estimates
     assert gateway.saw_compaction  # old results were digested in-flight
+    assert gateway.calls_made == 4
     terminal = envs[-1]
     assert terminal["type"] == "done", terminal
     # The compacted transcript still produced answer deltas.

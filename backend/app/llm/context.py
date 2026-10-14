@@ -45,6 +45,7 @@ from app.core.errors import ValidationError
 from app.core.logging import get_logger
 from app.domain.llm import ChatMessage, Role, ToolSpec
 from app.llm.tool_names import ToolNameMap
+from app.llm.tool_wire import wire_tools
 
 log = get_logger(__name__)
 
@@ -914,18 +915,7 @@ def _tools_wire_text(tools: Sequence[ToolSpec]) -> str:
     """
     import json
 
-    name_map = ToolNameMap(t.name for t in tools)
-    payload = [
-        {
-            "type": "function",
-            "function": {
-                "name": name_map.to_wire(t.name),
-                "description": t.description,
-                "parameters": t.parameters,
-            },
-        }
-        for t in tools
-    ]
+    payload = wire_tools(tools)
     try:
         return json.dumps(payload, sort_keys=True)
     except (TypeError, ValueError):  # pragma: no cover — schemas are JSON by construction

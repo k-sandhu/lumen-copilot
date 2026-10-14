@@ -368,6 +368,51 @@ def _capture_acompletion(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return captured
 
 
+async def test_context_counts_captured_projected_tool_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from app.llm.context import ContextConfig, _tools_wire_text, assemble_context
+
+    tools = (
+        ToolSpec(
+            name="mcp:server:probe",
+            description="Projected schema probe",
+            parameters={
+                "type": "object",
+                "properties": {f"optional_{i}": {"type": "string"} for i in range(30)},
+            },
+        ),
+    )
+    captured = _capture_acompletion(monkeypatch)
+    budget = assemble_context(
+        model="fake/model",
+        system_prompt="SYS",
+        history=[],
+        question="Q",
+        tools=tools,
+        config=ContextConfig(output_headroom_tokens=0),
+        counter=lambda value: len(value.encode("utf-8")),
+        max_input_resolver=lambda _: 50_000,
+    )
+    gateway = LLMGateway(_settings())
+    _ = [event async for event in gateway.stream_tools(budget.messages, tools=tools)]
+    wire = captured["tools"]
+    assert wire[0]["function"]["name"] != tools[0].name
+    assert wire[0]["function"]["parameters"]["required"] == list(tools[0].parameters["properties"])
+    assert _tools_wire_text(tools) == json.dumps(wire, sort_keys=True, ensure_ascii=False)
+    expected = (
+        len(json.dumps(wire, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        + sum(
+            len(json.dumps(msg, sort_keys=True, ensure_ascii=False).encode("utf-8")) + 4
+            for msg in captured["messages"]
+        )
+        + 2
+    )
+    assert budget.estimated_tokens == expected
+
+
 def _has_cache_control(wire_message: dict[str, Any]) -> bool:
     content = wire_message.get("content")
     return isinstance(content, list) and any(

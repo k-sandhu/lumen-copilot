@@ -229,14 +229,17 @@ async def test_non_recall_document_context_is_withheld_after_revocation(
     """R3-001: real document tools taint answers AND zero-citation questions."""
     retrieval = DocumentRetrieval(ctx.document_id, ctx.chunk_id)
     needle = "secret-q3-plan.pdf" if tool == "list_documents" else "41%"
+    arguments = {
+        "get_document": {"document_id": str(ctx.document_id)},
+        "search_text": {"query": "margin"},
+        "list_documents": {},
+    }[tool]
     copied = await run_context_answer(
         factory=ctx.sessionmaker,
         principal=ctx.principal,
         session_id=ctx.session_id,
         retrieval_factory=lambda _session: retrieval,
-        call=ToolCall(
-            id="read", name=tool, arguments={"document_id": str(ctx.document_id), "query": "margin"}
-        ),
+        call=ToolCall(id="read", name=tool, arguments=arguments),
         ending=ending,
         needle=needle,
     )
