@@ -19,6 +19,7 @@ from app.db.repositories import (
 from app.db.session import dispose_engine, session_scope, tenant_session_scope
 from app.domain.entities import Role
 from app.domain.llm import Embedding
+from app.ingestion.fingerprint import build_ingestion_fingerprint
 from app.ingestion.parsers import parse_document_with_locations
 from app.tasks.ingest import ingest_document_async
 from tests.test_ingestion_locations import _make_pdf_pages_with_blank_middle, _NoopIndexStore
@@ -91,6 +92,14 @@ async def test_postgres_provenance_round_trip_is_tenant_scoped() -> None:
             assert retained.source_locations == parsed.locations
             chunks = await ChunkRepository(session, tenant.id).list_for_document(document.id)
             assert chunks
+            expected = build_ingestion_fingerprint(
+                data,
+                mime_type="application/pdf",
+                chunk_size=settings.ingestion_chunk_size,
+                overlap=settings.ingestion_chunk_overlap,
+                embeddings=[Embedding(vector=list(chunks[0].embedding), model="synthetic")],
+            )
+            assert (retained.ingestion_metadata or {}).get("ingestion_fingerprint") == expected
             for chunk in chunks:
                 assert parsed.text[chunk.char_start : chunk.char_end] == chunk.text
                 assert chunk.source_locations == parsed.locations_for_span(

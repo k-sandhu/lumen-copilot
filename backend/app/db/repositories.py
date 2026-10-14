@@ -2321,7 +2321,12 @@ class DocumentRepository(_TenantScopedRepository):
         return to_document(row)
 
     async def set_extraction(
-        self, document_id: UUID, *, text: str, locations: Sequence[SourceLocation]
+        self,
+        document_id: UUID,
+        *,
+        text: str,
+        locations: Sequence[SourceLocation],
+        fingerprint: dict[str, object] | None = None,
     ) -> Document | None:
         """Replace retained extraction metadata, scoped like the owning document."""
         stmt = select(models.Document).where(
@@ -2335,6 +2340,7 @@ class DocumentRepository(_TenantScopedRepository):
         row.ingestion_metadata = {
             **(row.ingestion_metadata or {}),
             "source_locations": [location.to_dict() for location in locations],
+            "ingestion_fingerprint": fingerprint,
         }
         await self._session.flush()
         await self._session.refresh(row)
