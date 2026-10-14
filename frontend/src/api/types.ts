@@ -150,6 +150,21 @@ export interface IngestionFingerprint {
   embedding_dimension?: number | null;
 }
 
+export interface ExtractionDiagnostics {
+  character_count: number;
+  replacement_characters: number;
+  suspicious_controls: number;
+  source_part_kind?: 'page' | 'slide' | 'sheet' | null;
+  total_parts?: number | null;
+  parts_with_text?: number | null;
+  blank_parts: number[];
+  table_probe: 'native_tables' | 'sheet_cells' | 'unavailable';
+  table_regions?: number | null;
+  table_cells?: number | null;
+  missing_table_cells?: number | null;
+  warnings: string[];
+}
+
 export interface Document {
   id: string;
   filename: string;
@@ -175,6 +190,7 @@ export interface Document {
   /** Exact source-part map; absent/empty means unknown for legacy documents. */
   source_locations?: SourceLocation[];
   ingestion_fingerprint?: IngestionFingerprint | null;
+  extraction_diagnostics?: ExtractionDiagnostics | null;
 }
 
 /** 200 from GET /documents — a cursor page of documents. */

@@ -106,3 +106,12 @@ Contract-true against focused tests. Live integration must confirm multipart COR
 exposes ETag without credentials, completion returns one pending `Document`, subsequent reads project extraction
 outcome and searchability, signed
 media GETs support byte ranges, and transcript cursors/timestamps stay player-relative.
+
+## Extraction inspection
+
+Spec [0024](../../../../docs/specs/0024-extraction-diagnostics.md) adds administrator
+inspection in the document drawer. Render only diagnostics supplied by the
+permissioned API; frontend roles never grant document visibility. Counts describe
+the latest extraction attempt and may outlive a subsequent embedding failure.
+Blank parts are not classified as scans. Unknown table coverage stays unknown;
+native cell text presence does not prove row/column fidelity or visual completeness.
