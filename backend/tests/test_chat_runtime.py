@@ -2213,6 +2213,126 @@ async def test_suggestions_usage_attributed_to_the_dedicated_model(ctx: _Ctx) ->
     assert sugg_row.total_tokens == 10
 
 
+async def test_suggestions_row_ledger_linkage_and_read_semantics(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#759 pin (ADR-0016 §2.6): the suggestions spend is a SECOND, message-less
+    ledger row linked to the answer by ``answer_id`` and tagged
+    ``run_id == answer_id`` — never folded onto the answer's row. The reads
+    split accordingly: ``totals_for_session`` is the session-wide sum over ALL
+    scopes (``answers`` still 1), while ``last_for_session`` is only the
+    message-bearing winning scope (context-meter semantics). ``done.usage``
+    and the ``llm.cache_kpi`` line stay ANSWER-only. Distinct non-zero
+    cache-write values on both calls prove the column flows through both rows
+    and sums."""
+    log_rec = _patch_runtime_log(monkeypatch)
+    answer_model = "openrouter/anthropic/claude-opus-4.8"
+    suggestions_model = "openrouter/anthropic/claude-haiku-4.5"
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(
+                        prompt_tokens=100,
+                        completion_tokens=20,
+                        total_tokens=120,
+                        cached_prompt_tokens=30,
+                        cache_write_tokens=40,
+                    ),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed?", "Who owns this?"]',
+            model=suggestions_model,
+            usage=TokenUsage(
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                cached_prompt_tokens=2,
+                cache_write_tokens=7,
+            ),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_model=suggestions_model,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # done.usage + the cache-KPI line are ANSWER-only (no nicety tokens).
+    done = next(e for e in envs if e["type"] == "done")
+    assert done["data"]["usage"] == {  # type: ignore[index]
+        "promptTokens": 100,
+        "completionTokens": 20,
+        "totalTokens": 120,
+        "cachedPromptTokens": 30,
+        "cacheWriteTokens": 40,
+    }
+    kpis = log_rec.kpis()
+    assert len(kpis) == 1
+    assert kpis[0]["prompt_tokens"] == 100
+    assert kpis[0]["cached_prompt_tokens"] == 30
+    assert kpis[0]["cache_write_tokens"] == 40
+
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        rows = await repo.list_for_session(ctx.session_id)
+        totals = await repo.totals_for_session(ctx.session_id)
+        last = await repo.last_for_session(ctx.session_id)
+
+    # Exactly one message-bearing row (the answer) + one suggestions row.
+    assert len(rows) == 2
+    answer_rows = [r for r in rows if r.message_id is not None]
+    sugg_rows = [r for r in rows if r.message_id is None]
+    assert len(answer_rows) == 1
+    assert len(sugg_rows) == 1
+    answer_row, sugg_row = answer_rows[0], sugg_rows[0]
+    assert sugg_row.answer_id == answer_row.message_id
+    assert sugg_row.run_id == sugg_row.answer_id
+    assert sugg_row.model == suggestions_model
+    assert sugg_row.cache_write_tokens == 7
+    assert answer_row.cache_write_tokens == 40
+
+    # totals = answer + suggestions across every column; answers counts only
+    # the message-bearing row.
+    assert totals.answers == 1
+    assert totals.prompt_tokens == 110
+    assert totals.completion_tokens == 25
+    assert totals.total_tokens == 135
+    assert totals.cached_prompt_tokens == 32
+    assert totals.cache_write_tokens == 47
+
+    # last = the ANSWER row with answer-only tokens (never the nicety row).
+    assert last is not None
+    assert last.message_id == answer_row.message_id
+    assert last.prompt_tokens == 100
+    assert last.completion_tokens == 20
+    assert last.total_tokens == 120
+    assert last.cached_prompt_tokens == 30
+    assert last.cache_write_tokens == 40
+
+
 async def test_suggestions_spend_recorded_on_parse_miss(ctx: _Ctx) -> None:
     """R2-3 / #409: a suggestions completion that BILLED tokens but whose output does
     not parse into suggestions STILL records its spend (on its own row). The old code

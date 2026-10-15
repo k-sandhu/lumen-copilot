@@ -365,8 +365,9 @@ async def test_chat_usage_total_falls_back_to_sum(monkeypatch: pytest.MonkeyPatc
 class _UsageDetails:
     """OpenAI-style ``prompt_tokens_details`` (the LiteLLM-normalized shape)."""
 
-    def __init__(self, cached_tokens: int) -> None:
+    def __init__(self, cached_tokens: Any = None, cache_write_tokens: Any = None) -> None:
         self.cached_tokens = cached_tokens
+        self.cache_write_tokens = cache_write_tokens
 
 
 class _CacheUsage(_Usage):
@@ -383,13 +384,15 @@ class _CacheUsage(_Usage):
         completion: int,
         total: int | None,
         *,
-        cached_details: int | None = None,
+        cached_details: Any = None,
+        cache_write_details: Any = None,
         cache_read: int | None = None,
         cache_creation: int | None = None,
     ) -> None:
         super().__init__(prompt, completion, total)
+        has_details = cached_details is not None or cache_write_details is not None
         self.prompt_tokens_details = (
-            _UsageDetails(cached_details) if cached_details is not None else None
+            _UsageDetails(cached_details, cache_write_details) if has_details else None
         )
         self.cache_read_input_tokens = cache_read
         self.cache_creation_input_tokens = cache_creation
@@ -455,6 +458,321 @@ async def test_chat_usage_cached_zero_falls_back_to_anthropic_read(
 
     result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
     assert result.usage.cached_prompt_tokens == 77
+
+
+async def test_chat_usage_extracts_openrouter_cache_write_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — OpenRouter/OpenAI-compatible writes ride
+    ``prompt_tokens_details.cache_write_tokens`` (the Anthropic route through
+    OpenRouter never populates ``cache_creation_input_tokens``)."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            "x",
+            usage=_CacheUsage(10456, 2, 10458, cached_details=0, cache_write_details=10410),
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cache_write_tokens == 10410
+    assert result.usage.cached_prompt_tokens == 0
+
+
+async def test_chat_usage_openrouter_repeat_call_reads_cached_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — the warm-cache repeat call reports the read, not another write."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            "x",
+            usage=_CacheUsage(10456, 2, 10458, cached_details=10410, cache_write_details=0),
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cached_prompt_tokens == 10410
+    assert result.usage.cache_write_tokens == 0
+
+
+async def test_chat_usage_cache_write_details_wins_over_anthropic_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — both write shapes populated: the details value wins, never a sum."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            "x",
+            usage=_CacheUsage(100, 5, 105, cache_write_details=100, cache_creation=999),
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cache_write_tokens == 100
+
+
+async def test_chat_usage_cache_write_zero_falls_back_to_anthropic_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — a present-but-zero details write falls back to the Anthropic field,
+    mirroring the cached-read fallback (#419)."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response(
+            "x",
+            usage=_CacheUsage(100, 5, 105, cache_write_details=0, cache_creation=42),
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cache_write_tokens == 42
+
+
+@pytest.mark.parametrize("bad", ["x", True, -5])
+async def test_chat_usage_cache_write_malformed_details_coerce_to_zero(
+    monkeypatch: pytest.MonkeyPatch, bad: Any
+) -> None:
+    """#759 negative — malformed details write values degrade via ``_as_count``."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_CacheUsage(100, 5, 105, cache_write_details=bad))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cache_write_tokens == 0
+
+
+class _DictDetailsUsage(_Usage):
+    """Usage whose ``prompt_tokens_details`` is a plain dict, not an object."""
+
+    def __init__(self) -> None:
+        super().__init__(10456, 2, 10458)
+        self.prompt_tokens_details = {"cached_tokens": 7, "cache_write_tokens": 10410}
+
+
+async def test_chat_usage_reads_dict_shaped_prompt_tokens_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — a dict-shaped details payload (some LiteLLM paths surface the raw
+    mapping) reads the same as the object shape."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        return _Response("x", usage=_DictDetailsUsage())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat([ChatMessage(role=Role.USER, content="hi")])
+    assert result.usage.cache_write_tokens == 10410
+    assert result.usage.cached_prompt_tokens == 7
+
+
+class _UsageStreamPart:
+    """A streamed chunk carrying terminal usage and no choices (OpenAI wire)."""
+
+    def __init__(self, usage: Any) -> None:
+        self.choices: list[Any] = []
+        self.usage = usage
+
+
+class _PartStream:
+    """Async-iterable vendor stream over prebuilt parts, with a close hook."""
+
+    def __init__(self, parts: list[Any]) -> None:
+        self._parts = parts
+        self.closed = False
+
+    def __aiter__(self) -> _PartStream:
+        self._it = iter(self._parts)
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_stream_tools_usage_surfaces_openrouter_cache_write_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — the terminal streamed ``StreamEvent.usage`` carries the
+    OpenRouter-shape cache write from the final usage chunk."""
+    from app.domain.llm import ToolSpec
+
+    usage = _CacheUsage(10456, 2, 10458, cached_details=0, cache_write_details=10410)
+
+    async def fake_acompletion(**kwargs: Any) -> _PartStream:
+        return _PartStream([_StreamPart("Hi"), _UsageStreamPart(usage)])
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    gw = LLMGateway(_settings())
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+
+    events = [
+        ev
+        async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="hi")], tools=[spec])
+    ]
+
+    assert events[-1].usage is not None
+    assert events[-1].usage.cache_write_tokens == 10410
+    assert events[-1].usage.cached_prompt_tokens == 0
+
+
+# --- #759: the field must survive LiteLLM's REAL wrappers (offline) --------
+# The fake-object tests above cannot prove LiteLLM 1.55.9 keeps the extra
+# ``cache_write_tokens`` key when it rebuilds ``Usage`` (non-streaming) or
+# streams through ``CustomStreamWrapper``. These tests call the real
+# ``litellm.acompletion`` with an injected OpenAI client whose httpx transport
+# is a MockTransport — no network, no key. The ``openai/`` provider prefix is
+# deliberate: in 1.55.9 the ``openrouter/`` provider ignores an injected
+# ``client=`` (it builds its own client and would hit the real network),
+# while ``openai/`` honors it; both routes share the same OpenAI-compatible
+# wire format and the same ``Usage`` / stream-wrapper parsing under test.
+
+_REAL_USAGE_WIRE = {
+    "prompt_tokens": 10456,
+    "completion_tokens": 2,
+    "total_tokens": 10458,
+    "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 10410},
+}
+
+
+def _patch_real_litellm(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
+    import httpx
+    import openai
+
+    real_acompletion = litellm.acompletion
+
+    async def wrapper(**kwargs: Any) -> Any:
+        kwargs["api_key"] = "test"
+        kwargs.pop("api_base", None)
+        kwargs["client"] = openai.AsyncOpenAI(
+            api_key="test",
+            base_url="http://test/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        return await real_acompletion(**kwargs)
+
+    monkeypatch.setattr(litellm, "acompletion", wrapper)
+
+
+async def test_chat_usage_cache_write_survives_real_litellm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — real LiteLLM non-streaming ``Usage`` keeps ``cache_write_tokens``
+    and the gateway maps it onto ``TokenUsage.cache_write_tokens``."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "test"  # MockTransport only; no real egress
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-759",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "claude-haiku-5.5",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": _REAL_USAGE_WIRE,
+            },
+        )
+
+    _patch_real_litellm(monkeypatch, handler)
+    gw = LLMGateway(_settings())
+
+    result = await gw.chat(
+        [ChatMessage(role=Role.USER, content="hi")], model="openai/claude-haiku-5.5"
+    )
+    assert result.usage.cache_write_tokens == 10410
+    assert result.usage.cached_prompt_tokens == 0
+    assert result.usage.prompt_tokens == 10456
+
+
+async def test_stream_tools_cache_write_survives_real_litellm_stream_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#759 — real LiteLLM ``CustomStreamWrapper``: the terminal usage chunk's
+    ``prompt_tokens_details.cache_write_tokens`` reaches ``StreamEvent.usage``."""
+    import json
+
+    import httpx
+
+    from app.domain.llm import ToolSpec
+
+    chunks = [
+        {
+            "id": "chatcmpl-759",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "claude-haiku-5.5",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "Hi"},
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-759",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "claude-haiku-5.5",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "chatcmpl-759",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "claude-haiku-5.5",
+            "choices": [],
+            "usage": _REAL_USAGE_WIRE,
+        },
+    ]
+    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "test"  # MockTransport only; no real egress
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    _patch_real_litellm(monkeypatch, handler)
+    gw = LLMGateway(_settings())
+    spec = ToolSpec(name="search", description="d", parameters={"type": "object"})
+
+    events = [
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="hi")],
+            tools=[spec],
+            model="openai/claude-haiku-5.5",
+        )
+    ]
+
+    assert events[-1].usage is not None
+    assert events[-1].usage.cache_write_tokens == 10410
+    assert events[-1].usage.cached_prompt_tokens == 0
+    assert events[-1].usage.prompt_tokens == 10456
 
 
 class _HostileUsage:

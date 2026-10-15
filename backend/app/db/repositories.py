@@ -6391,8 +6391,10 @@ def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
 class LlmUsageRepository(_TenantScopedRepository):
     """Per-answer LLM token/cache accounting within one tenant (#409, ADR-0016 §2.6).
 
-    One ``record`` per produced answer (chat and headless runs alike — both ride
-    the shared runtime), summing the answer loop's turns. Tenant-scoped (INV-1):
+    One message-bearing ``record`` per produced answer (chat and headless runs
+    alike — both ride the shared runtime), summing the answer loop's turns,
+    plus one message-less row per additional spend scope (a #413 failover or
+    salvage scope, the post-terminal suggestions nicety). Tenant-scoped (INV-1):
     tenant A's spend is invisible to a tenant-B repository. A trace/analytics
     table like ``tool_invocations`` (ordinary access, no UPDATE/DELETE revoke);
     writes are flushed not committed — the runtime owns the transaction so the
@@ -6522,9 +6524,9 @@ class LlmUsageRepository(_TenantScopedRepository):
         """
         stmt = select(
             # COUNT(message_id) skips NULLs: answers = PRODUCED answers (the
-            # contract's wording) — message-less route scopes (#413 failovers,
-            # error-path salvage) contribute to the token sums but are not
-            # extra "answers".
+            # contract's wording) — message-less scopes (#413 failovers,
+            # error-path salvage, the suggestions nicety) contribute to the
+            # token sums but are not extra "answers".
             func.count(models.LlmUsage.message_id),
             func.coalesce(func.sum(models.LlmUsage.prompt_tokens), 0),
             func.coalesce(func.sum(models.LlmUsage.completion_tokens), 0),
@@ -6546,9 +6548,13 @@ class LlmUsageRepository(_TenantScopedRepository):
         )
 
     async def last_for_session(self, session_id: UUID) -> LlmUsageRecord | None:
-        """The most recent usage record for one session, or ``None`` (spec 0007).
+        """The most recent MESSAGE-BEARING usage record, or ``None`` (spec 0007).
 
-        The "how full was the window last turn" input of the context meter.
+        The "how full was the window last turn" input of the context meter:
+        only the winning answer scope qualifies — message-less scopes (a #413
+        failover/salvage row, the suggestions row) never win this read, so it
+        is NOT the answer's full spend (that is the SUM over its ``answer_id``
+        scopes; ADR-0016 §2.6 #759 amendment).
         """
         stmt = (
             select(models.LlmUsage)

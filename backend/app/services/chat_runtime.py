@@ -477,9 +477,9 @@ class _Usage:
     cache_write_tokens: int = 0
     # The LAST answer-loop turn's prompt size — window occupancy, not billing
     # (#434 NEW-1). Set ONLY by ``_stream_one_turn`` (each loop turn overwrites,
-    # so the final turn wins); the suggestions nicety folds into the sums via
-    # :meth:`add` but never touches this. ``None`` ⇒ the provider reported no
-    # usage.
+    # so the final turn wins); the suggestions nicety accumulates into its OWN
+    # ``_Usage`` (recorded on its own ledger row) and never touches this.
+    # ``None`` ⇒ the provider reported no usage.
     last_turn_prompt_tokens: int | None = None
 
     def add(self, usage: TokenUsage) -> None:
@@ -1889,8 +1889,10 @@ class ChatRuntime:
         # The answer's summed usage as reported on the terminal — the ANSWER's cost
         # (turn loop + any failover scopes), computed BEFORE the suggestions nicety
         # runs. ``done.usage`` is the answer terminal, so it must not wait on (nor
-        # include) the post-terminal nicety; the suggestions tokens are still
-        # accounted on the same DB row (#409 / AC-3) by the post-commit UPDATE below.
+        # include) the post-terminal nicety; the suggestions tokens are accounted
+        # afterwards on their OWN message-less ledger row — linked by ``answer_id``,
+        # tagged ``run_id = answer_id``, attributed to the actual suggestions model
+        # (ADR-0016 §2.6 #490 amendment) — by the post-terminal transaction below.
         answer_usage = _answer_usage_totals(route_state, usage)
         run_result = _RunResult(
             finish_reason=finish_reason,
@@ -1907,11 +1909,12 @@ class ChatRuntime:
         # Record the answer's BASE token/cache usage (#409) — one row per answer, in
         # the SAME transaction as the message it accounts for. This is the ANSWER's
         # cost only (turn loop + any failover scopes); the post-terminal suggestions
-        # nicety folds its own cost onto this same row afterwards, in its own
-        # transaction (BE-1). ``model`` is the requested id so a per-tenant
-        # ``provider:`` id stays attributable, matching the message row. Zeroed fields
-        # (a provider that omitted usage) still record: "no usage reported" must be
-        # visible, not a gap.
+        # nicety records its own cost afterwards on its OWN message-less row
+        # (``answer_id``-linked, ``run_id = answer_id``, the actual suggestions
+        # model), in its own transaction (BE-1). ``model`` is the requested id
+        # so a per-tenant ``provider:`` id stays attributable, matching the
+        # message row. Zeroed fields (a provider that omitted usage) still
+        # record: "no usage reported" must be visible, not a gap.
         await self._record_usage_scopes(
             session=session,
             tenant_id=tenant_id,
@@ -1957,8 +1960,9 @@ class ChatRuntime:
         # (BE-1) that cannot roll the committed answer back, and delivered as a
         # bounded POST-terminal ``event:suggestions`` (#489). Any failure / timeout /
         # parse miss ⇒ no event, never touching the already-published terminal
-        # (AC-6). Its token spend still folds onto the answer's single llm_usage row
-        # via the UPDATE inside that transaction (#409 / AC-3).
+        # (AC-6). Its token spend lands on its OWN message-less llm_usage row inside
+        # that transaction — linked by ``answer_id``, tagged ``run_id = answer_id``,
+        # attributed to the actual suggestions model (#409, ADR-0016 §2.6 #490).
         if will_suggest:
             suggestions = await self._run_followup_suggestions(
                 session_id=session_id,
@@ -3151,8 +3155,11 @@ class ChatRuntime:
         retrieved passages or tool output — so it cannot surface anything the
         caller wasn't already shown (spec 0006 §5). Every failure mode (gateway
         error, timeout, unparseable output) returns ``[]``: the nicety must
-        never degrade the answer. Its token usage folds into ``usage`` so the
-        answer's llm_usage row accounts for it (#409).
+        never degrade the answer. Its token usage folds into the caller's
+        SEPARATE ``usage`` accumulator, which the caller records on the
+        suggestions scope's OWN message-less llm_usage row — linked by
+        ``answer_id``, tagged ``run_id = answer_id``, attributed to the actual
+        suggestions model (#409, ADR-0016 §2.6 #490 amendment).
         """
         request = render_follow_up_request(
             question=question[:_SUGGESTIONS_QUESTION_HEAD_CHARS],
@@ -3208,9 +3215,11 @@ class ChatRuntime:
 
         Moved out of ``run`` into ``_answer`` so the terminal settles the UI BEFORE
         the follow-up-suggestions nicety runs (AC-1). ``done.usage`` carries the
-        ANSWER's summed usage (the suggestions call had not run yet); its cost is
-        still recorded on the DB usage row afterwards (#409). ``pending_suggestions``
-        declares that one post-terminal ``event:suggestions`` may still follow within
+        ANSWER's summed usage (the suggestions call had not run yet); the nicety's
+        cost is recorded afterwards on its OWN message-less usage row, linked by
+        ``answer_id`` and tagged ``run_id = answer_id`` (#409, ADR-0016 §2.6 #490
+        amendment). ``pending_suggestions`` declares that one post-terminal
+        ``event:suggestions`` may still follow within
         the consumer's grace window, and (BE-5) carries the server's own grace as
         ``suggestionsGraceMs`` so the consumer waits exactly the server's window
         rather than a hard-coded default; absent/false keeps the classic
