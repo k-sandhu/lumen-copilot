@@ -989,6 +989,21 @@ def _as_count(value: Any) -> int:
     return max(0, count)
 
 
+def _details_count(details: Any, key: str) -> int:
+    """Read one count off ``prompt_tokens_details``, object- or dict-shaped.
+
+    LiteLLM normally surfaces a ``PromptTokensDetailsWrapper``, but some paths
+    hand back the raw mapping; ``getattr`` alone would silently miss the dict
+    shape. Absent details and malformed values degrade to ``0`` via
+    :func:`_as_count`, like every other usage field.
+    """
+    if details is None:
+        return 0
+    if isinstance(details, dict):
+        return _as_count(details.get(key, 0))
+    return _as_count(getattr(details, key, 0))
+
+
 def _extract_usage(response: Any) -> TokenUsage:
     """Pull token usage off a LiteLLM response, defensively.
 
@@ -999,11 +1014,15 @@ def _extract_usage(response: Any) -> TokenUsage:
     breaking the envelope's non-negative contract.
 
     Cache accounting (#409, ADR-0016 §2.6) is read from BOTH normalized shapes —
-    OpenAI-style ``prompt_tokens_details.cached_tokens`` and Anthropic-style
-    ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` — whichever the
-    provider populated (LiteLLM passes each through as-is). A zero/absent
-    ``cached_tokens`` falls back to the Anthropic-style read field; absent/None
-    fields stay ``0``: a provider with no cache detail never breaks extraction.
+    OpenAI-style ``prompt_tokens_details.cached_tokens`` /
+    ``prompt_tokens_details.cache_write_tokens`` (the shape OpenRouter's
+    Anthropic route reports, #759) and Anthropic-native
+    ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` — whichever
+    the provider populated (LiteLLM passes each through as-is). A zero/absent
+    details field falls back to the Anthropic-native counterpart; the two
+    shapes are never summed, so a provider populating both cannot
+    double-count. Absent/None fields stay ``0``: a provider with no cache
+    detail never breaks extraction.
     """
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -1012,10 +1031,12 @@ def _extract_usage(response: Any) -> TokenUsage:
     completion = _as_count(getattr(usage, "completion_tokens", 0))
     total = _as_count(getattr(usage, "total_tokens", 0)) or (prompt + completion)
     details = getattr(usage, "prompt_tokens_details", None)
-    cached = _as_count(getattr(details, "cached_tokens", 0)) if details is not None else 0
+    cached = _details_count(details, "cached_tokens")
     if not cached:
         cached = _as_count(getattr(usage, "cache_read_input_tokens", 0))
-    cache_write = _as_count(getattr(usage, "cache_creation_input_tokens", 0))
+    cache_write = _details_count(details, "cache_write_tokens")
+    if not cache_write:
+        cache_write = _as_count(getattr(usage, "cache_creation_input_tokens", 0))
     return TokenUsage(
         prompt_tokens=prompt,
         completion_tokens=completion,
