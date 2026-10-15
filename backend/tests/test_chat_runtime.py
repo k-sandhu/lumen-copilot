@@ -1410,9 +1410,10 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
     # Count the current projected fixed schemas instead of baking in native
-    # schema bytes. Each document turn adds ~2708 full / ~573 digested bytes.
-    # The 5500-byte live allowance fits three digests plus the newest full result,
-    # but cannot fit four full results: compaction is necessary and sufficient.
+    # schema bytes. A full document turn (now including get_document's #610
+    # range/truncation disclosure) is several times its digest. The 5500-byte
+    # live allowance fits three digests plus the newest full result, but cannot
+    # fit four full results: compaction is necessary (asserted below) and sufficient.
     fixed_cost = estimate_message_tokens(
         [
             ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),

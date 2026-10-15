@@ -248,13 +248,39 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
     # remaining budget either. Capped at the tool's own ceiling; roomy = unchanged.
     body_budget = max(1, min(ctx.snippet_budget, _SNIPPET_BUDGET)) * 4
     body = doc.text[:body_budget]
+    total_length = len(doc.text)
+    truncated = len(body) < total_length
+    content = (
+        f"Document: {doc.document_name}\n"
+        f"Returned range: 0-{len(body)} of {total_length} characters (end-exclusive).\n\n"
+        f"{body}"
+    )
+    if truncated:
+        recovery = (
+            "use search_text with a targeted query to retrieve evidence from the remaining text."
+            if "search_text" in ctx.allowed_tools
+            else (
+                "This assistant cannot inspect the omitted text with its available tools. "
+                "Ask the user to supply the relevant excerpt or switch to an authorized "
+                "search-capable assistant."
+            )
+        )
+        content += (
+            f"\n\n[Truncated: characters {len(body)}-{total_length} are not shown. "
+            f"This legacy tool reads only a prefix; {recovery}]"
+        )
     return ToolHandlerResult(
         source_document_ids=(),
-        content=f"Document: {doc.document_name}\n\n{body}",
+        content=content,
         summary=doc.document_name,
         hit_count=1,
         document_ids=(doc.document_id,),
-        payload={"document_id": str(doc.document_id)},
+        payload={
+            "document_id": str(doc.document_id),
+            "returned_range": [0, len(body)],
+            "total_length": total_length,
+            "truncated": truncated,
+        },
     )
 
 
@@ -360,12 +386,15 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="get_document",
         description=(
-            "Read the accessible document id returned by search_documents or "
-            "list_documents. Returns a text prefix of up to 2400 characters (or "
-            "four times the current snippet allowance when context is tight), not "
-            "necessarily the whole document. If relevant evidence is beyond that "
-            "prefix, use search_text to find matching passages. A missing or "
-            "inaccessible id returns 'Document not found'."
+            "Read a prefix of an accessible document by the id returned by "
+            "search_documents or list_documents. Use this for an overview, not to "
+            "conclude that unseen text contains no answer. Returns up to 2,400 "
+            "characters, less under a tight context budget, with the returned range "
+            "and total length. A truncated read explicitly marks omitted text; use "
+            "search_text when available with a targeted query for evidence beyond "
+            "the prefix. Otherwise ask the user to supply the relevant excerpt "
+            "or switch to an authorized search-capable assistant. "
+            "Missing and inaccessible documents both return not found."
         ),
         json_schema={
             "type": "object",
