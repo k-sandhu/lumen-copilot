@@ -25,11 +25,15 @@ from app.db.repositories import (
 )
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditEvent, AuditOutcome, ToolInvocation
+from app.domain.llm import ChatMessage
+from app.domain.llm import Role as LlmRole
 from app.domain.retrieval import RetrievedPassage
-from app.llm.context import ContextConfig
+from app.llm.context import ContextConfig, estimate_message_tokens
 from app.realtime.backplane import InMemoryBackplane
 from app.services.audit import AuditSink
+from app.services.prompts import GROUNDED_SYSTEM_PROMPT
 from app.services.tools.context_audit import ContextAuditSink
+from app.services.tools.registry import default_allowlist, tool_specs
 from tests import test_chat_api as chat_api_tests
 from tests import test_chat_runtime as chat_runtime_tests
 
@@ -268,6 +272,23 @@ async def test_context_audit_sink_keeps_only_deep_copied_nondurable_records() ->
     assert durable.id != transient.id
 
 
+def _window_fitting_first_turn(question: str) -> int:
+    """A byte-fallback window whose first turn fits but one 8,000-byte passage does not.
+
+    Derived from the projected fixed cost (system prompt, question, every default
+    tool schema) rather than a constant, because tool descriptions legitimately grow.
+    """
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content=question),
+        ],
+        tool_specs(default_allowlist()),
+        counter=lambda text: len(text.encode("utf-8")),
+    )
+    return fixed_cost + 2_000 + 1_024  # + the assembler's 1,024 safety margin
+
+
 async def test_context_restore_failure_emits_internal_error_without_committing_turn(
     ctx: chat_runtime_tests._Ctx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -305,7 +326,10 @@ async def test_context_restore_failure_emits_internal_error_without_committing_t
         gateway=gateway,
         retrieval=chat_runtime_tests._FakeRetrieval([passage]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=9_072, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=_window_fitting_first_turn("summarize the large document"),
+            output_headroom_tokens=0,
+        ),
     )
     consumer = asyncio.create_task(chat_runtime_tests._drain(backplane, stream_id))
     await asyncio.sleep(0)
@@ -372,7 +396,10 @@ async def test_simulated_context_rejection_skips_recovery_commit(
         gateway=chat_runtime_tests._RecordingSearchGateway(),
         retrieval=chat_runtime_tests._FakeRetrieval([passage]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=9_072, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=_window_fitting_first_turn("summarize the large document"),
+            output_headroom_tokens=0,
+        ),
     )
     consumer = asyncio.create_task(chat_runtime_tests._drain(backplane, stream_id))
     await asyncio.sleep(0)

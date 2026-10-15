@@ -283,6 +283,10 @@ class ToolContext:
     #: recall); the handler then reports a typed ``ok=False`` instead of
     #: crashing, exactly as ``sandbox=None`` does for ``run_python``.
     transcript: TranscriptReader | None = None
+    #: The runner's authoritative per-run catalog, for actionable handler advice.
+    #: Empty outside the runner: do not promise a recovery tool without evidence
+    #: it is allowed. This field conveys availability, never grants permission.
+    allowed_tools: frozenset[str] = frozenset()
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and

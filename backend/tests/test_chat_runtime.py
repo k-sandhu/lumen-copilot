@@ -1197,7 +1197,9 @@ async def test_oversized_tool_results_never_exceed_budget(
     import sys
     import types as _types
 
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     # Force the assembler's counting/resolver onto their deterministic fallbacks
     # (conservative UTF-8 bytes; the configured fallback window) by making litellm
@@ -1223,16 +1225,28 @@ async def test_oversized_tool_results_never_exceed_budget(
     gateway = _RecordingSearchGateway()
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
-    # fallback 9072 − 0 headroom − 1024 margin ⇒ budget 8048 bytes. The initial
-    # [system, question] + tool schemas (incl. ask_user since spec 0006/#429)
-    # fits, but the accumulating tool results push a later turn over budget —
-    # where the guard must refuse, not send.
+    # Derive the budget from the current projected fixed cost (system prompt,
+    # question and every default tool schema) instead of baking in catalog bytes:
+    # tool descriptions legitimately grow (#623, #610). The 2000-byte allowance
+    # fits the initial [system, question] + schemas, but one 8000-byte passage
+    # pushes a later turn over budget — where the guard must refuse, not send.
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="summarize the big doc"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=lambda text: len(text.encode("utf-8")),
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([huge]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=9072, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0
+        ),
     )
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
@@ -1246,7 +1260,6 @@ async def test_oversized_tool_results_never_exceed_budget(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
-    budget = 9072 - 1024
     # Every payload the gateway received — measured by the SAME full-wire estimate
     # the guard uses — was within budget. Without the guard, the accumulating tool
     # results would push a later estimate over budget and this would FAIL.
@@ -1410,9 +1423,10 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
     # Count the current projected fixed schemas instead of baking in native
-    # schema bytes. Each document turn adds ~2708 full / ~573 digested bytes.
-    # The 5500-byte live allowance fits three digests plus the newest full result,
-    # but cannot fit four full results: compaction is necessary and sufficient.
+    # schema bytes. A full document turn (now including get_document's #610
+    # range/truncation disclosure) is several times its digest. The 5500-byte
+    # live allowance fits three digests plus the newest full result, but cannot
+    # fit four full results: compaction is necessary (asserted below) and sufficient.
     fixed_cost = estimate_message_tokens(
         [
             ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
