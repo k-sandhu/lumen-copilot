@@ -233,7 +233,8 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
 async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     raw_id = str(args.get("document_id") or "").strip()
     try:
-        document_id = UUID(raw_id)
+        resolved = ctx.document_id_resolver(raw_id) if ctx.document_id_resolver else None
+        document_id = resolved if resolved is not None else UUID(raw_id)
     except ValueError:
         # A malformed id is a tool-specific rejection, not a crash — the runner
         # passes the ``ok=False`` through and the run continues (issue #207 §7).

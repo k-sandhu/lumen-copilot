@@ -23,12 +23,22 @@ Reservations commit through the coordinator's session before any tool writes,
 then restore the transaction-local tenant binding. Serial and denial-only paths
 do not acquire a second database connection. Preview reservations remain inside
 the preview's rollback boundary.
+The reservation also precedes carry-forward rehydration audit writes, so a later
+context rejection restores only uncommitted events and retains every completed
+read and invocation without duplicate event identities (spec 0018).
 
 The final model answer cites `[S1]` or `[W1]` inline. Only permitted, currently
 visible cited evidence is persisted. D handles are navigation only. Unknown,
 forbidden and navigation markers are stripped, with any speculative answer
 retracted and corrected before persistence/terminal delivery. A generated refusal
 without source markers and deterministic fallback both have zero citations.
+`get_document` resolves a D handle from the current owner/tenant conversation,
+including persisted handles from earlier turns, then uses the same permissioned
+retrieval read as a UUID input. A handle supplies identity, never a grant; missing
+or foreign-conversation handles cannot resolve, and revoked documents remain hidden.
+Selection and removal apply only to citation text positions in CommonMark.
+Literal code, raw HTML, and Markdown link/image labels and destinations retain
+their original bytes through both resolution passes, including unknown markers.
 Compaction retains labeled visible evidence rather than merely its source ID.
 Recalled conversation prose is navigation, never source evidence.
 Generic tool content and its complete transitive document provenance remain

@@ -1110,6 +1110,19 @@ class ChatRuntime:
                 "document(s) to this message; document searches for this answer "
                 "are scoped to them. Search them before answering.]"
             )
+        # Reserve before tools can write forward-referencing trace rows. The
+        # reservation commit leaves gaps after aborts instead of reusing handles.
+        # It must precede carry-forward audit writes too: recovery snapshots
+        # contain only records still owned by the answer transaction.
+        # Reuse the coordinator: serial/denial-only paths must not acquire an
+        # extra pool connection. Preview's injected commit remains flush-only.
+        handle_repo = HandleRepository(session, self._principal, session_id)
+        first_handle = await handle_repo.reserve()
+        await session.commit()
+        # SET LOCAL resets at commit; restore the tenant on the new transaction.
+        await bind_tenant(session, tenant_id)
+        handles = EvidenceHandles(first=first_handle, existing=await handle_repo.load())
+
         # Evidence carry-forward rehydration (#416, ADR-0016 §3.2): the stored
         # digest is IDs ONLY; ONE bounded, permission-filtered metadata query
         # (#446 finding 4) re-checks every id against the requester's CURRENT
@@ -1221,16 +1234,6 @@ class ChatRuntime:
         self._salvage = (route_state, usage)
         finish_reason = "stop"
         total_hits = 0
-        # Reserve before tools can write forward-referencing trace rows. The
-        # reservation commit leaves gaps after aborts instead of reusing handles.
-        # Reuse the coordinator: serial/denial-only paths must not acquire an
-        # extra pool connection. Preview's injected commit remains flush-only.
-        handle_repo = HandleRepository(session, self._principal, session_id)
-        first_handle = await handle_repo.reserve()
-        await session.commit()
-        # SET LOCAL resets at commit; restore the tenant on the new transaction.
-        await bind_tenant(session, tenant_id)
-        handles = EvidenceHandles(first=first_handle, existing=await handle_repo.load())
         available_handles: set[str] = set()
         web_evidence: dict[str, WebCitation] = {}
         web_snippets: dict[str, tuple[str, ...]] = {}
@@ -1263,6 +1266,7 @@ class ChatRuntime:
         tool_context = ToolContext(
             principal=self._principal,
             retrieval=retrieval,
+            document_id_resolver=handles.document_id,
             collection_ids=effective_collection_ids,
             # Pinned documents (spec 0007 #429): passage search narrows to these
             # ids — an ADDITIONAL filter over the caller's allow-set, applied

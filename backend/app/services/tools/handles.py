@@ -9,6 +9,7 @@ from copy import deepcopy
 from uuid import UUID
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline.state_inline import StateInline
 
 from app.core.errors import ValidationError
 from app.domain.retrieval import RetrievedPassage
@@ -85,36 +86,68 @@ class EvidenceHandles:
         entry = self.entries.get(handle)
         return deepcopy(entry) if entry is not None else None
 
+    def document_id(self, handle: str) -> UUID | None:
+        """Resolve navigation identity from this conversation, never a grant."""
+        entry = self.entries.get(handle)
+        if (
+            not re.fullmatch(r"D[1-9][0-9]*", handle)
+            or not entry
+            or entry.get("kind") != "document"
+        ):
+            return None
+        try:
+            return UUID(str(entry["document_id"]))
+        except (KeyError, ValueError):
+            return None
+
 
 _HANDLE = re.compile(r"\[([SDW][1-9][0-9]*)\]")
+
+
+def _citation_marker(state: StateInline, silent: bool) -> bool:
+    """Run after CommonMark's links/images/code rules, recording raw positions."""
+    # Link-label lookahead must see ordinary brackets, not a nested token.
+    if silent or state.linkLevel:
+        return False
+    match = _HANDLE.match(state.src, state.pos, state.posMax)
+    if match is None:
+        return False
+    token = state.push("citation_marker", "", 0)
+    token.content = match.group(0)
+    token.meta["offset"] = state.pos
+    state.pos = match.end()
+    return True
 
 
 def select_cited_handles(answer: str, available: set[str]) -> tuple[str, list[str]]:
     """Strip invalid markers and select only visible S/W claims in first-use order."""
     selected: list[str] = []
-    # CommonMark text nodes agree with the frontend's remark text-node walk:
-    # code, HTML and link destinations/labels are data, never source claims.
-    for token in MarkdownIt("commonmark").parse(answer):
-        link_depth = 0
+    removed: list[tuple[int, int]] = []
+    parser = MarkdownIt("commonmark")
+    parser.inline.ruler.after("image", "citation_marker", _citation_marker)
+    line_starts = [0, *(match.end() for match in re.finditer(r"\r\n|\r|\n", answer)), len(answer)]
+    for token in parser.parse(answer):
+        if token.type != "inline" or token.map is None:
+            continue
+        # CommonMark strips block prefixes (quotes/lists/headings), but retains
+        # raw marker order in each inline block, including code/link data. Map
+        # every occurrence before considering eligibility so identical literal
+        # and citation markers cannot be confused. Edit only the original spans.
+        original = list(
+            _HANDLE.finditer(answer, line_starts[token.map[0]], line_starts[token.map[1]])
+        )
+        offsets = {
+            local.start(): source.span()
+            for local, source in zip(_HANDLE.finditer(token.content), original, strict=True)
+        }
         for child in token.children or ():
-            if child.type == "link_open":
-                link_depth += 1
-            elif child.type == "link_close":
-                link_depth -= 1
-            elif child.type == "text" and not link_depth:
-                for match in _HANDLE.finditer(child.content):
-                    handle = match.group(1)
-                    if (
-                        not handle.startswith("D")
-                        and handle in available
-                        and handle not in selected
-                    ):
-                        selected.append(handle)
-
-    def resolve(match: re.Match[str]) -> str:
-        handle = match.group(1)
-        if handle.startswith("D") or handle not in available:
-            return ""
-        return match.group(0)
-
-    return _HANDLE.sub(resolve, answer), selected
+            if child.type != "citation_marker":
+                continue
+            handle = child.content[1:-1]
+            if handle.startswith("D") or handle not in available:
+                removed.append(offsets[child.meta["offset"]])
+            elif handle not in selected:
+                selected.append(handle)
+    for start, end in reversed(removed):
+        answer = answer[:start] + answer[end:]
+    return answer, selected
