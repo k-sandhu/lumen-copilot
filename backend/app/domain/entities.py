@@ -758,6 +758,10 @@ class Document:
     source_text: str | None = None
     source_locations: tuple[SourceLocation, ...] = ()
     ingestion_metadata: dict[str, object] | None = None
+    title: str | None = None
+    source_path: str | None = None
+    source_modified_at: datetime | None = None
+    discovery_metadata: dict[str, object] | None = None
     ingestion_attempts: int = 0
     ingestion_failure: dict[str, object] | None = None
     kind: DocumentKind = DocumentKind.DOCUMENT

@@ -232,6 +232,9 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
 
 async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     raw_id = str(args.get("document_id") or "").strip()
+    if raw_id.startswith("D") and ctx.handles is not None:
+        entry = ctx.handles.resolve(raw_id)
+        raw_id = str(entry["document_id"]) if entry and entry.get("kind") == "document" else ""
     try:
         resolved = ctx.document_id_resolver(raw_id) if ctx.document_id_resolver else None
         document_id = resolved if resolved is not None else UUID(raw_id)
@@ -296,6 +299,7 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
 TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="search_text",
+        default_offered=False,
         description=(
             "Hybrid semantic + keyword search over the documents the user can "
             "access (their own and any shared with them). Use this to find "
@@ -333,6 +337,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="search_documents",
+        default_offered=False,
         description=(
             "Find accessible documents by filename substring. This search matches "
             "filenames only, not document body text or other metadata. Use the "
@@ -364,6 +369,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="list_documents",
+        default_offered=False,
         description=(
             "List the documents the user can access — their own uploads and any "
             "shared with them — without needing a search term. Use this to answer "
@@ -394,6 +400,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="get_document",
+        default_offered=False,
         description=(
             "Read a prefix of an accessible document by the id returned by "
             "search_documents or list_documents. Use this for an overview, not to "

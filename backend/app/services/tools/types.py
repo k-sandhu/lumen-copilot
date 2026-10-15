@@ -27,6 +27,7 @@ from app.domain.entities import Artifact, ArtifactProducedBy, CodeRunStatus
 from app.domain.tools import APPROVAL_REASON_GATE_INERT, RiskTier, ToolHandlerResult
 from app.retrieval import RetrievalService
 from app.services.artifacts_service import ArtifactLinks
+from app.services.tools.handles import EvidenceHandles
 
 
 @runtime_checkable
@@ -289,6 +290,7 @@ class ToolContext:
     allowed_tools: frozenset[str] = frozenset()
     #: Conversation-bound D identities only; authorization remains in retrieval.
     document_id_resolver: Callable[[str], UUID | None] | None = None
+    handles: EvidenceHandles | None = None
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and

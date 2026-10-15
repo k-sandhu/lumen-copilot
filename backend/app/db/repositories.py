@@ -263,6 +263,12 @@ def to_document(row: models.Document) -> Document:
         source_text=row.source_text,
         source_locations=tuple(SourceLocation.from_dict(value) for value in locations),
         ingestion_metadata=row.ingestion_metadata,
+        title=row.title,
+        source_path=row.source_path,
+        source_modified_at=row.source_modified_at,
+        discovery_metadata=(
+            dict(row.discovery_metadata) if row.discovery_metadata is not None else None
+        ),
         ingestion_attempts=row.ingestion_attempts,
         ingestion_failure=dict(row.ingestion_failure)
         if row.ingestion_failure is not None
@@ -1802,6 +1808,10 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None = None,
         acl_synced_at: datetime | None = None,
         acl_scope_ids: Sequence[str] | None = None,
+        title: str | None = None,
+        source_path: str | None = None,
+        source_modified_at: datetime | None = None,
+        discovery_metadata: dict[str, object] | None = None,
         kind: DocumentKind = DocumentKind.DOCUMENT,
     ) -> Document:
         """Create a document row — the ACL-mode write seam (ADR-0019 §2).
@@ -1829,6 +1839,10 @@ class DocumentRepository(_TenantScopedRepository):
             acl_synced_at=acl_synced_at,
             acl_scope_ids=list(acl_scope_ids) if acl_scope_ids is not None else None,
             external_id=external_id,
+            title=title,
+            source_path=source_path,
+            source_modified_at=source_modified_at,
+            discovery_metadata=discovery_metadata,
             kind=kind.value,
         )
         self._session.add(row)
@@ -1901,6 +1915,10 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None,
         acl_synced_at: datetime | None,
         acl_scope_ids: Sequence[str] | None,
+        title: str | None = None,
+        source_path: str | None = None,
+        source_modified_at: datetime | None = None,
+        discovery_metadata: dict[str, object] | None = None,
     ) -> Document | None:
         """Refresh an existing connector document in place (incremental upsert).
 
@@ -1926,6 +1944,10 @@ class DocumentRepository(_TenantScopedRepository):
         row.acl_principals = list(acl_principals) if acl_principals is not None else None
         row.acl_synced_at = acl_synced_at
         row.acl_scope_ids = list(acl_scope_ids) if acl_scope_ids is not None else None
+        row.title = title
+        row.source_path = source_path
+        row.source_modified_at = source_modified_at
+        row.discovery_metadata = discovery_metadata
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
