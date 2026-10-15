@@ -16,6 +16,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -43,6 +45,8 @@ from app.retrieval import RetrievalService
 from app.services.assistant_runtime import assemble_run_config
 from app.services.assistants_service import AssistantsService
 from app.services.audit import AuditSink
+from app.services.tools.compatibility import LEGACY
+from app.services.tools.handles import EvidenceHandles
 from app.services.tools.registry import default_allowlist, get_tool, registered_names, tool_specs
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import ToolContext
@@ -1052,7 +1056,15 @@ async def test_get_document_inv2_chunk_and_name_indistinguishable(
     principal = _principal(world.alice, world.tenant_a)
     bob_chunk = await _chunk_id(session, world.bob_doc)
     carol_chunk = await _chunk_id(session, world.carol_doc)
-    unknown = await _call(session, principal, "get_document", {"document_id": str(uuid.uuid4())})
+    # Even an accessible filename that looks like a handle cannot bypass the
+    # active conversation registry. Foreign identities remain navigation only.
+    await _doc(session, world.tenant_a, world.alice, "S999", "Handle-shaped filename.")
+    await session.commit()
+    handles = EvidenceHandles()
+    forbidden_handles = [handles.document(did) for did in (world.bob_doc, world.carol_doc)]
+    ctx = replace(_ctx(session, principal), handles=handles)
+    handler = get_tool("get_document").handler
+    unknown = await handler({"document_id": str(uuid.uuid4())}, ctx)
     assert unknown.ok is False
     assert unknown.error == ERROR_BAD_ARGS
     for handle in (
@@ -1067,8 +1079,13 @@ async def test_get_document_inv2_chunk_and_name_indistinguishable(
         "document carol.txt",
         "no-such-file.pdf",
         "not-a-uuid",
+        "",
+        "D999",
+        "S999",
+        "W999",
+        *forbidden_handles,
     ):
-        result = await _call(session, principal, "get_document", {"document_id": handle})
+        result = await handler({"document_id": handle}, ctx)
         assert _outcome(result) == _outcome(unknown), handle
         assert "Bob private" not in result.content
         assert "Carol notes" not in result.content
@@ -1101,6 +1118,7 @@ def test_get_document_descriptions_match_accepted_shapes() -> None:
     description = defn.description.lower()
     param = defn.json_schema["properties"]["document_id"]["description"].lower()
     for text in (description, param):
+        assert "d handle" in text
         assert "chunk" in text
         assert "filename" in text or "exact name" in text or "document name" in text
     assert "search_text" in description
@@ -1178,7 +1196,7 @@ async def test_runner_replay_get_document_argument_shapes(
     principal = _principal(world.alice, world.tenant_a)
     chunk_id = await _chunk_id(session, world.alice_doc)
     runner = ToolRunner(
-        allowed=default_allowlist(),
+        allowed=LEGACY,
         invocations=ToolInvocationRepository(session, world.tenant_a),
         audit=AuditSink(AuditEventRepository(session, world.tenant_a)),
         actor=AuditActor.user(world.alice),
@@ -1225,3 +1243,160 @@ async def test_runner_replay_get_document_argument_shapes(
         assert rejected.error == ERROR_BAD_ARGS, key
         assert "Correct the arguments and retry" in rejected.content, key
         assert "unknown" in rejected.content or "required" in rejected.content, key
+
+
+async def test_get_document_handle_precedes_resolver_and_literal_name(
+    session_and_world: tuple[AsyncSession, _World], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, world = session_and_world
+    handles = EvidenceHandles()
+    handle = handles.document(world.alice_doc)
+    await _doc(session, world.tenant_a, world.alice, handle, "Wrong literal document.")
+    await session.commit()
+    resolver = Mock(return_value=world.bob_doc)
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=handles,
+        document_id_resolver=resolver,
+    )
+    read = AsyncMock(wraps=ctx.retrieval.get_document)
+    fallback = AsyncMock(wraps=ctx.retrieval.resolve_document_text)
+    monkeypatch.setattr(ctx.retrieval, "get_document", read)
+    monkeypatch.setattr(ctx.retrieval, "resolve_document_text", fallback)
+
+    result = await get_tool("get_document").handler({"document_id": f"  {handle}  "}, ctx)
+
+    assert result.ok and result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+    resolver.assert_not_called()
+    fallback.assert_not_awaited()
+    read.assert_awaited_once_with(principal=ctx.principal, document_id=world.alice_doc)
+
+
+@pytest.mark.parametrize("handle", ["D999", "S1", "W2", "S999", "W999", "D3", "D4"])
+async def test_get_document_conversation_rejection_does_no_retrieval_io(
+    session_and_world: tuple[AsyncSession, _World], monkeypatch: pytest.MonkeyPatch, handle: str
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    ctx = replace(_ctx(session, principal), handles=EvidenceHandles())
+    unknown = await get_tool("get_document").handler({"document_id": "unknown.txt"}, ctx)
+    # A literal filename and a permissive legacy resolver must both lose to a
+    # handle-shaped input, including known passage/web and malformed entries.
+    await _doc(session, world.tenant_a, world.alice, handle, "Must not be read.")
+    await session.commit()
+    handles = EvidenceHandles(
+        existing={
+            "S1": {"kind": "passage", "document_id": str(world.alice_doc)},
+            "W2": {"kind": "web", "url": "https://example.test"},
+            "D3": {"kind": "passage", "document_id": str(world.alice_doc)},
+            "D4": {"kind": "document", "document_id": "not-a-uuid"},
+        }
+    )
+    resolver = Mock(return_value=world.alice_doc)
+    ctx = replace(ctx, handles=handles, document_id_resolver=resolver)
+    read = AsyncMock(wraps=ctx.retrieval.get_document)
+    fallback = AsyncMock(wraps=ctx.retrieval.resolve_document_text)
+    monkeypatch.setattr(ctx.retrieval, "get_document", read)
+    monkeypatch.setattr(ctx.retrieval, "resolve_document_text", fallback)
+
+    result = await get_tool("get_document").handler({"document_id": f" {handle} "}, ctx)
+
+    resolver.assert_not_called()
+    read.assert_not_awaited()
+    fallback.assert_not_awaited()
+    assert _outcome(result) == _outcome(unknown)
+
+
+@pytest.mark.parametrize("shape", ["document", "chunk", "filename"])
+async def test_get_document_resolver_precedes_uuid_chunk_and_name(
+    session_and_world: tuple[AsyncSession, _World], monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    session, world = session_and_world
+    raw = {
+        "document": str(world.bob_doc),
+        "chunk": str(await _chunk_id(session, world.bob_doc)),
+        "filename": "bob-secret.txt",
+    }[shape]
+    resolver = Mock(return_value=world.alice_doc)
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles(),
+        document_id_resolver=resolver,
+    )
+    read = AsyncMock(wraps=ctx.retrieval.get_document)
+    fallback = AsyncMock(wraps=ctx.retrieval.resolve_document_text)
+    monkeypatch.setattr(ctx.retrieval, "get_document", read)
+    monkeypatch.setattr(ctx.retrieval, "resolve_document_text", fallback)
+
+    result = await get_tool("get_document").handler({"document_id": f" {raw} "}, ctx)
+
+    assert result.ok and result.document_ids == (world.alice_doc,)
+    resolver.assert_called_once_with(raw)
+    read.assert_awaited_once_with(principal=ctx.principal, document_id=world.alice_doc)
+    fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize("raw", ["D0", "S01", "W-1", "d1", "Document Control Plan.pdf"])
+async def test_get_document_non_handle_filename_with_active_handles(
+    session_and_world: tuple[AsyncSession, _World], raw: str
+) -> None:
+    session, world = session_and_world
+    did = await _doc(session, world.tenant_a, world.alice, raw, "Literal filename body.")
+    await session.commit()
+    resolver = Mock(return_value=None)
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles(),
+        document_id_resolver=resolver,
+    )
+    result = await get_tool("get_document").handler({"document_id": raw}, ctx)
+    assert result.ok and result.document_ids == (did,)
+    resolver.assert_called_once_with(raw)
+
+
+@pytest.mark.parametrize("with_handles", [False, True], ids=["uuid", "handle"])
+async def test_get_document_canonical_discovery_recovery_is_usable(
+    session_and_world: tuple[AsyncSession, _World], with_handles: bool
+) -> None:
+    session, world = session_and_world
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles() if with_handles else None,
+        allowed_tools=frozenset({"get_document", "find_documents", "search_passages"}),
+    )
+    missing = await get_tool("get_document").handler({"document_id": "missing.txt"}, ctx)
+    assert not missing.ok and missing.error == ERROR_BAD_ARGS
+    assert "find_documents" in missing.content
+    for unavailable in ("search_text", "search_documents", "list_documents", "search_passages"):
+        assert unavailable not in missing.content
+    assert "a chunk id shown in search results" not in missing.content
+    assert ("D handle" in missing.content) is with_handles
+
+    found = await get_tool("find_documents").handler({"query": "alice-taxes"}, ctx)
+    label = found.content.split("]", 1)[0].removeprefix("[")
+    assert label.startswith("D") if with_handles else label == str(world.alice_doc)
+    read = await get_tool("get_document").handler({"document_id": label}, ctx)
+    assert read.ok and read.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_passage_only_catalog_does_not_offer_s_handles(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles(),
+        allowed_tools=frozenset({"get_document", "search_passages"}),
+    )
+    result = await get_tool("get_document").handler({"document_id": "missing.txt"}, ctx)
+    assert not result.ok and result.error == ERROR_BAD_ARGS
+    for unavailable in (
+        "find_documents",
+        "search_passages",
+        "search_text",
+        "search_documents",
+        "list_documents",
+    ):
+        assert unavailable not in result.content
+    assert "a chunk id shown in search results" not in result.content

@@ -25,9 +25,11 @@ records the ``tool_invocations`` row for each.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+from uuid import UUID
 
-from app.domain.retrieval import RetrievedPassage
+from app.domain.retrieval import DocumentResolution, RetrievedPassage
 from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
 from app.services.tools.types import ToolContext, ToolDefinition
 
@@ -131,20 +133,25 @@ def _document_not_found_content(ctx: ToolContext) -> str:
     (as the truncation-recovery text does), and discloses no length or range.
     """
     allowed = ctx.allowed_tools
-    accepted: list[str] = []
+    accepted = ["a document UUID"]
+    if ctx.handles is not None or ctx.document_id_resolver is not None:
+        accepted.append("a current conversation D handle")
     if "search_text" in allowed:
-        accepted.append("the 'document id:' value from search_text results")
+        accepted.append("the 'document id:' value or chunk id from search_text results")
     id_tools = [name for name in ("search_documents", "list_documents") if name in allowed]
     if id_tools:
         accepted.append("an id from " + " or ".join(id_tools))
-    if not accepted:
-        accepted.append("a document id")
-    accepted.extend(("a chunk id shown in search results", "an exact filename as displayed"))
+    if "find_documents" in allowed:
+        value = "a D handle" if ctx.handles is not None else "a document id"
+        accepted.append(value + " from find_documents")
+    accepted.extend(("a chunk UUID", "an exact filename as displayed"))
     content = (
         "Document not found. No accessible document matches that document_id. "
         "document_id takes " + ", ".join(accepted[:-1]) + ", or " + accepted[-1] + "."
     )
-    if "search_documents" in allowed:
+    if "find_documents" in allowed:
+        content += " To find a document by filename, call find_documents."
+    elif "search_documents" in allowed:
         content += " To find a document by filename, call search_documents."
     return content
 
@@ -259,16 +266,27 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
 
 async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     raw_id = str(args.get("document_id") or "").strip()
-    if raw_id.startswith("D") and ctx.handles is not None:
-        entry = ctx.handles.resolve(raw_id)
-        raw_id = str(entry["document_id"]) if entry and entry.get("kind") == "document" else ""
-    resolved = ctx.document_id_resolver(raw_id) if ctx.document_id_resolver else None
-    if resolved is not None:
-        raw_id = str(resolved)
-    # Resolution (document id → chunk id → exact name, with tolerant parsing)
-    # lives inside ``retrieval/`` under the same owner-or-grant predicate
-    # (#758).
-    resolution = await ctx.retrieval.resolve_document_text(principal=ctx.principal, handle=raw_id)
+    # Use the conversation handle grammar (EvidenceHandles), never a prefix
+    # test: e.g. "Document Control Plan.pdf" is still a literal filename.
+    # An active registry is authoritative for S/D/W identities, including misses.
+    handle_only = ctx.handles is not None and re.fullmatch(r"[SDW][1-9][0-9]*", raw_id) is not None
+    resolved = None
+    if handle_only and ctx.handles is not None:
+        resolved = ctx.handles.document_id(raw_id)
+    elif ctx.document_id_resolver is not None:
+        resolved = ctx.document_id_resolver(raw_id)
+    if isinstance(resolved, UUID):
+        resolution = DocumentResolution(
+            document=await ctx.retrieval.get_document(principal=ctx.principal, document_id=resolved)
+        )
+    elif handle_only:
+        resolution = DocumentResolution()  # No retrieval I/O for rejected handles.
+    else:
+        # UUID → chunk UUID → literal name → stripped name stays inside retrieval/,
+        # under its shared tenant + owner-or-grant predicate (#758).
+        resolution = await ctx.retrieval.resolve_document_text(
+            principal=ctx.principal, handle=raw_id
+        )
     if resolution.candidates:
         lines = [f"- {c.document_name} (id: {c.document_id})" for c in resolution.candidates]
         return ToolHandlerResult(
@@ -444,6 +462,7 @@ TOOLS: tuple[ToolDefinition, ...] = (
         default_offered=False,
         description=(
             "Read a prefix of an accessible document. document_id accepts the "
+            "current conversation D handle, a document UUID, the "
             "'document id:' value from search_text results, an id returned by "
             "search_documents or list_documents, a chunk id shown by search_text, "
             "or an exact filename as displayed. Use this for an overview, not to "
@@ -461,7 +480,8 @@ TOOLS: tuple[ToolDefinition, ...] = (
                 "document_id": {
                     "type": "string",
                     "description": (
-                        "The document to fetch: a 'document id:' value from "
+                        "The document to fetch: a current conversation D handle, "
+                        "a document UUID, a 'document id:' value from "
                         "search_text, an id from search_documents or "
                         "list_documents, a chunk id shown by search_text, or an "
                         "exact filename as displayed."

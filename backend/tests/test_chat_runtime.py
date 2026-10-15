@@ -5250,9 +5250,6 @@ async def test_summary_segment_is_shed_before_refusal(
     """#446 finding 4 (degrade order): an oversize summary must SHED, not turn
     a fitting question into context_too_large — the answer degrades to the
     verbatim window."""
-    import sys
-    import types as _types
-
     from app.llm.context import ContextConfig as _CC
     from app.llm.context import estimate_message_tokens
     from app.services.prompts import GROUNDED_SYSTEM_PROMPT
