@@ -1,0 +1,777 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "run_id": "local-20261015-chrome-current",
+  "started_at": "2026-10-15T14:57:20.041171Z",
+  "finished_at": "2026-10-15T15:10:29.124774Z",
+  "application": {
+    "images": [
+      {
+        "digest": "sha256:5cc09be8b6c5c697636d83f6d25680599728ef0295a09fbd6f2b14066719fe5e",
+        "service": "backend"
+      },
+      {
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6",
+        "service": "frontend"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "definitions": {
+    "commit": "049b382a7edd86bddb6395a9fc454d53ad2c40b2",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "759ebaafd0a9fe80059cbdbf5a1e87862b5af8d19ab7554c95528f150427f50b"
+  },
+  "environment": {
+    "models": [
+      "openrouter/inclusionai/ling-3.0-flash"
+    ],
+    "label": "canonical local Acme / synthetic QA",
+    "configuration": {
+      "base_url": "http://localhost:47180",
+      "knowledge_modes": [
+        "Company",
+        "Uploaded"
+      ],
+      "python_mode_available": false,
+      "compose_files": [
+        "docker-compose.yml",
+        "docker-compose.fast.yml"
+      ],
+      "web_mode_available": false,
+      "embedding_route": "openai/nvidia/nemotron-3-embed-1b:free",
+      "embedding_dimensions": 2048
+    },
+    "data": {
+      "scope": "single owner; synthetic fixture",
+      "fixture_sha256": "6115fb0af49f02b86f81a3564b4cb1cb08d84343640dedcd0e42a0d844c96ab2"
+    },
+    "kind": "live_local",
+    "database_schema": "0049_discovery_metadata",
+    "browser": "Chrome 155.0.8059.79"
+  },
+  "ci": null,
+  "notes": "14 manual browser cases executed against the deployed main app, not the tracking checkout. The four HTTP cases are in local-20261015-http-current. New synthetic collection, fixture, chat and unpublished assistant draft are intentionally retained for sponsor review; no schedule was created. The ingestion failure and subsequent unassisted recovery are both preserved; no root cause or fix is claimed. After reauthentication the original automated tab stopped responding to navigation activation; a fresh normal Chrome tab reopened the persisted chat successfully. This isolated observation is not assigned a product cause. Single owner/tenant, desktop browser, one model route and one TXT fixture only; this run does not establish full catalog-area coverage.",
+  "results": [
+    {
+      "case_id": "QA-RUNTIME-001",
+      "definition": {
+        "id": "QA-RUNTIME-001",
+        "title": "Dependency readiness",
+        "status": "active",
+        "areas": [
+          "QA-AREA-035"
+        ],
+        "steps": [
+          "GET /health/ready through the frontend proxy."
+        ],
+        "expected": "HTTP 200 JSON with status ready and a nonempty dependency list in which every ok flag is true.",
+        "method": "http_smoke",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "e2c61959f0a2594c8f55153daaa6b106c5b460e7078581f92a4b29308fc89e8c",
+      "outcome": "not_run",
+      "reason": "HTTP-only case executed separately in local-20261015-http-current.",
+      "residual_risk": "No browser observation is claimed for this HTTP case; consult the linked run.",
+      "evidence": [],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-AUTH-001",
+      "definition": {
+        "id": "QA-AUTH-001",
+        "title": "Anonymous product access",
+        "status": "active",
+        "areas": [
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "GET /api/v1/auth/me and /api/v1/documents without cookies or Authorization."
+        ],
+        "expected": "Both return JSON problem responses with status 401; no product data.",
+        "method": "http_smoke",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "602a47837b76056c55d8fe914869bed1f7548d7340014c0cd0279da224d40d93",
+      "outcome": "not_run",
+      "reason": "HTTP-only case executed separately in local-20261015-http-current.",
+      "residual_risk": "No browser observation is claimed for this HTTP case; consult the linked run.",
+      "evidence": [],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-INPUT-001",
+      "definition": {
+        "id": "QA-INPUT-001",
+        "title": "Malformed login input",
+        "status": "active",
+        "areas": [
+          "QA-AREA-035"
+        ],
+        "steps": [
+          "POST an empty JSON object to /api/v1/auth/login without credentials."
+        ],
+        "expected": "HTTP 422 JSON problem; no successful login.",
+        "method": "http_smoke",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "76c66a990eb97822322648f5ce93e7e5b5276142b1c1d073309f4ca4dcbb73ec",
+      "outcome": "not_run",
+      "reason": "HTTP-only case executed separately in local-20261015-http-current.",
+      "residual_risk": "No browser observation is claimed for this HTTP case; consult the linked run.",
+      "evidence": [],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-NAV-001",
+      "definition": {
+        "id": "QA-NAV-001",
+        "title": "Unknown API route",
+        "status": "active",
+        "areas": [
+          "QA-AREA-038"
+        ],
+        "steps": [
+          "GET /api/v1/qa-route-does-not-exist."
+        ],
+        "expected": "HTTP 404 with a JSON object, never SPA index HTML. Unregistered routes need not use the registered-operation Problem fields.",
+        "method": "http_smoke",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md",
+          "docs/runbooks/fast-local-docker.md"
+        ]
+      },
+      "definition_sha256": "32e2c279e6c560bd4aba45ace51d7241d26042e60469ceb096a324e0c34bc63d",
+      "outcome": "not_run",
+      "reason": "HTTP-only case executed separately in local-20261015-http-current.",
+      "residual_risk": "No browser observation is claimed for this HTTP case; consult the linked run.",
+      "evidence": [],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-AUTH-002",
+      "definition": {
+        "id": "QA-AUTH-002",
+        "title": "Visible login and session restore",
+        "status": "active",
+        "areas": [
+          "QA-AREA-047",
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Open the app without a valid session; inspect Email, Password and Sign in labels.",
+          "Sign in with the documented local development account, then reload."
+        ],
+        "expected": "Accessible login appears; successful login opens the correct tenant; reload restores the session.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "51c90d5a00d0d96f18a20dcf26cfc935c795408e053ff6d15541559b26a820a4",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Signed out to accessible Email/Password/Sign in form; documented local account signed into Acme and reload restored the authenticated Schedules route.",
+          "observed": {
+            "tenant": "Acme",
+            "restored_route": "/schedules",
+            "login_labels": [
+              "Email",
+              "Password",
+              "Sign in"
+            ]
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-AUTH-003",
+      "definition": {
+        "id": "QA-AUTH-003",
+        "title": "Invalid login feedback",
+        "status": "active",
+        "areas": [
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Submit a known local test email with an intentionally wrong password once."
+        ],
+        "expected": "Sign-in is rejected with generic incorrect-credentials feedback and no product data.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "8684e01b3b5cc9eddba5aa1f0d396b0bd8dd2acf3822f5a5508e602cc69fdd87",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "One intentionally invalid local test sign-in stayed on the login screen and displayed Incorrect email or password.",
+          "observed": {
+            "feedback": "Incorrect email or password.",
+            "workspace_visible": false
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-DOC-001",
+      "definition": {
+        "id": "QA-DOC-001",
+        "title": "Synthetic TXT ingestion and preview",
+        "status": "active",
+        "areas": [
+          "QA-AREA-009",
+          "QA-AREA-010",
+          "QA-AREA-034"
+        ],
+        "steps": [
+          "Select a QA collection and upload qa/fixtures/qa-silver-maple.txt through the browser.",
+          "Wait for Ready, open the document and inspect ingestion status and text preview."
+        ],
+        "expected": "Exactly one ready document with one nonempty passage; extracted preview preserves QA-OCT15-7429 and 24 October 2035.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "5f0f2b867939b3881dc143ca12af726b1c00550a63d1dea84f05468b7709ee56",
+      "outcome": "partial",
+      "reason": "Fresh upload first displayed Ingestion failed while creating embeddings; later revisiting showed Ready without manual intervention.",
+      "residual_risk": "Ingestion eventually recovered with one correct passage, but intermittent failure/recovery behavior remains unexplained and may confuse users.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Observed the failed status, then later Ready with Parsed, Chunked into 1 passages, Embedded, Indexed all done; preview retained launch code/date. No retry or policy change was made.",
+          "observed": {
+            "table": "Documents in this collection\nNAME\tCOLLECTION\tVISIBILITY\tOWNER\tUPDATED\tSTATUS\t\nACTIONS\n\n\nTXT\nqa-silver-maple.txt\nTXT\n\tQA catalog 766 / 2026-10-15\t\nPrivate to you\tYou\t\n2m ago\t\nIngestion failed\tDelete\n\n\nDocument ingestion failed while creating embeddings.",
+            "recovery": {
+              "status": "Ready",
+              "chunks": 1,
+              "extracted_characters": 338,
+              "code": "QA-OCT15-7429",
+              "launch_date": "24 October 2035"
+            }
+          }
+        },
+        {
+          "kind": "artifact",
+          "description": "Local screenshot of the synthetic QA observation; kept outside Git.",
+          "path": "output/qa/embedding-failure.jpg",
+          "sha256": "b8f590e86c00b3d76532b56b127d9d50e779d9a309142f2d85d7b00a7d37cb31"
+        },
+        {
+          "kind": "artifact",
+          "description": "Local screenshot of the synthetic QA observation; kept outside Git.",
+          "path": "output/qa/upload-recovered.jpg",
+          "sha256": "850ecea64d5e5b050e1cf974763d5feeb8b08c0d341b4a0198de82bd1dc87d20"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/767"
+      ]
+    },
+    {
+      "case_id": "QA-COLL-001",
+      "definition": {
+        "id": "QA-COLL-001",
+        "title": "Collection contents and counts",
+        "status": "active",
+        "areas": [
+          "QA-AREA-011"
+        ],
+        "steps": [
+          "Create a uniquely named QA collection.",
+          "Upload one synthetic fixture and reselect the collection."
+        ],
+        "expected": "Count changes from zero to one and the selected collection contains the uploaded fixture.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "eb92baf69e9edfd66b0f1d2b5dd78731d9f6f79a2d8aa86051858173cd5eaa1e",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Fresh collection was empty, then count became one and the uploaded fixture appeared after reselection.",
+          "observed": {
+            "initial": "This collection is empty. Upload files above to get started.",
+            "table": "Documents in this collection\nNAME\tCOLLECTION\tVISIBILITY\tOWNER\tUPDATED\tSTATUS\t\nACTIONS\n\n\nTXT\nqa-silver-maple.txt\nTXT\n\tQA catalog 766 / 2026-10-15\t\nPrivate to you\tYou\t\n2m ago\t\nIngestion failed\tDelete\n\n\nDocument ingestion failed while creating embeddings."
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-CHAT-001",
+      "definition": {
+        "id": "QA-CHAT-001",
+        "title": "Grounded fact and inline citation",
+        "status": "active",
+        "areas": [
+          "QA-AREA-005",
+          "QA-AREA-049",
+          "QA-AREA-044"
+        ],
+        "steps": [
+          "Ask: According to qa-silver-maple.txt, what is Project Silver Maple's launch code and launch date? Answer briefly and cite the source.",
+          "Wait for the completed answer and open its inline citation."
+        ],
+        "expected": "Answer gives QA-OCT15-7429 and 24 October 2035; citation resolves to the permitted supporting passage from qa-silver-maple.txt.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "f3531cfa5c1682d79d1fee304ec9107baa2cd419a0485e92d82839c30a221c8a",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Completed answer contained the exact code/date; its inline citation opened the permitted source passage.",
+          "observed": {
+            "answer": "Lumen\nLing 3.0 Flash\nFinding documents — 2 documents\nReading a document — 1 complete passages\nRetrieval\nLooked at 1 source\n\nProject Silver Maple's launch code is QA-OCT15-7429 and its launch date is 24 October 2035 [S3].\n\nSOURCES USED\n\nqa-silver-maple.txt\nJust now\n1\nYou have access\nPermission-checked\nanswered Just now",
+            "passage": "qa-silver-maple.txt\n\nLumen Copilot QA fixture — synthetic data only. Project Silver Maple is a fictional test project. The Project Silver Maple launch code is QA-OCT15-7429. The Project Silver Maple launch date is 24 October 2035. The owner is the QA demonstration team. This document exists only to test upload, ingestion, retrieval and citation behavior."
+          }
+        },
+        {
+          "kind": "artifact",
+          "description": "Local screenshot of the synthetic QA observation; kept outside Git.",
+          "path": "output/qa/grounded-citation.jpg",
+          "sha256": "49118b552caa6eec33449702f345efbd506a051d5ac6a111c353029af75a2c8c"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-CHAT-002",
+      "definition": {
+        "id": "QA-CHAT-002",
+        "title": "Unsupported fact has no citations",
+        "status": "active",
+        "areas": [
+          "QA-AREA-005",
+          "QA-AREA-044"
+        ],
+        "steps": [
+          "Ask for the exact 2035 annual compliance fee for fictional Project Violet Otter using only available documents; tell the assistant not to estimate.",
+          "Inspect the completed answer and source controls."
+        ],
+        "expected": "Answer says the fact could not be found, invents no fee, and has zero citation controls/sources.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "cca8bdf3b91939ff46a9742e402cd0bf9cc0de7f337dfe14f53fe269bdd660c8",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Completed unsupported-fact question refused to invent a fee and displayed No sources were cited for this answer.",
+          "observed": {
+            "answer": "Lumen\nLing 3.0 Flash\nSearching passages — 2 passages\nSearching passages — 2 passages\n\nI could not find the 2035 annual compliance fee for Project Violet Otter in the available documents. The only document present (qa-silver-maple.txt) contains information about Project Silver Maple and does not mention Project Violet Otter or any associated compliance fee.\n\nNo sources were cited for this answer.\n\nanswered Just now",
+            "citation_controls": 0
+          }
+        },
+        {
+          "kind": "artifact",
+          "description": "Local screenshot of the synthetic QA observation; kept outside Git.",
+          "path": "output/qa/completed-chrome-qa.jpg",
+          "sha256": "f4b635a1f1c7da7c42ae76b37ab7d3017cea316f00ce2d6d330957088251a7c9"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-CHAT-003",
+      "definition": {
+        "id": "QA-CHAT-003",
+        "title": "Renamed conversation persists",
+        "status": "active",
+        "areas": [
+          "QA-AREA-006",
+          "QA-AREA-037"
+        ],
+        "steps": [
+          "Rename a QA conversation containing a supported answer and an unsupported answer.",
+          "Fully reload, reopen it from history and inspect both messages and sources."
+        ],
+        "expected": "Title, both answers and the supporting citation survive; the refusal still has zero citations.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "4a4d465d4198db545f6ac50980e7a1963c5b57cd18619d755331b48a7ab158c2",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Full page reload and history reopen retained the renamed title and four messages, inline S3 citation, and zero-citation refusal.",
+          "observed": {
+            "messages": 4,
+            "supported_inline_citations": 1,
+            "refusal_citations": 0
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-SEARCH-001",
+      "definition": {
+        "id": "QA-SEARCH-001",
+        "title": "Search source and clear behavior",
+        "status": "active",
+        "areas": [
+          "QA-AREA-012"
+        ],
+        "steps": [
+          "Search for Project Silver Maple.",
+          "Inspect its matching result and open any answer citation.",
+          "Clear the query."
+        ],
+        "expected": "Permitted fixture appears; any citation resolves to its source; clearing restores a neutral initial search state without stale results.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "e00c7ba8952c96538a7490ae0cc1762bbfdd04aebcab05a04ad0663f1f4083df",
+      "outcome": "failed",
+      "reason": "Search and source citation worked, but clearing the query and pressing Enter retained the old direct answer and two results.",
+      "residual_risk": "Users can mistake stale evidence for a response to the current blank query.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Project Silver Maple returned two permitted fixture results; citation 2 opened the correct passage. With input confirmed empty, previous direct answer, source inspector and results remained.",
+          "observed": {
+            "direct_answer": "DIRECT ANSWER\nCited\n\nProject Silver Maple is a fictional test project. Its launch code is QA-OCT15-7429, and its launch date is 24 October 2035. The owner is the QA demonstration team.\n\nSources\n1\n2\nPermission-checked\nFreshest source 6 minutes ago\nEvidence: 2 sources",
+            "result_count": 2,
+            "cleared_input": "",
+            "retained_direct_answer": true,
+            "retained_results": true
+          }
+        },
+        {
+          "kind": "artifact",
+          "description": "Local screenshot of the synthetic QA observation; kept outside Git.",
+          "path": "output/qa/cleared-search-stale.jpg",
+          "sha256": "7d0f59c35526b4b2832532d536240baee616f2f601a4fa4e4674b04f1dd261ed"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/596"
+      ]
+    },
+    {
+      "case_id": "QA-AUDIT-001",
+      "definition": {
+        "id": "QA-AUDIT-001",
+        "title": "Audit an answer and source view",
+        "status": "active",
+        "areas": [
+          "QA-AREA-030"
+        ],
+        "steps": [
+          "As an authorized audit user, filter the latest generated-answer events and open provenance for this QA chat.",
+          "Inspect the supported/refusal citation counts and find the document-view event."
+        ],
+        "expected": "Tenant-scoped records identify the correct model/session; refusal citation count is zero; source view is audited.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b52ec85aa9cb71ccb8f1d5e498477e4f1973fa5d6c08a26695d1079030c7b3f5",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Opened current supported/refusal generated-answer provenance; same session and model, supported citation_count 1 versus refusal 0; current document-view events present.",
+          "observed": {
+            "refusal_audit": "Provenance · 3e3281e5-abf7-495d-a06c-eca4ba82248e\nEvent\nanswer.generated\nWhen\nOct 15, 11:00:40\nActor\n219fba4a-de10-459f-842e-9ed8e95dfa74\nTenant\ndcd42d0c-c9f0-4af1-b079-2c2bbe37bd1f\nDecision\nallowed\nResource\nbce9a57c-9f25-4893-9373-71760d250202\nRaw event\n{\n  \"model\": \"openrouter/inclusionai/ling-3.0-flash\",\n  \"query_hash\": \"1576ef2c4f4dfb5ea77fda7f2941ceee0bdad3ac6faaa3fa85e4ef9d41dcfb15\",\n  \"session_id\": \"dcffcc3e-d3db-4e39-8928-65a005f541e2\",\n  \"document_ids\": [],\n  \"citation_count\": 0,\n  \"retrieved_hits\": 4\n}",
+            "supported_audit": "Provenance · f253c7b8-d19a-41c0-b414-190a8c01aac0\nEvent\nanswer.generated\nWhen\nOct 15, 10:59:57\nActor\n219fba4a-de10-459f-842e-9ed8e95dfa74\nTenant\ndcd42d0c-c9f0-4af1-b079-2c2bbe37bd1f\nDecision\nallowed\nResource\n88142875-d200-4d54-87fa-df7f443cd4f3\nCandidates\na0155946-5020-42d3-bdb4-2f1de2a679eb\nretrieved\nRaw event\n{\n  \"model\": \"openrouter/inclusionai/ling-3.0-flash\",\n  \"query_hash\": \"04140487e6c654e52d0b0c016d8d5e74eb86949816e40d8c696ab033babbafa2\",\n  \"session_id\": \"dcffcc3e-d3db-4e39-8928-65a005f541e2\",\n  \"document_ids\": [\n    \"a0155946-5020-42d3-bdb4-2f1de2a679eb\"\n  ],\n  \"citation_count\": 1,\n  \"retrieved_hits\": 3\n}",
+            "document_view_events": [
+              "2a6291b4-dd2…Viewed document219fba4a-de10-459f-842e-9ed8e95dfa74 · allowed · ff8b9f53-6a6e-4846-b823-d86c94ab05c6Oct 15, 11:04:10",
+              "f0fc0e16-69f…Viewed document219fba4a-de10-459f-842e-9ed8e95dfa74 · allowed · ff8b9f53-6a6e-4846-b823-d86c94ab05c6Oct 15, 11:04:00",
+              "ca5bc11f-e3d…Viewed document219fba4a-de10-459f-842e-9ed8e95dfa74 · allowed · a0155946-5020-42d3-bdb4-2f1de2a679ebOct 15, 11:03:56",
+              "146bcf26-ffe…Viewed document219fba4a-de10-459f-842e-9ed8e95dfa74 · allowed · a0155946-5020-42d3-bdb4-2f1de2a679ebOct 15, 11:03:56"
+            ]
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-A11Y-001",
+      "definition": {
+        "id": "QA-A11Y-001",
+        "title": "Document dialog focus lifecycle",
+        "status": "active",
+        "areas": [
+          "QA-AREA-042"
+        ],
+        "steps": [
+          "Open the QA document viewer and inspect initial focus.",
+          "Use Tab and Shift+Tab through the dialog, then Escape."
+        ],
+        "expected": "Focus stays inside the modal, Escape closes it, and focus returns to its opener.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b5acd3f1b714ae393c89aa22f3a93dfc4039a26f1cf345f09319d56d2f912c0d",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Document modal initially focused Close viewer; eight Tabs and Shift+Tab stayed inside; Escape closed and returned focus to Open qa-silver-maple.txt.",
+          "observed": {
+            "focus_states": [
+              {
+                "inside": true,
+                "name": "Close viewer"
+              },
+              {
+                "inside": true,
+                "name": "Status detail: Native text is indexed and searchable."
+              },
+              {
+                "inside": true,
+                "name": "Download original"
+              },
+              {
+                "inside": true,
+                "name": "Close viewer"
+              },
+              {
+                "inside": true,
+                "name": "Status detail: Native text is indexed and searchable."
+              },
+              {
+                "inside": true,
+                "name": "Download original"
+              },
+              {
+                "inside": true,
+                "name": "Close viewer"
+              },
+              {
+                "inside": true,
+                "name": "Status detail: Native text is indexed and searchable."
+              },
+              {
+                "inside": true,
+                "name": "Download original"
+              },
+              {
+                "inside": true,
+                "name": "Status detail: Native text is indexed and searchable."
+              }
+            ],
+            "dialog_count_after_escape": 0,
+            "restored_opener": "Open qa-silver-maple.txt"
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-NAV-002",
+      "definition": {
+        "id": "QA-NAV-002",
+        "title": "Unknown frontend route recovery",
+        "status": "active",
+        "areas": [
+          "QA-AREA-038"
+        ],
+        "steps": [
+          "Open a nonexistent frontend route and use the recovery link."
+        ],
+        "expected": "An actionable not-found screen appears and recovery returns to a working route.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "8e96b4670922032a8a4f7fc5336523e1a13b4f49e2eed3a8a165b13b3c9990b3",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Unknown frontend URL showed Page not found plus matching path; Back to assistant returned to working New chat.",
+          "observed": {
+            "not_found_path": "/qa-route-does-not-exist",
+            "recovered_url": "http://localhost:47180/"
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-ARTIFACT-001",
+      "definition": {
+        "id": "QA-ARTIFACT-001",
+        "title": "Artifact library initial state",
+        "status": "active",
+        "areas": [
+          "QA-AREA-026"
+        ],
+        "steps": [
+          "Open Artifacts with no newly generated QA artifact and inspect the list/detail layout."
+        ],
+        "expected": "The empty or existing list state is truthful; no blank dead-end or fabricated artifact.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "502a8c4f32daf312d3cc4760abe02c3d0fa61d2896f4c18a7e2abda4e5757f75",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Artifacts completed with No artifacts yet, explanation of generated files, and No artifact selected; no fabricated entry.",
+          "observed": {
+            "empty_list": true,
+            "detail_state": "No artifact selected."
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-ASSISTANT-001",
+      "definition": {
+        "id": "QA-ASSISTANT-001",
+        "title": "Assistant draft validation and persistence",
+        "status": "active",
+        "areas": [
+          "QA-AREA-018"
+        ],
+        "steps": [
+          "Open New assistant; submit with no name.",
+          "Fill a unique QA name, synthetic instructions and uploaded-file collection scope; save a draft.",
+          "Reload its editor."
+        ],
+        "expected": "Missing name is explained; draft and selected scope persist. No publishing or approval-sensitive tool enabling.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "2fd1faac96a5c21589a8cb625e7d112e1cdc0f2a16ba36dc8a79ba80806d8602",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Blank draft save focused Name with Give your assistant a name. Created synthetic draft scoped to Uploaded files and the QA collection; reload retained name/instructions/scope and Draft status.",
+          "observed": {
+            "validation": "Give your assistant a name.",
+            "name": "QA catalog 766 — draft",
+            "uploaded_files_selected": true,
+            "collection": "QA catalog 766 / 2026-10-15",
+            "state": "Draft"
+          }
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-SCHEDULE-001",
+      "definition": {
+        "id": "QA-SCHEDULE-001",
+        "title": "Schedule requires an assistant",
+        "status": "active",
+        "areas": [
+          "QA-AREA-027"
+        ],
+        "steps": [
+          "Open New schedule and submit without an assistant."
+        ],
+        "expected": "Field-associated validation rejects submission; no schedule is created.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "caf9030e12659fb3734f93378f9a75174c623b982a553404a72c1927e4382697",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Create schedule without assistant focused the required field and showed Pick the assistant this schedule should run; returning to list showed No schedules yet.",
+          "observed": {
+            "validation": "Pick the assistant this schedule should run.",
+            "field_association": {
+              "described_by": "sched-form-assistant-error",
+              "invalid": "true"
+            },
+            "created_entries": 0
+          }
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}

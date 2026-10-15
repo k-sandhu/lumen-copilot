@@ -40,7 +40,7 @@ Every record includes:
   attempt, suite outcomes and report fingerprint.
 
 Use `passed`, `failed`, `partial`, `blocked`, `skipped` or `not_run`.
-A skipped or empty suite never passes. Different commits/environments/models are
+A fully skipped or empty suite never passes. Different commits/environments/models are
 separate observations. A current definition hash mismatch is displayed as
 **changed definition**; historical evidence is retained but cannot establish a
 pass for the changed case. Never turn partial area coverage into a green area.
@@ -92,6 +92,11 @@ to compare history. Small reviewed manual run records remain in Git; screenshots
 traces, full logs and JUnit outputs stay in ignored `output/qa/` or CI artifacts.
 
 ## Today's baseline and continued QA
+
+The [2026-10-15 report](2026-10-15-local.md) links the first recorded local
+baseline, continued Chrome cases, HTTP checks and CI evidence to their exact
+versions. The JSON ledger is the evidence source; this report summarizes that
+dated execution and does not represent current board status.
 
 The initial local observation predates this tracking implementation. Import it
 as a retrospective observation, retaining its original timestamp, application
