@@ -58,6 +58,7 @@ from app.services.assistant_runtime import AssistantRunConfig
 from app.services.chat_runtime import ChatRuntime
 from app.services.tools.types import ToolContext, ToolDefinition
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -172,7 +173,7 @@ class _BoomGateway:
         yield  # pragma: no cover — unreachable, makes this an async generator
 
 
-class _FakeRetrieval:
+class _FakeRetrieval(UUIDDocumentResolver):
     """A retrieval stand-in returning fixed permitted passages for search_text."""
 
     def __init__(self, passages: list[RetrievedPassage]) -> None:

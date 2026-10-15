@@ -1115,11 +1115,21 @@ def test_get_document_descriptions_match_accepted_shapes() -> None:
     assert "document id" in search_text_desc.lower()
 
 
+@pytest.mark.parametrize(
+    "offline", [pytest.param(False, id="service"), pytest.param(True, id="eval")]
+)
 async def test_retrieval_service_resolve_document_text_shapes_and_permissions(
     session_and_world: tuple[AsyncSession, _World],
+    offline: bool,
 ) -> None:
+    from tests.eval.support import DeterministicEmbedder, OfflineRetrieval
+
     session, world = session_and_world
-    svc = RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+    svc = (
+        OfflineRetrieval(session, embedder=DeterministicEmbedder())
+        if offline
+        else RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+    )
     alice = _principal(world.alice, world.tenant_a)
     chunk_id = await _chunk_id(session, world.alice_doc)
     bob_chunk = await _chunk_id(session, world.bob_doc)

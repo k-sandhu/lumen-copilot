@@ -26,7 +26,6 @@ records the ``tool_invocations`` row for each.
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
 
 from app.domain.retrieval import RetrievedPassage
 from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
@@ -268,31 +267,22 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
         raw_id = str(resolved)
     # Resolution (document id → chunk id → exact name, with tolerant parsing)
     # lives inside ``retrieval/`` under the same owner-or-grant predicate
-    # (#758); duck-typed test fakes that predate it keep the UUID-only path.
-    resolver = getattr(ctx.retrieval, "resolve_document_text", None)
-    if resolver is not None:
-        resolution = await resolver(principal=ctx.principal, handle=raw_id)
-        if resolution.candidates:
-            lines = [f"- {c.document_name} (id: {c.document_id})" for c in resolution.candidates]
-            return ToolHandlerResult(
-                source_document_ids=(),
-                content=(
-                    "Several accessible documents have that exact name. "
-                    "Retry with one document id:\n" + "\n".join(lines)
-                ),
-                ok=False,
-                error=ERROR_BAD_ARGS,
-                summary="ambiguous name",
-                payload={"document_ids": [str(c.document_id) for c in resolution.candidates]},
-            )
-        doc = resolution.document
-    else:
-        try:
-            document_id = UUID(raw_id.strip())
-        except ValueError:
-            doc = None
-        else:
-            doc = await ctx.retrieval.get_document(principal=ctx.principal, document_id=document_id)
+    # (#758).
+    resolution = await ctx.retrieval.resolve_document_text(principal=ctx.principal, handle=raw_id)
+    if resolution.candidates:
+        lines = [f"- {c.document_name} (id: {c.document_id})" for c in resolution.candidates]
+        return ToolHandlerResult(
+            source_document_ids=(),
+            content=(
+                "Several accessible documents have that exact name. "
+                "Retry with one document id:\n" + "\n".join(lines)
+            ),
+            ok=False,
+            error=ERROR_BAD_ARGS,
+            summary="ambiguous name",
+            payload={"document_ids": [str(c.document_id) for c in resolution.candidates]},
+        )
+    doc = resolution.document
     if doc is None:
         # Existence non-disclosure (INV-2): missing, malformed, foreign and
         # cross-tenant handles share this one corrective outcome (#758).
