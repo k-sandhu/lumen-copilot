@@ -2,8 +2,9 @@
 
 > **What this documents.** How to read the `llm.cache_kpi` log series the chat
 > answer path emits, what a cache hit means per **route family**, and — the part
-> operators keep getting wrong — **which route families report 0 hits by
-> design** so a zero on those routes is never mistaken for a regression. Governed
+> operators keep getting wrong — **which route families get no Lumen cache
+> directive**. A zero or a low KPI on those routes is therefore never a
+> regression, though the provider's own implicit caching may still produce hits. Governed
 > by [ADR-0016](../architecture/0016-context-engine-and-cache-first-prompting.md)
 > §2.4 (cache directives) and §2.6 (usage accounting).
 
@@ -134,5 +135,5 @@ RUN_LIVE=1 OPENROUTER_API_KEY=<key> \
 
 They cost a few small Haiku calls. A turn-2 `cached_prompt_tokens == 0` on the
 Anthropic route is a real regression (the moving mark or the message-0
-breakpoint was dropped somewhere in the stack); a 0 on any 0-by-design route is
-not.
+breakpoint was dropped somewhere in the stack). A 0, or any value, on a
+no-directive route is not.
