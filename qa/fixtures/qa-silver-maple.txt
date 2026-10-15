@@ -1,0 +1,7 @@
+Lumen Copilot QA fixture — synthetic data only.
+
+Project Silver Maple is a fictional test project.
+The Project Silver Maple launch code is QA-OCT15-7429.
+The Project Silver Maple launch date is 24 October 2035.
+The owner is the QA demonstration team.
+This document exists only to test upload, ingestion, retrieval and citation behavior.

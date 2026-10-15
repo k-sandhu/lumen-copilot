@@ -1,0 +1,330 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "QA-RUNTIME-001",
+      "title": "Dependency readiness",
+      "status": "active",
+      "areas": [
+        "QA-AREA-035"
+      ],
+      "steps": [
+        "GET /health/ready through the frontend proxy."
+      ],
+      "expected": "HTTP 200 JSON with status ready and a nonempty dependency list in which every ok flag is true.",
+      "method": "http_smoke",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-AUTH-001",
+      "title": "Anonymous product access",
+      "status": "active",
+      "areas": [
+        "QA-AREA-001"
+      ],
+      "steps": [
+        "GET /api/v1/auth/me and /api/v1/documents without cookies or Authorization."
+      ],
+      "expected": "Both return JSON problem responses with status 401; no product data.",
+      "method": "http_smoke",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-INPUT-001",
+      "title": "Malformed login input",
+      "status": "active",
+      "areas": [
+        "QA-AREA-035"
+      ],
+      "steps": [
+        "POST an empty JSON object to /api/v1/auth/login without credentials."
+      ],
+      "expected": "HTTP 422 JSON problem; no successful login.",
+      "method": "http_smoke",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-NAV-001",
+      "title": "Unknown API route",
+      "status": "active",
+      "areas": [
+        "QA-AREA-038"
+      ],
+      "steps": [
+        "GET /api/v1/qa-route-does-not-exist."
+      ],
+      "expected": "HTTP 404 JSON problem, never SPA index HTML.",
+      "method": "http_smoke",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-AUTH-002",
+      "title": "Visible login and session restore",
+      "status": "active",
+      "areas": [
+        "QA-AREA-047",
+        "QA-AREA-001"
+      ],
+      "steps": [
+        "Open the app without a valid session; inspect Email, Password and Sign in labels.",
+        "Sign in with the documented local development account, then reload."
+      ],
+      "expected": "Accessible login appears; successful login opens the correct tenant; reload restores the session.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-AUTH-003",
+      "title": "Invalid login feedback",
+      "status": "active",
+      "areas": [
+        "QA-AREA-001"
+      ],
+      "steps": [
+        "Submit a known local test email with an intentionally wrong password once."
+      ],
+      "expected": "Sign-in is rejected with generic incorrect-credentials feedback and no product data.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-DOC-001",
+      "title": "Synthetic TXT ingestion and preview",
+      "status": "active",
+      "areas": [
+        "QA-AREA-009",
+        "QA-AREA-010",
+        "QA-AREA-034"
+      ],
+      "steps": [
+        "Select a QA collection and upload qa/fixtures/qa-silver-maple.txt through the browser.",
+        "Wait for Ready, open the document and inspect ingestion status and text preview."
+      ],
+      "expected": "Exactly one ready document with one nonempty passage; extracted preview preserves QA-OCT15-7429 and 24 October 2035.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-COLL-001",
+      "title": "Collection contents and counts",
+      "status": "active",
+      "areas": [
+        "QA-AREA-011"
+      ],
+      "steps": [
+        "Create a uniquely named QA collection.",
+        "Upload one synthetic fixture and reselect the collection."
+      ],
+      "expected": "Count changes from zero to one and the selected collection contains the uploaded fixture.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-CHAT-001",
+      "title": "Grounded fact and inline citation",
+      "status": "active",
+      "areas": [
+        "QA-AREA-005",
+        "QA-AREA-049",
+        "QA-AREA-044"
+      ],
+      "steps": [
+        "Ask: According to qa-silver-maple.txt, what is Project Silver Maple's launch code and launch date? Answer briefly and cite the source.",
+        "Wait for the completed answer and open its inline citation."
+      ],
+      "expected": "Answer gives QA-OCT15-7429 and 24 October 2035; citation resolves to the permitted supporting passage from qa-silver-maple.txt.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-CHAT-002",
+      "title": "Unsupported fact has no citations",
+      "status": "active",
+      "areas": [
+        "QA-AREA-005",
+        "QA-AREA-044"
+      ],
+      "steps": [
+        "Ask for the exact 2035 annual compliance fee for fictional Project Violet Otter using only available documents; tell the assistant not to estimate.",
+        "Inspect the completed answer and source controls."
+      ],
+      "expected": "Answer says the fact could not be found, invents no fee, and has zero citation controls/sources.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-CHAT-003",
+      "title": "Renamed conversation persists",
+      "status": "active",
+      "areas": [
+        "QA-AREA-006",
+        "QA-AREA-037"
+      ],
+      "steps": [
+        "Rename a QA conversation containing a supported answer and an unsupported answer.",
+        "Fully reload, reopen it from history and inspect both messages and sources."
+      ],
+      "expected": "Title, both answers and the supporting citation survive; the refusal still has zero citations.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-SEARCH-001",
+      "title": "Search source and clear behavior",
+      "status": "active",
+      "areas": [
+        "QA-AREA-012"
+      ],
+      "steps": [
+        "Search for Project Silver Maple.",
+        "Inspect its matching result and open any answer citation.",
+        "Clear the query."
+      ],
+      "expected": "Permitted fixture appears; any citation resolves to its source; clearing restores a neutral initial search state without stale results.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-AUDIT-001",
+      "title": "Audit an answer and source view",
+      "status": "active",
+      "areas": [
+        "QA-AREA-030"
+      ],
+      "steps": [
+        "As an authorized audit user, filter the latest generated-answer events and open provenance for this QA chat.",
+        "Inspect the supported/refusal citation counts and find the document-view event."
+      ],
+      "expected": "Tenant-scoped records identify the correct model/session; refusal citation count is zero; source view is audited.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-A11Y-001",
+      "title": "Document dialog focus lifecycle",
+      "status": "active",
+      "areas": [
+        "QA-AREA-042"
+      ],
+      "steps": [
+        "Open the QA document viewer and inspect initial focus.",
+        "Use Tab and Shift+Tab through the dialog, then Escape."
+      ],
+      "expected": "Focus stays inside the modal, Escape closes it, and focus returns to its opener.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-NAV-002",
+      "title": "Unknown frontend route recovery",
+      "status": "active",
+      "areas": [
+        "QA-AREA-038"
+      ],
+      "steps": [
+        "Open a nonexistent frontend route and use the recovery link."
+      ],
+      "expected": "An actionable not-found screen appears and recovery returns to a working route.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-ARTIFACT-001",
+      "title": "Artifact library initial state",
+      "status": "active",
+      "areas": [
+        "QA-AREA-026"
+      ],
+      "steps": [
+        "Open Artifacts with no newly generated QA artifact and inspect the list/detail layout."
+      ],
+      "expected": "The empty or existing list state is truthful; no blank dead-end or fabricated artifact.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-ASSISTANT-001",
+      "title": "Assistant draft validation and persistence",
+      "status": "active",
+      "areas": [
+        "QA-AREA-018"
+      ],
+      "steps": [
+        "Open New assistant; submit with no name.",
+        "Fill a unique QA name, synthetic instructions and uploaded-file collection scope; save a draft.",
+        "Reload its editor."
+      ],
+      "expected": "Missing name is explained; draft and selected scope persist. No publishing or approval-sensitive tool enabling.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-SCHEDULE-001",
+      "title": "Schedule requires an assistant",
+      "status": "active",
+      "areas": [
+        "QA-AREA-027"
+      ],
+      "steps": [
+        "Open New schedule and submit without an assistant."
+      ],
+      "expected": "Field-associated validation rejects submission; no schedule is created.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    }
+  ]
+}
