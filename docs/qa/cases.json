@@ -1675,6 +1675,747 @@
         "docs/qa/770-systematic-chrome.md",
         "docs/specs/0004-security-and-domain-invariants.md"
       ]
+    },
+    {
+      "id": "QA-FILL-001",
+      "title": "Short-lived sessions and token negatives",
+      "status": "active",
+      "areas": [
+        "QA-AREA-001"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use a 45-second access TTL; verify Chrome refresh after expiry; exercise expired/invalid access, refresh rotation/replay, logout revocation with the auth harness.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Expired/invalid access is 401; used/revoked refresh is denied; legitimate refresh and Chrome recovery work.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-003",
+      "title": "Role and explicit-grant matrix",
+      "status": "active",
+      "areas": [
+        "QA-AREA-003"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Seed distinct owner, member, backup, security and foreign-tenant users; test Admin/audit denial and document/collection grants and revocation.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Member admin actions are 403; private/foreign resources are 404; explicit grants widen only their intended resources.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-004",
+      "title": "Permission-filtered ranking",
+      "status": "active",
+      "areas": [
+        "QA-AREA-004"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Seed owner-private, explicitly shared and foreign canary documents; search under each principal and run ranking/retrieval tests.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Only permitted evidence is returned; supported ranking thresholds hold on the configured fixture.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-005",
+      "title": "Forbidden source and citation checks",
+      "status": "active",
+      "areas": [
+        "QA-AREA-005"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Ask owner/member/foreign users for private canary facts and open citation targets under each principal.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Unauthorized facts are excluded; direct forbidden citations fail closed; permitted facts remain citation-backed.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-006",
+      "title": "Disposable chat deletion",
+      "status": "active",
+      "areas": [
+        "QA-AREA-006"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Create, message, rename, reload and delete a disposable QA chat; verify it is absent on read-back.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Deleted session is absent and direct access is denied without harming retained QA evidence.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-007",
+      "title": "Streaming replay/backplane",
+      "status": "active",
+      "areas": [
+        "QA-AREA-007"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run scoped Redis/WebSocket live tests for subscribe/replay/order, with Chrome reconnect corroboration.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Ordered envelopes are delivered once within supported replay semantics; late subscription and terminal recovery behave as specified.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-008",
+      "title": "Summary pressure and evidence",
+      "status": "active",
+      "areas": [
+        "QA-AREA-008"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Enable summaries in the isolated QA app, seed enough turns to summarize, inspect context and ask a previously grounded fact.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Summary persists with correct audit origin and evidence references; subsequent grounding remains correct.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-009",
+      "title": "Disposable document deletion",
+      "status": "active",
+      "areas": [
+        "QA-AREA-009"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Upload a disposable document, reach Ready, preview it, delete it and check list/direct access/object state.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Document is no longer retrievable/openable and its object cleanup follows the documented lifecycle.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-010",
+      "title": "Parser breadth and re-ingestion",
+      "status": "active",
+      "areas": [
+        "QA-AREA-010"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Upload small TXT/PDF/DOCX/PPTX/XLSX fixtures and repeat ingestion; inspect extracted canaries and chunk ordinals.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Supported formats preserve canaries; repeat ingestion does not duplicate active chunks.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-013",
+      "title": "Source deletion cascade",
+      "status": "active",
+      "areas": [
+        "QA-AREA-013"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Create and sync a disposable public source, then delete it and inspect backing documents/collection/object cleanup.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Source deletion follows the documented cascade; no orphaned retrievable evidence remains.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-016",
+      "title": "Provider registration and discovery",
+      "status": "active",
+      "areas": [
+        "QA-AREA-016"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use a supported provider fixture or an explicitly approved existing provider credential to test register/discover/use/delete; run secret round-trip negatives.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Discovered models are usable under policy and credentials remain write-only and tenant-scoped.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-017",
+      "title": "Tool fragments and context budgets",
+      "status": "active",
+      "areas": [
+        "QA-AREA-017"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run fragmented tool-call, prompt/cache budget and compression tests, and corroborate context behavior in Chrome.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Fragments reconstruct once; configured budgets and evidence-preserving compression assertions pass.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-018",
+      "title": "Published assistant versions and saved tests",
+      "status": "active",
+      "areas": [
+        "QA-AREA-018"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Seed a distinct backup, save a reusable case, publish two revisions, inspect history and reload both.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Publication requires accountable distinct owners; versions and saved cases persist and reference the tested revision.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-019",
+      "title": "Published assistant governance",
+      "status": "active",
+      "areas": [
+        "QA-AREA-019"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Launch a published assistant; exercise certification, disable, ownership validation and denied launch after disable.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Published launch works; invalid transitions and disabled launch fail as documented and are audited.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-020",
+      "title": "Tool denial execution boundary",
+      "status": "active",
+      "areas": [
+        "QA-AREA-020"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Exercise unknown, disabled and unapproved tool calls using a bounded handler-count fixture and inspect governance/audit in Chrome.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Denied calls do not execute handlers; permitted calls carry required audit/approval evidence.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-021",
+      "title": "Available built-in tool round trips",
+      "status": "active",
+      "areas": [
+        "QA-AREA-021"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Configure isolated web/file tools and sandbox prerequisites; run bounded public search, artifact writing and approved code if authorized.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Each enabled tool returns real scoped output; unavailable or unapproved paths deny explicitly.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-022",
+      "title": "MCP discovery invocation and egress",
+      "status": "active",
+      "areas": [
+        "QA-AREA-022"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use the existing MCP fixture for allow/error/egress negatives and a supported authorized public endpoint for Chrome discovery where available.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Allowed discovery/calls work; errors remain typed; forbidden destinations and secrets stay protected.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-027",
+      "title": "Scheduled cadence dispatch and overlap",
+      "status": "active",
+      "areas": [
+        "QA-AREA-027"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Publish a fixture assistant with backup; test cadence read-back, due dispatch, DST and overlap with the scheduling harness and Chrome run history.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Configured dispatch semantics and duplicate/overlap guards hold; failed runs remain diagnosable.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-030",
+      "title": "Audit CSV parity and role denial",
+      "status": "active",
+      "areas": [
+        "QA-AREA-030"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Export a narrowly filtered QA audit set and verify CSV rows/filters; attempt export as member and inspect audit.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "CSV matches the selected scope and the unauthorized role is denied; download completion is proven by bytes.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-031",
+      "title": "Admin role denial and policy round trip",
+      "status": "active",
+      "areas": [
+        "QA-AREA-031"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use a non-admin and synthetic QA admin; change a reversible QA-only policy, reload/read back and restore it.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Non-admin mutation is denied; authorized persisted policy and audit match, then original state is restored.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-034",
+      "title": "Object cleanup and adversarial names",
+      "status": "active",
+      "areas": [
+        "QA-AREA-034"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Upload a tiny own fixture with safe adversarial filename segments; verify normalized key, exact download, deletion and denied later access.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "No path traversal or cross-owner object access; documented cleanup and byte integrity hold.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-035",
+      "title": "Invalid configuration and problem contracts",
+      "status": "active",
+      "areas": [
+        "QA-AREA-035"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run invalid settings and malformed/unknown-exception HTTP contract tests; corroborate safe UI failure messaging.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Invalid settings fail startup; contracted statuses/shapes are safe and contain no internal exception details.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-036",
+      "title": "Invalid model preference rejection",
+      "status": "active",
+      "areas": [
+        "QA-AREA-036"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Submit a nonexistent model to the scoped preference API, then reload settings in Chrome.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Invalid model is rejected and the prior valid preference remains unchanged.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-037",
+      "title": "Forced 401 refresh retry",
+      "status": "active",
+      "areas": [
+        "QA-AREA-037"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Allow access expiry in the isolated app, trigger frontend requests, and run client refresh/retry/header tests.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "One valid rotation/retry recovers with correct credentials; invalid/revoked refresh returns to login.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-040",
+      "title": "System theme and token contrast",
+      "status": "active",
+      "areas": [
+        "QA-AREA-040"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Temporarily emulate light/dark system preference in Chrome; exercise supported theme/density combinations and scoped token/contrast checks; restore.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "System follows the emulated preference; documented token/contrast assertions pass and original settings return.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-043",
+      "title": "Autoscroll during controlled streaming",
+      "status": "active",
+      "areas": [
+        "QA-AREA-043"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use a delayed stream fixture, scroll away from bottom during token arrival, then reconnect/finish and compare message identity/text.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Reading position is respected; terminal rendering is stable and replay creates no duplicate content.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-044",
+      "title": "Restricted trust indicators",
+      "status": "active",
+      "areas": [
+        "QA-AREA-044"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Compare owner/shared/denied citation access and source freshness/answer-time/risk/provenance states under separate principals.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Indicators reflect actual access and timing semantics; denied source never exposes its passage.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-046",
+      "title": "Bundle guard and layout checks",
+      "status": "active",
+      "areas": [
+        "QA-AREA-046"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Build with development pages disabled; inspect generated chunks for exclusion/code splitting and shrink behavior; inspect matching routes in Chrome.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Development payload is excluded and heavy chat code split; supported grid shrink checks pass.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-049",
+      "title": "Unauthorized grounded E2E",
+      "status": "active",
+      "areas": [
+        "QA-AREA-049"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Repeat upload-to-citation as owner, then ask/fetch the same private canary as same-tenant member and foreign user.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Owner cites correct evidence; unauthorized users cannot retrieve the fact or open its document/citation.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-050",
+      "title": "Golden quality thresholds",
+      "status": "active",
+      "areas": [
+        "QA-AREA-050"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run existing fake and live golden evaluation harnesses on isolated fixtures and retain metrics/thresholds.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Configured retrieval, groundedness and citation correctness thresholds pass with evidence-preserving reports.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-052",
+      "title": "First-token failure and compaction budgets",
+      "status": "active",
+      "areas": [
+        "QA-AREA-052"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run existing configured latency/failure/compression harnesses; show the corresponding terminal/context state in Chrome.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Configured first-token and terminal-failure budgets pass; compression preserves cited evidence.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-056",
+      "title": "Automated and screen-reader audit",
+      "status": "active",
+      "areas": [
+        "QA-GAP-004"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run scoped automated accessibility checks and a supported screen-reader walkthrough if available, retaining violations and keyboard evidence.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Core tested flows meet the documented accessibility assertions; untested assistive technology is explicit.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-059",
+      "title": "Controlled stability measurement",
+      "status": "active",
+      "areas": [
+        "QA-GAP-007"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Run a sustained workload with periodic connection/container memory measurements for the documented soak duration while other tests proceed.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Measured duration and resource/error observations are retained; no unmeasured hours-long stability claim.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-060",
+      "title": "Controlled dependency recovery",
+      "status": "active",
+      "areas": [
+        "QA-GAP-008"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use isolated QA resources to interrupt worker/cache/search/storage paths during disposable operations and inspect retry/idempotence/read-back.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Failures surface; supported retry paths recover without duplicate active records or corruption.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-062",
+      "title": "Populated database upgrade",
+      "status": "active",
+      "areas": [
+        "QA-GAP-010"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Restore a disposable prior-schema fixture into a separate lumentest database, run migrations and verify data/permissions plus application start.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Upgrade preserves expected rows/grants and the upgraded app starts against the migrated schema.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-063",
+      "title": "Expanded prompt-injection matrix",
+      "status": "active",
+      "areas": [
+        "QA-GAP-011"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Test source and tool-result canaries for instruction takeover, forbidden evidence and unauthorized action without real secrets or exfiltration.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "No unauthorized evidence/action; measured canary outcomes and exact model context are retained.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-066",
+      "title": "Concurrent expired refresh",
+      "status": "active",
+      "areas": [
+        "QA-GAP-014"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "With short access TTL, expire the same session and trigger requests in multiple normal Chrome tabs plus deterministic refresh-race tests.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Tabs recover or reach the documented login state without a persistent loop; rotation/replay assertions hold.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-067",
+      "title": "Bounded parser resource negatives",
+      "status": "active",
+      "areas": [
+        "QA-GAP-015"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use tiny corrupt/mislabeled and bounded expansion fixtures in the isolated worker; record parser failure and resource caps.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Malformed inputs fail safely; configured resource bounds hold without affecting other tenants.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-FILL-070",
+      "title": "Deterministic interrupted stream recovery",
+      "status": "active",
+      "areas": [
+        "QA-GAP-018"
+      ],
+      "steps": [
+        "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+        "Use a delayed provider fixture to interrupt after known chunks, reconnect/reload, and compare persisted IDs/text/terminal status in Chrome.",
+        "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+      ],
+      "expected": "Recovery is usable; no duplicated content; interrupted/truncated output is visibly distinguishable from normal completion.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/777-residual-gaps.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
     }
   ]
 }
