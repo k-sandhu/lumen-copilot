@@ -1685,7 +1685,7 @@
       ],
       "steps": [
         "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
-        "Use a 45-second access TTL; verify Chrome refresh after expiry; exercise expired/invalid access, refresh rotation/replay, logout revocation with the auth harness.",
+        "Use a short QA access lifetime where that application can log in, or wait the existing configured lifetime in synthetic functional accounts. Verify Chrome after actual expiry; exercise expired/invalid access, refresh rotation/replay and logout revocation with the auth harness. Record the exact lifetime and keep any hardened-login failure separate.",
         "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
       ],
       "expected": "Expired/invalid access is 401; used/revoked refresh is denied; legitimate refresh and Chrome recovery work.",
@@ -2369,7 +2369,7 @@
       ],
       "steps": [
         "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
-        "With short access TTL, expire the same session and trigger requests in multiple normal Chrome tabs plus deterministic refresh-race tests.",
+        "Wait the configured access lifetime (or a supported shorter QA lifetime), then trigger requests in multiple normal Chrome tabs plus deterministic refresh-race tests. Record actual expiry and lifetime without changing database roles.",
         "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
       ],
       "expected": "Tabs recover or reach the documented login state without a persistent loop; rotation/replay assertions hold.",
