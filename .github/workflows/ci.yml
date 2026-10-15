@@ -13,6 +13,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  qa-tracking:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.5"
+      - name: Validate definitions and immutable ledger
+        env:
+          QA_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python scripts/qa_tracking.py validate
+          if [ -n "$QA_BASE" ] && [ "$QA_BASE" != "0000000000000000000000000000000000000000" ]; then
+            python scripts/qa_tracking.py validate --base "$QA_BASE"
+          fi
+      - name: Tracking regression tests
+        run: python -m unittest discover -s tests -p test_qa_tracking.py -v
+
   backend:
     runs-on: ubuntu-24.04
     defaults:
@@ -44,7 +64,22 @@ jobs:
       - name: Typecheck
         run: uv run --extra dev mypy app
       - name: Offline tests
-        run: uv run --extra dev pytest -n 2 --dist loadfile -p no:cacheprovider --basetemp "${{ runner.temp }}/pytest-${{ github.run_id }}-${{ github.run_attempt }}"
+        run: |
+          mkdir -p ../output/qa
+          date -u +%Y-%m-%dT%H:%M:%SZ > ../output/qa/backend.started
+          uv run --extra dev pytest -n 2 --dist loadfile -p no:cacheprovider --basetemp "${{ runner.temp }}/pytest-${{ github.run_id }}-${{ github.run_attempt }}" --junitxml=../output/qa/backend.xml
+      - name: Record backend suite provenance
+        if: always()
+        working-directory: .
+        run: python scripts/qa_tracking.py suite --suite backend --junit output/qa/backend.xml --started-at-file output/qa/backend.started --run-id ci-${{ github.run_id }}-${{ github.run_attempt }}-backend --output output/qa/backend-run.json
+      - name: Retain backend QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-backend-${{ github.sha }}-${{ github.run_attempt }}
+          path: output/qa/
+          retention-days: 90
+          if-no-files-found: error
       - name: Trim uv cache
         if: always()
         run: uv cache prune --ci
@@ -76,6 +111,21 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
       - name: Tests
-        run: pnpm test
+        run: |
+          mkdir -p ../output/qa
+          date -u +%Y-%m-%dT%H:%M:%SZ > ../output/qa/frontend.started
+          pnpm exec vitest run --reporter=default --reporter=junit --outputFile=../output/qa/frontend.xml
       - name: Build
         run: pnpm build
+      - name: Record frontend suite provenance
+        if: always()
+        working-directory: .
+        run: python3 scripts/qa_tracking.py suite --suite frontend --junit output/qa/frontend.xml --started-at-file output/qa/frontend.started --run-id ci-${{ github.run_id }}-${{ github.run_attempt }}-frontend --output output/qa/frontend-run.json
+      - name: Retain frontend QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-frontend-${{ github.sha }}-${{ github.run_attempt }}
+          path: output/qa/
+          retention-days: 90
+          if-no-files-found: error

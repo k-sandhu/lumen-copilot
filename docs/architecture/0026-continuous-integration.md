@@ -20,6 +20,25 @@ Grant only repository read access. Cancel superseded runs for the same ref.
 No service containers or secrets are required: existing live-test opt-ins remain
 off. Backend warning handling continues to fail socket leaks.
 
+## QA provenance and evidence (2026-10-15, #766)
+
+The sponsor requested in-repository QA tracking. A third dependency-light job
+validates the imported catalog, concrete cases and append-only run ledger, then
+runs its standard-library regression tests. It checks definition-ID evolution
+and refuses modifications or deletions of previously committed run records.
+
+The existing backend/frontend test gates additionally emit JUnit. Always-run
+reporting steps attach exact checkout commits, test-definition fingerprints,
+workflow run/attempt and actual suite outcomes. They preserve raw reports and
+sanitized manifests as official `upload-artifact@v4` artifacts for 90 days.
+Missing/empty reports are blocked, never passing; skips remain skips. Test-step
+failures retain their failure even when evidence upload succeeds. No catalog
+area or manual case receives an inferred pass from a broad suite.
+
+See [QA tracking](../qa/README.md) for case definitions, manual/live records and
+version queries. This adds reporting to the accepted CI design; it changes
+neither product behavior nor the existing offline/live opt-ins.
+
 Four workers bound memory on shared developer machines; CI uses two workers on
 its smaller runners. `PYTEST_ADDOPTS` or an explicit `-n` overrides the local default.
 The test-runtime isolation and security criteria are documented in

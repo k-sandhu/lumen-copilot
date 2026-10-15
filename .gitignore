@@ -33,6 +33,7 @@ htmlcov/
 *.tsbuildinfo
 test-results/
 playwright-report/
+output/qa/
 
 # Generated contract artifacts (regenerated from contracts/; never committed)
 frontend/src/api/generated/

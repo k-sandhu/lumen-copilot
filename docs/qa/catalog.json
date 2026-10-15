@@ -1,0 +1,580 @@
+{
+  "schema_version": 1,
+  "source": {
+    "title": "List Existing QA Test Titles",
+    "thread_id": "01a10aaa-54d1-7382-8865-c0c412a3d86a",
+    "date": "2026-10-05",
+    "snapshot_path": "docs/qa/source-chat-catalog.txt",
+    "snapshot_sha256": "0639b4a0b03291fca4b91c15e917278f4882e8c6828a9b3be047c2c624bc631d"
+  },
+  "entries": [
+    {
+      "id": "QA-GAP-001",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Authenticated Browser End-to-End",
+      "steps": "Login → upload → ingest → chat → open citation.",
+      "expected": "Complete flow works against real services."
+    },
+    {
+      "id": "QA-GAP-002",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Cross-Browser Compatibility",
+      "steps": "Run core flows in Chrome, Firefox, Safari/WebKit.",
+      "expected": "Equivalent behavior; no browser-specific failures."
+    },
+    {
+      "id": "QA-GAP-003",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Mobile and Touch Layout",
+      "steps": "Use narrow screens; open menus, dialogs, previews.",
+      "expected": "Controls remain usable; no clipping or overlap."
+    },
+    {
+      "id": "QA-GAP-004",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Accessibility Audit",
+      "steps": "Run automated checks and keyboard/screen-reader walkthroughs.",
+      "expected": "No serious violations; core flows accessible."
+    },
+    {
+      "id": "QA-GAP-005",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Visual Regression",
+      "steps": "Compare page screenshots across themes and densities.",
+      "expected": "No unintended layout or styling changes."
+    },
+    {
+      "id": "QA-GAP-006",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Concurrent Load",
+      "steps": "Run many users uploading, searching, and chatting.",
+      "expected": "Agreed latency/error targets met; tenants remain isolated."
+    },
+    {
+      "id": "QA-GAP-007",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Long-Running Stability",
+      "steps": "Repeat workloads for hours; monitor connections and memory.",
+      "expected": "Resource usage stabilizes; no accumulating failures."
+    },
+    {
+      "id": "QA-GAP-008",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Service Restart Recovery",
+      "steps": "Restart workers, Redis, search, and storage during operations.",
+      "expected": "Failures surface clearly; recovery avoids corrupt/duplicate data."
+    },
+    {
+      "id": "QA-GAP-009",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Backup and Restore",
+      "steps": "Back up data; restore into a clean environment.",
+      "expected": "Documents, permissions, artifacts, and audits remain consistent."
+    },
+    {
+      "id": "QA-GAP-010",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Upgrade with Existing Data",
+      "steps": "Apply migrations to a populated previous-version database.",
+      "expected": "Upgrade preserves data and permissions; application starts correctly."
+    },
+    {
+      "id": "QA-GAP-011",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Adversarial Prompt Injection",
+      "steps": "Place malicious instructions in documents and tool results.",
+      "expected": "No permission bypass, secret disclosure, or unauthorized action."
+    },
+    {
+      "id": "QA-GAP-012",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Login Abuse Protection",
+      "steps": "Flood login with invalid credentials.",
+      "expected": "Agreed abuse controls hold; legitimate requests remain responsive."
+    },
+    {
+      "id": "QA-GAP-013",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Cross-Origin Request Protection",
+      "steps": "Attempt cookie-backed requests and WebSocket connections from foreign origins.",
+      "expected": "Unauthorized origins cannot perform protected operations."
+    },
+    {
+      "id": "QA-GAP-014",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Multi-Tab Session Refresh",
+      "steps": "Expire tokens; trigger requests simultaneously in several tabs.",
+      "expected": "Refresh races recover; no persistent login loop."
+    },
+    {
+      "id": "QA-GAP-015",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Malicious Document Handling",
+      "steps": "Upload corrupt, mislabeled, and decompression-heavy files.",
+      "expected": "Safe rejection/failure; parser resources remain controlled."
+    },
+    {
+      "id": "QA-GAP-016",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Secret Leakage in Telemetry",
+      "steps": "Trigger provider/OAuth failures; inspect logs, traces, errors.",
+      "expected": "No tokens, keys, or credentials appear."
+    },
+    {
+      "id": "QA-GAP-017",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Permission Revocation During Execution",
+      "steps": "Revoke access while retrieval/tools are running.",
+      "expected": "Subsequent access follows revocation rules; no forbidden evidence disclosed."
+    },
+    {
+      "id": "QA-GAP-018",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Browser Network Recovery",
+      "steps": "Disconnect during streaming; reconnect and reload.",
+      "expected": "No duplicated answer text; usable terminal or recovery state."
+    },
+    {
+      "id": "QA-GAP-019",
+      "kind": "proposed_gap",
+      "status": "active",
+      "title": "Audit Failure Atomicity",
+      "steps": "Make audit persistence fail during a protected operation.",
+      "expected": "Operation cannot silently succeed without its required audit event."
+    },
+    {
+      "id": "QA-AREA-001",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Authentication, Tokens, and Sessions",
+      "steps": "Login, refresh, replay old token, logout.",
+      "expected": "Valid access works; invalid/revoked refresh tokens fail."
+    },
+    {
+      "id": "QA-AREA-002",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Tenant Isolation and RLS",
+      "steps": "Access another tenant’s records through API and database.",
+      "expected": "API returns 404; database excludes foreign rows."
+    },
+    {
+      "id": "QA-AREA-003",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Roles, Groups, and Grants",
+      "steps": "Change memberships/grants; retry restricted operations.",
+      "expected": "Authorized access succeeds; forbidden operations return 403."
+    },
+    {
+      "id": "QA-AREA-004",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Retrieval Permissions and Ranking",
+      "steps": "Search with different users and ranking signals.",
+      "expected": "Only permitted results appear; fusion order matches expectations."
+    },
+    {
+      "id": "QA-AREA-005",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Grounded Chat and Citations",
+      "steps": "Ask supported, unsupported, and restricted-source questions.",
+      "expected": "Valid citations appear; unsupported answers refuse; restricted sources stay hidden."
+    },
+    {
+      "id": "QA-AREA-006",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Chat API and Runtime",
+      "steps": "Create, update, message, reload, delete a conversation.",
+      "expected": "Lifecycle works; answers and citations persist correctly."
+    },
+    {
+      "id": "QA-AREA-007",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "WebSocket Streaming and Backplane",
+      "steps": "Subscribe before/after publishing; send terminal events.",
+      "expected": "Ordered delivery and replay work; terminal events end streaming."
+    },
+    {
+      "id": "QA-AREA-008",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Context and Session Summaries",
+      "steps": "Exceed context budget; summarize; ask follow-up questions.",
+      "expected": "Context fits budget; required cited evidence survives."
+    },
+    {
+      "id": "QA-AREA-009",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Document Upload, Management, Preview",
+      "steps": "Upload, list, preview, delete a document.",
+      "expected": "Content displays correctly; deletion removes stored data."
+    },
+    {
+      "id": "QA-AREA-010",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Parsing, Chunking, and Ingestion",
+      "steps": "Ingest supported formats; repeat ingestion.",
+      "expected": "Correct text/chunks; ready status; no duplicate chunks."
+    },
+    {
+      "id": "QA-AREA-011",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Collections Management",
+      "steps": "Create collections; add documents; inspect counts.",
+      "expected": "Ownership, contents, and counts match stored records."
+    },
+    {
+      "id": "QA-AREA-012",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Search, Suggestions, Saved Searches",
+      "steps": "Search, filter, select suggestions, save/reload queries.",
+      "expected": "Relevant permitted results; saved filters round-trip correctly."
+    },
+    {
+      "id": "QA-AREA-013",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Sources and Connector Sync",
+      "steps": "Add source, sync, inspect indexing, delete.",
+      "expected": "Documents index correctly; failures surface; deletion cascades."
+    },
+    {
+      "id": "QA-AREA-014",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Google Drive, OAuth, ACL Mapping",
+      "steps": "Connect Drive; sync files; vary permissions.",
+      "expected": "Authorized files appear; mirrored ACL restrictions hold."
+    },
+    {
+      "id": "QA-AREA-015",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Web Fetching and SSRF",
+      "steps": "Fetch public URLs and blocked/private destinations.",
+      "expected": "Public fetch works; unsafe destinations are rejected."
+    },
+    {
+      "id": "QA-AREA-016",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "LLM Gateway, Providers, Models",
+      "steps": "Configure provider; discover/select models; invoke gateway.",
+      "expected": "Correct model/provider used; credentials never returned."
+    },
+    {
+      "id": "QA-AREA-017",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "LLM Context, Tools, Prompt Economics",
+      "steps": "Exercise budgeting, fragmented tool calls, compaction.",
+      "expected": "Calls reconstruct correctly; compaction reduces input tokens."
+    },
+    {
+      "id": "QA-AREA-018",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Assistant Creation, Versioning, Testing",
+      "steps": "Create/edit/publish assistant; run sample tests.",
+      "expected": "Configuration persists; versions display; tests avoid real side effects."
+    },
+    {
+      "id": "QA-AREA-019",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Assistant Governance and Wiring",
+      "steps": "Certify/disable assistant; start chats; inspect instructions.",
+      "expected": "Governance applies; disabled assistants cannot start chats."
+    },
+    {
+      "id": "QA-AREA-020",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Tool Registry, Execution, Policy",
+      "steps": "Invoke allowed, unknown, disabled, unapproved tools.",
+      "expected": "Allowed tools run; denied handlers never execute; outcomes recorded."
+    },
+    {
+      "id": "QA-AREA-021",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Built-in Tools",
+      "steps": "Run retrieval, web search, Python, file-writing tools.",
+      "expected": "Correct results/artifacts; each tool’s policy is enforced."
+    },
+    {
+      "id": "QA-AREA-022",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "MCP Servers, Tools, Egress",
+      "steps": "Register server; discover/call tools; try blocked endpoints.",
+      "expected": "Allowed calls succeed; unsafe endpoints fail; secrets stay hidden."
+    },
+    {
+      "id": "QA-AREA-023",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Sandbox Execution and Lifecycle",
+      "steps": "Execute, reuse session, reset, close, test isolation.",
+      "expected": "Expected output; correct generations; no host/network exposure."
+    },
+    {
+      "id": "QA-AREA-024",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Sandbox Auth and Supply Chain",
+      "steps": "Use missing/wrong credentials; request denied packages.",
+      "expected": "Unauthorized calls return 401; denied dependencies never install."
+    },
+    {
+      "id": "QA-AREA-025",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Code Runs and Messages",
+      "steps": "Execute code; inspect output, status, errors, artifacts.",
+      "expected": "Accurate run details and safe, actionable messages appear."
+    },
+    {
+      "id": "QA-AREA-026",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Artifact Access and Retention",
+      "steps": "Create/read artifacts; attempt foreign access; purge expired items.",
+      "expected": "Content round-trips; unauthorized access denied; only expired items purge."
+    },
+    {
+      "id": "QA-AREA-027",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Scheduling and Dispatch",
+      "steps": "Configure cadence/timezone; trigger due runs and overlaps.",
+      "expected": "Correct next-run times; configured overlap policy holds."
+    },
+    {
+      "id": "QA-AREA-028",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Run History, Delivery, Inbox",
+      "steps": "Finish/fail runs; inspect inbox; repeat delivery; mark read.",
+      "expected": "Owner sees correct status; delivery is idempotent; read state updates."
+    },
+    {
+      "id": "QA-AREA-029",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Autonomy and Escalation",
+      "steps": "Apply autonomy cap; trigger escalation; resume/cancel.",
+      "expected": "Caps never raise autonomy; transitions match defined rules."
+    },
+    {
+      "id": "QA-AREA-030",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Audit Events, Filters, Export",
+      "steps": "Perform audited actions; filter events; export CSV.",
+      "expected": "Required tenant-scoped events exist; export matches displayed events."
+    },
+    {
+      "id": "QA-AREA-031",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Administration and Governance",
+      "steps": "Open panels as admin/member; change supported policies.",
+      "expected": "Correct tenant data; restricted operations denied; changes persist."
+    },
+    {
+      "id": "QA-AREA-032",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Encryption and Secrets",
+      "steps": "Encrypt/decrypt; tamper; use wrong key; inspect APIs.",
+      "expected": "Round-trip succeeds; tampering fails; plaintext never exposed."
+    },
+    {
+      "id": "QA-AREA-033",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Database Migrations and Repositories",
+      "steps": "Check migration chain; create/read/update scoped records.",
+      "expected": "Single valid migration head; repository results match stored data."
+    },
+    {
+      "id": "QA-AREA-034",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Object Storage",
+      "steps": "Store/read/delete content; test filenames and keys.",
+      "expected": "Bytes round-trip; keys are tenant-scoped; traversal stripped."
+    },
+    {
+      "id": "QA-AREA-035",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Configuration and API Errors",
+      "steps": "Supply invalid settings/input; trigger unknown exceptions.",
+      "expected": "Invalid values rejected; errors follow contract without internal leaks."
+    },
+    {
+      "id": "QA-AREA-036",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Preferences and Avatars",
+      "steps": "Save/clear preferences; upload/delete avatar; reload profile.",
+      "expected": "Values round-trip; invalid models rejected; avatar state matches."
+    },
+    {
+      "id": "QA-AREA-037",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Frontend API and Refresh",
+      "steps": "Send requests; simulate 401; retry after refresh.",
+      "expected": "Correct headers/payloads; refresh and retry follow expected behavior."
+    },
+    {
+      "id": "QA-AREA-038",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Navigation, Guards, Not Found",
+      "steps": "Visit known, protected, and unknown routes.",
+      "expected": "Correct screens; login when required; actionable 404 page."
+    },
+    {
+      "id": "QA-AREA-039",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Shell and Command Palette",
+      "steps": "Navigate; open palette; filter/select commands.",
+      "expected": "Correct routes/actions; input focus and shortcuts work."
+    },
+    {
+      "id": "QA-AREA-040",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Themes and Design Tokens",
+      "steps": "Change theme/mode/density; reload; change OS mode.",
+      "expected": "Preferences persist; system mode follows OS; tokens remain valid."
+    },
+    {
+      "id": "QA-AREA-041",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Markdown and Sanitization",
+      "steps": "Render formatting/code; inject unsafe markup; copy code.",
+      "expected": "Formatting/copy work; unsafe markup cannot execute."
+    },
+    {
+      "id": "QA-AREA-042",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Accessibility and Focus",
+      "steps": "Open dialogs; press Tab, Shift+Tab, Escape.",
+      "expected": "Correct initial focus; focus stays trapped; dismiss works."
+    },
+    {
+      "id": "QA-AREA-043",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Chat Rendering and Autoscroll",
+      "steps": "Stream tokens; scroll upward; reconnect; finish stream.",
+      "expected": "No duplicate text; scrolling respects user; stable messages avoid rerenders."
+    },
+    {
+      "id": "QA-AREA-044",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "UI Trust Indicators",
+      "steps": "Render citations, permissions, freshness, risk, provenance.",
+      "expected": "Labels/states match actual data; source inspection works."
+    },
+    {
+      "id": "QA-AREA-045",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Documentation and Feature Catalog",
+      "steps": "Open documents/cards; follow internal links.",
+      "expected": "Content renders; links resolve; unknown documents show helpful errors."
+    },
+    {
+      "id": "QA-AREA-046",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Production Build Guards",
+      "steps": "Build with development pages disabled; inspect bundles/layout.",
+      "expected": "Development content excluded; heavy chat code split; grid can shrink."
+    },
+    {
+      "id": "QA-AREA-047",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Unauthenticated Login Browser Smoke",
+      "steps": "Open app root without a valid session.",
+      "expected": "Accessible email/password login form appears."
+    },
+    {
+      "id": "QA-AREA-048",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Docs/Catalog Browser Smoke",
+      "steps": "Open `/docs` and `/features` in test setup.",
+      "expected": "Expected document navigation and catalog headings appear."
+    },
+    {
+      "id": "QA-AREA-049",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Grounded End-to-End",
+      "steps": "Upload → ingest → retrieve → ask → inspect citations.",
+      "expected": "Answer cites uploaded evidence; unauthorized users cannot retrieve it."
+    },
+    {
+      "id": "QA-AREA-050",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Retrieval/Citation/Groundedness Evaluations",
+      "steps": "Run golden questions against fake/live models.",
+      "expected": "Configured quality thresholds pass; ungrounded answers are detected."
+    },
+    {
+      "id": "QA-AREA-051",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Benchmark Data and Summaries",
+      "steps": "Validate manifests, checksums, questions, selection, reports.",
+      "expected": "Dataset checks pass; selection deterministic; evidence-preserving summaries pass."
+    },
+    {
+      "id": "QA-AREA-052",
+      "kind": "existing_area",
+      "status": "active",
+      "title": "Latency and Compression Evaluations",
+      "steps": "Measure first answer token; simulate failure; compact context.",
+      "expected": "Latency meets configured budget; failures terminate; grounding survives compression."
+    }
+  ]
+}
