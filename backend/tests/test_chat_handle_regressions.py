@@ -180,7 +180,15 @@ async def test_persisted_document_handle_rechecks_access_and_conversation(
         )
         document = await session.get(models.Document, ctx.document_id)
         assert document is not None
-        # Actual relational retrieval must deny the previously readable identity.
+        document.status = "ready"
+        await session.commit()
+    readable = _DocumentGateway()
+    assert (await _document_turn(ctx, readable))[-1]["type"] == "done"
+    assert "$14,600" in readable.replies[-1]
+    async with ctx.sessionmaker() as session:
+        document = await session.get(models.Document, ctx.document_id)
+        assert document is not None
+        # Readiness is unchanged: only access to the previously read identity is revoked.
         document.owner_id = uuid.uuid4()
         await session.commit()
     revoked = _DocumentGateway()

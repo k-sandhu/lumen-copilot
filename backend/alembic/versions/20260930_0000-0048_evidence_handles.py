@@ -62,7 +62,8 @@ def upgrade() -> None:
             op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
             op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
             op.execute(
-                f"CREATE POLICY rls_{table} ON {table} USING ({_PREDICATE}) WITH CHECK ({_PREDICATE})"
+                f"CREATE POLICY rls_{table} ON {table} "
+                f"USING ({_PREDICATE}) WITH CHECK ({_PREDICATE})"
             )
 
 
