@@ -15,7 +15,7 @@
 **Stack.** The isolated `lumen-eval` compose project used by notebooks 05–07: origin/main ce4d853, backend `:47381`, the 95-PDF `answer-accuracy-eval` collection, and four chat models via OpenRouter (`anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6-luna`, `z-ai/glm-5.3-flash`). The rolling summary, web search and sandbox were off.
 
 **Per-call method.** Each arm ran temporary, never-committed patches in the eval checkout:
-- One `eval.llm_call_raw` log line per agent-loop completion, with prompt, cached, cache-write and completion tokens taken straight from the provider's `usage` (OpenRouter's `prompt_tokens_details.cache_write_tokens`, which Lumen's ledger misses, #759), plus the OpenRouter generation id.
+- One `eval.llm_call_raw` log line per agent-loop completion, with prompt, cached, cache-write and completion tokens taken straight from the provider's `usage` (OpenRouter's `prompt_tokens_details.cache_write_tokens`, which Lumen's ledger missed on ce4d853; fixed by #759 / #762 on 2026-10-15), plus the OpenRouter generation id.
 - `saved_tokens` / `before_tokens` added to the existing `context.tool_results_proactively_compacted` line.
 - An arm switch, read per call so arms could flip without a restart.
 
@@ -194,7 +194,7 @@ In-answer compaction remains correct as a **budget** tool: the reactive, over-bu
 - **The offline harness overstates compaction.** `backend/tests/test_prompt_economics.py` (and #658's 25.5% figure) models one 200-character cited snippet per result. The runtime cites every retrieved passage in full, so the harness's token reduction does not occur live (≈0.4%). Its realism fix is part of the compaction follow-up.
 - **Per-conversation stickiness was not measured** (§5.2, arm D). The decision rests on arm A/B attribution and on #763's live smoke.
 - **A cache-probing oracle remains on unpartitioned upstreams** (§5.1). See [#769](https://github.com/k-sandhu/lumen-copilot/issues/769).
-- **The ledger misses cache writes** (#759). Write tokens here come from the raw provider usage, not Lumen's `llm_usage`.
+- **Cache writes came from raw provider usage.** The measured build (ce4d853) recorded 0 writes in `llm_usage`, so write tokens here come from the raw provider usage. #759 / #762, merged 2026-10-15, now maps them into the ledger, so a re-run on current `main` can use Lumen's own accounting.
 
 ## 7. Reproduce
 
