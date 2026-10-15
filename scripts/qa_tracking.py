@@ -163,6 +163,11 @@ def git(root, *args):
     return result.stdout.strip()
 
 
+def definition_tree_dirty(root):
+    # Adding observations does not change the definitions that produced them.
+    return bool(git(root, "status", "--porcelain", "--", ".", ":(exclude)qa/runs"))
+
+
 def make_run(root, run_id, app_commit, context, definition_commit, definition_dirty):
     _, cases = load_definitions(root)
     application = dict(context["application"], commit=app_commit)
@@ -736,7 +741,7 @@ def main(argv=None):
         print(render_report(runs, cases, args.app_commit, args.case), end="")
         return 0
     commit = git(root, "rev-parse", "HEAD")
-    dirty = bool(git(root, "status", "--porcelain"))
+    dirty = definition_tree_dirty(root)
     if args.command == "suite":
         context = {
             "application": {

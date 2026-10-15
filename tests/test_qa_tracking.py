@@ -275,6 +275,10 @@ class TrackingContract(unittest.TestCase):
                 "test: initial run",
             )
             base = git("rev-parse", "HEAD")
+            (root / "qa/runs/new.json").write_text("{}")
+            self.assertFalse(qa.definition_tree_dirty(root))
+            (root / "case-change.txt").write_text("new test data")
+            self.assertTrue(qa.definition_tree_dirty(root))
             ledger.write_text('{"changed": true}')
             git("add", ".")
             git(
