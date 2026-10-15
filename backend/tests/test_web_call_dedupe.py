@@ -72,12 +72,25 @@ async def world() -> AsyncIterator[_World]:
         await engine.dispose()
 
 
+# Declared like the real web_search schema: #623 validates closed schemas before execution,
+# so an undeclared {"type": "object"} would reject the query/k arguments these tests send.
+_QUERY_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "minLength": 1},
+        "k": {"type": "integer", "minimum": 1},
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
+
 def _definition(handler: Any, *, timeout_seconds: float | None = 2.0) -> ToolDefinition:
     """A static registry web_search definition with its governance kept intact."""
     return ToolDefinition(
         name="web_search",
         description="Public web search",
-        json_schema={"type": "object"},
+        json_schema=_QUERY_SCHEMA,
         handler=handler,
         risk_tier=RiskTier.T0,
         read_only=True,
@@ -294,7 +307,7 @@ async def test_other_static_read_only_tools_are_not_coalesced(
     definition = ToolDefinition(
         name="search_text",
         description="Corpus search",
-        json_schema={"type": "object"},
+        json_schema=_QUERY_SCHEMA,
         handler=_web_handler(executions),
         risk_tier=RiskTier.T0,
         read_only=True,
