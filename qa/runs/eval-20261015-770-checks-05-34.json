@@ -1,0 +1,1508 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "run_id": "eval-20261015-770-checks-05-34",
+  "started_at": "2026-10-15T17:52:17.144Z",
+  "finished_at": "2026-10-15T18:20:38.502588Z",
+  "application": {
+    "source_state": "modified",
+    "images": [
+      {
+        "service": "backend",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      },
+      {
+        "service": "frontend",
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6"
+      }
+    ],
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "definitions": {
+    "commit": "cb59359ff2db30ccc60c3237bd5fedab8a8d0bc7",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "b99ebaea599a75441a076feb5baaadb2d9a83fa955b9d8975482dd18ae92bc35"
+  },
+  "environment": {
+    "label": "populated Eval / current static frontend / Chrome #770",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/openai/gpt-6-luna"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "tenant": "Eval",
+      "initial_ready_documents": 96,
+      "initial_mime_counts": {
+        "application/pdf": 95,
+        "text/plain": 1
+      },
+      "collection_counts": {
+        "answer-accuracy-eval": 95,
+        "QA visible walkthrough 2026-10-15": 1
+      }
+    },
+    "configuration": {
+      "LLM_MODEL": "openrouter/openai/gpt-6-luna",
+      "LLM_EMBEDDING_MODEL": "openai/openai/text-embedding-3-large",
+      "LLM_EMBEDDING_DIMENSIONS": "2048",
+      "WEB_SEARCH_ENABLED": "false",
+      "SANDBOX_ENABLED": "false",
+      "CHAT_SUMMARY_ENABLED": "false",
+      "base_url": "http://localhost:47380",
+      "backend_commit": "3c022fcc4880228636a3cfda067c7014c89441f9",
+      "backend_patch_sha256": "ea4797f203d11025da7728e62a6f65a23eba786d18ceb7eb1fa40c580ca40ecf",
+      "frontend_commit": "3c022fcc4880228636a3cfda067c7014c89441f9",
+      "frontend_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_roots": "modified mounted Eval backend; immutable current static frontend",
+      "disabled_features_are_not_enabled_for_testing": true,
+      "frontend_mode": "baked static frontend; tree unchanged at main 70c3c2e4"
+    }
+  },
+  "ci": null,
+  "notes": "Checkpoint of current-static-frontend observations for catalog checks 5–34 plus bounded subcases. Unlisted cases are not claimed in this checkpoint. The backend and datastores stopped externally during the run; after restoring them, an embedding-contract startup gate remained degraded until the API/worker were restarted against healthy dependencies. No source patches, credentials or tenant policies were changed. Initial upload was correctly rejected while degraded; its retry then completed. Public source ingestion failed embedding once and recovered on Sync now. Synthetic QA collection, fixture, public source, saved search, assistant draft and chat are retained for inspection. No schedule was created. Sequential native browser prompts blocked Save as case automation; a fresh tab reopened the saved draft. CSV export has no observed completion signal; file/bytes remain unconfirmed, and an internal downloads-page request was blocked by browser URL policy. These are modified-backend Eval observations, not clean-main certification.",
+  "results": [
+    {
+      "case_id": "QA-DOC-001",
+      "definition": {
+        "id": "QA-DOC-001",
+        "title": "Synthetic TXT ingestion and preview",
+        "status": "active",
+        "areas": [
+          "QA-AREA-009",
+          "QA-AREA-010",
+          "QA-AREA-034"
+        ],
+        "steps": [
+          "Select a QA collection and upload qa/fixtures/qa-silver-maple.txt through the browser.",
+          "Wait for Ready, open the document and inspect ingestion status and text preview."
+        ],
+        "expected": "Exactly one ready document with one nonempty passage; extracted preview preserves QA-OCT15-7429 and 24 October 2035.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "5f0f2b867939b3881dc143ca12af726b1c00550a63d1dea84f05468b7709ee56",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "After readiness recovery, retry uploaded qa-silver-maple.txt; one passage, all stages done, 338 extracted characters, zero replacement/control characters, correct code/date preview.",
+          "observed": {
+            "chunks": 1,
+            "bytes": 340,
+            "code": "QA-OCT15-7429",
+            "date": "24 October 2035",
+            "initial_attempt": "blocked by degraded embedding contract; no data created"
+          },
+          "captured_at": "2026-10-15T17:58:55.103Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-COLL-001",
+      "definition": {
+        "id": "QA-COLL-001",
+        "title": "Collection contents and counts",
+        "status": "active",
+        "areas": [
+          "QA-AREA-011"
+        ],
+        "steps": [
+          "Create a uniquely named QA collection.",
+          "Upload one synthetic fixture and reselect the collection."
+        ],
+        "expected": "Count changes from zero to one and the selected collection contains the uploaded fixture.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "eb92baf69e9edfd66b0f1d2b5dd78731d9f6f79a2d8aa86051858173cd5eaa1e",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "New QA 770 collection started empty; one uploaded fixture appeared and count changed from zero to one.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:58:55.104Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-CHAT-002",
+      "definition": {
+        "id": "QA-CHAT-002",
+        "title": "Unsupported fact has no citations",
+        "status": "active",
+        "areas": [
+          "QA-AREA-005",
+          "QA-AREA-044"
+        ],
+        "steps": [
+          "Ask for the exact 2035 annual compliance fee for fictional Project Violet Otter using only available documents; tell the assistant not to estimate.",
+          "Inspect the completed answer and source controls."
+        ],
+        "expected": "Answer says the fact could not be found, invents no fee, and has zero citation controls/sources.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "cca8bdf3b91939ff46a9742e402cd0bf9cc0de7f337dfe14f53fe269bdd660c8",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Unsupported fictional-fee question completed with I could not find a documented annual compliance fee and No sources were cited for this answer.",
+          "observed": {
+            "citation_controls": 0
+          },
+          "captured_at": "2026-10-15T17:52:17.145Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-CHAT-003",
+      "definition": {
+        "id": "QA-CHAT-003",
+        "title": "Renamed conversation persists",
+        "status": "active",
+        "areas": [
+          "QA-AREA-006",
+          "QA-AREA-037"
+        ],
+        "steps": [
+          "Rename a QA conversation containing a supported answer and an unsupported answer.",
+          "Fully reload, reopen it from history and inspect both messages and sources."
+        ],
+        "expected": "Title, both answers and the supporting citation survive; the refusal still has zero citations.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "4a4d465d4198db545f6ac50980e7a1963c5b57cd18619d755331b48a7ab158c2",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Renamed QA 770 — populated PDF checks, fully reloaded and reopened from history; both answers persisted with inline S1 for supported facts and no citations on refusal.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:56:03.742Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-AUDIT-001",
+      "definition": {
+        "id": "QA-AUDIT-001",
+        "title": "Audit an answer and source view",
+        "status": "active",
+        "areas": [
+          "QA-AREA-030"
+        ],
+        "steps": [
+          "As an authorized audit user, filter the latest generated-answer events and open provenance for this QA chat.",
+          "Inspect the supported/refusal citation counts and find the document-view event."
+        ],
+        "expected": "Tenant-scoped records identify the correct model/session; refusal citation count is zero; source view is audited.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b52ec85aa9cb71ccb8f1d5e498477e4f1973fa5d6c08a26695d1079030c7b3f5",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Inspected matching-session supported/refusal answer provenance (citation_count 1 versus 0, GPT-6 Luna, Eval tenant) and found current document-view audit events.",
+          "observed": {
+            "supported": "Provenance · 7143e069-c516-4a0a-9d36-e79c02d02b6a\nEvent\nanswer.generated\nWhen\nOct 15, 13:48:40\nActor\ncf687d59-2cb3-40c1-a676-a79e0888cb30\nTenant\nec5c157e-ab2a-4576-90b9-674cdd87ab38\nDecision\nallowed\nResource\n5864419c-9fa4-4bd9-8ca6-23aa9c4c086f\nCandidates\n1397422b-12b7-4933-94bd-09297eef18d8\nretrieved\nRaw event\n{\n  \"model\": \"openrouter/openai/gpt-6-luna\",\n  \"query_hash\": \"8ffed28e7c255ac18b73fcaa92b3dfd934d19ec811efe25c6325e1413ad24a04\",\n  \"session_id\": \"663e3321-c52a-401e-a49b-8e41e6704973\",\n  \"document_ids\": [\n    \"1397422b-12b7-4933-94bd-09297eef18d8\"\n  ],\n  \"citation_count\": 1,\n  \"retrieved_hits\": 15\n}",
+            "refusal": "Provenance · 67ee9b04-1399-42a7-965b-c3a7ed18eab4\nEvent\nanswer.generated\nWhen\nOct 15, 13:51:24\nActor\ncf687d59-2cb3-40c1-a676-a79e0888cb30\nTenant\nec5c157e-ab2a-4576-90b9-674cdd87ab38\nDecision\nallowed\nResource\nae6f5e79-1d50-4d03-82a8-9a439ecd9317\nRaw event\n{\n  \"model\": \"openrouter/openai/gpt-6-luna\",\n  \"query_hash\": \"3be2d9f09bfb0433e266c6cfb0f9d4571f904926c540a93fec1177ff2a7ed6e3\",\n  \"session_id\": \"663e3321-c52a-401e-a49b-8e41e6704973\",\n  \"document_ids\": [],\n  \"citation_count\": 0,\n  \"retrieved_hits\": 20\n}",
+            "document_view_count": 7,
+            "document_view": "Provenance · 5a9f1432-9acc-42c5-bd6b-993f5071fc06\nEvent\ndocument.viewed\nWhen\nOct 15, 13:58:34\nActor\ncf687d59-2cb3-40c1-a676-a79e0888cb30\nTenant\nec5c157e-ab2a-4576-90b9-674cdd87ab38\nDecision\nallowed\nResource\nedb99623-7825-4995-b199-fdeac5d76c9c\nRaw event\n{\n  \"form\": \"text\",\n  \"filename\": \"qa-silver-maple.txt\"\n}"
+          },
+          "captured_at": "2026-10-15T18:17:39.006Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-A11Y-001",
+      "definition": {
+        "id": "QA-A11Y-001",
+        "title": "Document dialog focus lifecycle",
+        "status": "active",
+        "areas": [
+          "QA-AREA-042"
+        ],
+        "steps": [
+          "Open the QA document viewer and inspect initial focus.",
+          "Use Tab and Shift+Tab through the dialog, then Escape."
+        ],
+        "expected": "Focus stays inside the modal, Escape closes it, and focus returns to its opener.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b5acd3f1b714ae393c89aa22f3a93dfc4039a26f1cf345f09319d56d2f912c0d",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Six Tabs and Shift+Tab cycled inside the TXT viewer between Close viewer, status detail and Download original; Escape closed the dialog and returned focus to Open qa-silver-maple.txt.",
+          "observed": {
+            "focus": [
+              "The focused UI element is 125 button Status detail: Native text is indexed and searchable.",
+              "The focused UI element is 157 button Download original",
+              "The focused UI element is 111 button Close viewer",
+              "The focused UI element is 125 button Status detail: Native text is indexed and searchable.",
+              "The focused UI element is 157 button Download original",
+              "The focused UI element is 111 button Close viewer",
+              "The focused UI element is 157 button Download original"
+            ],
+            "restored_opener": "Open qa-silver-maple.txt"
+          },
+          "captured_at": "2026-10-15T17:59:06.336Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-ARTIFACT-001",
+      "definition": {
+        "id": "QA-ARTIFACT-001",
+        "title": "Artifact library initial state",
+        "status": "active",
+        "areas": [
+          "QA-AREA-026"
+        ],
+        "steps": [
+          "Open Artifacts with no newly generated QA artifact and inspect the list/detail layout."
+        ],
+        "expected": "The empty or existing list state is truthful; no blank dead-end or fabricated artifact.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "502a8c4f32daf312d3cc4760abe02c3d0fa61d2896f4c18a7e2abda4e5757f75",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Artifact library completed with No artifacts yet and No artifact selected; no artifact was fabricated after the unavailable file-tool request.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:12:14.915Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-ASSISTANT-001",
+      "definition": {
+        "id": "QA-ASSISTANT-001",
+        "title": "Assistant draft validation and persistence",
+        "status": "active",
+        "areas": [
+          "QA-AREA-018"
+        ],
+        "steps": [
+          "Open New assistant; submit with no name.",
+          "Fill a unique QA name, synthetic instructions and uploaded-file collection scope; save a draft.",
+          "Reload its editor."
+        ],
+        "expected": "Missing name is explained; draft and selected scope persist. No publishing or approval-sensitive tool enabling.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "2fd1faac96a5c21589a8cb625e7d112e1cdc0f2a16ba36dc8a79ba80806d8602",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Missing name showed Give your assistant a name.; QA draft saved with Uploaded files and answer-accuracy-eval scope; reload retained configuration.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:09:15.589Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-SCHEDULE-001",
+      "definition": {
+        "id": "QA-SCHEDULE-001",
+        "title": "Schedule requires an assistant",
+        "status": "active",
+        "areas": [
+          "QA-AREA-027"
+        ],
+        "steps": [
+          "Open New schedule and submit without an assistant."
+        ],
+        "expected": "Field-associated validation rejects submission; no schedule is created.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "caf9030e12659fb3734f93378f9a75174c623b982a553404a72c1927e4382697",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Submitting a schedule without an assistant focused its field and displayed Pick the assistant this schedule should run.; no schedule was created.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:12:24.585Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-005",
+      "definition": {
+        "id": "QA-WALK-005",
+        "title": "Grounded Chat and Citations — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-005"
+        ],
+        "steps": [
+          "Ask supported, unsupported, and restricted-source questions.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Valid citations appear; unsupported answers refuse; restricted sources stay hidden.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "3c7be35ac6e799b6a2861cacd1fe032d0ee2fab8d23df6ccdc6f112c8b1045f0",
+      "outcome": "partial",
+      "reason": "Restricted-source questions cannot be tested without a second principal or controlled restricted corpus.",
+      "residual_risk": "Source authorization under a different principal remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "On current static frontend, inline S1 opened the correct balance-sheet passage. Unsupported Project Violet Otter fee question refused with no citation controls.",
+          "observed": {
+            "file": "kc-341.pdf",
+            "net_assets_2017": "334852",
+            "net_assets_2016": "274639",
+            "refusal_citations": 0
+          },
+          "captured_at": "2026-10-15T17:52:17.144Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-006",
+      "definition": {
+        "id": "QA-WALK-006",
+        "title": "Chat API and Runtime — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-006"
+        ],
+        "steps": [
+          "Create, update, message, reload, delete a conversation.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Lifecycle works; answers and citations persist correctly.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "c61c81495437d06f6ccdcf2d34802fc32d3cc1ee8c15b25a1b80db90a08997ac",
+      "outcome": "partial",
+      "reason": "The evidence conversation is retained for inspection; deletion was not exercised in this phase.",
+      "residual_risk": "Conversation deletion behavior remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Created, messaged, renamed and reloaded a QA conversation; both answers and citation states persisted.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:56:03.743Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-007",
+      "definition": {
+        "id": "QA-WALK-007",
+        "title": "WebSocket Streaming and Backplane — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-007"
+        ],
+        "steps": [
+          "Subscribe before/after publishing; send terminal events.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Ordered delivery and replay work; terminal events end streaming.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "a83acbd7b6581ce841412bba709a8e9681b311209f393fdb1e3dd752df68d7f1",
+      "outcome": "partial",
+      "reason": "Raw WebSocket late-subscription/replay and Redis backplane event ordering need protocol-level probes.",
+      "residual_risk": "UI completion does not establish transport replay guarantees.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Observed ordered preparing/thinking/tool activity followed by completed answer and restored composer; no duplicated answer after reload.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:56:03.744Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-008",
+      "definition": {
+        "id": "QA-WALK-008",
+        "title": "Context and Session Summaries — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-008"
+        ],
+        "steps": [
+          "Exceed context budget; summarize; ask follow-up questions.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Context fits budget; required cited evidence survives.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "fc2e94344af4c265c01034db0a4d470c86fc411044cf979405dd94c9b2428294",
+      "outcome": "partial",
+      "reason": "CHAT_SUMMARY_ENABLED is false; no overflow/compaction or summary-preserved evidence test was run.",
+      "residual_risk": "Summary and context-pressure behavior remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Context panel showed two answers, 52.0k total tokens, 37.8k cached, one cited document and tool counts including a failed read.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:56:20.286Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-009",
+      "definition": {
+        "id": "QA-WALK-009",
+        "title": "Document Upload, Management, Preview — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-009"
+        ],
+        "steps": [
+          "Upload, list, preview, delete a document.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Content displays correctly; deletion removes stored data.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "0a1dfc5296f97d3eb49fea6d19bc2a3c8a9345515d45ab17694371f4e708bdf8",
+      "outcome": "partial",
+      "reason": "Existing data and the new evidence fixture were retained; deletion was not exercised.",
+      "residual_risk": "Document deletion/storage cleanup remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Listed and previewed an existing 38-passage PDF and uploaded/previewed one correct TXT fixture.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:58:55.105Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-010",
+      "definition": {
+        "id": "QA-WALK-010",
+        "title": "Parsing, Chunking, and Ingestion — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-010"
+        ],
+        "steps": [
+          "Ingest supported formats; repeat ingestion.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Correct text/chunks; ready status; no duplicate chunks.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b7104b34c0f4910477e4b94dd76119eda0dbde826d84b8cc11d199a192772a61",
+      "outcome": "partial",
+      "reason": "Only one new TXT ingestion was run; format breadth and repeat-ingestion deduplication were not exercised.",
+      "residual_risk": "Parsing fidelity for other formats and duplicate-chunk prevention remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Existing PDF has 38 ready passages; new TXT reached parsed/chunked/embedded/indexed completion with one passage and correct extracted text.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:58:55.106Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-011",
+      "definition": {
+        "id": "QA-WALK-011",
+        "title": "Collections Management — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-011"
+        ],
+        "steps": [
+          "Create collections; add documents; inspect counts.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Ownership, contents, and counts match stored records.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "de78a38d3789320960b9695906b8a1cdccf3077d1dabfaddf519fb736df25062",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Created QA 770 — upload checks, verified empty state, uploaded one fixture, and observed count one with correct collection, owner You and private visibility.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:58:55.106Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-012",
+      "definition": {
+        "id": "QA-WALK-012",
+        "title": "Search, Suggestions, Saved Searches — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-012"
+        ],
+        "steps": [
+          "Search, filter, select suggestions, save/reload queries.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Relevant permitted results; saved filters round-trip correctly.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "c6bfa1a820986010a8568b4c5dbc11dc00eccdecef16ca0291dc5ad3e1471a20",
+      "outcome": "failed",
+      "reason": "Empty input retained stale answer/results, reproducing #596.",
+      "residual_risk": "Users may mistake prior evidence for the current blank query.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Key Enterprises search returned relevant PDF passages; selecting the collection filter worked. Saved QA 770 query persisted across reload and restored the query/filter. Clearing the query retained prior answer/results.",
+          "observed": {
+            "query": "Key Enterprises",
+            "saved_name": "QA 770 — Key Enterprises PDFs",
+            "restored_collection": "answer-accuracy-eval",
+            "stale_results_after_clear": true
+          },
+          "captured_at": "2026-10-15T18:00:44.691Z"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/596"
+      ]
+    },
+    {
+      "case_id": "QA-WALK-013",
+      "definition": {
+        "id": "QA-WALK-013",
+        "title": "Sources and Connector Sync — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-013"
+        ],
+        "steps": [
+          "Add source, sync, inspect indexing, delete.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Documents index correctly; failures surface; deletion cascades.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "12e11f1516e9c6c45512b780163d41d4c35bc40202fe4f23cc52737e4f745567",
+      "outcome": "partial",
+      "reason": "Source deletion/cascade was not exercised; initial embedding failure cause is unestablished.",
+      "residual_risk": "Deletion cleanup and reliability beyond the successful manual retry remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Created owner-only example.com source; initial fetched document failed embedding ingestion and UI showed Sync failed; Sync now recovered to Connected/Synced with one indexed object.",
+          "observed": {
+            "public_url": "https://example.com/?qa770=20261015",
+            "indexed_after_retry": 1,
+            "initial_failure": "ingestion_embedding_error"
+          },
+          "captured_at": "2026-10-15T18:03:51.509Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-014",
+      "definition": {
+        "id": "QA-WALK-014",
+        "title": "Google Drive, OAuth, ACL Mapping — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-014"
+        ],
+        "steps": [
+          "Connect Drive; sync files; vary permissions.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Authorized files appear; mirrored ACL restrictions hold.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "64e2040f65446d9c2a3f74d9e30b9d44ca94cf110d473f8f92e6efd41cc19d62",
+      "outcome": "blocked",
+      "reason": "No authorized preconfigured Drive connection or alternate ACL principals are available; no OAuth consent was granted.",
+      "residual_risk": "Drive sync and ACL mirroring remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Drive setup exposes My Drive, folder and Shared Drive scopes and a Continue to Google consent action; no existing Drive source is connected.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:02:45.260Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-015",
+      "definition": {
+        "id": "QA-WALK-015",
+        "title": "Web Fetching and SSRF — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-015"
+        ],
+        "steps": [
+          "Fetch public URLs and blocked/private destinations.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Public fetch works; unsafe destinations are rejected.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "d478f008f8aae58fb4d97d77c618b10388de304d1ba573e0cf5f28505ceb1f17",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Malformed URL was rejected; loopback/private URL was blocked with an explicit safety message; public example.com fetch produced a document and later indexed successfully after retry.",
+          "observed": {
+            "private_probe": "http://127.0.0.1:47381/health",
+            "private_rejected": true,
+            "public_fetch": true
+          },
+          "captured_at": "2026-10-15T18:03:51.510Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-016",
+      "definition": {
+        "id": "QA-WALK-016",
+        "title": "LLM Gateway, Providers, Models — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-016"
+        ],
+        "steps": [
+          "Configure provider; discover/select models; invoke gateway.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Correct model/provider used; credentials never returned.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "10daff90e97cff1236191c5f4cea884127f2d414f7e8c063db3619dbea8dea32",
+      "outcome": "partial",
+      "reason": "Registering/discovering a new provider was not performed; no credentials were added or revealed.",
+      "residual_risk": "Provider discovery and credential storage round trips remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Model governance displayed four configured model IDs; chat used GPT-6 Luna and labeled the answered model correctly. Provider setup has write-only key input and no stored provider rows.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:04:22.541Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-017",
+      "definition": {
+        "id": "QA-WALK-017",
+        "title": "LLM Context, Tools, Prompt Economics — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-017"
+        ],
+        "steps": [
+          "Exercise budgeting, fragmented tool calls, compaction.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Calls reconstruct correctly; compaction reduces input tokens.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "923fcac988c1f36bbcb98288cdf340b83daefa4d83a6fc23d0978408664adc83",
+      "outcome": "partial",
+      "reason": "Fragmented tool-call reconstruction and budget-triggered compaction are not observable from this small browser conversation; summarization is disabled.",
+      "residual_risk": "Prompt-economics and compaction correctness remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "The answer completed after a rejected read_document argument; context panel reported token input/output/cache and tool counts.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:04:22.542Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-018",
+      "definition": {
+        "id": "QA-WALK-018",
+        "title": "Assistant Creation, Versioning, Testing — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-018"
+        ],
+        "steps": [
+          "Create/edit/publish assistant; run sample tests.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Configuration persists; versions display; tests avoid real side effects.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "98c412367c4b3edc9f2b3b686631743847049280c0b951b842d3100ee10263dc",
+      "outcome": "partial",
+      "reason": "Publishing/version history cannot be exercised with one member. Saving a reusable browser test case was blocked by sequential native prompts and browser-control recovery.",
+      "residual_risk": "Published version behavior and saved-case persistence remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Created and reloaded a scoped draft. Safe preview used GPT-6 Luna and returned correct £334,852 with a source citation. Publish stayed disabled because a distinct backup owner is unavailable.",
+          "observed": {
+            "preview_answer": "£334,852",
+            "scope": "answer-accuracy-eval",
+            "publish_enabled": false
+          },
+          "captured_at": "2026-10-15T18:09:15.591Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-019",
+      "definition": {
+        "id": "QA-WALK-019",
+        "title": "Assistant Governance and Wiring — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-019"
+        ],
+        "steps": [
+          "Certify/disable assistant; start chats; inspect instructions.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Governance applies; disabled assistants cannot start chats.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "167dddf74b9a137d2cc3532a8934fc56170823525d3cd2635a7466e7347d323f",
+      "outcome": "partial",
+      "reason": "No distinct backup owner or published assistant exists for certification/disable/launch checks.",
+      "residual_risk": "Full published-assistant governance remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Draft Start chat was offered but the backend rejected it with Only a published assistant can start a session.; this reproduces existing UX issue #600 while preserving the publish gate.",
+          "observed": {
+            "related_issue": "https://github.com/k-sandhu/lumen-copilot/issues/600",
+            "draft_launch_rejected": true
+          },
+          "captured_at": "2026-10-15T18:09:44.324Z"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/600"
+      ]
+    },
+    {
+      "case_id": "QA-WALK-020",
+      "definition": {
+        "id": "QA-WALK-020",
+        "title": "Tool Registry, Execution, Policy — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-020"
+        ],
+        "steps": [
+          "Invoke allowed, unknown, disabled, unapproved tools.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Allowed tools run; denied handlers never execute; outcomes recorded.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "26dce12a9cd898aa3bb88ce8004dc22175425b2c14c9024f6b43c6a34c324c62",
+      "outcome": "partial",
+      "reason": "Unknown/disabled/unapproved handler-level calls were not forced through a protocol client; policies were not changed.",
+      "residual_risk": "Backend denial-path and no-handler-execution guarantees remain unverified beyond visible policy.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Tool governance listed T0 retrieval tools enabled, write_file T1 without extra approval, and run_python T2 requiring approval with a note that no approver exists and calls are refused. Allowed retrieval tools executed in chat.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:10:06.212Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-021",
+      "definition": {
+        "id": "QA-WALK-021",
+        "title": "Built-in Tools — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-021"
+        ],
+        "steps": [
+          "Run retrieval, web search, Python, file-writing tools.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Correct results/artifacts; each tool’s policy is enforced.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "5e97a73979162492ad312da697e51743e46c3e9565effe165318932633ca9ddc",
+      "outcome": "partial",
+      "reason": "Web search, Python and file writing are not exposed by this runtime/chat configuration.",
+      "residual_risk": "Built-in web/code/file execution paths remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Retrieval tools ran successfully. An explicit write_file request was refused because that tool is unavailable in this evaluation chat; no artifact/download was fabricated.",
+          "observed": {
+            "file_tool_refusal": "write_file tool isn’t available in this chat"
+          },
+          "captured_at": "2026-10-15T18:10:48.039Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-022",
+      "definition": {
+        "id": "QA-WALK-022",
+        "title": "MCP Servers, Tools, Egress — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-022"
+        ],
+        "steps": [
+          "Register server; discover/call tools; try blocked endpoints.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Allowed calls succeed; unsafe endpoints fail; secrets stay hidden.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "d055cfda040bfa93b4d31cdf642cd744f2422d63a292a804dd5505329802f685",
+      "outcome": "partial",
+      "reason": "No authorized live MCP server is configured for discovery and allowed-call tests.",
+      "residual_risk": "MCP tool invocation, credential handling and broader egress cases remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "MCP registration rejected missing name and a loopback HTTPS endpoint; no secret was entered and no server was registered.",
+          "observed": {
+            "private_endpoint_rejection": true
+          },
+          "captured_at": "2026-10-15T18:11:15.007Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-023",
+      "definition": {
+        "id": "QA-WALK-023",
+        "title": "Sandbox Execution and Lifecycle — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-023"
+        ],
+        "steps": [
+          "Execute, reuse session, reset, close, test isolation.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Expected output; correct generations; no host/network exposure.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "6fa9f026fc90052c5ad1ba1f661423807029e62d99068a69ee211ec8d6980063",
+      "outcome": "blocked",
+      "reason": "SANDBOX_ENABLED is false and the tenant code-execution switch is Off; neither was changed.",
+      "residual_risk": "Sandbox execution/session reuse/reset/isolation remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Sandbox governance shows Code execution Off, and the chat reports Python sandbox unavailable.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:11:48.982Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-024",
+      "definition": {
+        "id": "QA-WALK-024",
+        "title": "Sandbox Auth and Supply Chain — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-024"
+        ],
+        "steps": [
+          "Use missing/wrong credentials; request denied packages.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Unauthorized calls return 401; denied dependencies never install.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "3729957402e3eac05397e81df3bb86fb7131a41118f98acfa84bab2371396c25",
+      "outcome": "blocked",
+      "reason": "SANDBOX_ENABLED is false and the tenant code-execution switch is Off; neither was changed.",
+      "residual_risk": "Sandbox runner authentication and dependency supply chain remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Sandbox governance shows Code execution Off, and the chat reports Python sandbox unavailable.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:11:48.983Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-025",
+      "definition": {
+        "id": "QA-WALK-025",
+        "title": "Code Runs and Messages — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-025"
+        ],
+        "steps": [
+          "Execute code; inspect output, status, errors, artifacts.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Accurate run details and safe, actionable messages appear.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "a70735a6b0007ebf2d2014d64bc6f734e11951a17b068e1bc4547f08661395f8",
+      "outcome": "blocked",
+      "reason": "SANDBOX_ENABLED is false and the tenant code-execution switch is Off; neither was changed.",
+      "residual_risk": "Sandbox code-run output/status/artifacts remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Sandbox governance shows Code execution Off, and the chat reports Python sandbox unavailable.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:11:48.984Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-026",
+      "definition": {
+        "id": "QA-WALK-026",
+        "title": "Artifact Access and Retention — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-026"
+        ],
+        "steps": [
+          "Create/read artifacts; attempt foreign access; purge expired items.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Content round-trips; unauthorized access denied; only expired items purge.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "0e956fa927bc40599472f6ae063c28f9df9739e0ff311d1f21c3256593e5c351",
+      "outcome": "blocked",
+      "reason": "No artifact-producing tool is exposed and no existing artifact is available; foreign-principal and expiry-purge prerequisites are absent.",
+      "residual_risk": "Artifact content/access/retention round trips remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Artifact library shows a truthful empty state after write_file was unavailable.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:12:14.915Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-027",
+      "definition": {
+        "id": "QA-WALK-027",
+        "title": "Scheduling and Dispatch — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-027"
+        ],
+        "steps": [
+          "Configure cadence/timezone; trigger due runs and overlaps.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Correct next-run times; configured overlap policy holds.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "44fe5e44cdc5840503effe0c9b84c1469da060361111e5b618cf18c6f3086e7e",
+      "outcome": "partial",
+      "reason": "No published assistant is available for cadence persistence, due-run or overlap execution tests.",
+      "residual_risk": "Dispatch timing, DST and overlap behavior remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Schedule form rejected missing assistant and invalid IANA timezone. With firing unchecked and a valid timezone, backend rejected the draft assistant as unpublished; no schedule was created.",
+          "observed": {
+            "invalid_timezone": "QA/Nowhere",
+            "draft_rejection": "Only a published assistant can be scheduled.",
+            "schedule_created": false
+          },
+          "captured_at": "2026-10-15T18:12:54.704Z"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/352"
+      ]
+    },
+    {
+      "case_id": "QA-WALK-028",
+      "definition": {
+        "id": "QA-WALK-028",
+        "title": "Run History, Delivery, Inbox — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-028"
+        ],
+        "steps": [
+          "Finish/fail runs; inspect inbox; repeat delivery; mark read.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Owner sees correct status; delivery is idempotent; read state updates.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "fd1ed42a4ee7b6b5924a5700dfe99fc5919f58351e7aff22a9a42be0f2546aaa",
+      "outcome": "blocked",
+      "reason": "Finishing/failing runs, delivery idempotence and inbox read-state transitions require a runnable published assistant.",
+      "residual_risk": "Run execution/delivery behavior remains unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Run history opened; no published assistant or successfully created schedule is available to produce headless runs.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:13:21.261Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-029",
+      "definition": {
+        "id": "QA-WALK-029",
+        "title": "Autonomy and Escalation — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-029"
+        ],
+        "steps": [
+          "Apply autonomy cap; trigger escalation; resume/cancel.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Caps never raise autonomy; transitions match defined rules.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "eecfd374d97f9f519c446770cbeffafe7afbb9f035f6391887e422ecc1e241f4",
+      "outcome": "blocked",
+      "reason": "No runnable published assistant or escalated run is available; tenant autonomy policy was not changed.",
+      "residual_risk": "Cap enforcement and escalation/resume/cancel transitions remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Autonomy cap panel is available, and the draft remains Suggest with publication gated by missing backup owner.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:13:42.712Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-030",
+      "definition": {
+        "id": "QA-WALK-030",
+        "title": "Audit Events, Filters, Export — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-030"
+        ],
+        "steps": [
+          "Perform audited actions; filter events; export CSV.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Required tenant-scoped events exist; export matches displayed events.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "bc8f8f91875fe070b1dba19382e80be86c1189dced8af3df780ca26347d7ebd8",
+      "outcome": "partial",
+      "reason": "CSV bytes/filter parity could not be confirmed. Browser download observation timed out; internal downloads-page inspection was blocked by URL policy. User confirmation is pending.",
+      "residual_risk": "Export success/content and unauthorized-role export remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Event type and keyboard-entered From date filtered three current QA answers. Provenance matched model/session/tenant and citation counts; document-view events were present. Export produced no observed download event or in-app status.",
+          "observed": {
+            "answer_rows": 3,
+            "related_issue": "https://github.com/k-sandhu/lumen-copilot/issues/588"
+          },
+          "captured_at": "2026-10-15T18:17:39.008Z"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/588"
+      ]
+    },
+    {
+      "case_id": "QA-WALK-031",
+      "definition": {
+        "id": "QA-WALK-031",
+        "title": "Administration and Governance — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-031"
+        ],
+        "steps": [
+          "Open panels as admin/member; change supported policies.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Correct tenant data; restricted operations denied; changes persist.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "5be3d4ccb461ccf74a309aa2215f3c5a7c72a113c35d98380916012e9ecb17ab",
+      "outcome": "partial",
+      "reason": "No member-only principal is available for denial checks; existing policies and branding were not modified.",
+      "residual_risk": "Role denial and policy persistence remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Admin member/model/provider/tool/sandbox/autonomy/branding panels rendered Eval data; Data minimization honestly says its policy API is unavailable. The header still claims read-only while writable controls exist (existing #594).",
+          "observed": {
+            "related_issue": "https://github.com/k-sandhu/lumen-copilot/issues/594"
+          },
+          "captured_at": "2026-10-15T18:18:59.435Z"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/594"
+      ]
+    },
+    {
+      "case_id": "QA-WALK-032",
+      "definition": {
+        "id": "QA-WALK-032",
+        "title": "Encryption and Secrets — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-032"
+        ],
+        "steps": [
+          "Encrypt/decrypt; tamper; use wrong key; inspect APIs.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Round-trip succeeds; tampering fails; plaintext never exposed.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "6d49d24f68b71a112c19b2d2fadc98d43719e25485e960cb45a7ca011ab40705",
+      "outcome": "skipped",
+      "reason": "Cryptographic round-trip/tampering/wrong-key and API-secret serialization tests require backend instrumentation rather than this browser pass.",
+      "residual_risk": "Encryption correctness and secret API handling remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Provider and MCP forms show write-only/masked secret inputs; no credentials were entered or revealed.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:18:59.436Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-033",
+      "definition": {
+        "id": "QA-WALK-033",
+        "title": "Database Migrations and Repositories — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-033"
+        ],
+        "steps": [
+          "Check migration chain; create/read/update scoped records.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Single valid migration head; repository results match stored data.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "3aaa478bea7227ed4e834ec7e36bffadba68b80f1a88e16c2f1bbaba865149de",
+      "outcome": "skipped",
+      "reason": "Migration-chain and scoped-repository/RLS verification require database/runner checks outside Chrome.",
+      "residual_risk": "Migration and repository invariants are not certified by this UI run.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Running schema provenance is recorded in the environment context.",
+          "observed": {},
+          "captured_at": "2026-10-15T18:18:59.437Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-034",
+      "definition": {
+        "id": "QA-WALK-034",
+        "title": "Object Storage — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-034"
+        ],
+        "steps": [
+          "Store/read/delete content; test filenames and keys.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Bytes round-trip; keys are tenant-scoped; traversal stripped.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "975f7b9a2650107e1c675d88184c728737adb246d2b8f87b57dea3dbd06c955e",
+      "outcome": "partial",
+      "reason": "Deletion and adversarial filename/key traversal were not exercised.",
+      "residual_risk": "Cleanup and path/key sanitization remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Downloaded the newly uploaded TXT through the document viewer; 340 bytes and SHA-256 exactly match the original.",
+          "observed": {
+            "bytes": 340,
+            "sha256": "6115fb0af49f02b86f81a3564b4cb1cb08d84343640dedcd0e42a0d844c96ab2"
+          },
+          "captured_at": "2026-10-15T18:20:08.243Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "Fixture bytes downloaded through the document viewer; compared with the committed upload fixture.",
+          "path": "output/qa/770/downloaded-qa-silver-maple.txt",
+          "sha256": "6115fb0af49f02b86f81a3564b4cb1cb08d84343640dedcd0e42a0d844c96ab2"
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}
