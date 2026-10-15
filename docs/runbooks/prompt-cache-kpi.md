@@ -53,25 +53,26 @@ live-validated against — ADR-0016 §2.4). The kill-switch
 | `openrouter/google/…` (Gemini) | **none** | provider-implicit: Gemini 2.5+ caches automatically, so **> 0 is normal** |
 | `openrouter/deepseek/…`, `openrouter/z-ai/…` (DeepSeek, GLM) | **none** | provider-implicit: **> 0 is normal**, but erratic. These upstreams are served by 30+ OpenRouter providers, each with its own cache. Measured on 2026-10-14/15: 47% / 41% answer hit, with 12% / 28% of calls 2+ at zero cache ([#760 spike](../audits/prompt-cache-scope-spike-2026-10-15.md)) |
 | `openrouter/qwen/…` (Qwen) | **none** | provider-dependent: Alibaba-served Qwen caches only with explicit `cache_control`; other providers may cache implicitly |
-| any **non-OpenRouter** `api_base` (a tenant's own OpenAI-compatible endpoint) | **none — fail-safe** | **0 by design**, even when the model is *named* `claude`/`gpt` |
-| any id **without** the `openrouter/` adapter prefix and no OpenRouter `api_base` | **none — fail-safe** | **0 by design** |
-| kill-switch `CHAT_PROMPT_CACHE_ENABLED=false` | **none** | **0 everywhere** |
+| any **non-OpenRouter** `api_base` (a tenant's own OpenAI-compatible endpoint) | **none — fail-safe**, even when the model is *named* `claude`/`gpt` | whatever the endpoint caches implicitly (often 0) |
+| any id **without** the `openrouter/` adapter prefix and no OpenRouter `api_base` | **none — fail-safe** | whatever the native provider caches implicitly (often 0) |
+| kill-switch `CHAT_PROMPT_CACHE_ENABLED=false` | **none** | no Lumen directives anywhere; implicit hits may still appear on upstreams whose providers cache automatically (DeepSeek, GLM, Gemini; OpenAI with no key) |
 
 **No-directive routes (do not page on a low or zero KPI here):** every `google/`,
 `deepseek/`, `z-ai/` and `qwen/` upstream; every non-OpenRouter transport; and the
 kill-switch-off case. The gateway emits nothing for them. On non-OpenRouter
 transports and with the kill switch off, that is because the pass-through was
 never validated: a route's model *name* never earns directives its *transport*
-wasn't proven to accept. The OpenRouter upstreams in this list may still show
-hits from the provider's own implicit caching; how many depends on which
-provider served each call. Only the non-OpenRouter transports and the
-kill-switch case are truly **0 by design**.
+wasn't proven to accept. Any of these routes may still show hits from the provider's own implicit
+caching. How many depends on which provider served each call, and for a
+tenant's own `api_base`, on whether that endpoint caches. Treat a zero as
+expected and a nonzero as normal. Neither is a Lumen regression.
 
 **Decided, not yet built ([ADR-0016](../architecture/0016-context-engine-and-cache-first-prompting.md) §2 amendment, #760).**
-- The `openai/` key becomes an opaque **tenant** scope instead of the session
-  id. Today a new chat on `openai/…` reads 0 on call 1 by construction, because
-  the key partitions the provider cache per session.
-- Every OpenRouter route gains a sticky `session_id`.
+- The `openai/` key becomes an opaque, keyed **per-user** scope instead of the
+  session id. Today a new chat on `openai/…` reads 0 on call 1 by construction,
+  because the key partitions the provider cache per session.
+- Every OpenRouter route gains an opaque, per-**conversation** sticky
+  `session_id`, so a conversation stays on one provider from its first call.
 - Proactive compaction defaults off (§3.1 amendment).
 
 Update the table above when that lands.
