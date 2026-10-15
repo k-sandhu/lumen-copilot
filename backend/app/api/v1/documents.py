@@ -81,6 +81,23 @@ class IngestionFingerprintResponse(BaseModel):
     embedding_dimension: int | None = Field(default=None, ge=1)
 
 
+class ExtractionDiagnosticsResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    character_count: int = Field(ge=0)
+    replacement_characters: int = Field(ge=0)
+    suspicious_controls: int = Field(ge=0)
+    source_part_kind: Literal["page", "slide", "sheet"] | None = None
+    total_parts: int | None = Field(default=None, ge=0)
+    parts_with_text: int | None = Field(default=None, ge=0)
+    blank_parts: list[int]
+    table_probe: Literal["native_tables", "sheet_cells", "unavailable"]
+    table_regions: int | None = Field(default=None, ge=0)
+    table_cells: int | None = Field(default=None, ge=0)
+    missing_table_cells: int | None = Field(default=None, ge=0)
+    warnings: list[str]
+
+
 class DocumentResponse(BaseModel):
     """``#/components/schemas/Document`` — the wire projection of a document."""
 
@@ -103,6 +120,7 @@ class DocumentResponse(BaseModel):
     ingestion_outcome: ExtractionOutcome | None = None
     searchable: bool = False
     ingestion_fingerprint: IngestionFingerprintResponse | None = None
+    extraction_diagnostics: ExtractionDiagnosticsResponse | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -160,6 +178,11 @@ def _to_response(view: DocumentView) -> DocumentResponse:
             if d.ingestion_fingerprint is not None
             else None
         ),
+        extraction_diagnostics=(
+            ExtractionDiagnosticsResponse.model_validate(view.extraction_diagnostics.to_dict())
+            if view.extraction_diagnostics is not None
+            else None
+        ),
     )
 
 
@@ -190,6 +213,7 @@ def _build_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
+        roles=principal.roles,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
         denials=authenticated_denial_context(
@@ -243,6 +267,7 @@ async def list_documents(
         status=status_filter,
         filename_query=q,
     )
+    await session.commit()
     return _to_list_response(page)
 
 
@@ -277,6 +302,7 @@ async def get_document(
     view = await service.get(document_id)
     if view is None:
         raise NotFoundError("Document not found.")
+    await session.commit()
     return _to_response(view)
 
 
