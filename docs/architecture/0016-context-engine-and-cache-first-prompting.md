@@ -61,7 +61,9 @@ Decided:
 
 1. **Partition level: one opaque key per (tenant, user)**, derived inside `llm/`. The runtime hands the gateway domain identifiers only (tenant, user and session ids) and never builds provider fields.
    - **Key material: a dedicated deployment secret**, `CHAT_PROMPT_CACHE_SCOPE_SECRET`.
-     - It is base64 of ≥ 32 random bytes, read only through `core/config.py`, and like `JWT_SECRET` the app refuses to start outside `local` while it holds the public dev default.
+     - It is ≥ 32 random bytes in **standard** base64 (RFC 4648 alphabet, padded), read only through `core/config.py`.
+     - It is decoded with `base64.b64decode(value, validate=True)`. Malformed input, or fewer than 32 decoded bytes, fails at construction.
+     - The public dev default is `bHVtZW4tbG9jYWwtZGV2LWNhY2hlLXNjb3BlLTAwMDA=` (the 32 ASCII bytes `lumen-local-dev-cache-scope-0000`, mirroring the vault's dev default). Like `JWT_SECRET`, the app refuses to start outside `local` while it holds that value.
      - It is deliberately **not** derived from `SECRETS_ENCRYPTION_KEY`. `app.core.crypto` is that key's sole holder, with `services/secrets_service.py` as its sole caller. Reusing the vault's AES-GCM master key for HMAC would widen that contract. It would also tie the cache scopes to a key whose rotation is not yet supported: `crypto` has one key version, so changing it today breaks vault decrypts.
      - The gateway computes the digests with the standard library (`hmac`, `hashlib`), so `cryptography` stays imported only by `app.core.crypto`.
    - **Derivation.** `user_scope = "lc1u-" + HMAC-SHA256(secret, "v1:user:" + tenant_id + ":" + user_id).hexdigest()[:24]`.
@@ -70,7 +72,9 @@ Decided:
      - The digest is truncated to 96 bits.
      - The purpose label (`user`; `session` below) separates the two uses of one secret.
    - **Opacity.** Only the keyed digest goes on the wire: no raw id and no prompt content. Outside `local`, a third party can neither recompute it from a guessed UUID nor correlate it across deployments. In `local`, with the public dev default, digests are recomputable from known ids. That is acceptable for a dev stack, and is the reason for the fail-fast.
-   - **Rotation.** Bumping the `v1` label, or rotating `CHAT_PROMPT_CACHE_SCOPE_SECRET`, re-partitions every cache: each user re-writes one cold prefix. Neither touches the vault.
+   - **Rotation.** Rotating `CHAT_PROMPT_CACHE_SCOPE_SECRET` re-partitions every cache: each user re-writes one cold prefix, and nothing else changes.
+     - A change to the *derivation* bumps the message label (`v1:` → `v2:`) and the wire prefix (`lc1u-`/`lc1s-` → `lc2u-`/`lc2s-`) **together**, so old and new scopes stay distinguishable in logs. The two markers never move independently.
+     - Neither touches the vault.
    - The key is sent as `extra_body.prompt_cache_key = user_scope` on the `openai/` family only.
    - **Isolation (INV-1, INV-2).** The scope never spans tenants. It also does not span users within a tenant:
      - Content-addressed caching makes cached-token counts (returned to the requester in `done.usage`) and latency a probe. A user who replays another user's *exact opening* (same system prompt, custom instructions and first question) would learn that it was recently sent.
@@ -82,8 +86,8 @@ Decided:
 2. **Stickiness level: one opaque `session_id` per conversation.** `sticky = "lc1s-" + HMAC-SHA256(secret, "v1:session:" + tenant_id + ":" + session_id).hexdigest()[:24]` (same secret and encoding as item 1), sent as `extra_body.session_id = sticky` on **every** route that passes item 4's OpenRouter-transport predicate, whatever its upstream family.
    - `session_id` is an OpenRouter transport field, not an upstream cache directive. It rides `extra_body` through the pinned LiteLLM exactly like `prompt_cache_key`, live-verified on 1.55.9.
    - It pins the serving provider from a conversation's first call instead of after the first observed hit (sticky until 10 minutes idle; re-routed on a provider error). It is also Z.AI's session-affinity key.
-   - It is per *conversation*, not per tenant or user. A wider sticky key would pin a busy tenant indefinitely to one provider out of a ~40× price spread, and possibly to a poor-caching one. It would also defeat OpenRouter's per-conversation load balancing, and buy at most the cross-session warmth of a new conversation's first call. That call measured 0.8–2.6% of input tokens on the multi-provider upstreams, across all new sessions in arms A and B. Single-provider-in-practice routes (`openai/`, `anthropic/`) started all 16/16 sessions (24 answers) per arm on one provider without it.
-3. **Unchanged:** Anthropic breakpoints (message 0 + the moving mark); `_cache_family`; nothing for a non-OpenRouter transport or an id without the adapter prefix. The kill-switch `CHAT_PROMPT_CACHE_ENABLED=false` also suppresses `session_id`.
+   - It is per *conversation*, not per tenant or user. A wider sticky key would pin a busy tenant indefinitely to one provider out of a ~40× price spread, and possibly to a poor-caching one. It would also defeat OpenRouter's per-conversation load balancing, and buy at most the cross-session warmth of a new conversation's first call. That call measured 0.8–2.6% of input tokens on the multi-provider upstreams, across all new sessions in arms A and B. Single-provider-in-practice routes (`openai/`, `anthropic/`) started all 16/16 sessions (24 answers) on one provider in arm A, which sent no `session_id`.
+3. **Unchanged:** Anthropic breakpoints (message 0 + the moving mark); `_cache_family`; nothing for a non-OpenRouter transport or an id without the adapter prefix. The kill-switch `CHAT_PROMPT_CACHE_ENABLED=false` also suppresses `session_id`. **A missing identifier fails safe the same way:** if the tenant, user or session id is absent, the gateway emits *no* cache fields. It never interpolates an empty or `None` id into a digest, which would mint one scope shared by every caller missing that id.
 4. **Rejected or deferred:**
    - *Rejected:* pinning DeepSeek/GLM with `provider.order`. It turns sticky routing off, hard-codes a vendor choice into Lumen and loses price/availability routing. Choosing *which* providers may serve a model is an operator concern for the model registry, not for the cache key.
    - *Rejected:* a per-assistant or prompt-hash component. The provider already separates different prefixes by content.
@@ -92,7 +96,7 @@ Decided:
 Measured effect (same harness, 24 answers per model per arm; arms ran sequentially, so DeepSeek and GLM also drew different sticky providers, while Luna and Haiku were single-provider throughout):
 - **Partition, `gpt-6-luna`:** new-session call 1 went from **0% → 98%** cached (95% CI of the change [97, 99] pts). That call costs 76% less, and in-session reuse is unchanged (calls 2+ at 65% / 64%). The arm used one tenant and one user, so it measures the per-user partition exactly.
 - **Stickiness, `glm-5.3-flash` and `deepseek-v4.1-flash`:** the hop counts are small and move in different directions.
-  - GLM had 6 hop calls in A (5.3% of tokens) and 2 in B (2.7%). DeepSeek had 3 in A (2.9%) and 4 in B (4.3%), the B hops all following provider errors.
+  - GLM had 6 hop calls in A (5.3% of tokens) and 2 in B (2.7%). DeepSeek had 3 in A (2.9%) and 4 in B (4.3%), its B hops plausibly re-routes after provider errors, inferred from OpenRouter's re-route rule because the data carry no error field.
   - This is *consistent with* the mechanism (stickiness from call 1), not a measured effect of it.
   - GLM's overall hit rate held at 41–43%, since its misses are inside the serving provider's cache.
   - DeepSeek's hit-rate gain (47% → 62%, CI [3, 27] pts) is confounded with drawing a better-caching provider and is **not** claimed for stickiness.

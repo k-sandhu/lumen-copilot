@@ -118,9 +118,9 @@ The direct probe (§3) and arm B agree. With a shared key, a new GPT-6 Luna sess
 - **Residual.** Upstreams with no partition key (Anthropic, DeepSeek, Z.AI, Gemini) share their caches by content across all of a provider's customers, so the same probe exists there today. Tracked in [#769](https://github.com/k-sandhu/lumen-copilot/issues/769).
 
 **Why a keyed hash, and why its own secret.** A plain `sha256(id)` is only as opaque as the id's entropy, and it is identical across deployments that share an id. The scope is therefore an HMAC-SHA256 under a **dedicated** deployment secret, `CHAT_PROMPT_CACHE_SCOPE_SECRET`, computed with the standard library.
-- **Fail-fast.** Like `JWT_SECRET`, it must be set outside `local`. In `local`, a public dev default makes digests recomputable, which is acceptable for a dev stack only.
+- **Fail-fast.** Like `JWT_SECRET`, it must be set outside `local`, as standard, padded base64 of ≥ 32 bytes, decoded with `validate=True`. In `local`, a public dev default makes digests recomputable, which is acceptable for a dev stack only. ADR-0016 §2 pins the exact value and encoding.
 - **Why not the vault key.** Deriving the scope from `SECRETS_ENCRYPTION_KEY` was considered and rejected: `app.core.crypto` is that AES-GCM key's sole holder, with `secrets_service` as its sole caller. Reuse would widen that contract, and it would couple cache scopes to a key whose rotation is not yet supported. `crypto` has one key version, so changing the key today breaks vault decrypts.
-- **Rotation.** Rotating the cache secret, or bumping the `v1` label, only costs each user one cold prefix.
+- **Rotation.** Rotating the cache secret only costs each user one cold prefix. A change to the derivation bumps the `v1:` label and the `lc1` wire prefix together.
 
 **Why not finer.** A per-assistant or prompt-hash component would only re-partition one user's own warm cache, because the provider already separates different prefixes by content.
 
@@ -137,13 +137,13 @@ The overall effect on Luna's per-token price is small (0.51 → 0.51), because c
   - That ceiling belongs to the serving provider's cache, not to the route.
 - **What arm B (tenant-wide `session_id`) can and cannot show.**
   - *Not attributable:* DeepSeek's hit rate rose from 47% to 62% and its zero-cache calls 2+ fell from 12% to 3%. GLM's zero-cache calls fell from 28% to 13%. But the arms ran sequentially, and B drew different sticky providers (§4 caveat). These gains are not attributable to stickiness.
-  - *Consistent with the mechanism, but too few to attribute:* GLM had 6 hop calls in A (5.3% of tokens) and 2 in B (2.7%). DeepSeek had 3 in A (2.9%) and 4 in B (4.3%), its B hops all following provider errors.
+  - *Consistent with the mechanism, but too few to attribute:* GLM had 6 hop calls in A (5.3% of tokens) and 2 in B (2.7%). DeepSeek had 3 in A (2.9%) and 4 in B (4.3%), its B hops plausibly re-routes after provider errors, inferred from OpenRouter's re-route rule because the data carry no error field.
   - *Also observed:* new-session call 1 warmed (DeepSeek 55% → 67%, GLM 12% → 60%), but first calls of new sessions are only 0.8–2.6% of their input tokens. Follow-up messages' first calls read 24% → 56% and 7% → 30%.
 - **Stickiness held across sessions** under the tenant-wide key. Haiku, Luna and GLM-in-C each stayed on one provider for the whole ~45-minute run. DeepSeek (B: 4 hand-overs, C: 1) and GLM-in-B (3) changed provider only mid-answer, never after an idle gap; the longest gap before a switch was 18 s. That fits OpenRouter's re-route after a provider error, and DeepSeek also had the most failed answers.
 - **Granularity decided: per conversation.**
   - A tenant- or user-wide sticky key adds only the call-1 warmth of new sessions on multi-provider upstreams. Measured across all new sessions in arms A and B, that is 0.8–2.6% of input tokens: 0.80–2.48% excluding each arm's warm-up session, and 0.86–2.65% including it.
   - In exchange, it pins a busy tenant indefinitely: it is never 10 minutes idle. It would sit on one provider out of a $0.014–$0.60 per M (~40×) price spread, possibly a poor cacher, and it defeats OpenRouter's per-conversation load balancing.
-  - The single-provider-in-practice routes need no wide key: Luna and Haiku started all 16/16 sessions (24 answers) per arm on one provider without one.
+  - The single-provider-in-practice routes need no wide key: In arm A, which sent no `session_id`, Luna and Haiku started all 16/16 sessions (24 answers) on one provider.
   - A per-conversation `session_id` keeps the in-answer stickiness that arm B exercised, since a tenant-wide and a per-conversation key are equally constant within one answer. It pins from a conversation's first call instead of after its first observed hit, and it is Z.AI's affinity key.
 - **Not measured.** An arm D with a per-conversation `session_id` was prepared on 2026-10-15 but not run, because the shared `lumen-eval` stack had been recreated from another checkout for a different evaluation. Running the workload there would have contaminated both. No request was sent, and the eval checkout was restored. [#763](https://github.com/k-sandhu/lumen-copilot/issues/763)'s live smoke verifies that one answer's calls stay on one provider.
 - **Cost/benefit.** `session_id` is free; it rides `extra_body` through the pinned LiteLLM.
@@ -194,7 +194,7 @@ In-answer compaction remains correct as a **budget** tool: the reactive, over-bu
 - **The offline harness overstates compaction.** `backend/tests/test_prompt_economics.py` (and #658's 25.5% figure) models one 200-character cited snippet per result. The runtime cites every retrieved passage in full, so the harness's token reduction does not occur live (≈0.4%). Its realism fix is part of the compaction follow-up.
 - **Per-conversation stickiness was not measured** (§5.2, arm D). The decision rests on arm A/B attribution and on #763's live smoke.
 - **A cache-probing oracle remains on unpartitioned upstreams** (§5.1). See [#769](https://github.com/k-sandhu/lumen-copilot/issues/769).
-- **Cache writes came from raw provider usage.** The measured build (ce4d853) recorded 0 writes in `llm_usage`, so write tokens here come from the raw provider usage. #759 / #762, merged 2026-10-15, now maps them into the ledger, so a re-run on current `main` can use Lumen's own accounting.
+- **Cache writes came from raw provider usage.** The measured build (ce4d853) recorded 0 writes in `llm_usage`, so write tokens here come from the raw provider usage. #759 / #762, merged 2026-10-15, now maps them into the ledger. A re-run on current `main` can therefore take per-answer write *totals* from `llm_usage`. That ledger is one row per (answer, attempt-scope), so every per-call metric here still needs the per-call log: call-1 hits, per-event X and δ, and provider hops.
 
 ## 7. Reproduce
 
