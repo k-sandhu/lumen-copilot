@@ -45,6 +45,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.tenant_context import BYPASS_SENTINEL, bind_bypass, bind_tenant
 from tests._db_helpers import copy_sqlite_schema
 from tests._live_helpers import worker_database_name
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -565,7 +566,7 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
         all_started = asyncio.Event()
         seen_sessions: list[object] = []
 
-        class _SqlProbeRetrieval:
+        class _SqlProbeRetrieval(UUIDDocumentResolver):
             def __init__(self, session: AsyncSession) -> None:
                 self._session = session
 

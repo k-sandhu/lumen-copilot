@@ -33,6 +33,7 @@ from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
 from tests._audit_helpers import RecordingDurableAuditTransactions
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -479,7 +480,7 @@ def _wire_test_harness(monkeypatch: pytest.MonkeyPatch, factory: object) -> None
     monkeypatch.setattr("app.db.session.get_sessionmaker", lambda settings=None: factory)
     real_cls = svc.ChatRuntime
 
-    class _Retrieval:
+    class _Retrieval(UUIDDocumentResolver):
         async def search_text(
             self,
             *,

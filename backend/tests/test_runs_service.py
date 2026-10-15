@@ -61,6 +61,7 @@ from tests._audit_helpers import (
     denial_context_from_session,
 )
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -158,7 +159,7 @@ class _AppErrorGateway:
         yield  # pragma: no cover — makes this an async generator
 
 
-class _PermissionedRetrieval:
+class _PermissionedRetrieval(UUIDDocumentResolver):
     """Retrieval that returns a passage **only** to principals in ``allowed_users``.
 
     Models the INV-2 permission predicate inside ``retrieval/``: the same query run
