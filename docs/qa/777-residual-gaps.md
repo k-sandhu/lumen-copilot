@@ -57,3 +57,32 @@ Chrome demonstrates user-visible results; protocol, backend, eval and build asse
 Docker Desktop was initially unavailable. Startup failed replacing its stale dockerInference AF_UNIX reparse endpoint. A single-file rename failed; the confirmed reversible repair stopped the failed Desktop processes, verified the two runtime directories were ordinary directories inside their exact expected parents, and renamed Docker/run and docker-secrets-engine to names suffixed qa777-preserved-20261015-2112. No recursive deletion, data-volume reset or Docker settings change was performed. Docker Engine 29.6.2 then answered and existing containers returned. The old runtime directories are retained. Matching upstream report: https://github.com/docker/desktop-feedback/issues/531.
 
 The populated Eval frontend at localhost:47380 was restarted and Chrome restored the Eval session. New QA execution starts only after prerequisite and definition commits are recorded.
+
+## Provisioning observations and functional path
+
+The dedicated `lumentest_qa777` database was migrated successfully and readiness
+passed all six dependencies. Its application role `qa777_app` is explicitly
+NOSUPERUSER/NOBYPASSRLS. Standard seed and valid browser login nevertheless fail
+casting the deliberate `bypass` sentinel to UUID, reproducing #644. Five users
+were created through a bootstrap-only operator connection so the browser probe
+used known-valid credentials. The failure is frozen in
+`qa/runs/qa777-20261015-hardened-login.json`; the restricted role remains unchanged.
+
+The existing canonical local application already has web/sandbox support and
+summaries configured. Functional Chrome testing therefore uses that existing
+configuration at localhost:47180 with new `QA 777 Functional Alpha/Beta` tenants,
+without changing any database role or existing tenant policy. The pending
+question about changing the dedicated database connection is not required for
+this alternative path. This phase has tenant/data isolation, not a new claim
+that the development superuser connection enforces RLS. Runtime and dataset
+context are recorded separately from both hardened and Eval appearance probes.
+
+The live RLS harness initially could not reach its chat-runtime assertions:
+its raw document fixture omitted `acl_enforced` (old #552), then its application
+role lacked newly required SQL privileges for `tenant_tool_policy`,
+`source_handles`, and `session_summaries`. Only those test prerequisites were
+corrected in `backend/tests/test_rls.py`. The test was observed red at each
+setup failure and green after correction; the complete six-case live
+RLS/permission group then passed with temporary non-superuser/non-bypass roles.
+No production policy or application behavior was changed. This scoped success
+does not resolve the distinct #644 global-lookup failure.
