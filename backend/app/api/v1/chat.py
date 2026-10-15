@@ -614,10 +614,13 @@ async def get_session_usage(
 ) -> SessionUsageResponse:
     """The session's token/context accounting (spec 0007 #429); not visible → 404.
 
-    Powers the conversation context meter: summed llm_usage (#409) + the last
-    answer's record + the input-token budget the assembler grants the session's
-    model (the same formula answers are assembled under — never a parallel
-    approximation).
+    Powers the conversation context meter: ``totals`` is the session-wide SUM
+    over every llm_usage scope (#409 — answer scopes plus message-less
+    failover/salvage and suggestions rows), while ``last`` is only the most
+    recent MESSAGE-BEARING answer scope (context-meter semantics, not that
+    answer's full spend; ADR-0016 §2.6). Plus the input-token budget the
+    assembler grants the session's model (the same formula answers are
+    assembled under — never a parallel approximation).
     """
     service = _build_service(
         session=session,
