@@ -1,0 +1,32 @@
+[
+  {
+    "filename": "qa777-owner-private.txt",
+    "bytes": 179,
+    "sha256": "dcbb1e0a645f2444512237498683684443500b76f7a4e37fa6d8dc1c414d4d66"
+  },
+  {
+    "filename": "qa777-format.pdf",
+    "bytes": 627,
+    "sha256": "31f57b00d674d63531e6c315c9ea8a13d15ba9ac6f21eb05d555babd80cd51e5"
+  },
+  {
+    "filename": "qa777-format.docx",
+    "bytes": 36617,
+    "sha256": "b9210fa1b6c7f41502298555264102d809e0fd048d45855e468849f569fd5e69"
+  },
+  {
+    "filename": "qa777-format.pptx",
+    "bytes": 28299,
+    "sha256": "4d5d34a7348daf49d66dc52b820b8340c7556e8f47a5d01eca18af0167c9c547"
+  },
+  {
+    "filename": "qa777-format.xlsx",
+    "bytes": 4859,
+    "sha256": "308c3a022dd37deecf81181407ca157ee5e31f6372deb1bf7c705533572cf4d1"
+  },
+  {
+    "filename": "qa777-disposable-delete.txt",
+    "bytes": 144,
+    "sha256": "4bc639f95890c3d430d7412e2900975c23409e94db14f35dbc023a3614900f07"
+  }
+]

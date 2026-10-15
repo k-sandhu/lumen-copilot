@@ -1599,7 +1599,7 @@ INSERT INTO embedding_legacy_archive_0044 (
         async with engine.begin() as conn:
             assert (
                 await conn.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == "0045_embedding_contract"
+            ).scalar_one() == ScriptDirectory.from_config(_alembic_config()).get_current_head()
             await conn.execute(
                 text("SELECT set_config('app.tenant_id', :tenant, true)"),
                 {"tenant": str(tenant_id)},
