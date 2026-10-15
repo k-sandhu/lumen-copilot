@@ -19,8 +19,11 @@ Short reads report their exact range without a truncation marker. `search_text`
 passage headers carry the document id (`document id: …`), and `document_id`
 also accepts a chunk id shown by `search_text` or an exact filename as
 displayed, all resolved inside `retrieval/` under the same owner-or-grant
-predicate (#758). Several permitted documents with that exact name return the
-permitted candidates so the caller can retry with one id. Missing, malformed
+predicate (#758). After unambiguous UUID extraction, the trimmed, unquoted
+literal name is matched first; prefixes and trailing parentheticals are stripped
+only if it has no permitted matches. Literal matches, including ambiguity,
+are never merged with fallback matches. Several permitted documents with that
+exact name return the permitted candidates so the caller can retry with one id. Missing, malformed
 and forbidden handles have the same corrective `tool_bad_args` response and
 disclose no length or range.
 Payload metadata (`returned_range`, `total_length`, `truncated`) is internal tool

@@ -819,6 +819,95 @@ async def test_get_document_accepts_exact_name(
     assert "Alice tax notes" in result.content
 
 
+@pytest.mark.parametrize(
+    ("filename", "fallback"),
+    [
+        pytest.param("Document Control Plan.pdf", "Control Plan.pdf", id="document-prefix"),
+        pytest.param("Chunk sizes.txt", "sizes.txt", id="chunk-prefix"),
+        pytest.param("Budget (2024)", "Budget", id="parenthetical"),
+        pytest.param("document: notes.md", "notes.md", id="document-colon"),
+        pytest.param("Document 1.docx", "1.docx", id="word-default"),
+    ],
+)
+async def test_get_document_literal_name_precedes_stripping(
+    session_and_world: tuple[AsyncSession, _World], filename: str, fallback: str
+) -> None:
+    session, world = session_and_world
+    literal_id = await _doc(session, world.tenant_a, world.alice, filename, "Literal body.")
+    await _doc(session, world.tenant_a, world.alice, fallback, "Fallback body.")
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": filename},
+    )
+    assert result.ok is True
+    assert result.document_ids == (literal_id,)
+    assert "Literal body." in result.content
+    assert "Fallback body." not in result.content
+
+
+async def test_get_document_literal_ambiguity_excludes_fallback(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    literal_ids = {
+        await _doc(session, world.tenant_a, world.alice, "document alice-taxes.txt", body)
+        for body in ("First literal.", "Second literal.")
+    }
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "document alice-taxes.txt"},
+    )
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert result.payload == {"document_ids": [str(did) for did in sorted(literal_ids)]}
+    assert str(world.alice_doc) not in result.content
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        pytest.param("document alice-taxes.txt", id="document-prefix"),
+        pytest.param("chunk: alice-taxes.txt", id="chunk-colon"),
+        pytest.param("alice-taxes.txt (copied header)", id="parenthetical"),
+    ],
+)
+async def test_get_document_stripped_name_fallback(
+    session_and_world: tuple[AsyncSession, _World], handle: str
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session, _principal(world.alice, world.tenant_a), "get_document", {"document_id": handle}
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        pytest.param("document bob-secret.txt", id="foreign-owner"),
+        pytest.param("document carol.txt", id="cross-tenant"),
+    ],
+)
+async def test_get_document_stripped_name_fallback_inv2(
+    session_and_world: tuple[AsyncSession, _World], handle: str
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    unknown = await _call(session, principal, "get_document", {"document_id": "unknown.txt"})
+    result = await _call(session, principal, "get_document", {"document_id": handle})
+    assert unknown.ok is False
+    assert unknown.error == ERROR_BAD_ARGS
+    assert _outcome(result) == _outcome(unknown)
+
+
 async def test_get_document_accepts_name_case_whitespace_quote_variant(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:
@@ -956,6 +1045,8 @@ async def test_get_document_inv2_chunk_and_name_indistinguishable(
         f"chunk {bob_chunk}",
         "bob-secret.txt",
         "carol.txt",
+        "document bob-secret.txt",
+        "document carol.txt",
         "no-such-file.pdf",
         "not-a-uuid",
     ):

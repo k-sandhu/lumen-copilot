@@ -84,7 +84,7 @@ def _strip_surrounding_quotes(value: str) -> str:
     return text
 
 
-def _normalize_document_handle(raw: str) -> str:
+def _normalize_document_handle(raw: str, *, literal_name: bool = False) -> str:
     """Tolerantly normalize a model-supplied ``get_document`` handle (#758).
 
     Small and explicit by design — it accepts only the shapes the tools
@@ -92,7 +92,9 @@ def _normalize_document_handle(raw: str) -> str:
     ``document `` prefix, and a copied ``search_text`` / ``search_documents``
     header fragment carrying ``document id: <uuid>``, ``(id: <uuid>)`` or
     ``chunk <uuid>`` (the document id wins when both are present). Anything
-    else passes through trimmed and simply fails to resolve.
+    else passes through trimmed and simply fails to resolve. ``literal_name``
+    preserves filename prefixes and parentheticals for the first lookup;
+    unambiguous UUID extraction applies in either mode.
     """
     text = _strip_surrounding_quotes(raw)
     if match := re.search(rf"document\s+id\s*:\s*({_UUID_PATTERN})", text, re.IGNORECASE):
@@ -101,6 +103,8 @@ def _normalize_document_handle(raw: str) -> str:
         return match.group(1)
     if match := re.search(rf"\bchunk[\s:]+({_UUID_PATTERN})", text, re.IGNORECASE):
         return match.group(1)
+    if literal_name:
+        return text
     lowered = text.lower()
     for prefix in ("document ", "document:", "chunk ", "chunk:"):
         if lowered.startswith(prefix):
@@ -633,6 +637,8 @@ class RetrievalService:
         document UUID (unchanged :meth:`get_document` behaviour), then a chunk
         UUID resolved to its containing document, then (for a non-UUID) an
         exact document name as displayed, case-insensitive and trimmed. The
+        literal name wins, including ambiguity; only when it has no permitted
+        matches do we try stripping a prefix or parenthetical. The
         tolerant string normalization lives in
         :func:`_normalize_document_handle`; every query leg folds in the
         identical tenant + owner-or-grant predicate as :meth:`get_document`
@@ -641,32 +647,18 @@ class RetrievalService:
         (INV-2 existence non-disclosure). Several permitted exact-name
         matches return those candidates only — never a foreign document.
         """
-        normalized = _normalize_document_handle(handle)
-        if not normalized:
+        literal = _normalize_document_handle(handle, literal_name=True)
+        if not literal:
             return DocumentResolution()
         allow_set = await self._resolve_allow_set(principal)
-        try:
-            as_uuid: UUID | None = UUID(normalized)
-        except ValueError:
-            as_uuid = None
-        if as_uuid is not None:
-            row = await queries.load_document_text(
-                self._session, allow_set=allow_set, document_id=as_uuid
-            )
-            if row is not None:
-                return DocumentResolution(
-                    document=DocumentText(
-                        document_id=row.document_id,
-                        document_name=row.document_name,
-                        text=row.text,
-                    )
-                )
-            containing = await queries.document_id_for_permitted_chunk(
-                self._session, allow_set=allow_set, chunk_id=as_uuid
-            )
-            if containing is not None:
+        for normalized in dict.fromkeys((literal, _normalize_document_handle(handle))):
+            try:
+                as_uuid: UUID | None = UUID(normalized)
+            except ValueError:
+                as_uuid = None
+            if as_uuid is not None:
                 row = await queries.load_document_text(
-                    self._session, allow_set=allow_set, document_id=containing
+                    self._session, allow_set=allow_set, document_id=as_uuid
                 )
                 if row is not None:
                     return DocumentResolution(
@@ -676,37 +668,52 @@ class RetrievalService:
                             text=row.text,
                         )
                     )
-            return DocumentResolution()
-        rows = await queries.documents_by_exact_name(
-            self._session,
-            allow_set=allow_set,
-            name=normalized,
-            k=_MAX_NAME_CANDIDATES,
-        )
-        if len(rows) == 1:
-            row = await queries.load_document_text(
-                self._session, allow_set=allow_set, document_id=rows[0].document_id
+                containing = await queries.document_id_for_permitted_chunk(
+                    self._session, allow_set=allow_set, chunk_id=as_uuid
+                )
+                if containing is not None:
+                    row = await queries.load_document_text(
+                        self._session, allow_set=allow_set, document_id=containing
+                    )
+                    if row is not None:
+                        return DocumentResolution(
+                            document=DocumentText(
+                                document_id=row.document_id,
+                                document_name=row.document_name,
+                                text=row.text,
+                            )
+                        )
+                return DocumentResolution()
+            rows = await queries.documents_by_exact_name(
+                self._session,
+                allow_set=allow_set,
+                name=normalized,
+                k=_MAX_NAME_CANDIDATES,
             )
-            if row is not None:
+            if len(rows) == 1:
+                row = await queries.load_document_text(
+                    self._session, allow_set=allow_set, document_id=rows[0].document_id
+                )
+                if row is not None:
+                    return DocumentResolution(
+                        document=DocumentText(
+                            document_id=row.document_id,
+                            document_name=row.document_name,
+                            text=row.text,
+                        )
+                    )
+                return DocumentResolution()
+            if len(rows) > 1:
                 return DocumentResolution(
-                    document=DocumentText(
-                        document_id=row.document_id,
-                        document_name=row.document_name,
-                        text=row.text,
+                    candidates=tuple(
+                        DocumentMatch(
+                            document_id=row.document_id,
+                            document_name=row.document_name,
+                            score=rrf_score(position),
+                        )
+                        for position, row in enumerate(rows)
                     )
                 )
-            return DocumentResolution()
-        if len(rows) > 1:
-            return DocumentResolution(
-                candidates=tuple(
-                    DocumentMatch(
-                        document_id=row.document_id,
-                        document_name=row.document_name,
-                        score=rrf_score(position),
-                    )
-                    for position, row in enumerate(rows)
-                )
-            )
         return DocumentResolution()
 
 
