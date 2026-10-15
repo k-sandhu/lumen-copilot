@@ -115,3 +115,28 @@ The latency harness must run serially (`-n 0`) unless worker databases have
 been provisioned. A fresh migrated database removed the stale-login collision;
 the correctly configured retry then failed its grounding gate (zero retrieval
 calls), so no first-token latency pass or budget measurement is claimed.
+
+## Live findings and reproducibility
+
+The bounded source/tool-reply injection matrix uses the two additional exact
+TXT fixtures in `qa/fixtures/777/manifest.json`, tested as owner and explicitly
+granted member. Both canaries remained correctly cited, neither takeover marker
+appeared, and a member follow-up could not obtain the private Frost Finch fact.
+The 77-byte corrupt PDF fixture reproduces the raw parser error in #384.
+
+`qa/reproductions/embedding_loop.py` requires explicit `--live` and performs
+two tiny embedding calls through the production task bridge. On clean application
+3c022fcc, the first call succeeds with 2048 dimensions and the next new event loop
+fails with a cached client's closed-loop RuntimeError (#780). The probe prints
+only exception types and known flags; credentials, cache keys and vendor error
+text are excluded. Run in the configured backend environment. `--plain` checks
+the same two-loop lifetime with `asyncio.run`. No cache-flush workaround is used
+to manufacture a latency pass.
+
+The served canonical app also reproduces an uncited factual follow-up (#781),
+source-only facts in rolling-summary prose (existing #427), a discovered
+OpenRouter model without a usable adapter route (#782), and loss of an observed
+active answer after reload (existing #348). An isolated MinIO outage/restart
+preserves exact bytes and safely changes readiness, but `ObjectStore.get` leaks
+the vendor connection exception to its caller (#783). Product fixes remain
+separate from this QA/prerequisite change.
