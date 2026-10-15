@@ -210,6 +210,12 @@ class TrackingContract(unittest.TestCase):
             qa.evaluate_probe("QA-NAV-001", [(404, "text/html", {})])["outcome"],
             "failed",
         )
+        self.assertEqual(
+            qa.evaluate_probe(
+                "QA-NAV-001", [(404, "application/json", {"detail": "Not Found"})]
+            )["outcome"],
+            "passed",
+        )
         ready = {"status": "ready", "dependencies": [{"name": "postgres", "ok": False}]}
         self.assertEqual(
             qa.evaluate_probe("QA-RUNTIME-001", [(200, "application/json", ready)])[

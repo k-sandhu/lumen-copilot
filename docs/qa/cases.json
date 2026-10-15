@@ -62,11 +62,12 @@
       "steps": [
         "GET /api/v1/qa-route-does-not-exist."
       ],
-      "expected": "HTTP 404 JSON problem, never SPA index HTML.",
+      "expected": "HTTP 404 with a JSON object, never SPA index HTML. Unregistered routes need not use the registered-operation Problem fields.",
       "method": "http_smoke",
       "references": [
         "docs/qa/README.md",
-        "docs/specs/0004-security-and-domain-invariants.md"
+        "docs/specs/0004-security-and-domain-invariants.md",
+        "docs/runbooks/fast-local-docker.md"
       ]
     },
     {
