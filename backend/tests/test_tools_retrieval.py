@@ -345,10 +345,14 @@ async def test_get_document_invalid_id_is_a_bad_args_rejection(
         {"document_id": "not-a-uuid"},
     )
     # A malformed id is a tool-specific rejection the runner passes through, not a
-    # crash: the handler returns ok=False with the bad-args code.
+    # crash: the handler returns ok=False with the bad-args code and a corrective
+    # message the model can act on (#758), not the old dead-end line.
     assert result.ok is False
     assert result.error == ERROR_BAD_ARGS
-    assert "invalid" in result.content.lower()
+    assert result.content != "Invalid document id."
+    assert "document id:" in result.content
+    assert "search_text" in result.content
+    assert "search_documents" in result.content
 
 
 async def test_get_document_long_text_returns_bounded_range_and_truncation_metadata(
@@ -584,7 +588,8 @@ async def test_get_document_forbidden_response_discloses_no_length_or_range(
         {"document_id": str(private_document_id)},
     )
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
     assert "not found" in result.content.lower()
     assert "total_length" not in result.payload
     assert "returned_range" not in result.payload
@@ -713,3 +718,391 @@ async def test_search_text_returns_the_complete_passage_at_any_snippet_budget(
         assert result.passages[0].text == text
         assert text in result.content
         assert "LATE FACT: the launch date is 2031-04-19." in result.content
+
+
+# --- #758: get_document accepts what search shows ---------------------------
+
+
+async def _chunk_id(session: AsyncSession, document_id: uuid.UUID) -> uuid.UUID:
+    from sqlalchemy import select
+
+    from app.db import models
+
+    row = (
+        await session.execute(
+            select(models.Chunk.id).where(models.Chunk.document_id == document_id)
+        )
+    ).scalar_one()
+    return row  # type: ignore[no-any-return]
+
+
+def _outcome(result: object) -> tuple[object, ...]:
+    return (
+        result.content,  # type: ignore[attr-defined]
+        result.ok,  # type: ignore[attr-defined]
+        result.error,  # type: ignore[attr-defined]
+        result.document_ids,  # type: ignore[attr-defined]
+        result.payload,  # type: ignore[attr-defined]
+        result.hit_count,  # type: ignore[attr-defined]
+    )
+
+
+def test_search_text_header_carries_document_id() -> None:
+    from app.services.tools.impls.retrieval import _render_passages
+
+    doc_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    passage = RetrievedPassage(
+        chunk_id=chunk_id,
+        document_id=doc_id,
+        document_name="permit.pdf",
+        ord=0,
+        text="evidence body",
+        char_start=3,
+        char_end=16,
+        score=1.0,
+    )
+    rendered = _render_passages([passage])
+    assert rendered.startswith(
+        f"[1] permit.pdf (document id: {doc_id}, chunk {chunk_id}, chars 3-16):"
+    )
+    assert f"document id: {doc_id}" in rendered
+
+    media = RetrievedPassage(
+        chunk_id=chunk_id,
+        document_id=doc_id,
+        document_name="meeting.mp4",
+        ord=1,
+        text="hello",
+        char_start=0,
+        char_end=5,
+        score=1.0,
+        time_start_ms=61_250,
+        time_end_ms=64_900,
+        speaker_id="speaker-2",
+        speaker_name="John",
+    )
+    rendered_media = _render_passages([media])
+    assert f"document id: {doc_id}" in rendered_media
+    assert "time 01:01.250-01:04.900, John (speaker-2)" in rendered_media
+
+
+async def test_get_document_accepts_chunk_uuid(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(chunk_id)},
+    )
+    assert result.ok is True
+    assert result.hit_count == 1
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+async def test_get_document_accepts_exact_name(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "alice-taxes.txt"},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+async def test_get_document_accepts_name_case_whitespace_quote_variant(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": '  "ALICE-TAXES.TXT"  '},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+async def test_get_document_accepts_chunk_prefix(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": f"chunk {chunk_id}"},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_accepts_document_prefix(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": f"document {world.alice_doc}"},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_accepts_header_fragment_with_document_id(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    fragment = f"alice-taxes.txt (document id: {world.alice_doc}, chunk {chunk_id}, chars 0-17)"
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": fragment},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_ambiguous_name_lists_permitted_candidates(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    dup_id = await _doc(session, world.tenant_a, world.alice, "alice-taxes.txt", "Second copy.")
+    bob_dup = await _doc(session, world.tenant_a, world.bob, "alice-taxes.txt", "Bob copy.")
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "alice-taxes.txt"},
+    )
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert str(world.alice_doc) in result.content
+    assert str(dup_id) in result.content
+    assert "alice-taxes.txt" in result.content
+    assert "retry" in result.content.lower()
+    assert str(bob_dup) not in result.content
+    assert "Second copy" not in result.content
+
+
+async def test_get_document_unknown_name_returns_corrective_error(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "no-such-file.pdf"},
+    )
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert result.content != "Invalid document id."
+    assert "document id:" in result.content
+    assert "search_text" in result.content
+    assert "search_documents" in result.content
+    assert "list_documents" in result.content
+    assert "by filename" in result.content
+
+
+async def test_get_document_malformed_value_returns_same_corrective_error(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    unknown = await _call(session, principal, "get_document", {"document_id": "no-such-file.pdf"})
+    assert unknown.ok is False
+    assert unknown.error == ERROR_BAD_ARGS
+    assert "document id:" in unknown.content
+    assert "search_documents" in unknown.content
+    assert "by filename" in unknown.content
+    for bad in ("not-a-uuid", "1", ""):
+        result = await _call(session, principal, "get_document", {"document_id": bad})
+        assert _outcome(result) == _outcome(unknown), bad
+
+
+async def test_get_document_inv2_chunk_and_name_indistinguishable(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    bob_chunk = await _chunk_id(session, world.bob_doc)
+    carol_chunk = await _chunk_id(session, world.carol_doc)
+    unknown = await _call(session, principal, "get_document", {"document_id": str(uuid.uuid4())})
+    assert unknown.ok is False
+    assert unknown.error == ERROR_BAD_ARGS
+    for handle in (
+        str(world.bob_doc),
+        str(world.carol_doc),
+        str(bob_chunk),
+        str(carol_chunk),
+        f"chunk {bob_chunk}",
+        "bob-secret.txt",
+        "carol.txt",
+        "no-such-file.pdf",
+        "not-a-uuid",
+    ):
+        result = await _call(session, principal, "get_document", {"document_id": handle})
+        assert _outcome(result) == _outcome(unknown), handle
+        assert "Bob private" not in result.content
+        assert "Carol notes" not in result.content
+
+
+async def test_get_document_corrective_only_names_allowed_tools(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    ctx = ToolContext(
+        principal=principal,
+        retrieval=RetrievalService(session, gateway=_FakeGateway()),  # type: ignore[arg-type]
+        collection_ids=None,
+        allowed_tools=frozenset({"get_document"}),
+    )
+    result = await get_tool("get_document").handler({"document_id": "no-such-file.pdf"}, ctx)
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert result.content.startswith("Document not found.")
+    assert "chunk" in result.content
+    assert "exact filename" in result.content
+    assert "search_text" not in result.content
+    assert "search_documents" not in result.content
+    assert "list_documents" not in result.content
+
+
+def test_get_document_descriptions_match_accepted_shapes() -> None:
+    defn = get_tool("get_document")
+    description = defn.description.lower()
+    param = defn.json_schema["properties"]["document_id"]["description"].lower()
+    for text in (description, param):
+        assert "chunk" in text
+        assert "filename" in text or "exact name" in text or "document name" in text
+    assert "search_text" in description
+    # Closed portable schema unchanged in shape (#634): one required string.
+    assert list(defn.json_schema["properties"]) == ["document_id"]
+    assert defn.json_schema["properties"]["document_id"]["type"] == "string"
+    assert defn.json_schema["required"] == ["document_id"]
+    assert defn.json_schema["additionalProperties"] is False
+    assert "anyOf" not in str(defn.json_schema)
+    assert "oneOf" not in str(defn.json_schema)
+    search_text_desc = get_tool("search_text").description
+    assert "document id" in search_text_desc.lower()
+
+
+async def test_retrieval_service_resolve_document_text_shapes_and_permissions(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    svc = RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+    alice = _principal(world.alice, world.tenant_a)
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    bob_chunk = await _chunk_id(session, world.bob_doc)
+    carol_chunk = await _chunk_id(session, world.carol_doc)
+
+    by_doc = await svc.resolve_document_text(principal=alice, handle=str(world.alice_doc))
+    assert by_doc.document is not None
+    assert by_doc.document.document_id == world.alice_doc
+    assert by_doc.candidates == ()
+
+    by_chunk = await svc.resolve_document_text(principal=alice, handle=f"chunk {chunk_id}")
+    assert by_chunk.document is not None
+    assert by_chunk.document.document_id == world.alice_doc
+
+    by_name = await svc.resolve_document_text(principal=alice, handle="  'ALICE-TAXES.TXT' ")
+    assert by_name.document is not None
+    assert by_name.document.document_id == world.alice_doc
+
+    unknown = await svc.resolve_document_text(principal=alice, handle=str(uuid.uuid4()))
+    assert unknown.document is None
+    assert unknown.candidates == ()
+    for forbidden in (
+        str(world.bob_doc),
+        str(world.carol_doc),
+        str(bob_chunk),
+        str(carol_chunk),
+        "bob-secret.txt",
+        "carol.txt",
+        "no-such-file.pdf",
+    ):
+        resolved = await svc.resolve_document_text(principal=alice, handle=forbidden)
+        assert resolved.document is None, forbidden
+        assert resolved.candidates == (), forbidden
+
+    dup_id = await _doc(session, world.tenant_a, world.alice, "alice-taxes.txt", "Second copy.")
+    await session.commit()
+    ambiguous = await svc.resolve_document_text(principal=alice, handle="alice-taxes.txt")
+    assert ambiguous.document is None
+    assert {c.document_id for c in ambiguous.candidates} == {world.alice_doc, dup_id}
+
+
+async def test_runner_replay_get_document_argument_shapes(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    runner = ToolRunner(
+        allowed=default_allowlist(),
+        invocations=ToolInvocationRepository(session, world.tenant_a),
+        audit=AuditSink(AuditEventRepository(session, world.tenant_a)),
+        actor=AuditActor.user(world.alice),
+        request_id="issue-758",
+        source_ip="127.0.0.1",
+    )
+
+    async def run(call_id: str, arguments: dict[str, object]):  # type: ignore[no-untyped-def]
+        return await runner.run(
+            call=ToolCall(id=call_id, name="get_document", arguments=arguments),
+            context=_ctx(session, principal),
+        )
+
+    ok_doc = await run("ok-doc", {"document_id": str(world.alice_doc)})
+    assert ok_doc.ok is True
+    assert "Alice tax notes" in ok_doc.content
+
+    ok_name = await run("ok-name", {"document_id": "alice-taxes.txt"})
+    assert ok_name.ok is True
+    assert "Alice tax notes" in ok_name.content
+
+    ok_chunk = await run("ok-chunk", {"document_id": str(chunk_id)})
+    assert ok_chunk.ok is True
+    assert "Alice tax notes" in ok_chunk.content
+
+    ok_chunk_prefix = await run("ok-chunk-prefix", {"document_id": f"chunk {chunk_id}"})
+    assert ok_chunk_prefix.ok is True
+
+    bad_index = await run("bad-index", {"document_id": "1"})
+    assert bad_index.ok is False
+    assert bad_index.error == ERROR_BAD_ARGS
+    assert "document id:" in bad_index.content
+    assert "search_documents" in bad_index.content
+
+    bad_int = await run("bad-int", {"document_id": 1})
+    assert bad_int.ok is False
+    assert bad_int.error == ERROR_BAD_ARGS
+    assert "must satisfy type string" in bad_int.content
+    assert "Correct the arguments and retry" in bad_int.content
+
+    for i, key in enumerate(("document_name", "name", "id", "chunk_id", "documentId")):
+        rejected = await run(f"bad-key-{i}", {key: "alice-taxes.txt"})
+        assert rejected.ok is False, key
+        assert rejected.error == ERROR_BAD_ARGS, key
+        assert "Correct the arguments and retry" in rejected.content, key
+        assert "unknown" in rejected.content or "required" in rejected.content, key
