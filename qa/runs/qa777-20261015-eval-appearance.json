@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "source_state": "modified",
+    "images": [
+      {
+        "service": "backend",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      },
+      {
+        "service": "frontend",
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6"
+      }
+    ],
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "environment": {
+    "label": "QA777 Eval appearance/build corroboration; modified Eval backend, unchanged static frontend",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/openai/gpt-6-luna"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "tenant": "Eval",
+      "initial_ready_documents": 96,
+      "initial_mime_counts": {
+        "application/pdf": 95,
+        "text/plain": 1
+      },
+      "collection_counts": {
+        "answer-accuracy-eval": 95,
+        "QA visible walkthrough 2026-10-15": 1
+      }
+    },
+    "configuration": {
+      "LLM_MODEL": "openrouter/openai/gpt-6-luna",
+      "LLM_EMBEDDING_MODEL": "openai/openai/text-embedding-3-large",
+      "LLM_EMBEDDING_DIMENSIONS": "2048",
+      "WEB_SEARCH_ENABLED": "false",
+      "SANDBOX_ENABLED": "false",
+      "CHAT_SUMMARY_ENABLED": "false",
+      "base_url": "http://localhost:47380",
+      "backend_commit": "3c022fcc4880228636a3cfda067c7014c89441f9",
+      "backend_patch_sha256": "ea4797f203d11025da7728e62a6f65a23eba786d18ceb7eb1fa40c580ca40ecf",
+      "frontend_commit": "3c022fcc4880228636a3cfda067c7014c89441f9",
+      "frontend_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_roots": "modified mounted Eval backend; immutable current static frontend",
+      "disabled_features_are_not_enabled_for_testing": true,
+      "frontend_mode": "baked static frontend; tree unchanged at main 70c3c2e4"
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-eval-appearance",
+  "definitions": {
+    "commit": "da2abe219b24ffa882f9cb4b0a006f8630fa2ae0",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T21:28:59.294Z",
+  "finished_at": "2026-10-15T22:12:35.980Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed.",
+  "results": [
+    {
+      "case_id": "QA-FILL-040",
+      "definition": {
+        "id": "QA-FILL-040",
+        "title": "System theme and token contrast",
+        "status": "active",
+        "areas": [
+          "QA-AREA-040"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Temporarily emulate light/dark system preference in Chrome; exercise supported theme/density combinations and scoped token/contrast checks; restore.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "System follows the emulated preference; documented token/contrast assertions pass and original settings return.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "3cfc9fa78c2aa7fab821fd7415d7c75a3859e26684f18670799c0f5a2d85316e",
+      "outcome": "failed",
+      "reason": "2026-10-15: bounded optional-theme link readability defect #779.",
+      "residual_risk": "Affected optional light-theme small accent links remain low contrast; default Aurora passed. No site-wide WCAG compliance conclusion.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Chrome System mode followed emulated light and dark preferences. All seven themes were exercised in both modes (14 combinations) with correct theme/mode attributes; original Aurora/System/Cozy and native media behavior were restored. Frontend theme/token tests passed. Body and muted foreground-on-surface contrast was measured for all 14 states.",
+          "observed": {
+            "runtime": "Eval unchanged static frontend",
+            "samples": 14,
+            "body_min": 14.487334659273658,
+            "muted_min": 5.745126762715642,
+            "accent_min": 3.6695083962450648
+          },
+          "captured_at": "2026-10-15T21:28:59.294Z"
+        },
+        {
+          "kind": "observation",
+          "description": "System-mode light/dark and all14 theme/mode combinations worked; body/muted contrast passed. Actual 14px/400-weight accent links measured4.095,3.922,3.670 in Graphite/Meridian/Sunset light, below the4.5 normal-text benchmark; filed#779 with optional-theme qualification. Original appearance/media restored.",
+          "observed": {
+            "evidence": "theme-matrix.json; theme-contrast-matrix.json; rendered-link-colors.json; sunset-light-link.jpg"
+          },
+          "captured_at": "2026-10-15T22:12:35.980Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "rendered-link-colors.json",
+          "path": "output/qa/777/rendered-link-colors.json",
+          "sha256": "edd6552b089bdfcef43f6b4d7d081f9e029685d6f7d83b5fccd46eb00d3f4c6d"
+        },
+        {
+          "kind": "artifact",
+          "description": "sunset-light-link.jpg",
+          "path": "output/qa/777/sunset-light-link.jpg",
+          "sha256": "bc97a15c7623b446fc5ee566938122a2959dcc78b9e638c490ef9f9924acedf8"
+        },
+        {
+          "kind": "artifact",
+          "description": "theme-contrast-matrix.json",
+          "path": "output/qa/777/theme-contrast-matrix.json",
+          "sha256": "79dff27287b0787c498d90bb39aeb8bc5c47744db1c15295eb912a1c0d82d4c5"
+        },
+        {
+          "kind": "artifact",
+          "description": "theme-matrix.json",
+          "path": "output/qa/777/theme-matrix.json",
+          "sha256": "d1bbfd28a9e59d97dd621a7cd9470a4056999cec8c59c0c83413dfae9b2ec236"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/779"
+      ]
+    },
+    {
+      "case_id": "QA-FILL-046",
+      "definition": {
+        "id": "QA-FILL-046",
+        "title": "Bundle guard and layout checks",
+        "status": "active",
+        "areas": [
+          "QA-AREA-046"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Build with development pages disabled; inspect generated chunks for exclusion/code splitting and shrink behavior; inspect matching routes in Chrome.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Development payload is excluded and heavy chat code split; supported grid shrink checks pass.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "8a3ccc506043cc316bd6e181a01e17e71b4107a84d28b6fb5b8d6ca8a9705582",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Real Vite build guards passed: development payload excluded in flag-off production builds, included in the positive flag-on control, heavy Markdown pipeline absent from static entry closure and present only in lazy chunks; grid-shrink guards passed. Chrome on the exact deployed frontend tree returned actionable not-found views for /docs and /features.",
+          "observed": {
+            "runtime": "Eval static frontend; source tree equals tested frontend checkout",
+            "frontend_tests": 69,
+            "build_guard_tests": 21
+          },
+          "captured_at": "2026-10-15T21:28:59.530Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "frontend-residual.xml",
+          "path": "output/qa/777/frontend-residual.xml",
+          "sha256": "cba2f1f1151210687ccbda82913fe7aa6f5cc291b13d76893d97bbc34ae2c3a3"
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}

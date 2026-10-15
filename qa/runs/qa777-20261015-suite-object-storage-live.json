@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      }
+    ],
+    "source_state": "modified",
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "environment": {
+    "label": "QA777 object-storage-live",
+    "kind": "live_local",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "raw_junit_sha256": "7ba84b47d9dc330304a3259d07f25909eaff2b44219d0ec1863bb4cf7d7982c6"
+    },
+    "configuration": {
+      "scope": "modified Eval harness with own QA S3/CORS prerequisites; app-base3c022fcc",
+      "test_source_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+      "backend_patch_sha256": "ea4797f203d11025da7728e62a6f65a23eba786d18ceb7eb1fa40c580ca40ecf"
+    }
+  },
+  "ci": null,
+  "kind": "suite",
+  "run_id": "qa777-20261015-suite-object-storage-live",
+  "suite": {
+    "name": "object-storage-live",
+    "outcome": "passed",
+    "reason": "",
+    "counts": {
+      "passed": 3,
+      "failed": 0,
+      "errored": 0,
+      "skipped": 0
+    },
+    "tests": [
+      {
+        "test_id": "object-storage-live::tests.test_object_store::test_minio_put_get_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "object-storage-live::tests.test_object_store::test_minio_rejects_disallowed_type_without_storing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "object-storage-live::tests.test_object_store::test_minio_direct_multipart_cors_etag_and_range_round_trip",
+        "outcome": "passed"
+      }
+    ]
+  },
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T21:54:42.650763+00:00",
+  "finished_at": "2026-10-15T21:54:48.678763+00:00",
+  "notes": "modified Eval harness with own QA S3/CORS prerequisites; app-base3c022fcc. Raw JUnit retained at output/qa/777/object-storage-live-cors-fixed.xml. Suite skips are explicit; clean offline skipped9 =8 ordinary live exclusions plus1 known xfail421. A passing suite is not a catalog-area certification."
+}

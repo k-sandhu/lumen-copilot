@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      },
+      {
+        "service": "isolated-fault-worker",
+        "digest": "sha256:5cc09be8b6c5c697636d83f6d25680599728ef0295a09fbd6f2b14066719fe5e"
+      }
+    ],
+    "source_state": "unknown",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 integration-dependency-faults; isolated clean-source integration harness",
+    "kind": "live_local",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "redis": {
+        "name": "lumen-qa777-fault-redis",
+        "id": "0694e781ea5d518110fd0082c96f730361a93bf45fa93df823231f93c296564b",
+        "image": "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2"
+      },
+      "worker": {
+        "name": "lumen-qa777-fault-worker",
+        "id": "cf5bc44d8492bebc5484442321c6a652f4773a441afd9951d4de01a4e2311cc8",
+        "image": "sha256:5cc09be8b6c5c697636d83f6d25680599728ef0295a09fbd6f2b14066719fe5e"
+      },
+      "source": "clean3c022fcc baked application",
+      "scope": "Synthetic ping tasks only; no model/document task calls; baked entrypoint checks schema head on the isolated lumentest_qa777_clean_live harness database. No published ports/shared queues; Redis /data is tmpfs.",
+      "redis_databases": {
+        "broker": 0,
+        "result": 1,
+        "realtime": 2
+      }
+    },
+    "configuration": {
+      "application_source": "Verified main70c3c2e4 application tree via PYTHONPATH; test fixture commit0e9fd8f4. Earlier raw context incorrectly said3c022fcc; corrected before ledger freeze using source-provenance-correction.json.",
+      "posture": "isolated migration/operator connection, no deployment RLS certification",
+      "fault_scope": "own MinIO; isolated ping worker/Redis; own OpenSearch index write-block, not whole engine",
+      "mixed_runtime_scope": "Storage/search harness uses verified main70c3c2e4; isolated ping worker uses baked3c022fcc; Chrome readiness uses modified Eval app-base3c022fcc. Results are bounded component observations, not one clean deployment certificate."
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-integration-dependency-faults",
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T23:08:57.563Z",
+  "finished_at": "2026-10-15T23:08:57.563Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed. Source provenance correction: raw setup notes labelled the clean harness3c022fcc, but its exact tracked application tree is main70c3c2e4. Content hashes and archive tree comparison were checked before freezing this ledger. Mixed dependency components are listed individually.",
+  "results": [
+    {
+      "case_id": "QA-FILL-060",
+      "definition": {
+        "id": "QA-FILL-060",
+        "title": "Controlled dependency recovery",
+        "status": "active",
+        "areas": [
+          "QA-GAP-008"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Use isolated QA resources to interrupt worker/cache/search/storage paths during disposable operations and inspect retry/idempotence/read-back.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Failures surface; supported retry paths recover without duplicate active records or corruption.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "3b591cb08ea2821a829084986b7219dd2cd95e375442074967168caf0769272f",
+      "outcome": "partial",
+      "reason": "Storage adapter still leaks its vendor connection exception (#783); in-flight ingestion worker crash and whole-search-engine outage were not exercised.",
+      "residual_risk": "Ping task/adapter/index-block recovery is not certification of every document-ingestion crash or dependency failure.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Dedicated MinIO outage/restart preserved exact bytes and Chrome readiness recovered, but get leaked vendor exception (#783). New isolated clean-app worker/Redis: paused-worker ping queued once then drained, broker/cache outage failed promptly, restart restored ping plus ordered start/done. Own OpenSearch index write block yielded typed DependencyError; prior text unchanged, two retries left one updated chunk, ownhit1/foreign0. Exact worker/Redis containers and scratch index/pipeline removed after empty-queue/identity guards.",
+          "observed": {
+            "evidence": "storage-fault-recovered.json; fault-worker-context.json; fault-paused-job.json; fault-worker-drained.json; fault-broker-down.json; fault-cache-down.json; fault-worker-recovered.json; fault-cache-recovered.json; fault-worker-teardown.json; search-fault-recovery.json"
+          },
+          "captured_at": "2026-10-15T23:08:57.563Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-broker-down.json",
+          "path": "output/qa/777/fault-broker-down.json",
+          "sha256": "d30ef2a928e4520b8ef793d5deca7a67059fad5f19ff78080c544f51467e5936"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-cache-down.json",
+          "path": "output/qa/777/fault-cache-down.json",
+          "sha256": "07568e41bc86e90145cd9608f970539f265354fd2e9014205f88cf3b76310b14"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-cache-recovered.json",
+          "path": "output/qa/777/fault-cache-recovered.json",
+          "sha256": "2df4b0c5ad03d7c2c108fe6384bfafe8f0abc1c41303bf05d1a2a8fb415477d7"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-paused-job.json",
+          "path": "output/qa/777/fault-paused-job.json",
+          "sha256": "f93c308e5fb7f59042759160c4abc50c00551ee53aea29bafe2a126f34748562"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-worker-context.json",
+          "path": "output/qa/777/fault-worker-context.json",
+          "sha256": "a374ca781b25bc07b9a04bbb69d0e901cea8589ed66ca56b82d2ab6130367c02"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-worker-drained.json",
+          "path": "output/qa/777/fault-worker-drained.json",
+          "sha256": "11e595a2107153dcbfb7d08f72c5b4b3bc88d401828d574748cde26501f917ec"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-worker-recovered.json",
+          "path": "output/qa/777/fault-worker-recovered.json",
+          "sha256": "3c8e00730a08f9443b1852bf1ef11b39ab5986ccf4dda37e89e6afc462f266ea"
+        },
+        {
+          "kind": "artifact",
+          "description": "fault-worker-teardown.json",
+          "path": "output/qa/777/fault-worker-teardown.json",
+          "sha256": "05acbf9c21a7ed10566cddab8104d7fc2980185cd48f47d92b543fc843d0e95a"
+        },
+        {
+          "kind": "artifact",
+          "description": "search-fault-recovery.json",
+          "path": "output/qa/777/search-fault-recovery.json",
+          "sha256": "a43f18c21e8131f9085be71bfe2c74d945f1820c7da115a85ebf1cea2bf79c61"
+        },
+        {
+          "kind": "artifact",
+          "description": "storage-fault-recovered.json",
+          "path": "output/qa/777/storage-fault-recovered.json",
+          "sha256": "604929fdd75a40794605e942f35781d1c8600b11b34e748baa9edcc5bc2d00ee"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/783"
+      ]
+    }
+  ]
+}

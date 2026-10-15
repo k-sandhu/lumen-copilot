@@ -491,6 +491,9 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
             "documents",
             "chunks",
             "tool_invocations",
+            "tenant_tool_policy",
+            "source_handles",
+            "session_summaries",
             "audit_events",
             "llm_usage",
         )
@@ -533,8 +536,9 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
             await sess.execute(
                 text(
                     "INSERT INTO documents (id, tenant_id, owner_id, collection_id, filename, "
-                    "mime_type, size_bytes, storage_key, status) VALUES "
-                    "(:id, :tid, :oid, :cid, 'taxes.pdf', 'application/pdf', 10, :key, 'ready')"
+                    "mime_type, size_bytes, storage_key, status, acl_enforced) VALUES "
+                    "(:id, :tid, :oid, :cid, 'taxes.pdf', 'application/pdf', "
+                    "10, :key, 'ready', false)"
                 ),
                 {
                     "id": doc_a,
