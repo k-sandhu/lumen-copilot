@@ -38,6 +38,19 @@ revisions, current patch hashes, deployed image digests and selected non-secret
 configuration in each run. Do not claim these results apply to clean main or
 reuse earlier clean-main passes. Existing code patches are not changed by QA.
 
+During checks 1–5, the old frontend rendered the backend's inline `[S1]`
+citation as plain text while its footer citation opened the correct passage.
+That initial phase is preserved in its own immutable run. The frontend alone
+was then replaced on the same loopback port with the already-built static image
+`sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6`.
+Its source is `3c022fcc4880228636a3cfda067c7014c89441f9`; a Git comparison
+confirmed the frontend tree is unchanged at current main `70c3c2e4`.
+The replacement container is `lumen-qa770-ui`, joined to the existing Eval
+network. The old frontend container remains stopped and recoverable. Database,
+object storage, existing uploads, backend patches and tenant policies were not
+changed. Subsequent checks use a separate refreshed-frontend run; they do not
+inherit the old client's observations.
+
 ## Data and boundaries
 
 Inspect the existing documents and histories without deleting or overwriting
