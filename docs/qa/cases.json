@@ -326,6 +326,1355 @@
         "docs/qa/README.md",
         "docs/specs/0004-security-and-domain-invariants.md"
       ]
+    },
+    {
+      "id": "QA-WALK-001",
+      "title": "Authentication, Tokens, and Sessions — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-001"
+      ],
+      "steps": [
+        "Login, refresh, replay old token, logout.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Valid access works; invalid/revoked refresh tokens fail.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-002",
+      "title": "Tenant Isolation and RLS — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-002"
+      ],
+      "steps": [
+        "Access another tenant’s records through API and database.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "API returns 404; database excludes foreign rows.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-003",
+      "title": "Roles, Groups, and Grants — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-003"
+      ],
+      "steps": [
+        "Change memberships/grants; retry restricted operations.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Authorized access succeeds; forbidden operations return 403.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-004",
+      "title": "Retrieval Permissions and Ranking — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-004"
+      ],
+      "steps": [
+        "Search with different users and ranking signals.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Only permitted results appear; fusion order matches expectations.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-005",
+      "title": "Grounded Chat and Citations — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-005"
+      ],
+      "steps": [
+        "Ask supported, unsupported, and restricted-source questions.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Valid citations appear; unsupported answers refuse; restricted sources stay hidden.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-006",
+      "title": "Chat API and Runtime — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-006"
+      ],
+      "steps": [
+        "Create, update, message, reload, delete a conversation.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Lifecycle works; answers and citations persist correctly.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-007",
+      "title": "WebSocket Streaming and Backplane — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-007"
+      ],
+      "steps": [
+        "Subscribe before/after publishing; send terminal events.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Ordered delivery and replay work; terminal events end streaming.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-008",
+      "title": "Context and Session Summaries — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-008"
+      ],
+      "steps": [
+        "Exceed context budget; summarize; ask follow-up questions.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Context fits budget; required cited evidence survives.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-009",
+      "title": "Document Upload, Management, Preview — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-009"
+      ],
+      "steps": [
+        "Upload, list, preview, delete a document.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Content displays correctly; deletion removes stored data.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-010",
+      "title": "Parsing, Chunking, and Ingestion — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-010"
+      ],
+      "steps": [
+        "Ingest supported formats; repeat ingestion.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct text/chunks; ready status; no duplicate chunks.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-011",
+      "title": "Collections Management — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-011"
+      ],
+      "steps": [
+        "Create collections; add documents; inspect counts.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Ownership, contents, and counts match stored records.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-012",
+      "title": "Search, Suggestions, Saved Searches — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-012"
+      ],
+      "steps": [
+        "Search, filter, select suggestions, save/reload queries.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Relevant permitted results; saved filters round-trip correctly.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-013",
+      "title": "Sources and Connector Sync — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-013"
+      ],
+      "steps": [
+        "Add source, sync, inspect indexing, delete.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Documents index correctly; failures surface; deletion cascades.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-014",
+      "title": "Google Drive, OAuth, ACL Mapping — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-014"
+      ],
+      "steps": [
+        "Connect Drive; sync files; vary permissions.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Authorized files appear; mirrored ACL restrictions hold.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-015",
+      "title": "Web Fetching and SSRF — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-015"
+      ],
+      "steps": [
+        "Fetch public URLs and blocked/private destinations.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Public fetch works; unsafe destinations are rejected.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-016",
+      "title": "LLM Gateway, Providers, Models — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-016"
+      ],
+      "steps": [
+        "Configure provider; discover/select models; invoke gateway.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct model/provider used; credentials never returned.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-017",
+      "title": "LLM Context, Tools, Prompt Economics — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-017"
+      ],
+      "steps": [
+        "Exercise budgeting, fragmented tool calls, compaction.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Calls reconstruct correctly; compaction reduces input tokens.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-018",
+      "title": "Assistant Creation, Versioning, Testing — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-018"
+      ],
+      "steps": [
+        "Create/edit/publish assistant; run sample tests.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Configuration persists; versions display; tests avoid real side effects.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-019",
+      "title": "Assistant Governance and Wiring — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-019"
+      ],
+      "steps": [
+        "Certify/disable assistant; start chats; inspect instructions.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Governance applies; disabled assistants cannot start chats.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-020",
+      "title": "Tool Registry, Execution, Policy — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-020"
+      ],
+      "steps": [
+        "Invoke allowed, unknown, disabled, unapproved tools.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Allowed tools run; denied handlers never execute; outcomes recorded.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-021",
+      "title": "Built-in Tools — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-021"
+      ],
+      "steps": [
+        "Run retrieval, web search, Python, file-writing tools.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct results/artifacts; each tool’s policy is enforced.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-022",
+      "title": "MCP Servers, Tools, Egress — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-022"
+      ],
+      "steps": [
+        "Register server; discover/call tools; try blocked endpoints.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Allowed calls succeed; unsafe endpoints fail; secrets stay hidden.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-023",
+      "title": "Sandbox Execution and Lifecycle — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-023"
+      ],
+      "steps": [
+        "Execute, reuse session, reset, close, test isolation.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Expected output; correct generations; no host/network exposure.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-024",
+      "title": "Sandbox Auth and Supply Chain — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-024"
+      ],
+      "steps": [
+        "Use missing/wrong credentials; request denied packages.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Unauthorized calls return 401; denied dependencies never install.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-025",
+      "title": "Code Runs and Messages — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-025"
+      ],
+      "steps": [
+        "Execute code; inspect output, status, errors, artifacts.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Accurate run details and safe, actionable messages appear.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-026",
+      "title": "Artifact Access and Retention — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-026"
+      ],
+      "steps": [
+        "Create/read artifacts; attempt foreign access; purge expired items.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Content round-trips; unauthorized access denied; only expired items purge.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-027",
+      "title": "Scheduling and Dispatch — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-027"
+      ],
+      "steps": [
+        "Configure cadence/timezone; trigger due runs and overlaps.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct next-run times; configured overlap policy holds.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-028",
+      "title": "Run History, Delivery, Inbox — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-028"
+      ],
+      "steps": [
+        "Finish/fail runs; inspect inbox; repeat delivery; mark read.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Owner sees correct status; delivery is idempotent; read state updates.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-029",
+      "title": "Autonomy and Escalation — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-029"
+      ],
+      "steps": [
+        "Apply autonomy cap; trigger escalation; resume/cancel.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Caps never raise autonomy; transitions match defined rules.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-030",
+      "title": "Audit Events, Filters, Export — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-030"
+      ],
+      "steps": [
+        "Perform audited actions; filter events; export CSV.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Required tenant-scoped events exist; export matches displayed events.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-031",
+      "title": "Administration and Governance — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-031"
+      ],
+      "steps": [
+        "Open panels as admin/member; change supported policies.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct tenant data; restricted operations denied; changes persist.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-032",
+      "title": "Encryption and Secrets — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-032"
+      ],
+      "steps": [
+        "Encrypt/decrypt; tamper; use wrong key; inspect APIs.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Round-trip succeeds; tampering fails; plaintext never exposed.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-033",
+      "title": "Database Migrations and Repositories — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-033"
+      ],
+      "steps": [
+        "Check migration chain; create/read/update scoped records.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Single valid migration head; repository results match stored data.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-034",
+      "title": "Object Storage — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-034"
+      ],
+      "steps": [
+        "Store/read/delete content; test filenames and keys.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Bytes round-trip; keys are tenant-scoped; traversal stripped.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-035",
+      "title": "Configuration and API Errors — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-035"
+      ],
+      "steps": [
+        "Supply invalid settings/input; trigger unknown exceptions.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Invalid values rejected; errors follow contract without internal leaks.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-036",
+      "title": "Preferences and Avatars — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-036"
+      ],
+      "steps": [
+        "Save/clear preferences; upload/delete avatar; reload profile.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Values round-trip; invalid models rejected; avatar state matches.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-037",
+      "title": "Frontend API and Refresh — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-037"
+      ],
+      "steps": [
+        "Send requests; simulate 401; retry after refresh.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct headers/payloads; refresh and retry follow expected behavior.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-038",
+      "title": "Navigation, Guards, Not Found — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-038"
+      ],
+      "steps": [
+        "Visit known, protected, and unknown routes.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct screens; login when required; actionable 404 page.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-039",
+      "title": "Shell and Command Palette — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-039"
+      ],
+      "steps": [
+        "Navigate; open palette; filter/select commands.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct routes/actions; input focus and shortcuts work.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-040",
+      "title": "Themes and Design Tokens — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-040"
+      ],
+      "steps": [
+        "Change theme/mode/density; reload; change OS mode.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Preferences persist; system mode follows OS; tokens remain valid.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-041",
+      "title": "Markdown and Sanitization — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-041"
+      ],
+      "steps": [
+        "Render formatting/code; inject unsafe markup; copy code.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Formatting/copy work; unsafe markup cannot execute.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-042",
+      "title": "Accessibility and Focus — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-042"
+      ],
+      "steps": [
+        "Open dialogs; press Tab, Shift+Tab, Escape.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Correct initial focus; focus stays trapped; dismiss works.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-043",
+      "title": "Chat Rendering and Autoscroll — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-043"
+      ],
+      "steps": [
+        "Stream tokens; scroll upward; reconnect; finish stream.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "No duplicate text; scrolling respects user; stable messages avoid rerenders.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-044",
+      "title": "UI Trust Indicators — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-044"
+      ],
+      "steps": [
+        "Render citations, permissions, freshness, risk, provenance.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Labels/states match actual data; source inspection works.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-045",
+      "title": "Documentation and Feature Catalog — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-045"
+      ],
+      "steps": [
+        "Open documents/cards; follow internal links.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Content renders; links resolve; unknown documents show helpful errors.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-046",
+      "title": "Production Build Guards — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-046"
+      ],
+      "steps": [
+        "Build with development pages disabled; inspect bundles/layout.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Development content excluded; heavy chat code split; grid can shrink.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-047",
+      "title": "Unauthenticated Login Browser Smoke — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-047"
+      ],
+      "steps": [
+        "Open app root without a valid session.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Accessible email/password login form appears.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-048",
+      "title": "Docs/Catalog Browser Smoke — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-048"
+      ],
+      "steps": [
+        "Open `/docs` and `/features` in test setup.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Expected document navigation and catalog headings appear.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-049",
+      "title": "Grounded End-to-End — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-049"
+      ],
+      "steps": [
+        "Upload → ingest → retrieve → ask → inspect citations.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Answer cites uploaded evidence; unauthorized users cannot retrieve it.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-050",
+      "title": "Retrieval/Citation/Groundedness Evaluations — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-050"
+      ],
+      "steps": [
+        "Run golden questions against fake/live models.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Configured quality thresholds pass; ungrounded answers are detected.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-051",
+      "title": "Benchmark Data and Summaries — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-051"
+      ],
+      "steps": [
+        "Validate manifests, checksums, questions, selection, reports.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Dataset checks pass; selection deterministic; evidence-preserving summaries pass.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-052",
+      "title": "Latency and Compression Evaluations — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-AREA-052"
+      ],
+      "steps": [
+        "Measure first answer token; simulate failure; compact context.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Latency meets configured budget; failures terminate; grounding survives compression.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-053",
+      "title": "Authenticated Browser End-to-End — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-001"
+      ],
+      "steps": [
+        "Login → upload → ingest → chat → open citation.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Complete flow works against real services.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-054",
+      "title": "Cross-Browser Compatibility — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-002"
+      ],
+      "steps": [
+        "Run core flows in Chrome, Firefox, Safari/WebKit.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Equivalent behavior; no browser-specific failures.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-055",
+      "title": "Mobile and Touch Layout — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-003"
+      ],
+      "steps": [
+        "Use narrow screens; open menus, dialogs, previews.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Controls remain usable; no clipping or overlap.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-056",
+      "title": "Accessibility Audit — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-004"
+      ],
+      "steps": [
+        "Run automated checks and keyboard/screen-reader walkthroughs.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "No serious violations; core flows accessible.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-057",
+      "title": "Visual Regression — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-005"
+      ],
+      "steps": [
+        "Compare page screenshots across themes and densities.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "No unintended layout or styling changes.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-058",
+      "title": "Concurrent Load — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-006"
+      ],
+      "steps": [
+        "Run many users uploading, searching, and chatting.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Agreed latency/error targets met; tenants remain isolated.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-059",
+      "title": "Long-Running Stability — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-007"
+      ],
+      "steps": [
+        "Repeat workloads for hours; monitor connections and memory.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Resource usage stabilizes; no accumulating failures.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-060",
+      "title": "Service Restart Recovery — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-008"
+      ],
+      "steps": [
+        "Restart workers, Redis, search, and storage during operations.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Failures surface clearly; recovery avoids corrupt/duplicate data.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-061",
+      "title": "Backup and Restore — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-009"
+      ],
+      "steps": [
+        "Back up data; restore into a clean environment.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Documents, permissions, artifacts, and audits remain consistent.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-062",
+      "title": "Upgrade with Existing Data — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-010"
+      ],
+      "steps": [
+        "Apply migrations to a populated previous-version database.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Upgrade preserves data and permissions; application starts correctly.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-063",
+      "title": "Adversarial Prompt Injection — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-011"
+      ],
+      "steps": [
+        "Place malicious instructions in documents and tool results.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "No permission bypass, secret disclosure, or unauthorized action.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-064",
+      "title": "Login Abuse Protection — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-012"
+      ],
+      "steps": [
+        "Flood login with invalid credentials.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Agreed abuse controls hold; legitimate requests remain responsive.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-065",
+      "title": "Cross-Origin Request Protection — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-013"
+      ],
+      "steps": [
+        "Attempt cookie-backed requests and WebSocket connections from foreign origins.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Unauthorized origins cannot perform protected operations.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-066",
+      "title": "Multi-Tab Session Refresh — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-014"
+      ],
+      "steps": [
+        "Expire tokens; trigger requests simultaneously in several tabs.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Refresh races recover; no persistent login loop.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-067",
+      "title": "Malicious Document Handling — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-015"
+      ],
+      "steps": [
+        "Upload corrupt, mislabeled, and decompression-heavy files.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Safe rejection/failure; parser resources remain controlled.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-068",
+      "title": "Secret Leakage in Telemetry — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-016"
+      ],
+      "steps": [
+        "Trigger provider/OAuth failures; inspect logs, traces, errors.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "No tokens, keys, or credentials appear.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-069",
+      "title": "Permission Revocation During Execution — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-017"
+      ],
+      "steps": [
+        "Revoke access while retrieval/tools are running.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Subsequent access follows revocation rules; no forbidden evidence disclosed.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-070",
+      "title": "Browser Network Recovery — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-018"
+      ],
+      "steps": [
+        "Disconnect during streaming; reconnect and reload.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "No duplicated answer text; usable terminal or recovery state.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
+    },
+    {
+      "id": "QA-WALK-071",
+      "title": "Audit Failure Atomicity — systematic Chrome coverage",
+      "status": "active",
+      "areas": [
+        "QA-GAP-019"
+      ],
+      "steps": [
+        "Make audit persistence fail during a protected operation.",
+        "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+      ],
+      "expected": "Operation cannot silently succeed without its required audit event.",
+      "method": "manual_browser",
+      "references": [
+        "docs/qa/README.md",
+        "docs/qa/770-systematic-chrome.md",
+        "docs/specs/0004-security-and-domain-invariants.md"
+      ]
     }
   ]
 }

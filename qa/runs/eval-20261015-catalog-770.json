@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "run_id": "eval-20261015-catalog-770",
+  "started_at": "2026-10-15T17:46:39.194Z",
+  "finished_at": "2026-10-15T17:50:18.862619Z",
+  "application": {
+    "source_state": "modified",
+    "images": [
+      {
+        "service": "backend",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      },
+      {
+        "service": "frontend",
+        "digest": "sha256:9ae4a28cebbf6dbecbd42551bf99837cd23ed2b1daa2a2f7b026896976306ad7"
+      }
+    ],
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "definitions": {
+    "commit": "38e2a6ad019992a433716aafa7c8e965409b4313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "b99ebaea599a75441a076feb5baaadb2d9a83fa955b9d8975482dd18ae92bc35"
+  },
+  "environment": {
+    "label": "populated Eval / Chrome catalog walkthrough #770",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/openai/gpt-6-luna"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "tenant": "Eval",
+      "initial_ready_documents": 96,
+      "initial_mime_counts": {
+        "application/pdf": 95,
+        "text/plain": 1
+      },
+      "collection_counts": {
+        "answer-accuracy-eval": 95,
+        "QA visible walkthrough 2026-10-15": 1
+      }
+    },
+    "configuration": {
+      "LLM_MODEL": "openrouter/openai/gpt-6-luna",
+      "LLM_EMBEDDING_MODEL": "openai/openai/text-embedding-3-large",
+      "LLM_EMBEDDING_DIMENSIONS": "2048",
+      "WEB_SEARCH_ENABLED": "false",
+      "SANDBOX_ENABLED": "false",
+      "CHAT_SUMMARY_ENABLED": "false",
+      "base_url": "http://localhost:47380",
+      "backend_commit": "3c022fcc4880228636a3cfda067c7014c89441f9",
+      "backend_patch_sha256": "ea4797f203d11025da7728e62a6f65a23eba786d18ceb7eb1fa40c580ca40ecf",
+      "frontend_commit": "ce4d8533b04faa2806cc09a5526f604f6ddef415",
+      "frontend_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_roots": "composite Eval backend/frontend checkouts; unchanged by QA",
+      "disabled_features_are_not_enabled_for_testing": true
+    }
+  },
+  "ci": null,
+  "notes": "Initial populated-instance phase before refreshing its stale frontend. Only observed cases are included; unlisted cases are not exercised in this phase. Invalid-login preparation used the unchanged existing authentication case. Backend has local patches; frontend is the older ce4d853 development client. Inline S-handle markers were plain text, while the footer citation opened the correct PDF passage. This environment mismatch is not claimed as a defect in current clean main. A follow-up run will record the refreshed frontend separately.",
+  "results": [
+    {
+      "case_id": "QA-AUTH-002",
+      "definition": {
+        "id": "QA-AUTH-002",
+        "title": "Visible login and session restore",
+        "status": "active",
+        "areas": [
+          "QA-AREA-047",
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Open the app without a valid session; inspect Email, Password and Sign in labels.",
+          "Sign in with the documented local development account, then reload."
+        ],
+        "expected": "Accessible login appears; successful login opens the correct tenant; reload restores the session.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "51c90d5a00d0d96f18a20dcf26cfc935c795408e053ff6d15541559b26a820a4",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Accessible login accepted the documented Eval account; authenticated Eval workspace remained available after browser reload.",
+          "observed": {
+            "tenant": "Eval"
+          },
+          "captured_at": "2026-10-15T17:46:47.559Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-AUTH-003",
+      "definition": {
+        "id": "QA-AUTH-003",
+        "title": "Invalid login feedback",
+        "status": "active",
+        "areas": [
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Submit a known local test email with an intentionally wrong password once."
+        ],
+        "expected": "Sign-in is rejected with generic incorrect-credentials feedback and no product data.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "8684e01b3b5cc9eddba5aa1f0d396b0bd8dd2acf3822f5a5508e602cc69fdd87",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Invalid password was rejected with Incorrect email or password. and no workspace content.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:46:39.194Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-001",
+      "definition": {
+        "id": "QA-WALK-001",
+        "title": "Authentication, Tokens, and Sessions — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Login, refresh, replay old token, logout.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Valid access works; invalid/revoked refresh tokens fail.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "2529717f4862e99ac9c4e0213f395df03223a60d1c68e653697fe128ef67dae9",
+      "outcome": "partial",
+      "reason": "Refresh-token replay and explicit revoked-token checks require controlled token-level probes beyond the current visible browser flow.",
+      "residual_risk": "Token rotation/revocation guarantees remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Wrong password rejected; valid Eval login and reload worked.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:46:47.560Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-002",
+      "definition": {
+        "id": "QA-WALK-002",
+        "title": "Tenant Isolation and RLS — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-002"
+        ],
+        "steps": [
+          "Access another tenant’s records through API and database.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "API returns 404; database excludes foreign rows.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b5aa8ed2183cf2447a97c4f4514882614c7b9e63e8c8caee67d87e00edba2b90",
+      "outcome": "blocked",
+      "reason": "No alternate tenant principal is available for browser cross-tenant probes; database RLS is not observable from the browser.",
+      "residual_risk": "Foreign-tenant 404 behavior and database exclusion remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "The populated Eval instance contains one tenant/account; account menu and Admin list show only Eval / eval@lumen.test.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:47:32.872Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-003",
+      "definition": {
+        "id": "QA-WALK-003",
+        "title": "Roles, Groups, and Grants — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-003"
+        ],
+        "steps": [
+          "Change memberships/grants; retry restricted operations.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Authorized access succeeds; forbidden operations return 403.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "511414845600aaf5d25ebbbd59d7c1ef0897bd8db235fa97d927e8942d2c8307",
+      "outcome": "partial",
+      "reason": "A single admin principal cannot demonstrate different-role 403 responses or membership/grant revocation. Existing access settings were not changed.",
+      "residual_risk": "Role/grant enforcement remains unverified beyond authorized admin visibility.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Admin Members & roles displayed the Eval principal as Member/Admin; Groups displayed the managed All members group.",
+          "observed": {},
+          "captured_at": "2026-10-15T17:47:45.930Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-004",
+      "definition": {
+        "id": "QA-WALK-004",
+        "title": "Retrieval Permissions and Ranking — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-004"
+        ],
+        "steps": [
+          "Search with different users and ranking signals.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Only permitted results appear; fusion order matches expectations.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "65bc7f046284714f27f1ac4b1a07bbbf6f063d61d9b86003a752e0968eb36f2d",
+      "outcome": "partial",
+      "reason": "Different-user visibility and deterministic fusion ranking cannot be verified with the single available account and browser UI.",
+      "residual_risk": "Cross-user permission filtering and exact ranking math remain unverified.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Key Enterprises returned 20 relevant passages from kc-341.pdf with permission indicators and a cited direct answer.",
+          "observed": {
+            "query": "Key Enterprises",
+            "results": 20,
+            "top_file": "kc-341.pdf"
+          },
+          "captured_at": "2026-10-15T17:48:18.249Z"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-WALK-005",
+      "definition": {
+        "id": "QA-WALK-005",
+        "title": "Grounded Chat and Citations — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-005"
+        ],
+        "steps": [
+          "Ask supported, unsupported, and restricted-source questions.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Valid citations appear; unsupported answers refuse; restricted sources stay hidden.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "3c7be35ac6e799b6a2861cacd1fe032d0ee2fab8d23df6ccdc6f112c8b1045f0",
+      "outcome": "partial",
+      "reason": "Unsupported/restricted-source probes not yet completed; the old frontend rendered inline [S1] as plain text.",
+      "residual_risk": "Do not infer current-frontend citation behavior or restricted-source enforcement from this composite runtime.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "GPT-6 Luna answered the two balance-sheet figures correctly; footer citation opened kc-341.pdf with NET ASSETS 334,852 and 274,639.",
+          "observed": {
+            "net_assets_2017": "334852",
+            "net_assets_2016": "274639",
+            "file": "kc-341.pdf",
+            "source_range": "17891–18810",
+            "inline_marker_interactive": false
+          },
+          "captured_at": "2026-10-15T17:49:30.152Z"
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}

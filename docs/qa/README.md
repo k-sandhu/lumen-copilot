@@ -98,6 +98,12 @@ baseline, continued Chrome cases, HTTP checks and CI evidence to their exact
 versions. The JSON ledger is the evidence source; this report summarizes that
 dated execution and does not represent current board status.
 
+The [populated Eval catalog pass](2026-10-15-populated-eval.md) addresses all
+71 imported areas/gaps in normal Chrome, including explicit partial, blocked
+and skipped coverage. Its modified backend, frontend image and model context
+are recorded separately from the clean local baseline; results do not transfer
+between those environments.
+
 The initial local observation predates this tracking implementation. Import it
 as a retrospective observation, retaining its original timestamp, application
 revision, model/fixture context and source fingerprint; do not claim the new
