@@ -86,3 +86,32 @@ setup failure and green after correction; the complete six-case live
 RLS/permission group then passed with temporary non-superuser/non-bypass roles.
 No production policy or application behavior was changed. This scoped success
 does not resolve the distinct #644 global-lookup failure.
+
+## Additional prerequisite repairs and retained fixtures
+
+The exact six synthetic upload files and SHA-256 manifest are retained under
+`qa/fixtures/777/`. They contain only QA canaries and no credentials. The DOCX,
+PPTX, XLSX and TXT extracted previews were verified in Chrome; the PDF text
+endpoint preserved its canary. All six reached Ready. A real Celery DOCX
+re-ingestion replaced its single chunk, retained ordinal zero and identical text,
+and returned Ready without duplicates.
+
+The expanded backend harness needed the canonical WebSocket schema mounted at
+`/contracts`; its blob is identical at application 3c022fcc and this branch.
+Four contract assertions failed for the missing file and then passed when it was
+provided. The migration rollback fixture also expected revision 0045 after
+upgrading to current head. Its assertion now compares the actual migration head;
+the previously failing restricted-owner, populated-vector rollback test passed.
+No migration code changed.
+
+Object-storage unit tests must run without the live S3 environment overrides.
+The live multipart test additionally needs origin `http://localhost:47180` in
+the dedicated QA MinIO process CORS configuration. The QA-only server was
+recreated with that origin plus `http://localhost:47480`, preserving its exact
+data volume and the old stopped container. The three live storage checks then
+passed, including CORS/ETag, range download and teardown.
+
+The latency harness must run serially (`-n 0`) unless worker databases have
+been provisioned. A fresh migrated database removed the stale-login collision;
+the correctly configured retry then failed its grounding gate (zero retrieval
+calls), so no first-token latency pass or budget measurement is claimed.
