@@ -63,3 +63,14 @@ test prerequisites must remain visible limitations.
 Use the append-only ledger from [the tracking guide](README.md). Store large
 screenshots and incremental observations under ignored `output/qa/770/`; commit
 small sanitized run records. The source catalog and prior run files are frozen.
+
+## Execution result
+
+The [dated results report](2026-10-15-populated-eval.md) links all 71 catalog
+outcomes to immutable runs. Eight areas passed their stated scope, two failed,
+39 are partial, 11 are blocked and 11 were skipped with reasons and residual
+risks. The failed areas are stale search state after clearing the query and
+phone-width Documents clipping. The latter is filed as #776; existing defects
+are linked individually rather than duplicated. The modified Eval runtime is
+not a clean-main certification. Viewport/network overrides and personal
+preferences were restored; synthetic QA objects remain for review.
