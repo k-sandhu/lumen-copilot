@@ -74,6 +74,21 @@ class DocumentMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentResolution:
+    """The outcome of resolving a ``get_document`` handle inside ``retrieval/`` (#758).
+
+    Exactly one shape is populated: ``document`` for a unique permitted match,
+    ``candidates`` for an ambiguous exact-name match (permitted documents only,
+    so listing them discloses nothing), or neither for nothing resolved — the
+    INV-2 case where missing, malformed, foreign and cross-tenant handles are
+    indistinguishable by construction.
+    """
+
+    document: DocumentText | None = None
+    candidates: tuple[DocumentMatch, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentText:
     """The full text of a permitted document (the ``get_document`` tool).
 
