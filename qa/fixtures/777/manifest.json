@@ -43,5 +43,10 @@
     "filename": "qa777-corrupt.pdf",
     "bytes": 77,
     "sha256": "add2c81a7303ba4412567749a1fbd99a9ca8087646f3442cdef65e91fb4698e1"
+  },
+  {
+    "filename": "qa777-docx-output-bound.docx",
+    "bytes": 38626,
+    "sha256": "b76710923781fd5db6dab63bb9cda3a99a26e953247a5a6203af4b2c92279060"
   }
 ]
