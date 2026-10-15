@@ -112,12 +112,15 @@ The direct probe (§3) and arm B agree. With a shared key, a new GPT-6 Luna sess
 
 **Why per user, not per tenant (INV-1, INV-2).**
 - **The oracle.** Provider caches are content-addressed. The cached-token counts a requester sees in `done.usage`, and their latency, therefore reveal whether an identical opening was recently sent on the same partition: same system prompt, same custom instructions, same first question.
-- **What it cannot reach.** Passage-bearing prefixes are out of reach. Every tool result follows an assistant message with provider-generated tool-call ids and model-chosen arguments that another user cannot reproduce, so no retrieved content (INV-2) is exposed.
+- **What it cannot reach.** Passage-bearing prefixes are out of reach. Every tool result follows an assistant message with provider-generated tool-call ids and model-chosen arguments that another user cannot reproduce. Before the first tool call, the prefix holds only session-specific content: prior assistant turns that may quote passages, and the rolling summary. Reaching those means reproducing the victim's whole session history verbatim. Evidence carry-forward contributes document and chunk ids only, never passage text. So no retrieved content (INV-2) is exposed.
 - **What it can reach.** A colleague's *question* is exposed if the partition is the tenant. Least exposure (AGENTS.md §4) puts the partition at (tenant, user). That is consistent with OpenAI's guidance to key per customer or user against cache-hit probing.
 - **The cost.** Each user's first chat per cache lifetime re-writes the ~1–2.4k-token system + tools head. Every later chat of that user is warm.
 - **Residual.** Upstreams with no partition key (Anthropic, DeepSeek, Z.AI, Gemini) share their caches by content across all of a provider's customers, so the same probe exists there today. Tracked in [#769](https://github.com/k-sandhu/lumen-copilot/issues/769).
 
-**Why a keyed hash.** A plain `sha256(id)` is only as opaque as the id's entropy, and it is identical across deployments that share an id. The scope is therefore an HMAC under a labelled sub-key of the existing 32-byte, fail-fast `SECRETS_ENCRYPTION_KEY`, so no new secret is needed.
+**Why a keyed hash, and why its own secret.** A plain `sha256(id)` is only as opaque as the id's entropy, and it is identical across deployments that share an id. The scope is therefore an HMAC-SHA256 under a **dedicated** deployment secret, `CHAT_PROMPT_CACHE_SCOPE_SECRET`, computed with the standard library.
+- **Fail-fast.** Like `JWT_SECRET`, it must be set outside `local`. In `local`, a public dev default makes digests recomputable, which is acceptable for a dev stack only.
+- **Why not the vault key.** Deriving the scope from `SECRETS_ENCRYPTION_KEY` was considered and rejected: `app.core.crypto` is that AES-GCM key's sole holder, with `secrets_service` as its sole caller. Reuse would widen that contract, and it would couple cache scopes to a key whose rotation is not yet supported. `crypto` has one key version, so changing the key today breaks vault decrypts.
+- **Rotation.** Rotating the cache secret, or bumping the `v1` label, only costs each user one cold prefix.
 
 **Why not finer.** A per-assistant or prompt-hash component would only re-partition one user's own warm cache, because the provider already separates different prefixes by content.
 
@@ -129,18 +132,19 @@ The overall effect on Luna's per-token price is small (0.51 → 0.51), because c
 
 - **No upstream directive exists for DeepSeek or Z.AI.** Both cache automatically, so nothing like `cache_control` is needed or available.
 - **Where the misses come from.**
-  - In arm A, mid-answer provider hops carried 2.9% (DeepSeek) and 5.3% (GLM) of prompt tokens, read at 0–6% cached.
+  - In arm A, mid-answer provider hops carried 2.9% (DeepSeek, 3 calls) and 5.3% (GLM, 6 calls) of prompt tokens, read at 0–6% cached.
   - The larger cause is the serving provider's own cache. Among calls 2+ that stayed on one provider, the zero-cache rate was 11–21% on CoreWeave, 0–10% on Together, 7–14% on Parasail and 2–5% on Relace (DeepSeek). StreamLake had none, Friendli 57%, and GMICloud and Relace (GLM) 100% on few calls.
   - That ceiling belongs to the serving provider's cache, not to the route.
 - **What arm B (tenant-wide `session_id`) can and cannot show.**
   - *Not attributable:* DeepSeek's hit rate rose from 47% to 62% and its zero-cache calls 2+ fell from 12% to 3%. GLM's zero-cache calls fell from 28% to 13%. But the arms ran sequentially, and B drew different sticky providers (§4 caveat). These gains are not attributable to stickiness.
-  - *Attributable:* GLM's mid-answer hops fell from 5.3% to 2.7% of tokens. DeepSeek's stayed ~3–4%; its remaining hops followed provider errors. New-session call 1 warmed (DeepSeek 55% → 67%, GLM 12% → 60%), but call 1 is only 0.9–2.6% of their input tokens. Follow-up messages' first calls read 24% → 56% and 7% → 30%.
+  - *Consistent with the mechanism, but too few to attribute:* GLM had 6 hop calls in A (5.3% of tokens) and 2 in B (2.7%). DeepSeek had 3 in A (2.9%) and 4 in B (4.3%), its B hops all following provider errors.
+  - *Also observed:* new-session call 1 warmed (DeepSeek 55% → 67%, GLM 12% → 60%), but first calls of new sessions are only 0.8–2.6% of their input tokens. Follow-up messages' first calls read 24% → 56% and 7% → 30%.
 - **Stickiness held across sessions** under the tenant-wide key. Haiku, Luna and GLM-in-C each stayed on one provider for the whole ~45-minute run. DeepSeek (B: 4 hand-overs, C: 1) and GLM-in-B (3) changed provider only mid-answer, never after an idle gap; the longest gap before a switch was 18 s. That fits OpenRouter's re-route after a provider error, and DeepSeek also had the most failed answers.
 - **Granularity decided: per conversation.**
-  - A tenant- or user-wide sticky key adds only that ≤ 2.6% call-1 warmth on multi-provider upstreams.
+  - A tenant- or user-wide sticky key adds only the call-1 warmth of new sessions on multi-provider upstreams. Measured across all new sessions in arms A and B, that is 0.8–2.6% of input tokens: 0.80–2.48% excluding each arm's warm-up session, and 0.86–2.65% including it.
   - In exchange, it pins a busy tenant indefinitely: it is never 10 minutes idle. It would sit on one provider out of a $0.014–$0.60 per M (~40×) price spread, possibly a poor cacher, and it defeats OpenRouter's per-conversation load balancing.
-  - The single-provider-in-practice routes need no wide key: Luna and Haiku landed on the same provider for 24/24 new sessions in arm A without one.
-  - A per-conversation `session_id` keeps what is attributable. It pins from a conversation's first call instead of after its first observed hit, and it is Z.AI's affinity key.
+  - The single-provider-in-practice routes need no wide key: Luna and Haiku started all 16/16 sessions (24 answers) per arm on one provider without one.
+  - A per-conversation `session_id` keeps the in-answer stickiness that arm B exercised, since a tenant-wide and a per-conversation key are equally constant within one answer. It pins from a conversation's first call instead of after its first observed hit, and it is Z.AI's affinity key.
 - **Not measured.** An arm D with a per-conversation `session_id` was prepared on 2026-10-15 but not run, because the shared `lumen-eval` stack had been recreated from another checkout for a different evaluation. Running the workload there would have contaminated both. No request was sent, and the eval checkout was restored. [#763](https://github.com/k-sandhu/lumen-copilot/issues/763)'s live smoke verifies that one answer's calls stay on one provider.
 - **Cost/benefit.** `session_id` is free; it rides `extra_body` through the pinned LiteLLM.
   - Rejected alternative: `provider.order`. It disables sticky routing, hard-codes vendors in Lumen and loses OpenRouter's price/availability routing.
