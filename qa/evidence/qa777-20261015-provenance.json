@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "issue": 777,
+  "correction": "Raw setup context mislabelled the clean harness as3c022fcc. Actual clean harness source tree equals main70c3c2e4. Canonical Chrome before restart used3c022fcc. These were verified separately before final ledger freeze.",
+  "source_hash_comparison": {
+    "comparisons": {
+      "api/v1/chat.py": {
+        "3c022fcc": "258f98820d8da0e6acf64f45944b7d8580a17bf528f60458b8522ad03a41eb25",
+        "70c3c2e4": "c03ef36eef4613c713c9392f29b07fe9e65fa7d5d2f6c6df6bcad7118cf96c92",
+        "0e9fd8f4": "c03ef36eef4613c713c9392f29b07fe9e65fa7d5d2f6c6df6bcad7118cf96c92",
+        "canonical": "258f98820d8da0e6acf64f45944b7d8580a17bf528f60458b8522ad03a41eb25",
+        "harness_archive": "c03ef36eef4613c713c9392f29b07fe9e65fa7d5d2f6c6df6bcad7118cf96c92"
+      },
+      "db/repositories.py": {
+        "3c022fcc": "bdc963705ba43e330c2617e82a4a71690ab923689040a7bd50ebf18b3b798108",
+        "70c3c2e4": "914d84c7a5f0f75e3a769b3a385cb23fcfa3b128e5c97c2bfced1a399574450a",
+        "0e9fd8f4": "914d84c7a5f0f75e3a769b3a385cb23fcfa3b128e5c97c2bfced1a399574450a",
+        "canonical": "bdc963705ba43e330c2617e82a4a71690ab923689040a7bd50ebf18b3b798108",
+        "harness_archive": "914d84c7a5f0f75e3a769b3a385cb23fcfa3b128e5c97c2bfced1a399574450a"
+      },
+      "llm/gateway.py": {
+        "3c022fcc": "04b4c676fb7215afb712fa02674ec42069e61fc2d1e55abb54d876196c31cc51",
+        "70c3c2e4": "39111e6fa27997cb5a076106ce66801547382b6a38928bf184bc067823ffaf9b",
+        "0e9fd8f4": "39111e6fa27997cb5a076106ce66801547382b6a38928bf184bc067823ffaf9b",
+        "canonical": "04b4c676fb7215afb712fa02674ec42069e61fc2d1e55abb54d876196c31cc51",
+        "harness_archive": "39111e6fa27997cb5a076106ce66801547382b6a38928bf184bc067823ffaf9b"
+      },
+      "services/chat_runtime.py": {
+        "3c022fcc": "ffa21330176e36705009b2b4a7911df19bce9acc237d03c40a52329890ec8528",
+        "70c3c2e4": "4786ad1de43a7e2dca32b0d09423ac2caf6b397fa3ad3f54c0066b1d77bf621a",
+        "0e9fd8f4": "4786ad1de43a7e2dca32b0d09423ac2caf6b397fa3ad3f54c0066b1d77bf621a",
+        "canonical": "ffa21330176e36705009b2b4a7911df19bce9acc237d03c40a52329890ec8528",
+        "harness_archive": "4786ad1de43a7e2dca32b0d09423ac2caf6b397fa3ad3f54c0066b1d77bf621a"
+      }
+    },
+    "main_app_tree": "52c98e23ca556e655a64e621865df15f95357f91",
+    "fixture_app_tree": "52c98e23ca556e655a64e621865df15f95357f91"
+  },
+  "latest_image_verification": {
+    "application_commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04",
+    "image": "sha256:60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6",
+    "tracked_python_file_count": 205,
+    "exact_content_and_path_match": true,
+    "extra_python_files": false
+  },
+  "latest_image_build": {
+    "application_commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04",
+    "image": "sha256:60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6",
+    "tag": "lumen-copilot-qa777-main:70c3c2e4",
+    "dependency_base": "sha256:5cc09be8b6c5c697636d83f6d25680599728ef0295a09fbd6f2b14066719fe5e",
+    "dependency_inputs_unchanged_from_prior": true,
+    "archive_sha256": "10b5e6105c422f536e1f9492457f0ca0c416e14b805636de8dbd7b490ed5b43d",
+    "method": "Exact tracked main backend copied over existing dependency image; no source mount, package upgrade or data-volume reset."
+  },
+  "clean_harness_execution": {
+    "image": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f",
+    "source_path": "/tmp/qa777-clean/backend",
+    "application_commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04",
+    "test_fixture_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "note": "Pinned harness dependency image differs from the final deployed60ab7f91 image. Offline suite source/version evidence is not a deployment certificate."
+  }
+}

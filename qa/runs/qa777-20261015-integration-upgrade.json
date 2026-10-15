@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 integration-upgrade; isolated clean-source integration harness",
+    "kind": "live_local",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "prior_schema": "0048_evidence_handles",
+      "target_schema": "0049_discovery_metadata",
+      "source_database": "lumentest_qa777_upgrade_fixture",
+      "restored_database": "lumentest_qa777_upgrade_restored",
+      "backup_sha256": "021c82d8982f48eb3a2b6656c420d33a7fffb3b33656d9447d69b97405b702e8",
+      "application_source": "Verified main70c3c2e4 application tree; fixture0e9fd8f4; raw context label corrected by hashes.",
+      "posture": "isolated integration harness with migration/operator connection; not RLS deployment certification",
+      "result": "see upgrade-restored-application.json"
+    },
+    "configuration": {
+      "application_source": "Verified main70c3c2e4 application tree via PYTHONPATH; test fixture commit0e9fd8f4. Earlier raw context incorrectly said3c022fcc; corrected before ledger freeze using source-provenance-correction.json.",
+      "posture": "isolated migration/operator connection, no deployment RLS certification",
+      "vector": "fixed2048unit vector; no semantic-quality claim"
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-integration-upgrade",
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T22:19:10.572Z",
+  "finished_at": "2026-10-15T22:46:01.135Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed. Source provenance correction: raw setup notes labelled the clean harness3c022fcc, but its exact tracked application tree is main70c3c2e4. Content hashes and archive tree comparison were checked before freezing this ledger. Mixed dependency components are listed individually.",
+  "results": [
+    {
+      "case_id": "QA-FILL-062",
+      "definition": {
+        "id": "QA-FILL-062",
+        "title": "Populated database upgrade",
+        "status": "active",
+        "areas": [
+          "QA-GAP-010"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Restore a disposable prior-schema fixture into a separate lumentest database, run migrations and verify data/permissions plus application start.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Upgrade preserves expected rows/grants and the upgraded app starts against the migrated schema.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "db16a8e67d7f66b2d18fceb05e879d966ef6dd0e2f2ddd51fae5093909027145",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Dumped populated0048 fixture, restored into verified empty separate database, migrated to0049, and started actual app viaTestClient. Canary text/2048-vector shape/ordinal0/grant survived; new nullablemetadataNULL; owner+grantee text200, ungranted+foreign404. Migration/operator integration fixture, not restricted-role deployment certification.",
+          "observed": {
+            "evidence": "upgrade-context.json; upgrade-restored-application.json; upgrade-prior.dump; migration-live.xml; migration-prerequisite-fixed.xml"
+          },
+          "captured_at": "2026-10-15T22:19:10.572Z"
+        },
+        {
+          "kind": "observation",
+          "description": "Custom pg_dump backup of populated 0048 fixture restored into separate empty database, migrated to 0049, clean application lifespan/health started. Preserved 2 tenants/4 users/document/chunk/2048-vector/explicit grant; owner/grantee text200, ungranted/foreign404. Both exact disposable fixture databases verified idle with expected counts, dropped without FORCE and confirmed absent. Backup retained by SHA-256. No semantic-quality or RLS deployment certification.",
+          "observed": {
+            "evidence": "upgrade-context.json; upgrade-restored-application.json; upgrade-teardown.json"
+          },
+          "captured_at": "2026-10-15T22:46:01.135Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "migration-live.xml",
+          "path": "output/qa/777/migration-live.xml",
+          "sha256": "444b544f8e4719b503c5c5f76111c7ced9578bfe9204b5a0c0a65bce173cc476"
+        },
+        {
+          "kind": "artifact",
+          "description": "migration-prerequisite-fixed.xml",
+          "path": "output/qa/777/migration-prerequisite-fixed.xml",
+          "sha256": "9fa37b42bbf5b6ac85d581ccd52c397c1a0e71300733f7f07b5243397996f936"
+        },
+        {
+          "kind": "artifact",
+          "description": "upgrade-context.json",
+          "path": "output/qa/777/upgrade-context.json",
+          "sha256": "1008033df12bb2ffc2eff8e56b6e9c099d64e3bbb0e0e99c1a5efabe4005db81"
+        },
+        {
+          "kind": "artifact",
+          "description": "upgrade-restored-application.json",
+          "path": "output/qa/777/upgrade-restored-application.json",
+          "sha256": "792980126a6721abfad59ef344c0f9e5c3beee4311adecc8e5e15b5b2da50a96"
+        },
+        {
+          "kind": "artifact",
+          "description": "upgrade-teardown.json",
+          "path": "output/qa/777/upgrade-teardown.json",
+          "sha256": "fa7163a20dbffd6c1d01accd3a88dd1fa05ec40678d80ddeacdd1bb81be4717e"
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}

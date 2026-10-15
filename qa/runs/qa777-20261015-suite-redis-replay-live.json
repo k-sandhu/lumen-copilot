@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      }
+    ],
+    "source_state": "modified",
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "environment": {
+    "label": "QA777 redis-replay-live",
+    "kind": "live_local",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "raw_junit_sha256": "682c6fdba6b5c4cedcc81c016a027c19cb7c8c195f7d3fe062f7bbad9ecb4c06"
+    },
+    "configuration": {
+      "scope": "modified Eval harness; real isolated Redis databases",
+      "test_source_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+      "backend_patch_sha256": "ea4797f203d11025da7728e62a6f65a23eba786d18ceb7eb1fa40c580ca40ecf"
+    }
+  },
+  "ci": null,
+  "kind": "suite",
+  "run_id": "qa777-20261015-suite-redis-replay-live",
+  "suite": {
+    "name": "redis-replay-live",
+    "outcome": "passed",
+    "reason": "",
+    "counts": {
+      "passed": 2,
+      "failed": 0,
+      "errored": 0,
+      "skipped": 0
+    },
+    "tests": [
+      {
+        "test_id": "redis-replay-live::tests.test_realtime_backplane_live::test_late_subscriber_gets_full_stream_when_producer_already_finished",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "redis-replay-live::tests.test_realtime_backplane_live::test_subscriber_connected_before_publish_still_receives_live",
+        "outcome": "passed"
+      }
+    ]
+  },
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T21:19:40.542706+00:00",
+  "finished_at": "2026-10-15T21:19:50.537706+00:00",
+  "notes": "modified Eval harness; real isolated Redis databases. Raw JUnit retained at output/qa/777/redis-replay-live.xml. Suite skips are explicit; clean offline skipped9 =8 ordinary live exclusions plus1 known xfail421. A passing suite is not a catalog-area certification."
+}

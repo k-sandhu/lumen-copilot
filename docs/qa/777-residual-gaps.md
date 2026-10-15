@@ -1,142 +1,130 @@
-# Residual QA coverage — issue 777
+# Residual QA execution — issue 777
 
-Tracking: https://github.com/k-sandhu/lumen-copilot/issues/777. Explicit sponsor request: provision missing prerequisites and work through the 39 partial checks with narrated normal-Chrome evidence. This branch depends on unmerged PR #775; historical ledgers remain immutable.
+Tracking: [issue 777](https://github.com/k-sandhu/lumen-copilot/issues/777),
+[PR 778](https://github.com/k-sandhu/lumen-copilot/pull/778), stacked on unmerged
+PR 775. Scope: the 39 residual checks from the earlier partial-coverage report,
+with missing prerequisites provisioned and normal Chrome showing real behavior.
+This report does not rewrite the historical 71-area outcomes or certify a release.
 
-## Environment and safety scope
+## Versions and test context
 
-Use a dedicated QA application/database/index/bucket and synthetic owner, backup, member, security and foreign-tenant accounts. Existing Eval documents and tenant access settings remain untouched. Reuse pinned existing datastore/runner images where appropriate; all new app jobs use distinct Redis databases. Short access-token lifetime and enabled summaries apply only to this QA app. Existing governance gates remain in place; any approval-sensitive action is handled when its concrete test is ready.
+| Phase | Application / runtime | Definition and method |
+|---|---|---|
+| Functional Chrome | Clean application `3c022fcc4880228636a3cfda067c7014c89441f9`; backend image `5cc09be8…`, frontend `7a99a3e2…`; localhost:47180; new synthetic QA 777 Alpha/Beta | QA definitions `2d2f2517…`; real Chrome + authenticated read-back. Existing standard local DB connection, no new RLS backstop certificate. Ling 3.0 Flash + Nemo embedding 2048; summaries on, keep 4/minbatch 2; access 900 s. Full digests/configuration are in each ledger. |
+| Expiry / concurrent tabs | Same functional app/config; two tabs offline for 920.254/912.915 s, then real protected requests | Definitions `aca946cf…` committed before expiry execution, allowing measured natural 900 s expiry. No shortened-lifetime claim. |
+| Eval appearance/build | Same static frontend; modified mounted Eval backend at app base 3c022fcc, patch SHA `ea4797f2…`; model GPT 6 Luna/text-embedding-3-large 2048 | Definitions `da2abe21…`; appearance restored Aurora/System/Cozy. No transfer of Eval provider/failure timing to clean canonical configuration. |
+| Clean integration | Clean archive app `70c3c2e4775aeb031012625bc018f6dd2d96ba04` loaded with explicit PYTHONPATH inside pinned harness; test fixture commit `0e9fd8f43b0a5358eda3e1f99e3712eee9135313` | Independent database/index/Redis resources; serial live tests. Protocol golden summaries **off**, distinct from sequential Chrome companion with summaries **on**. |
+| Fresh main restart/smoke | Main `70c3c2e4775aeb031012625bc018f6dd2d96ba04`; backend/worker/media/beat image `60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6`, frontend unchanged `7a99a3e2…`; same configuration and database volumes | After the completed older-runtime soak, all 205 Python files match main by hash, no source mounts. Readiness 6/6; fresh Silver Maple upload Ready, exact code/date cited and citation opened; owner text200, member/foreign404. Two atomic smoke results only; the 39 earlier residual results are not inherited. |
+| Hardened login | Dedicated `qa777_app` NOSUPERUSER/NOBYPASSRLS app, own database/index/bucket | Frozen failure #644: valid login casts bypass sentinel to UUID. Restricted role unchanged. Later user approval permits functional use of standard local connection; this does not turn the hardened failure into a pass. |
 
-Chrome demonstrates user-visible results; protocol, backend, eval and build assertions are additional evidence and are labelled with their actual method. A passing residual case does not silently rewrite a historical partial area or transfer a pass across changed runtime configuration. Product fixes are separate issues. Synthetic disposable objects are prefixed QA 777; retain shared evidence objects and remove only fixtures explicitly designated disposable.
+A final content-hash audit corrected an earlier provenance assumption: canonical
+Chrome used backend 3c022fcc, while the clean harness archive at fixture commit
+0e9fd8f4 contains the exact main70c3c2e4 application tree. All four intervening
+backend files were compared against both Git revisions and both containers. The
+frontend trees match; the backend trees differ by the #759 usage-accounting fix.
+Raw setup contexts with the old label are preserved alongside
+[the retained provenance comparison](../../qa/evidence/qa777-20261015-provenance.json); new ledgers use the corrected revision.
+The dependency-fault phase explicitly lists its mixed component versions.
+Repository/test-definition commits and deployed application commits remain
+separate. Application fixes are separate issues; no PR merged.
 
-## Acceptance and order
+## Outcomes
 
-| Original check | Residual case | Prerequisite / scenario | Expected |
-|---|---|---|---|
-| QA-WALK-001 | QA-FILL-001: Short-lived sessions and token negatives | Use a short QA lifetime where login works, or wait the functional app's configured lifetime; record actual expiry and exercise token/rotation/logout negatives. Keep hardened-login failures separate. | Expired/invalid access is 401; used/revoked refresh is denied; legitimate refresh and Chrome recovery work. |
-| QA-WALK-003 | QA-FILL-003: Role and explicit-grant matrix | Seed distinct owner, member, backup, security and foreign-tenant users; test Admin/audit denial and document/collection grants and revocation. | Member admin actions are 403; private/foreign resources are 404; explicit grants widen only their intended resources. |
-| QA-WALK-004 | QA-FILL-004: Permission-filtered ranking | Seed owner-private, explicitly shared and foreign canary documents; search under each principal and run ranking/retrieval tests. | Only permitted evidence is returned; supported ranking thresholds hold on the configured fixture. |
-| QA-WALK-005 | QA-FILL-005: Forbidden source and citation checks | Ask owner/member/foreign users for private canary facts and open citation targets under each principal. | Unauthorized facts are excluded; direct forbidden citations fail closed; permitted facts remain citation-backed. |
-| QA-WALK-006 | QA-FILL-006: Disposable chat deletion | Create, message, rename, reload and delete a disposable QA chat; verify it is absent on read-back. | Deleted session is absent and direct access is denied without harming retained QA evidence. |
-| QA-WALK-007 | QA-FILL-007: Streaming replay/backplane | Run scoped Redis/WebSocket live tests for subscribe/replay/order, with Chrome reconnect corroboration. | Ordered envelopes are delivered once within supported replay semantics; late subscription and terminal recovery behave as specified. |
-| QA-WALK-008 | QA-FILL-008: Summary pressure and evidence | Enable summaries in the isolated QA app, seed enough turns to summarize, inspect context and ask a previously grounded fact. | Summary persists with correct audit origin and evidence references; subsequent grounding remains correct. |
-| QA-WALK-009 | QA-FILL-009: Disposable document deletion | Upload a disposable document, reach Ready, preview it, delete it and check list/direct access/object state. | Document is no longer retrievable/openable and its object cleanup follows the documented lifecycle. |
-| QA-WALK-010 | QA-FILL-010: Parser breadth and re-ingestion | Upload small TXT/PDF/DOCX/PPTX/XLSX fixtures and repeat ingestion; inspect extracted canaries and chunk ordinals. | Supported formats preserve canaries; repeat ingestion does not duplicate active chunks. |
-| QA-WALK-013 | QA-FILL-013: Source deletion cascade | Create and sync a disposable public source, then delete it and inspect backing documents/collection/object cleanup. | Source deletion follows the documented cascade; no orphaned retrievable evidence remains. |
-| QA-WALK-016 | QA-FILL-016: Provider registration and discovery | Use a supported provider fixture or an explicitly approved existing provider credential to test register/discover/use/delete; run secret round-trip negatives. | Discovered models are usable under policy and credentials remain write-only and tenant-scoped. |
-| QA-WALK-017 | QA-FILL-017: Tool fragments and context budgets | Run fragmented tool-call, prompt/cache budget and compression tests, and corroborate context behavior in Chrome. | Fragments reconstruct once; configured budgets and evidence-preserving compression assertions pass. |
-| QA-WALK-018 | QA-FILL-018: Published assistant versions and saved tests | Seed a distinct backup, save a reusable case, publish two revisions, inspect history and reload both. | Publication requires accountable distinct owners; versions and saved cases persist and reference the tested revision. |
-| QA-WALK-019 | QA-FILL-019: Published assistant governance | Launch a published assistant; exercise certification, disable, ownership validation and denied launch after disable. | Published launch works; invalid transitions and disabled launch fail as documented and are audited. |
-| QA-WALK-020 | QA-FILL-020: Tool denial execution boundary | Exercise unknown, disabled and unapproved tool calls using a bounded handler-count fixture and inspect governance/audit in Chrome. | Denied calls do not execute handlers; permitted calls carry required audit/approval evidence. |
-| QA-WALK-021 | QA-FILL-021: Available built-in tool round trips | Configure isolated web/file tools and sandbox prerequisites; run bounded public search, artifact writing and approved code if authorized. | Each enabled tool returns real scoped output; unavailable or unapproved paths deny explicitly. |
-| QA-WALK-022 | QA-FILL-022: MCP discovery invocation and egress | Use the existing MCP fixture for allow/error/egress negatives and a supported authorized public endpoint for Chrome discovery where available. | Allowed discovery/calls work; errors remain typed; forbidden destinations and secrets stay protected. |
-| QA-WALK-027 | QA-FILL-027: Scheduled cadence dispatch and overlap | Publish a fixture assistant with backup; test cadence read-back, due dispatch, DST and overlap with the scheduling harness and Chrome run history. | Configured dispatch semantics and duplicate/overlap guards hold; failed runs remain diagnosable. |
-| QA-WALK-030 | QA-FILL-030: Audit CSV parity and role denial | Export a narrowly filtered QA audit set and verify CSV rows/filters; attempt export as member and inspect audit. | CSV matches the selected scope and the unauthorized role is denied; download completion is proven by bytes. |
-| QA-WALK-031 | QA-FILL-031: Admin role denial and policy round trip | Use a non-admin and synthetic QA admin; change a reversible QA-only policy, reload/read back and restore it. | Non-admin mutation is denied; authorized persisted policy and audit match, then original state is restored. |
-| QA-WALK-034 | QA-FILL-034: Object cleanup and adversarial names | Upload a tiny own fixture with safe adversarial filename segments; verify normalized key, exact download, deletion and denied later access. | No path traversal or cross-owner object access; documented cleanup and byte integrity hold. |
-| QA-WALK-035 | QA-FILL-035: Invalid configuration and problem contracts | Run invalid settings and malformed/unknown-exception HTTP contract tests; corroborate safe UI failure messaging. | Invalid settings fail startup; contracted statuses/shapes are safe and contain no internal exception details. |
-| QA-WALK-036 | QA-FILL-036: Invalid model preference rejection | Submit a nonexistent model to the scoped preference API, then reload settings in Chrome. | Invalid model is rejected and the prior valid preference remains unchanged. |
-| QA-WALK-037 | QA-FILL-037: Forced 401 refresh retry | Allow access expiry in the isolated app, trigger frontend requests, and run client refresh/retry/header tests. | One valid rotation/retry recovers with correct credentials; invalid/revoked refresh returns to login. |
-| QA-WALK-040 | QA-FILL-040: System theme and token contrast | Temporarily emulate light/dark system preference in Chrome; exercise supported theme/density combinations and scoped token/contrast checks; restore. | System follows the emulated preference; documented token/contrast assertions pass and original settings return. |
-| QA-WALK-043 | QA-FILL-043: Autoscroll during controlled streaming | Use a delayed stream fixture, scroll away from bottom during token arrival, then reconnect/finish and compare message identity/text. | Reading position is respected; terminal rendering is stable and replay creates no duplicate content. |
-| QA-WALK-044 | QA-FILL-044: Restricted trust indicators | Compare owner/shared/denied citation access and source freshness/answer-time/risk/provenance states under separate principals. | Indicators reflect actual access and timing semantics; denied source never exposes its passage. |
-| QA-WALK-046 | QA-FILL-046: Bundle guard and layout checks | Build with development pages disabled; inspect generated chunks for exclusion/code splitting and shrink behavior; inspect matching routes in Chrome. | Development payload is excluded and heavy chat code split; supported grid shrink checks pass. |
-| QA-WALK-049 | QA-FILL-049: Unauthorized grounded E2E | Repeat upload-to-citation as owner, then ask/fetch the same private canary as same-tenant member and foreign user. | Owner cites correct evidence; unauthorized users cannot retrieve the fact or open its document/citation. |
-| QA-WALK-050 | QA-FILL-050: Golden quality thresholds | Run existing fake and live golden evaluation harnesses on isolated fixtures and retain metrics/thresholds. | Configured retrieval, groundedness and citation correctness thresholds pass with evidence-preserving reports. |
-| QA-WALK-052 | QA-FILL-052: First-token failure and compaction budgets | Run existing configured latency/failure/compression harnesses; show the corresponding terminal/context state in Chrome. | Configured first-token and terminal-failure budgets pass; compression preserves cited evidence. |
-| QA-WALK-056 | QA-FILL-056: Automated and screen-reader audit | Run scoped automated accessibility checks and a supported screen-reader walkthrough if available, retaining violations and keyboard evidence. | Core tested flows meet the documented accessibility assertions; untested assistive technology is explicit. |
-| QA-WALK-059 | QA-FILL-059: Controlled stability measurement | Run a sustained workload with periodic connection/container memory measurements for the documented soak duration while other tests proceed. | Measured duration and resource/error observations are retained; no unmeasured hours-long stability claim. |
-| QA-WALK-060 | QA-FILL-060: Controlled dependency recovery | Use isolated QA resources to interrupt worker/cache/search/storage paths during disposable operations and inspect retry/idempotence/read-back. | Failures surface; supported retry paths recover without duplicate active records or corruption. |
-| QA-WALK-062 | QA-FILL-062: Populated database upgrade | Restore a disposable prior-schema fixture into a separate lumentest database, run migrations and verify data/permissions plus application start. | Upgrade preserves expected rows/grants and the upgraded app starts against the migrated schema. |
-| QA-WALK-063 | QA-FILL-063: Expanded prompt-injection matrix | Test source and tool-result canaries for instruction takeover, forbidden evidence and unauthorized action without real secrets or exfiltration. | No unauthorized evidence/action; measured canary outcomes and exact model context are retained. |
-| QA-WALK-066 | QA-FILL-066: Concurrent expired refresh | Wait the configured access lifetime or a supported shorter QA lifetime, record expiry, then request in multiple Chrome tabs and run deterministic refresh-race tests. Do not change database roles. | Tabs recover or reach the documented login state without a persistent loop; rotation/replay assertions hold. |
-| QA-WALK-067 | QA-FILL-067: Bounded parser resource negatives | Use tiny corrupt/mislabeled and bounded expansion fixtures in the isolated worker; record parser failure and resource caps. | Malformed inputs fail safely; configured resource bounds hold without affecting other tenants. |
-| QA-WALK-070 | QA-FILL-070: Deterministic interrupted stream recovery | Use a delayed provider fixture to interrupt after known chunks, reconnect/reload, and compare persisted IDs/text/terminal status in Chrome. | Recovery is usable; no duplicated content; interrupted/truncated output is visibly distinguishable from normal completion. |
 
-## Runtime recovery before execution
+Latest residual-case outcomes: **39/39 recorded** — **10 failed**, **5 partial**, **24 passed**.
 
-Docker Desktop was initially unavailable. Startup failed replacing its stale dockerInference AF_UNIX reparse endpoint. A single-file rename failed; the confirmed reversible repair stopped the failed Desktop processes, verified the two runtime directories were ordinary directories inside their exact expected parents, and renamed Docker/run and docker-secrets-engine to names suffixed qa777-preserved-20261015-2112. No recursive deletion, data-volume reset or Docker settings change was performed. Docker Engine 29.6.2 then answered and existing containers returned. The old runtime directories are retained. Matching upstream report: https://github.com/docker/desktop-feedback/issues/531.
+These are scoped residual results, not automatic promotion of entire catalog areas. Case 050 has both a passing protocol threshold result and a partial Chrome companion; the table retains the latest companion limitation. Phase ledgers preserve both.
 
-The populated Eval frontend at localhost:47380 was restarted and Chrome restored the Eval session. New QA execution starts only after prerequisite and definition commits are recorded.
+| Case | Result | What was verified / remaining gap |
+|---|---|---|
+| QA-FILL-001 | passed | Two Chrome tabs expired for >900 s: 401 → refresh 200 → retry 200. Rotation/replay/logout negatives passed; hardened login #644 remains separate. |
+| QA-FILL-003 | passed | Owner/member/security/backup/foreign role matrix; explicit user/group/collection grants and revocation; forbidden direct reads 404. |
+| QA-FILL-004 | passed | Permitted-only live search and ranking assertions. Fixed-vector fault tests are not semantic-quality evidence. |
+| QA-FILL-005 | failed | Permitted initial answer cited; explicit factual follow-up asserted the date without a citation (#781). Unauthorized retrieval/direct citation boundaries passed. |
+| QA-FILL-006 | passed | Fresh two-message disposable chat renamed, reloaded/reopened, deleted in Chrome; session/messages 404 and absent from history. |
+| QA-FILL-007 | failed | Real Redis ordering/replay tests passed. Guarded active Chrome reload lost the assistant output and left only the user message (#348). |
+| QA-FILL-008 | failed | Real summary v1, coverage cursor, ID-only evidence and system-origin audit persisted; prose still retained a source-only code (#427). Post-summary answer cited correctly. |
+| QA-FILL-009 | passed | Approved 144-byte file deleted in Chrome. List, row, chunks and object absent; text/access capability 404; exact local backup retained. |
+| QA-FILL-010 | passed | TXT/PDF/DOCX/PPTX/XLSX canaries reached Ready; real DOCX re-ingestion replaced its chunk at ordinal 0 without duplicates. |
+| QA-FILL-013 | passed | Owner-only public source synced one document; member/foreign denied. Approved disposable source removal cascaded collection/document/chunk/object; direct reads 404. |
+| QA-FILL-016 | failed | 463 public models discovered. Discovered Ling invocation failed without a provider adapter route (#782). Disposable provider removed; models disappeared; secret/tenant negatives passed. |
+| QA-FILL-017 | passed | Fragment reconstruction, prompt/cache budget and compression assertions passed; Chrome context corroborated usage. |
+| QA-FILL-018 | partial | Preview, distinct backup, publish v1/v2, rollback→v3, governance restoration→v4 persisted. Live saved-case round trip blocked by consecutive native-prompt control limitation; store/verdict unit tests passed. |
+| QA-FILL-019 | passed | Published launch, certification/feature state, disable/denied launch, invalid ownership/foreign backup transitions and restoration verified. |
+| QA-FILL-020 | passed | Unknown/disabled/unapproved calls executed zero handlers and emitted denial evidence. Approved bounded Python call separately audited; gate restored. |
+| QA-FILL-021 | failed | One actual print(777 + 1) succeeded: stdout 778, exit 0, 93 ms, no packages/artifacts; started/finished audit. Initial sandbox-disabled attempt denied. Both gates restored. write_file unavailable (#576); fresh web search still rate-limited. |
+| QA-FILL-022 | passed | Chrome Context7 discovery + two real T0 MCP calls succeeded. Allowlist provisioned through supported API because editor omits MCP (#575); typed-error/egress negatives passed. DeepWiki T2 unchanged. |
+| QA-FILL-027 | failed | Cadence/DST/overlap fixtures passed, but actual due schedule did not dispatch (#718); manual run worker failed while API/UI stayed Running (#578). Schedule paused. |
+| QA-FILL-030 | partial | Filtered two policy audit rows, role denials and 11 CSV assertions passed. Browser Blob download observer timed out; actual CSV bytes unproven (#588). |
+| QA-FILL-031 | passed | QA-only budget 20→5 read back and restored to 20; non-admin mutation 403 and both audited updates verified. |
+| QA-FILL-034 | passed | Adversarial filename normalized, exact-byte round trip and cross-tenant denial passed. Raw adapter teardown and product document deletion both verified. |
+| QA-FILL-035 | passed | Invalid settings, malformed inputs and problem-envelope/unknown-exception tests passed in scoped suites; safe readiness UI failure corroborated. |
+| QA-FILL-036 | passed | Nonexistent model preference rejected 422; original valid selection unchanged on API read-back and Chrome reload. |
+| QA-FILL-037 | passed | Expired access recovered in both tabs with one refresh per tab; logout then other-tab reload reached stable login. Client retry/credentials/header fixtures passed. |
+| QA-FILL-040 | failed | All 14 theme/mode states and System emulation exercised/restored. Small light-theme links Graphite 4.095, Meridian 3.922, Sunset 3.670 below 4.5:1 (#779); default Aurora passed. |
+| QA-FILL-043 | passed | Reading position stayed at scrollTop 0 while output grew 7316→7375 characters. Completed answer reloaded stably without duplicate text. Interruption defect recorded separately. |
+| QA-FILL-044 | passed | Owner/shared/denied citation access and answer-time/access/freshness semantics checked; no forbidden passage shown. |
+| QA-FILL-046 | passed | 69 frontend residual assertions, including21 real Vite build/layout guards; dev payload excluded with positive flag-on control, Markdown lazy-split, deployed dev routes404. |
+| QA-FILL-049 | passed | Owner upload→grounded citation positive; same-tenant member and foreign user could not retrieve/open private fact/document. |
+| QA-FILL-050 | partial | Protocol aggregate passed 0.8 thresholds: groundedness 0.8333, citation 0.8333, recall 1.0 (summaries off). Chrome companion (summaries on): 4/5 supported answers correct+cited; runbook answer falsely refused despite exact retrieval (#785), ticker negative honest. Safe clarification scorer false-negative separately #784. |
+| QA-FILL-052 | failed | Compression/budgets passed. No valid clean first-token sample: cached embedding client closed-loop failure blocked setup (#780). Separate modified Eval unreachable-provider terminal 25.062 s ≤ 30 s is not a canonical latency pass. |
+| QA-FILL-056 | partial | 54 named Chrome controls/lang=en, 12 Tab steps with visible focus and scoped keyboard/ARIA tests. No actual screen reader or full external accessibility scan; untested assistive behavior remains. |
+| QA-FILL-059 | passed | Completed measured two-hour workload; see stability section. Bounded workload, no general memory-leak certification. |
+| QA-FILL-060 | partial | Own storage outage/restart recovered bytes but adapter leaked vendor connection exception (#783). Isolated worker pause/queue/drain, Redis outage/recovery, ordered backplane and own-index write-block/idempotent retry passed; fixtures removed. In-flight ingestion crash/whole-search-engine outage untested. |
+| QA-FILL-062 | passed | Populated 0048 dump restored into separate DB, upgraded to 0049 and clean app started; 2 tenants/4 users/doc/chunk/vector/grant and owner/grantee 200 vs ungranted/foreign 404. Both fixture DBs dropped after idle/count guards; backup retained. |
+| QA-FILL-063 | passed | Two harmless source/tool-reply injection payloads × owner/granted member: correct cited canaries, no takeover marker/action, private follow-up denied. Only retrieval tools invoked. |
+| QA-FILL-066 | passed | Two real expired tabs concurrently recovered 401→refresh200→retry200 with no loop; replay/rotation fixtures passed. Bounded timing observation, not all race interleavings. |
+| QA-FILL-067 | failed | Bounded valid DOCX expansion safely rejected at 2M-character cap before embedding, 0 chunks/text 409. The 77-byte corrupt PDF exposed raw PdfStreamError (#384); transient recovery UI stale until reload (#767). General CPU/OOM isolation untested. |
+| QA-FILL-070 | failed | Confirmed Stop generating and 712 rendered characters immediately before reload. History afterward contained only the user message, no recovered prefix/error/recovery control (#348). |
 
-## Provisioning observations and functional path
+## Automated evidence
 
-The dedicated `lumentest_qa777` database was migrated successfully and readiness
-passed all six dependencies. Its application role `qa777_app` is explicitly
-NOSUPERUSER/NOBYPASSRLS. Standard seed and valid browser login nevertheless fail
-casting the deliberate `bypass` sentinel to UUID, reproducing #644. Five users
-were created through a bootstrap-only operator connection so the browser probe
-used known-valid credentials. The failure is frozen in
-`qa/runs/qa777-20261015-hardened-login.json`; the restricted role remains unchanged.
+The clean harness uses dependency image22530ff5 with explicit archive PYTHONPATH; the final deployed image60ab7f91 inherits dependency base5cc09be8. These are distinct contexts, recorded in the provenance comparison.
 
-The existing canonical local application already has web/sandbox support and
-summaries configured. Functional Chrome testing therefore uses that existing
-configuration at localhost:47180 with new `QA 777 Functional Alpha/Beta` tenants,
-without changing any database role or existing tenant policy. The pending
-question about changing the dedicated database connection is not required for
-this alternative path. This phase has tenant/data isolation, not a new claim
-that the development superuser connection enforces RLS. Runtime and dataset
-context are recorded separately from both hardened and Eval appearance probes.
+Primary clean main 70c3c2e4 offline backend run: **1019 passed, 8 live exclusions, 1 known xfail #421** (1028 total), zero failures/errors. The HTTP auth negatives were captured earlier at 21:37 UTC using unchanged criteria from definition2d2f2517; the natural-expiry Chrome method ran after aca946cf at 22:35 UTC. They are labelled supplementary evidence rather than a new HTTP execution after the definition change.
 
-The live RLS harness initially could not reach its chat-runtime assertions:
-its raw document fixture omitted `acl_enforced` (old #552), then its application
-role lacked newly required SQL privileges for `tenant_tool_policy`,
-`source_handles`, and `session_summaries`. Only those test prerequisites were
-corrected in `backend/tests/test_rls.py`. The test was observed red at each
-setup failure and green after correction; the complete six-case live
-RLS/permission group then passed with temporary non-superuser/non-bypass roles.
-No production policy or application behavior was changed. This scoped success
-does not resolve the distinct #644 global-lookup failure.
+Frontend workflow group: **391 passed in 42 files**; earlier 69-test residual group includes 21 real Vite build/layout guards. Clean live RLS/permission group: **6 passed** with temporary restricted roles and teardown. Dedicated S3/CORS live group: **3 passed**. Real Redis replay group: **2 passed**. Counts overlap between targeted and expanded runs and must not be added as independent coverage.
 
-## Additional prerequisite repairs and retained fixtures
+The existing six-question real-model protocol golden test passed its original 0.8 aggregate thresholds: groundedness 0.833333, citation correctness 0.833333, retrieval recall 1.0. Per-item results are retained. Its unanswerable case scored false on groundedness/citation because the scorer did not recognize a safe clarification (#784); a focused diagnostic preserves that failure without rewriting scores or thresholds. In Chrome, four of five supported questions answered correctly with citations; the runbook question falsely refused although the exact supporting passage was retrieved (#785). The unsupported ticker question refused honestly.
 
-The exact six synthetic upload files and SHA-256 manifest are retained under
-`qa/fixtures/777/`. They contain only QA canaries and no credentials. The DOCX,
-PPTX, XLSX and TXT extracted previews were verified in Chrome; the PDF text
-endpoint preserved its canary. All six reached Ready. A real Celery DOCX
-re-ingestion replaced its single chunk, retained ordinal zero and identical text,
-and returned Ready without duplicates.
+Clean latency group: one quality test passed and two latency setup errors; no valid first-token timing was measured. Reproducer first embedding task succeeded with 2048 dimensions; second task on a new event loop failed with cached-client closed-loop error (#780). Separate modified-Eval unreachable-provider terminal result 25.062 s within 30 s remains explicitly separate.
 
-The expanded backend harness needed the canonical WebSocket schema mounted at
-`/contracts`; its blob is identical at application 3c022fcc and this branch.
-Four contract assertions failed for the missing file and then passed when it was
-provided. The migration rollback fixture also expected revision 0045 after
-upgrading to current head. Its assertion now compares the actual migration head;
-the previously failing restricted-owner, populated-vector rollback test passed.
-No migration code changed.
+Setup failures were retained: RLS document fixture/SQL privileges, missing mounted contracts, stale migration-head assertion, S3 CORS, live/unit environment contamination, stale fixture identity and missing xdist databases. Only test prerequisites were repaired. Re-run results are linked individually rather than replacing red evidence. Raw JUnit hashes, suite counts and per-test suite ledgers are indexed.
 
-Object-storage unit tests must run without the live S3 environment overrides.
-The live multipart test additionally needs origin `http://localhost:47180` in
-the dedicated QA MinIO process CORS configuration. The QA-only server was
-recreated with that origin plus `http://localhost:47480`, preserving its exact
-data volume and the old stopped container. The three live storage checks then
-passed, including CORS/ETag, range download and teardown.
+## Measured stability
 
-The latency harness must run serially (`-n 0`) unless worker databases have
-been provisioned. A fresh migrated database removed the stale-login collision;
-the correctly configured retry then failed its grounding gate (zero retrieval
-calls), so no first-token latency pass or budget measurement is claimed.
+Completed workload: **7200.0 seconds**, **463 iterations**, **0 request errors**, **7 successful natural refreshes**, **47 empty disposable chats deleted**. The soak itself made zero model calls; manual Chrome concurrently exercised model/upload/search flows.
 
-## Live findings and reproducibility
+| Container | First / last MiB | Observed min / max MiB |
+|---|---|---|
+| lumen-copilot-backend-1 | 629.90 / 642.70 | 619.40 / 758.80 |
+| lumen-copilot-worker-1 | 638.20 / 644.00 | 632.90 / 698.40 |
+| lumen-copilot-postgres-1 | 73.56 / 117.50 | 73.56 / 127.00 |
 
-The bounded source/tool-reply injection matrix uses the two additional exact
-TXT fixtures in `qa/fixtures/777/manifest.json`, tested as owner and explicitly
-granted member. Both canaries remained correctly cited, neither takeover marker
-appeared, and a member follow-up could not obtain the private Frost Finch fact.
-The 77-byte corrupt PDF fixture reproduces the raw parser error in #384.
+One of the 20 connection samples contained one idle transaction; the other 19 contained none. No duration is inferred from that single sampled observation.
 
-`qa/reproductions/embedding_loop.py` requires explicit `--live` and performs
-two tiny embedding calls through the production task bridge. On clean application
-3c022fcc, the first call succeeds with 2048 dimensions and the next new event loop
-fails with a cached client's closed-loop RuntimeError (#780). The probe prints
-only exception types and known flags; credentials, cache keys and vendor error
-text are excluded. Run in the configured backend environment. `--plain` checks
-the same two-loop lifetime with `asyncio.run`. No cache-flush workaround is used
-to manufacture a latency pass.
+Direct database connections were sampled only for the final **2400.0 seconds**, every 120 s: total range [11, 11], idle-in-transaction maximum 1. This is not two hours of direct connection sampling. Final container restart/OOM state is retained in stability-derived.json.
 
-The served canonical app also reproduces an uncited factual follow-up (#781),
-source-only facts in rolling-summary prose (existing #427), a discovered
-OpenRouter model without a usable adapter route (#782), and loss of an observed
-active answer after reload (existing #348). An isolated MinIO outage/restart
-preserves exact bytes and safely changes readiness, but `ObjectStore.get` leaks
-the vendor connection exception to its caller (#783). Product fixes remain
-separate from this QA/prerequisite change.
+Memory increased during concurrent ingestion/model activity. This finite mixed workload does not establish absence of a memory leak or behavior at production load.
+
+## Cleanup, restoration and retained evidence
+
+The user approved the named disposable file deletion, cleanup of new items explicitly labelled QA 777 disposable, and one bounded Python expression with the gate restored. Chrome removed that file, a fresh two-message disposable chat, the new public source/collection/document, and the new disposable provider; direct reads/object absence and model-list removal were verified. Retained evidence chats, private/golden documents, MCP servers and published assistants remain inspectable. Existing populated Eval data was not changed.
+
+Python executed only `print(777 + 1)`: one succeeded run, stdout 778, exit 0, 93 ms, no packages/artifacts, exact executor image `sha256:8161fe4f1aa127d6a258bcb8c1b470957ffeac1d40fb535c995e3d4255713379`. Its preceding denied attempt did not execute code. Start/finish audits and tool traces persist. The explicitly disposable sandbox was then closed through the supported lifecycle API while execution stayed disabled; its container is absent and the code-run/history evidence remains. Tenant code execution is Off again and run_python Requires approval is On. The QA 777 schedule is paused; appearance/network/viewport overrides restored. Final read-back found an intervening audited resume at 23:00:44 UTC; Chrome paused it again at 23:17:55, and both reload and API read-back confirm disabled. No cause for that intervening action is attributed.
+
+Both populated-upgrade fixture databases were verified idle with expected counts and dropped without FORCE; dump retained by SHA256 `021c82d8982f48eb3a2b6656c420d33a7fffb3b33656d9447d69b97405b702e8`. Isolated fault worker/Redis containers were verified by exact ID/labels, drained and removed; scratch search index/pipeline removed. The dedicated QA MinIO restart preserved its own data volume. Docker startup repair preserved old runtime directories; no data-volume reset.
+
+Exact upload fixtures and hashes: [`qa/fixtures/777`](../../qa/fixtures/777). Immutable run records: [`qa/runs`](../../qa/runs). Sanitized artifact index: [`qa/evidence/qa777-20261015-index.json`](../../qa/evidence/qa777-20261015-index.json). Raw screenshots/JUnit/traces remain **local, ignored** at `output/qa/777`; preserve that directory before local cleanup. Hash references do not imply cloud retention. CI artifacts retain 90 days. Logs/env files are not committed.
+
+## Remaining limits and findings
+
+New tracked findings: [779 contrast](https://github.com/k-sandhu/lumen-copilot/issues/779), [780 embedding lifecycle](https://github.com/k-sandhu/lumen-copilot/issues/780), [781 uncited follow-up](https://github.com/k-sandhu/lumen-copilot/issues/781), [782 provider route](https://github.com/k-sandhu/lumen-copilot/issues/782), [783 storage error boundary](https://github.com/k-sandhu/lumen-copilot/issues/783), [784 scorer clarification](https://github.com/k-sandhu/lumen-copilot/issues/784), [785 retrieved-answer refusal](https://github.com/k-sandhu/lumen-copilot/issues/785). Existing issues 348/384/427/575/576/578/644/718/767 received linked corroboration where relevant. No fixes or clean-release/security certification in this change.
+
+Live saved-case persistence/rerun, browser CSV bytes, actual screen reader/full scanner, general parser containment, in-flight ingestion crash/whole-search-engine fault recovery, and valid clean first-token measurement remain explicit. The first three are capability/evidence limits; the latter cases retain their failures/partial scope.
+
+An earlier automatic approval review rejected opening Chrome’s internal downloads page under its URL policy. It was not retried or bypassed; the CSV byte result remains unconfirmed.
+
+## Verification and review
+
+Final local verification: 21 tracking regression tests passed; validator accepted 71 catalog entries and128 concrete cases including all new records; scoped Ruff lint/format and git diff checks passed. PR 778 remains stacked on PR 775; its updated description links the exact final CI run. No merge performed.

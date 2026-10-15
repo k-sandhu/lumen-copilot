@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 golden-latency-clean-live",
+    "kind": "live_local",
+    "browser": null,
+    "models": [
+      "openrouter/inclusionai/ling-3.0-flash"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "raw_junit_sha256": "2a75a19354e7ac77168e00584282f1e06c4924c9c3774174cffcb061c40233e0"
+    },
+    "configuration": {
+      "scope": "verified main70c3c2e4 clean archive and canonical Ling/Nemo; two latency setup failures#780",
+      "test_source_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+      "LLM_MODEL": "openrouter/inclusionai/ling-3.0-flash",
+      "LLM_EMBEDDING_MODEL": "openai/nvidia/nemotron-3-embed-1b:free",
+      "LLM_EMBEDDING_DIMENSIONS": "2048",
+      "LATENCY_SAMPLES": "5",
+      "CHAT_SUMMARY_ENABLED": "false",
+      "source": "Verified main70c3c2e4 app tree; earlier raw source label corrected by content hashes.",
+      "database": "lumentest_qa777_clean_live",
+      "first_fragment_p50_budget_seconds": 2,
+      "method": "HTTP + ASGI WebSocket relay + real Redis/Postgres/OpenSearch/provider; browser RTT/render excluded"
+    }
+  },
+  "ci": null,
+  "kind": "suite",
+  "run_id": "qa777-20261015-suite-golden-latency-clean-live",
+  "suite": {
+    "name": "golden-latency-clean-live",
+    "outcome": "failed",
+    "reason": "JUnit contains failed or errored tests.",
+    "counts": {
+      "passed": 1,
+      "failed": 2,
+      "errored": 0,
+      "skipped": 0
+    },
+    "tests": [
+      {
+        "test_id": "golden-latency-clean-live::tests.eval.test_eval_live::test_live_eval_meets_thresholds",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "golden-latency-clean-live::tests.eval.test_chat_latency_live::test_time_to_first_answer_token_p50_under_budget",
+        "outcome": "failed"
+      },
+      {
+        "test_id": "golden-latency-clean-live::tests.eval.test_chat_latency_live::test_unreachable_provider_yields_typed_terminal_error_within_budget",
+        "outcome": "failed"
+      }
+    ]
+  },
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T22:12:25.143041+00:00",
+  "finished_at": "2026-10-15T22:12:53.875041+00:00",
+  "notes": "verified main70c3c2e4 clean archive and canonical Ling/Nemo; two latency setup failures#780. Raw JUnit retained at output/qa/777/golden-latency-clean-live.xml. Suite skips are explicit; clean offline skipped9 =8 ordinary live exclusions plus1 known xfail421. A passing suite is not a catalog-area certification."
+}
