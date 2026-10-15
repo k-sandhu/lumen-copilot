@@ -908,6 +908,24 @@ async def test_get_document_stripped_name_fallback_inv2(
     assert _outcome(result) == _outcome(unknown)
 
 
+@pytest.mark.parametrize("filename", [pytest.param("Über.pdf", id="non-ascii-exact-case")])
+async def test_get_document_exact_non_ascii_name(
+    session_and_world: tuple[AsyncSession, _World], filename: str
+) -> None:
+    session, world = session_and_world
+    document_id = await _doc(session, world.tenant_a, world.alice, filename, "Unicode body.")
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": filename},
+    )
+    assert result.ok is True
+    assert result.document_ids == (document_id,)
+    assert "Unicode body." in result.content
+
+
 async def test_get_document_accepts_name_case_whitespace_quote_variant(
     session_and_world: tuple[AsyncSession, _World],
 ) -> None:

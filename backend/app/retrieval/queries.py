@@ -765,7 +765,7 @@ async def documents_by_exact_name(
             models.Document.tenant_id == allow_set.tenant_id,
             _document_permitted(allow_set),
             models.Document.status == DocumentStatus.READY.value,
-            func.lower(models.Document.filename) == name.strip().lower(),
+            func.lower(models.Document.filename) == func.lower(name.strip()),
         )
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
         .limit(k)
