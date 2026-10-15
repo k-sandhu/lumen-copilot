@@ -287,6 +287,8 @@ class ToolContext:
     #: Empty outside the runner: do not promise a recovery tool without evidence
     #: it is allowed. This field conveys availability, never grants permission.
     allowed_tools: frozenset[str] = frozenset()
+    #: Conversation-bound D identities only; authorization remains in retrieval.
+    document_id_resolver: Callable[[str], UUID | None] | None = None
 
 
 # The signature every tool handler satisfies: given the model-supplied ``args`` and

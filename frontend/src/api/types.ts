@@ -428,6 +428,8 @@ export type MessageRole = 'user' | 'assistant' | 'system';
  */
 export interface Citation {
   id: string;
+  /** Conversation-scoped inline evidence handle; absent on legacy messages. */
+  handle?: string | null;
   document_id: string;
   document_name: string;
   chunk_id: string;
@@ -449,6 +451,15 @@ export interface Citation {
    * claim's provenance stays visible instead of silently disappearing.
    */
   redacted?: boolean;
+}
+
+/** Public web evidence actually shown to the model and cited inline. */
+export interface WebCitation {
+  id: string;
+  handle: string;
+  url: string;
+  title: string;
+  snippet: string;
 }
 
 /**
@@ -500,6 +511,8 @@ export interface Message {
   model?: string;
   /** Passage-level citations (assistant messages only). */
   citations?: Citation[];
+  /** Public web citations remain separate from permissioned corpus passages. */
+  web_citations?: WebCitation[];
   /** Governed tool calls behind an assistant message, oldest first (#377). */
   tool_invocations?: MessageToolInvocation[];
   /** The clarifying question this turn ended with, if any (spec 0006 #429). */
@@ -2037,6 +2050,8 @@ export interface ChatTokenDelta {
  */
 export interface ChatCitation {
   id: string;
+  /** Conversation-scoped inline evidence handle; absent on legacy streams. */
+  handle?: string | null;
   documentId: string;
   documentName: string;
   chunkId: string;
@@ -2049,6 +2064,15 @@ export interface ChatCitation {
   speakerId?: string;
   speakerName?: string;
   score?: number;
+}
+
+/** `event.data` for name=web_citation. Public web evidence has no corpus ids. */
+export interface ChatWebCitation {
+  id: string;
+  handle: string;
+  url: string;
+  title: string;
+  snippet: string;
 }
 
 /**

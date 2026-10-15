@@ -31,8 +31,11 @@ import type { ChatSession, KnowledgeMode, MessageToolInvocation } from '@/api';
 
 const NOW = Date.parse('2026-06-19T12:00:00Z');
 
-function cite(over: Partial<UiCitation> = {}): UiCitation {
+function cite(
+  over: Partial<Extract<UiCitation, { kind: 'document' }>> = {},
+): Extract<UiCitation, { kind: 'document' }> {
   return {
+    kind: 'document',
     id: 'c1',
     documentId: 'doc-1',
     documentName: 'Q3 Pricing.pdf',
@@ -379,7 +382,21 @@ describe('modeAvailability', () => {
 
 describe('usedWebSearch', () => {
   it('is true when a web citation is present', () => {
-    expect(usedWebSearch([cite({ url: 'https://example.com/a' })], [])).toBe(true);
+    expect(
+      usedWebSearch(
+        [
+          {
+            kind: 'web',
+            id: 'w1',
+            handle: 'W1',
+            url: 'https://example.com/a',
+            webTitle: 'Page',
+            snippet: 'Text',
+          },
+        ],
+        [],
+      ),
+    ).toBe(true);
   });
 
   it('is true when the web_search tool ran (even with no citation)', () => {
@@ -395,7 +412,14 @@ describe('usedWebSearch', () => {
 describe('partitionCitations', () => {
   it('splits web vs document citations, preserving order', () => {
     const doc = cite({ id: 'd1' });
-    const web = cite({ id: 'w1', documentId: '', url: 'https://example.com/x' });
+    const web = {
+      kind: 'web' as const,
+      id: 'w1',
+      handle: 'W1',
+      url: 'https://example.com/x',
+      webTitle: 'Page',
+      snippet: 'Text',
+    };
     const { web: webs, documents } = partitionCitations([doc, web]);
     expect(documents.map((c) => c.id)).toEqual(['d1']);
     expect(webs.map((c) => c.id)).toEqual(['w1']);

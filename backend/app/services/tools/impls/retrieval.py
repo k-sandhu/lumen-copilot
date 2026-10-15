@@ -81,6 +81,14 @@ def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
     return text.strip()
 
 
+def rendered_evidence(passage: RetrievedPassage, handle: str) -> str:
+    """Handle-labelled complete evidence with the source's player provenance."""
+    return (
+        f"[{handle}] {passage.document_name}{_media_provenance(passage)}\n"
+        f"{rendered_snippet(passage.text)}"
+    )
+
+
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
     # An omitted/invalid ``k`` falls back to ``default`` — but still clamped to the
     # ceiling (#424 re-review): under a tight budget ``maximum`` can be lower than
@@ -225,7 +233,8 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
 async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     raw_id = str(args.get("document_id") or "").strip()
     try:
-        document_id = UUID(raw_id)
+        resolved = ctx.document_id_resolver(raw_id) if ctx.document_id_resolver else None
+        document_id = resolved if resolved is not None else UUID(raw_id)
     except ValueError:
         # A malformed id is a tool-specific rejection, not a crash — the runner
         # passes the ``ok=False`` through and the run continues (issue #207 §7).
