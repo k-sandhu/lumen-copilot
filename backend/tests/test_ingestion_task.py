@@ -859,7 +859,7 @@ async def test_empty_document_is_failed_empty_with_zero_chunks(sqlite_engine: No
     )
     assert result.status is DocumentStatus.FAILED
     assert result.chunk_count == 0
-    assert result.error
+    assert "No native text" in (result.error or "")
     # And no chunks were left behind / created.
     async with db_session.session_scope() as session:
         chunks = await ChunkRepository(session, tenant_id).list_for_document(document_id)
