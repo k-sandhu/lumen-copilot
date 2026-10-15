@@ -1,0 +1,1611 @@
+{
+  "schema_version": 1,
+  "application": {
+    "images": [],
+    "source_state": "clean",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 frontend-workflows",
+    "kind": "ci_offline",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "raw_junit_sha256": "045ec955c7b8a6be301ebaf257fb28a056610910a95bb4efe411c56cc7c2ccbe"
+    },
+    "configuration": {
+      "scope": "frontend tree equals main70c3c2e4 and3c022fcc; branch fixtures0e9fd8f4",
+      "test_source_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313"
+    }
+  },
+  "ci": null,
+  "kind": "suite",
+  "run_id": "qa777-20261015-suite-frontend-workflows",
+  "suite": {
+    "name": "frontend-workflows",
+    "outcome": "passed",
+    "reason": "",
+    "counts": {
+      "passed": 391,
+      "failed": 0,
+      "errored": 0,
+      "skipped": 0
+    },
+    "tests": [
+      {
+        "test_id": "frontend-workflows::src/features/schedules/route.test.tsx::schedules route/nav discovery descriptors > exposes a /schedules/* splat route with a renderable element",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/route.test.tsx::schedules route/nav discovery descriptors > contributes a nav item at the route root (the splat is stripped)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AnswerFooter.test.tsx::AnswerFooter > shows \"Permission-checked\" only when the answer is grounded",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AnswerFooter.test.tsx::AnswerFooter > labels the timestamp as the ANSWER time (\"answered <ago>\"), omitted when absent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AnswerFooter.test.tsx::AnswerFooter > NEVER labels the answer time as source freshness/last-indexed (#120 GUARD)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AnswerFooter.test.tsx::AnswerFooter > renders nothing when there is no status and no answer time (no empty rule)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AnswerFooter.test.tsx::AnswerFooter > toggles helpful / not-helpful as a mutually exclusive, clearable LOCAL vote",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AnswerFooter.test.tsx::AnswerFooter > copies the answer text to the clipboard (client-side only)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AskUserOptions.test.tsx::AskUserOptions > sends the clicked option label while active (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/AskUserOptions.test.tsx::AskUserOptions > renders inert once inactive, highlighting the chosen option",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatComposerRenderHygiene.test.tsx::#495 AC-3 composer typing does not re-render the message list > keystrokes stay inside the composer subtree",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.renderHygiene.test.tsx::#495 ChatThread render hygiene > AC-1: persisted MessageBubbles do not re-render across streamed deltas",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.renderHygiene.test.tsx::#495 ChatThread render hygiene > AC-2: per-message derivations run once per data change, not once per delta",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.renderHygiene.test.tsx::#495 ChatThread render hygiene > AC-2: appending a message re-derives only on the data change",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::ChatThread > releases sticky autoscroll when the user scrolls the Radix viewport up",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::ChatThread > resumes sticky autoscroll when the viewport returns near the bottom",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::ChatThread > renders loading, error, and empty states",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::ChatThread > renders persisted tool invocations on a reloaded assistant message (#377)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::ChatThread > keeps a persisted user message free of tool badges (#377)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::live narration (#414) > renders transient narration while streaming with no answer text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThread.test.tsx::live narration (#414) > hides narration once answer text streams (never in the bubble)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThreadQuestions.test.tsx::#495 AC-4 clarifying-question wiring (relocated into PersistedMessages) > activates options only on the last message with nothing in flight",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThreadQuestions.test.tsx::#495 AC-4 clarifying-question wiring (relocated into PersistedMessages) > renders options inert while a live turn is streaming",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatThreadQuestions.test.tsx::#495 AC-4 clarifying-question wiring (relocated into PersistedMessages) > highlights the chosen option from the following user turn (answered, inert)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > sends → streams delta/tool/citation → done reloads with a clickable citation (AC-1/2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > treats a WS error as terminal with a Retry (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > retracts speculatively-streamed text and re-surfaces it as narration (#488, AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > keeps chat history reachable at narrow widths via the drawer (AC-4, #136)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > shows a zero-citation answer honestly (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > shows Web mode DISABLED with a reason for an ad-hoc chat (#221 AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::ChatView (critical flow) > reflects a web-enabled assistant scope and renders a web citation + disclosure (#221 AC-1/AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::BE2-7: post-terminal suggestions survive the history reload > renders the trailing suggestion chips after the reload and refreshes usage to the post-suggestion total",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatView.test.tsx::#434 round-1: suggestions must not survive a terminal error > suggestions event followed by error leaves no chips and no ghost",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ChatViewRenderHygiene.test.tsx::#495 AC-1 through real ActiveSession wiring > streams 30 deltas over a 24-message thread without re-rendering one persisted bubble",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > sends a trimmed message on Send click (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > sends on Enter, inserts a newline on Shift+Enter (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > disables Send when the draft is empty",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > shows Stop instead of Send while streaming and cancels (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > does not send while disabled (no session)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > offers \"Set as default\" and reports the chosen model (#144)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > shows a \"Default\" tag (not the button) when the model is already the default (#144)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > surfaces the knowledge-mode control with the active modes pressed (#221)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > disables the Web mode toggle with a reason when web is not enabled (#221 AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer > reports a mode toggle to the parent (#221)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer ghost prefill (spec 0006 AC-4) > shows the ghost over an empty composer and accepts it with Tab",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer ghost prefill (spec 0006 AC-4) > accepts via the click affordance and dismisses on typing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer ghost prefill (spec 0006 AC-4) > Tab without a ghost keeps normal focus traversal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer history recall (spec 0006 AC-5) > ArrowUp walks previous messages newest-first; ArrowDown walks back and restores the draft",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer history recall (spec 0006 AC-5) > Escape restores the stashed draft immediately",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer history recall (spec 0006 AC-5) > is multiline-safe: ArrowUp only recalls from the first line",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer history recall (spec 0006 AC-5) > editing a recalled entry ends navigation (the edit is the new draft)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer @-mention picker (spec 0007 AC-4) > opens on @, pins via Enter, and strips the token from the draft",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer @-mention picker (spec 0007 AC-4) > Escape dismisses the picker for the current token",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer @-mention picker (spec 0007 AC-4) > renders pinned pills and unpins via ×",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer @-mention picker (spec 0007 AC-4) > already-pinned documents are excluded from the picker",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer mention picker key precedence (#434 finding 4) > consumes Enter/arrows while the picker is empty — no literal @ send, no history recall",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer mention picker key precedence (#434 finding 4) > ArrowUp over an option-less picker does not recall history",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::Composer ghost Escape dismissal (research pass) > Escape hides the ghost until a new suggestion arrives",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/Composer.test.tsx::#434 NEW-3: mention picker focus semantics > options are outside the tab order and pinning returns focus to the input",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextMeter.test.tsx::ContextMeter > shows last-turn utilization against the input budget (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextMeter.test.tsx::ContextMeter > renders an honest empty meter for a fresh session",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextMeter.test.tsx::ContextMeter > renders nothing on a failed read (silent nicety)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextMeter.test.tsx::formatTokens > abbreviates thousands and millions",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextPanel.test.tsx::ContextPanel > aggregates documents, tools, artifacts, and usage (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextPanel.test.tsx::ContextPanel > shows honest empty states",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ContextPanel.test.tsx::#434 round-1: retryable failures > failed loads show Retry (and tools never fake an empty state)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > loads the cited document through an authenticated request (bearer attached)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > renders \"no longer available\" with no retry on 404 (not-permitted / cross-tenant, INV-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > does not fetch document bytes after receiving the access capability",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > source metadata grid (#120) > renders owner / last-modified / last-indexed rows",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > source metadata grid (#120) > shows ALL rows as \"Not available\" — the chat wire carries no source metadata (GUARD #120)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > source metadata grid (#120) > does NOT present a message/answer timestamp as \"Last indexed\" (GUARD #120 — no fabricated provenance)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > source metadata grid (#120) > lights up the last-indexed row only when a REAL source-indexing value is supplied",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/DocumentViewer.test.tsx::DocumentViewer (authenticated content load — INV-4) > source metadata grid (#120) > lights up the owner row when a source actually carries one",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > shows a loading state then the session list (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > shows an empty state when there are no sessions",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > surfaces a load error with a Retry (negative: 404 INV-1/INV-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > filters the list with the search box, with an honest no-match state (#136)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > creates a new chat and reports its id (AC-4 new)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > renames a session via PATCH (AC-4 rename)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > dismisses the delete confirm on Escape without deleting (#136 a11y)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/HistorySidebar.test.tsx::HistorySidebar > confirms and deletes a session (AC-4 delete)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeChips.test.tsx::KnowledgeModeChips > marks the active mode via aria-pressed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeChips.test.tsx::KnowledgeModeChips > disables \"Selected sources\" until a collection scope is available",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeChips.test.tsx::KnowledgeModeChips > enables \"Selected sources\" and changes mode when a scope is available",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeChips.test.tsx::KnowledgeModeChips > disables the whole group while streaming",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::KnowledgeModeControl > marks active modes via aria-pressed and offers all four (E3-12 visible)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::KnowledgeModeControl > toggles a mode and reports the new set in canonical order (E3-12 changeable)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::KnowledgeModeControl > turns a mode OFF when it is already active",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::KnowledgeModeControl > disables Web WITH A REASON when web is not enabled (AC-3, negative)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::KnowledgeModeControl > fails web CLOSED: absent availability ⇒ disabled with a default reason",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::KnowledgeModeControl > disables the whole group while streaming",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::resolveAvailability > fails web closed when unspecified",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::resolveAvailability > respects an explicit web availability",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/KnowledgeModeControl.test.tsx::resolveAvailability > leaves non-web modes available by default",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders assistant markdown (rendered, not raw)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders clickable citation chips that open the inspector (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > opens the exact corpus citation referenced by an inline [S#] handle",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > opens an inline [W#] source and keeps it out of the corpus sources strip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > shows a FreshnessPill on a cited source when freshness is known (#89)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > groups multiple passages of one document into a single source card (#248)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders one card per document and keeps citation numbers flat across groups (#248)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders a model badge and a collapsible retrieval trace (#89)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > shows an honest zero-citation notice and NO references (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders the answer footer on a settled grounded assistant turn (#120)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > labels the footer timestamp as the ANSWER time, never source freshness (#120 GUARD)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > omits the answer footer while the turn is still streaming (#120)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > does not claim \"Permission-checked\" on an ungrounded answer (#120, honest)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > wraps a streaming assistant answer in a polite live region (#163)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > does NOT keep the live region on a settled turn — answers are not re-announced (#163)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders user messages as plain text (no markdown interpretation)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > renders a web citation DISTINCTLY, with host + snippet + a safe link (#221 AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > routes a web-citation row click to the inspector (#221)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > shows the \"web sources were used\" disclosure ONLY when web was used (#221 AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > never renders an outbound link for an unsafe (non-http) web citation URL (#221)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/MessageBubble.test.tsx::MessageBubble > shows a revoked source as unavailable instead of dropping it (#536)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ModelPicker.test.tsx::ModelPicker > renders models grouped by tier (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ModelPicker.test.tsx::ModelPicker > preselects the provided (default) value (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ModelPicker.test.tsx::ModelPicker > calls onChange with the chosen model id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ModelPicker.test.tsx::ModelPicker > omits empty tiers",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ModelPicker.test.tsx::ModelPicker > groups per-tenant provider models under their provider name (PR 2a)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ModelPicker.test.tsx::ModelPicker > lets the user select a provider model by its namespaced id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/SandboxSessionControl.test.tsx::SandboxSessionControl > shows an active root-inside generation and closes it",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/SandboxSessionControl.test.tsx::SandboxSessionControl > requires an explicit destructive confirmation before reset",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/SandboxSessionControl.test.tsx::SandboxSessionControl > does not offer lifecycle controls when deploy or tenant policy disables execution",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/StepTimeline.test.tsx::StepTimeline > renders each step with its state and annotations (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/StepTimeline.test.tsx::StepTimeline > renders nothing for an empty step list",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/streamAutoscroll.test.tsx::streaming autoscroll throttling (#493 AC-5) > runs one autoscroll layout per flush, not one per delta",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/streamAutoscroll.test.tsx::streaming autoscroll throttling (#493 AC-5) > still lands at the bottom when the stream ends",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/SuggestionChips.test.tsx::SuggestionChips > sends the clicked suggestion (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/SuggestionChips.test.tsx::SuggestionChips > renders nothing for an empty list and disables while busy",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > labels a known running tool",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > labels the search_passages tool activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > labels the find_documents tool activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > labels the read_document tool activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > continues to label legacy search_text activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > continues to label legacy search_documents activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > continues to label legacy list_documents activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > continues to label legacy get_document activity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > falls back to the raw tool name for an unknown tool — never \"undefined\" (#280, #377)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > falls back for an unknown DONE tool too (with the passage count)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > renders a failed/denied invocation with a danger badge (#377)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > keeps the ok badge for a successful settled invocation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/ToolActivity.test.tsx::ToolActivity > names the list \"Tool activity\" — it renders the whole governed registry (#397)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/WebSourceView.test.tsx::WebSourceView > renders the host + snippet and a safe external link (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/WebSourceView.test.tsx::WebSourceView > covers the empty-snippet state without a blank pane",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/WebSourceView.test.tsx::WebSourceView > renders NO outbound link for an unsafe url (never an unsafe link)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/components/WebSourceView.test.tsx::WebSourceView > closes via the close button",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > renders skeleton rows while loading",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > renders the genuinely-empty state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > renders an actionable retry on a generic error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > messages the 403 access-denied dead-end without a retry (INV-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > messages the 401 dead-end without a retry (INV-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > renders the event table on success",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > opens the provenance drawer on row click with the allow/exclude ledger + raw payload",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > closes the drawer from its close control",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > disables Previous on the first page and enables Next when a cursor is returned",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > advances to the next page and re-fetches with the new cursor",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel > shows the filtered-empty copy after applying a filter that matches nothing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel — #121 polish > renders the subtitle, the three KPI tiles, and the ledger footer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel — #121 polish > narrows the table client-side when a segment chip is chosen",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel — #121 polish > shows the segment-empty copy when the chosen segment matches nothing on the page",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/components/AuditPanel.test.tsx::AuditPanel — #121 polish > offers an enabled Export CSV button when there are rows",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::summarizeEvents > counts total, denied, and the cited share of answers",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::summarizeEvents > reports a null cited rate when there are no answers (never a fake 0%)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::summarizeEvents > is empty for an empty page",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::formatRate > renders an em-dash for no data and a percent otherwise",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::segmentForEvent / filterBySegment > folds wire types into segments",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::segmentForEvent / filterBySegment > passes everything through for the \"all\" segment",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::segmentForEvent / filterBySegment > filters to a single segment client-side",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::segmentForEvent / filterBySegment > \"access\" matches denied decisions, not every login that folds to access",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::eventsToCsv > emits a header plus one row per event with candidate counts",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::eventsToCsv > quotes fields containing commas or quotes (RFC 4180)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/audit/model/metrics.test.ts::eventsToCsv > renders just the header for an empty page",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::kindOfCitation > uses the normalized source discriminator",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::hostOf > returns the registrable host with www stripped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::hostOf > returns null for an unparseable or non-http url",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::isSafeHttpUrl > accepts only http(s) urls",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::normalizes handle-based citation wires > preserves corpus handles from REST and live WS citations",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::normalizes handle-based citation wires > normalizes separate REST and WS web citations without corpus identifiers",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::normalizes handle-based citation wires > rejects unsafe URLs from the separate web citation shape",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::media citation normalization > preserves timestamp, transcript segment and contextual speaker fields from REST and WS",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/citation.test.ts::media citation normalization > omits REST media fields serialized as null instead of inventing a zero seek",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::groupCitationsByDocument > returns an empty array for no citations",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::groupCitationsByDocument > collapses many passages of one document into a single group",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::groupCitationsByDocument > preserves first-appearance document order and keeps FLAT numbering across groups",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::relativeTime > returns null for absent / unparseable timestamps (pill is omitted)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::relativeTime > formats recent → distant spans",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::isStale > is false for fresh / missing timestamps and true past the window",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::modelBadgeLabel > prefers the friendly label, then the trailing id segment, else null",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::buildRetrievalSummary > counts distinct sources and summed passages",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::buildRetrievalSummary > surfaces excluded candidates as a muted step + in the summary (filter #4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::buildRetrievalSummary > ignores still-running tools when building steps but still has source content",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::buildRetrievalSummary > reports no content for a zero-citation, zero-tool turn",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::buildRetrievalSummary > never says \"0 sources · N passages\" when passages arrive before citations (#248)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::buildRetrievalSummary > drops the leading \"0 sources\" but keeps passages + excluded when uncited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::toolActivityFromInvocations (#377) > maps a persisted invocation to a settled ToolActivity with a duration summary",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::toolActivityFromInvocations (#377) > prefers the persisted handler result line over the duration (#377 \"what it returned\")",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::toolActivityFromInvocations (#377) > formats second-scale durations as seconds",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::toolActivityFromInvocations (#377) > marks a failure/denial with ok=false and the stable error code",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::toolActivityFromInvocations (#377) > reports an errorless failure honestly (no invented code)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::passageFromCitation > highlights the whole cited snippet (it is what was cited)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::passageFromCitation > yields no runs for an empty snippet",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sourceMetadataRows > always emits the owner / last-modified / last-indexed rows in order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sourceMetadataRows > marks fields the wire does not carry as unknown (no fabricated values, GUARD #120)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sourceMetadataRows > passes through a REAL source-indexing label as last-indexed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sourceMetadataRows > marks last-indexed unknown when no source-indexing value is supplied (GUARD #120)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sourceMetadataRows > treats blank / whitespace values as unknown",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::dayBucket > buckets by calendar day, not elapsed hours",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::dayBucket > falls back to Today for absent / unparseable / future timestamps",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::groupSessionsByDay > groups newest-first, drops empty buckets, sorts within a bucket",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sessionMeta > builds an honest meta line from wire fields only (no fabricated counts)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::sessionMeta > singularises one message",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::initialModes > seeds an assistant session with its declared modes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::initialModes > falls back to the corpus default for an ad-hoc chat",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::modeAvailability > marks web AVAILABLE only when the scope includes it",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::modeAvailability > marks web UNAVAILABLE with a reason when the scope omits it (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::modeAvailability > gives a reason that points at the real path, not a nonexistent setting (#378)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::modeAvailability > fails web closed for an ad-hoc chat (no scope)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::usedWebSearch > is true when a web citation is present",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::usedWebSearch > is true when the web_search tool ran (even with no citation)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::usedWebSearch > is false for a document-only answer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/presentation.test.ts::partitionCitations > splits web vs document citations, preserving order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > streams delta tokens in order into accumulated text (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > ignores duplicate / out-of-order seq (no double-append on reconnect)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > surfaces tool activity: running on tool_call, done on tool_result (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > propagates a denied/failed tool_result (ok=false) with a failure summary (#377)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > collects citations and dedupes by id (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > collects distinct web_citation events and dedupes by id (#436)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > still rejects a malformed citation with neither documentId nor url (#221)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > rejects an unpaired or reversed media timestamp before it reaches the viewer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > rejects speaker/segment metadata without valid paired integer timestamps",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > reaches done with the terminal summary (AC-2 persist trigger)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > supports a zero-citation answer honestly (AC-5: no fabricated refs)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > handles a terminal WS error envelope (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > ignores envelopes after a terminal state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > accepts one post-terminal suggestions event after a pendingSuggestions done (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > does not accept post-terminal suggestions when done did NOT declare pending",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > ignores anything other than suggestions after a pendingSuggestions done",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > accepts only ONE post-terminal suggestions event, ignoring a second",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > terminateWithDisconnect marks a dropped stream as error (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > does not override an existing terminal on disconnect",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > assembles a code run: creates it running on the first code_output chunk (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > appends streamed stdout/stderr chunks in order onto the matching run (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > finalizes the run on code_result with status/exit/duration/artifacts (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > creates an inspectable run from a lone code_result with no output — e.g. denied (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > tracks two concurrent runs independently by runId",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > ignores a malformed code_output (bad stream / missing text) without corrupting state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::reduceStream > code_result is a run-terminal, not a stream-terminal — the stream still streams",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::spec 0006 events (#429) > upserts steps by key in first-seen order (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::spec 0006 events (#429) > folds ask_user and replays idempotently by seq (AC-2/AC-N3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::spec 0006 events (#429) > folds suggestions, filtering non-string/empty items (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::narration (ADR-0016 §6, #414) > accumulates within a turn, resets on a new turn, never touches text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::narration (ADR-0016 §6, #414) > ignores malformed narration payloads",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::answer_retract (speculative streaming, #488) > discards the speculatively-streamed answer text — removed, not dangling (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::answer_retract (speculative streaming, #488) > leaves other side-band state untouched (only clears the answer text)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/streamReducer.test.ts::answer_retract (speculative streaming, #488) > consumes its seq (a same-seq replay cannot re-clear later text)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > is idle with no socket when streamId is null",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > streams delta tokens and citations, then fires onDone (AC-1/AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > treats a WS error envelope as terminal (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > treats an unexpected disconnect (no terminal) as terminal error (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > closes the client on an unexpected disconnect so it cannot zombie-reconnect (#273)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > treats an open-but-silent stream as terminal error with retry",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > treats a start-then-silence stall (no first token) as terminal error with retry (#159)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > treats silence after a side-band event (no terminal) as terminal error (#159)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > treats idle silence between tokens as terminal error while preserving text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > does NOT flag disconnect-as-error after a clean done",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > closes the socket after clean done so completed streams do not reconnect",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > cancel() closes the socket",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > opens the socket at /chat/<streamId>",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > holds the socket open on a pendingSuggestions done and accepts the trailing suggestions (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > closes the socket at grace expiry when no suggestions follow a pendingSuggestions done",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream > honours a server suggestionsGraceMs larger than the client default (BE-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > coalesces N text deltas into a bounded number of commits (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > final text equals the concatenation of all deltas, in order (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > flushes the pending buffer before a terminal done arriving right after a delta (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > flushes the pending buffer before a terminal error, preserving partial text (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > flushes the pending buffer before a side-band event, preserving order (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > cancels the pending flush on unmount so nothing fires after teardown (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > cancels the pending flush when streamId changes mid-buffer (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — delta batching (#493) > discards buffered speculative text on answer_retract (#488) so it does not survive",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — teardown liveness (FE-4) > a stale async close from the previous streamId does not bleed into the new stream",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — teardown liveness (FE-4) > a deferred close after unmount performs no state update (no act warning)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — post-terminal envelopes (FE-5) > ignores a late delta after done: no watchdog re-arm, no scheduled flush, no surviving timer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — post-terminal envelopes (FE-5) > ignores a late delta after a terminal error and leaves no timer alive",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — post-terminal envelopes (FE-5) > ignores a late delta after cancel() so nothing re-arms",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — post-terminal envelopes (FE-5) > still accepts the one post-terminal suggestions event within the grace (#489 preserved)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — suggestions window lifetime (FE2-3) > ignores a suggestions event arriving after cancel()",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — suggestions window lifetime (FE2-3) > ignores a suggestions event arriving after the grace closed the socket",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — suggestions window lifetime (FE2-3) > cancel() invalidates the run token, so the socket deferred close updates nothing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/chat/model/useChatStream.test.tsx::useChatStream — suggestions window lifetime (FE2-3) > delivers the one suggestion on the normal pending-suggestions flow",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — load states (AC-3/AC-5) > shows a LOADING skeleton while the head resolves",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — load states (AC-3/AC-5) > renders an error state (not a crash) for a 404 on load (AC-5)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — load states (AC-3/AC-5) > offers a retry on a transient load failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — new mode > renders the New form and hides Publish (owner set only after save)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — new mode > shows an inline name error when saving without a name (INV-8 client guard)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — granting run_python (#505) > ticks run_python in the picker and PATCHes it into the allow-list",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — granting run_python (#505) > shows a tenant-disabled tool as unavailable instead of a silent no-op",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — publish gating (AC-1, ADR-0011 §4) > DISABLES Publish until an owner and a distinct backup owner are set",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — publish gating (AC-1, ADR-0011 §4) > surfaces a 422 from publish INLINE (missing backup owner, INV-8)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/AssistantEditor.test.tsx::AssistantEditor — publish surfaces the new version (#214, E6-7) > shows the version history and adds the newly-frozen version after publish",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — run + debug trace > starts idle with the read-only guarantee stated",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — run + debug trace > runs a sample input and renders the debug trace (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — run + debug trace > surfaces a SIMULATED write and a DENIED run_python (no real side effect)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — run + debug trace > shows an ERROR + retry on a transient failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — run + debug trace > shows an honest 404 with NO retry (non-owned / cross-tenant)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — saved cases (client-side regression) > saves a case and re-runs it, showing a pass verdict",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — saved cases (client-side regression) > shows a FAIL verdict when the expected substring is absent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/components/TestPanel.test.tsx::TestPanel — saved cases (client-side regression) > deletes a saved case",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::testCases store > is empty for an assistant with no saved cases",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::testCases store > upserts and reads back newest-first, scoped per assistant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::testCases store > upsert replaces a case by id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::testCases store > removes a case by id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::testCases store > ignores malformed stored data (degrades to empty)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::verdictFor > is null when the case sets no expectation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/assistants/model/testCases.test.ts::verdictFor > passes when the expected substring is present, fails otherwise",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateCron > accepts a well-formed 5-field expression",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateCron > rejects an empty expression with a friendly message",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateCron > rejects the wrong field count with the count in the message",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateCron > rejects an illegal character in a field, naming the field",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateTimeOfDay > accepts HH:MM",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateTimeOfDay > rejects a malformed time with a friendly message",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateTimezone > accepts a known IANA zone",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateTimezone > rejects an unknown zone with a friendly message",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateTimezone > rejects an empty zone",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::draft ↔ wire round-trip > maps a structured weekly cadence to the wire and back",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::draft ↔ wire round-trip > maps a cron cadence to the wire and back",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::draft ↔ wire round-trip > omits day_of_week/day_of_month for a daily cadence",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::draft ↔ wire round-trip > throws on an invalid cron when converting",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::validateCadence > validates the active mode only",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::describeCadence > describes each structured period",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/cadence.test.ts::describeCadence > describes a cron cadence verbatim",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::param rows > maps a wire input_params object to rows and back",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::param rows > drops empty keys and returns undefined for no rows",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::formFromSchedule > hydrates every editable field from a schedule",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::validateForm > requires an assistant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::validateForm > flags a bad cron and a bad timezone with friendly messages",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::validateForm > passes a well-formed form",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::toCreateBody > builds a create body with delivery, overlap, enabled, and params",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::toCreateBody > omits input_params when there are none",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/form.test.ts::toUpdateBody > sends the full editable head, with an empty params object when cleared",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::assembleAnswer > concatenates delta text in seq order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::assembleAnswer > returns empty for no steps",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::toTranscript > folds non-delta steps into labelled items in seq order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::toTranscript > labels an error step",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::citationToPassage > highlights the whole snippet run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::traceSummary > counts tool calls and citations",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/model/transcript.test.ts::traceSummary > pluralizes correctly with zero",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/EscalationActions.test.tsx::EscalationActions > resumes an escalated run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/EscalationActions.test.tsx::EscalationActions > cancels an escalated run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/EscalationActions.test.tsx::EscalationActions > reroutes to another owner after entering a valid id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/EscalationActions.test.tsx::EscalationActions > keeps reroute disabled until the target id is a valid uuid",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/EscalationActions.test.tsx::EscalationActions > surfaces a 409 (no longer escalated) inline — never a silent no-op (INV-8)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > renders a loading skeleton",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > renders an actionable retry on error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > messages a 404 as existence non-disclosure without a retry (INV-1/INV-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > renders the answer, transcript summary, and outputs on a succeeded run (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > opens a citation into the source inspector (AC-2)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > does not mount a media player for REST citation fields serialized as null",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > surfaces a FAILED run’s typed error prominently — not a blank pane (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunDetail.test.tsx::RunDetail > surfaces an ESCALATED run as needing a human (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunHistory.test.tsx::RunHistory > renders skeleton rows while loading",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunHistory.test.tsx::RunHistory > renders the genuinely-empty state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunHistory.test.tsx::RunHistory > renders an actionable retry on error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunHistory.test.tsx::RunHistory > lists runs with status and assistant name",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunHistory.test.tsx::RunHistory > flags a FAILED run inline — never a quiet row (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunHistory.test.tsx::RunHistory > flags an ESCALATED run as needing a human (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > renders skeleton rows while loading",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > renders the genuinely-empty state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > renders an actionable retry on error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > lists a delivery with its summary and a link to the run (AC-1)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > flags a FAILED delivery inline — never a silent drop (AC-3)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > marks a delivery read via the boundary",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/RunInbox.test.tsx::RunInbox > shows the caught-up empty state under the unread filter",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > renders the assistant picker once the roster loads",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > shows an empty-roster note when the user has no assistants",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > blocks submit and prompts for an assistant when none is picked (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > validates a malformed cron expression with a friendly message (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > validates an unknown timezone with a friendly message (AC-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > creates a schedule with the correct body once valid",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleEditor.test.tsx::ScheduleEditor (create) > maps a server 422 invalid_cron back onto the cadence field (INV-8)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > renders skeleton rows while loading",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > renders the genuinely-empty state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > renders an actionable retry on a generic error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > messages the 401 dead-end without a retry (INV-4)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > renders schedules with the assistant name, cadence, and status",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > pauses an enabled schedule via the toggle (correct call)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > resumes a paused schedule via the toggle (correct call)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > runs a schedule now and surfaces a confirmation toast (correct call)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > surfaces a friendly message when run-now conflicts (409)",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "frontend-workflows::src/features/schedules/components/ScheduleList.test.tsx::ScheduleList > enables Next when a cursor is returned",
+        "outcome": "passed"
+      }
+    ]
+  },
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T21:59:16.526000+00:00",
+  "finished_at": "2026-10-15T21:59:16.528250+00:00",
+  "notes": "frontend tree equals main70c3c2e4 and3c022fcc; branch fixtures0e9fd8f4. Raw JUnit retained at output/qa/777/frontend-workflows.xml. Suite skips are explicit; clean offline skipped9 =8 ordinary live exclusions plus1 known xfail421. A passing suite is not a catalog-area certification."
+}

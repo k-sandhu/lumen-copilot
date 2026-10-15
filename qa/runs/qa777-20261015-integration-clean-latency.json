@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 integration-clean-latency; isolated clean-source integration harness",
+    "kind": "live_local",
+    "browser": null,
+    "models": [
+      "openrouter/inclusionai/ling-3.0-flash"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "fixture": "existing six-question golden corpus; isolated lumentest_qa777_clean_live"
+    },
+    "configuration": {
+      "application_source": "Verified main70c3c2e4 application tree via PYTHONPATH; test fixture commit0e9fd8f4. Earlier raw context incorrectly said3c022fcc; corrected before ledger freeze using source-provenance-correction.json.",
+      "posture": "isolated migration/operator connection, no deployment RLS certification",
+      "LLM_MODEL": "openrouter/inclusionai/ling-3.0-flash",
+      "LLM_EMBEDDING_MODEL": "openai/nvidia/nemotron-3-embed-1b:free",
+      "LLM_EMBEDDING_DIMENSIONS": "2048",
+      "LATENCY_SAMPLES": "5",
+      "CHAT_SUMMARY_ENABLED": "false",
+      "source": "Verified main70c3c2e4 application tree, clean archive at fixture0e9fd8f4; raw context source label corrected by content hashes.",
+      "database": "lumentest_qa777_clean_live",
+      "first_fragment_p50_budget_seconds": 2,
+      "method": "HTTP + ASGI WebSocket relay + real Redis/Postgres/OpenSearch/provider; browser RTT/render excluded"
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-integration-clean-latency",
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T22:38:45.400Z",
+  "finished_at": "2026-10-15T22:38:45.400Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed. Source provenance correction: raw setup notes labelled the clean harness3c022fcc, but its exact tracked application tree is main70c3c2e4. Content hashes and archive tree comparison were checked before freezing this ledger. Mixed dependency components are listed individually.",
+  "results": [
+    {
+      "case_id": "QA-FILL-052",
+      "definition": {
+        "id": "QA-FILL-052",
+        "title": "First-token failure and compaction budgets",
+        "status": "active",
+        "areas": [
+          "QA-AREA-052"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Run existing configured latency/failure/compression harnesses; show the corresponding terminal/context state in Chrome.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Configured first-token and terminal-failure budgets pass; compression preserves cited evidence.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "53957e6be6059aa55780d3d13916b68420aaefdcdaf025c1fccfa836fed484cf",
+      "outcome": "failed",
+      "reason": "Cached embedding client outlives its event loop (#780), preventing the configured latency harness from reaching measurement.",
+      "residual_risk": "First-token budget has no valid live result; modified Eval terminal-failure timing is not transferred to canonical configuration.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Existing compression/fragment/budget tests passed. Clean canonical live quality passed, but latency setup hit a reproducible embedding-client closed-event-loop failure across production run_task calls, so no valid first-token sample was measured. Separate modified Eval unreachable-provider test terminated in 25.062 seconds within 30-second budget.",
+          "observed": {
+            "evidence": "golden-latency-clean-live.xml; embedding-task-tracked.json; golden-latency-live.xml",
+            "issue": 780
+          },
+          "captured_at": "2026-10-15T22:38:45.400Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "embedding-task-tracked.json",
+          "path": "output/qa/777/embedding-task-tracked.json",
+          "sha256": "73ffbb91925af96843d3726cec2215916b9e61a3bde19f3fa320d6c62eb5fac6"
+        },
+        {
+          "kind": "artifact",
+          "description": "golden-latency-clean-live.xml",
+          "path": "output/qa/777/golden-latency-clean-live.xml",
+          "sha256": "2a75a19354e7ac77168e00584282f1e06c4924c9c3774174cffcb061c40233e0"
+        },
+        {
+          "kind": "artifact",
+          "description": "golden-latency-live.xml",
+          "path": "output/qa/777/golden-latency-live.xml",
+          "sha256": "762ceb9e3d38fd4778e183e7f21816fb7674706dc4c67dab5f865e880582b912"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/780"
+      ]
+    }
+  ]
+}

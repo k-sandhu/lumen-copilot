@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04",
+    "source_state": "clean",
+    "images": [
+      {
+        "service": "backend",
+        "digest": "sha256:60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6"
+      },
+      {
+        "service": "worker",
+        "digest": "sha256:60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6"
+      },
+      {
+        "service": "media-worker",
+        "digest": "sha256:60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6"
+      },
+      {
+        "service": "beat",
+        "digest": "sha256:60ab7f9168052e3b82af97ee43abce1c77d806c7c40043126ec9b52a6bd172d6"
+      },
+      {
+        "service": "frontend",
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6"
+      }
+    ]
+  },
+  "environment": {
+    "label": "QA777 fresh canonical latest-main smoke after completed older-runtime soak",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/inclusionai/ling-3.0-flash"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "tenants": [
+        "QA 777 Functional Alpha",
+        "QA 777 Functional Beta"
+      ],
+      "principals": [
+        "owner/admin/security",
+        "backup/member",
+        "member",
+        "security/member",
+        "foreign admin/member"
+      ],
+      "fixture_scope": "new synthetic QA 777 data only; existing Acme and Eval data retained",
+      "new_fixture": "Existing tracked qa-silver-maple.txt uploaded into new QA777 private collection context; no existing real data modified."
+    },
+    "configuration": {
+      "llm_model": "openrouter/inclusionai/ling-3.0-flash",
+      "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+      "embedding_dimensions": 2048,
+      "access_lifetime_seconds": 900,
+      "refresh_lifetime_seconds": 1209600,
+      "summaries_enabled": true,
+      "summary_keep_messages": 4,
+      "summary_min_batch": 2,
+      "sandbox_enabled": true,
+      "web_search_enabled": true,
+      "search_index": "lumen-chunks-v2",
+      "base_url": "http://localhost:47180",
+      "db_posture": "existing standard local compose connection; role not changed, no RLS backstop certification",
+      "source_reference": "Exact main70c3c2e4 Git archive, all205Python files compared by hash, no source mounts; dependencies inherited unchanged from prior pinned image.",
+      "coverage_limit": "Fresh readiness and one grounded citation atomic case only; older39residual results not inherited."
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-latest-main-smoke",
+  "definitions": {
+    "commit": "f97c896ee2875f47f8f4fa69ec71936f4846c40d",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "b4d0d6c2803e32d73cd0f1ac763341ffd19a0e2898040e072da796080eb706d7"
+  },
+  "started_at": "2026-10-15T23:37:39.599Z",
+  "finished_at": "2026-10-15T23:38:53.109Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed. Fresh smoke after restarting canonical services on exact main70c3c2e4. Earlier39residual checks and two-hour soak remain tied to their older recorded runtime/context; no automatic transfer to this new image.",
+  "results": [
+    {
+      "case_id": "QA-CHAT-001",
+      "definition": {
+        "id": "QA-CHAT-001",
+        "title": "Grounded fact and inline citation",
+        "status": "active",
+        "areas": [
+          "QA-AREA-005",
+          "QA-AREA-049",
+          "QA-AREA-044"
+        ],
+        "steps": [
+          "Ask: According to qa-silver-maple.txt, what is Project Silver Maple's launch code and launch date? Answer briefly and cite the source.",
+          "Wait for the completed answer and open its inline citation."
+        ],
+        "expected": "Answer gives QA-OCT15-7429 and 24 October 2035; citation resolves to the permitted supporting passage from qa-silver-maple.txt.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "f3531cfa5c1682d79d1fee304ec9107baa2cd419a0485e92d82839c30a221c8a",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Normal Chrome on restarted exact main70c3c2e4 uploaded the committed qa-silver-maple.txt into the QA777 private collection; Ready1chunk. Launched published EvidenceWorkbenchv4 and asked the exact committed atomic question. Answer gave QA-OCT15-7429 and24October2035 with S2; opened its inline citation and verified the full supporting passage. API read-back retains one citation and exact facts; ownertext200, member/foreign404. This fresh atomic smoke does not transfer the earlier39residual outcomes or certify stochastic follow-up behavior.",
+          "observed": {
+            "evidence": "latest-main-grounded-readback.json; latest-main-context.json; latest-main-final-state.json",
+            "screenshots": "latest-main-silver-ready.jpg; latest-main-supported-citation.jpg",
+            "document_id": "d5d72adf-f71e-419a-84d1-13b6df5ceabd",
+            "session_id": "1626a5bf-62f8-4055-84a6-776d493bb320",
+            "assistant_version": 4,
+            "owner_status": 200,
+            "member_status": 404,
+            "foreign_status": 404
+          },
+          "captured_at": "2026-10-15T23:38:53.109Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-context.json",
+          "path": "output/qa/777/latest-main-context.json",
+          "sha256": "fee3d142a89ddea856c6ea63f99a41a7dcf394b6e96163b278d533087620c296"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-final-state.json",
+          "path": "output/qa/777/latest-main-final-state.json",
+          "sha256": "c7b00c5c2025489bec66050da080d1fe8374bdf371fde94ad0c9bdb8c20ca17d"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-grounded-readback.json",
+          "path": "output/qa/777/latest-main-grounded-readback.json",
+          "sha256": "4966cea6fc0437421a50b45637354825e356514079e24973c1bc2bfa6faa97a0"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-silver-ready.jpg",
+          "path": "output/qa/777/latest-main-silver-ready.jpg",
+          "sha256": "ea7ce966017274727d8f4d22131a3be18fcdaa551bc9da97a76e7de1122d9006"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-supported-citation.jpg",
+          "path": "output/qa/777/latest-main-supported-citation.jpg",
+          "sha256": "b7aa22cb899a2ab42ee05ffc952f6c02678e69c0a1db54d7f32862ea22762a2f"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-RUNTIME-001",
+      "definition": {
+        "id": "QA-RUNTIME-001",
+        "title": "Dependency readiness",
+        "status": "active",
+        "areas": [
+          "QA-AREA-035"
+        ],
+        "steps": [
+          "GET /health/ready through the frontend proxy."
+        ],
+        "expected": "HTTP 200 JSON with status ready and a nonempty dependency list in which every ok flag is true.",
+        "method": "http_smoke",
+        "references": [
+          "docs/qa/README.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "e2c61959f0a2594c8f55153daaa6b106c5b460e7078581f92a4b29308fc89e8c",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "After the completed prior-runtime soak, Compose restarted backend/worker/media-worker/beat on exact main70c3c2e4 image60ab7f91 with all205Python files verified and no source mounts. Environment values match the preceding runtime; database volumes retained; unchanged frontend image restarted. GET/health/ready through frontend proxy returned200 ready with all6dependencies ok.",
+          "observed": {
+            "evidence": "latest-restart-after.json; latest-main-image-verification.json; latest-main-readiness.json",
+            "application_commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+          },
+          "captured_at": "2026-10-15T23:37:39.599Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-image-verification.json",
+          "path": "output/qa/777/latest-main-image-verification.json",
+          "sha256": "942855713f876d372f8724b420dbb0a0d75a10342790eae6ca28f445ee8203ff"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-main-readiness.json",
+          "path": "output/qa/777/latest-main-readiness.json",
+          "sha256": "d918609e140dedb04e489c02a57fa202579c77a908ac606529309a810618b80d"
+        },
+        {
+          "kind": "artifact",
+          "description": "latest-restart-after.json",
+          "path": "output/qa/777/latest-restart-after.json",
+          "sha256": "7bdc5206084fa50c67668df3ab7084c3f5c71d0726953c1af8ded4ff8442028a"
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}

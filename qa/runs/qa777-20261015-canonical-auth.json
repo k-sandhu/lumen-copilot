@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "images": [
+      {
+        "digest": "sha256:5cc09be8b6c5c697636d83f6d25680599728ef0295a09fbd6f2b14066719fe5e",
+        "service": "backend"
+      },
+      {
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6",
+        "service": "frontend"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "environment": {
+    "label": "QA777 functional Alpha/Beta on existing canonical local configuration",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/inclusionai/ling-3.0-flash"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "tenants": [
+        "QA 777 Functional Alpha",
+        "QA 777 Functional Beta"
+      ],
+      "principals": [
+        "owner/admin/security",
+        "backup/member",
+        "member",
+        "security/member",
+        "foreign admin/member"
+      ],
+      "fixture_scope": "new synthetic QA 777 data only; existing Acme and Eval data retained"
+    },
+    "configuration": {
+      "llm_model": "openrouter/inclusionai/ling-3.0-flash",
+      "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+      "embedding_dimensions": 2048,
+      "access_lifetime_seconds": 900,
+      "refresh_lifetime_seconds": 1209600,
+      "summaries_enabled": true,
+      "summary_keep_messages": 4,
+      "summary_min_batch": 2,
+      "sandbox_enabled": true,
+      "web_search_enabled": true,
+      "search_index": "lumen-chunks-v2",
+      "base_url": "http://localhost:47180",
+      "db_posture": "existing standard local compose connection; role not changed, no RLS backstop certification",
+      "source_reference": "exact baked images verified by prior clean-3c022fcc baseline; no application source mounts or changed .py files in container diff"
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-canonical-auth",
+  "definitions": {
+    "commit": "aca946cf207b043613fcc7a4c6d9cbae321324f5",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "b4d0d6c2803e32d73cd0f1ac763341ffd19a0e2898040e072da796080eb706d7"
+  },
+  "started_at": "2026-10-15T22:35:17.977Z",
+  "finished_at": "2026-10-15T22:51:15.830Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed. Chrome expiry method was executed after definitionaca946cf. Supplementary HTTP auth/preference negatives were captured earlier at21:37UTC using unchanged negative criteria from definition2d2f2517 on the same recorded application/configuration; they are not claimed as a new HTTP execution afteraca946cf.",
+  "results": [
+    {
+      "case_id": "QA-FILL-001",
+      "definition": {
+        "id": "QA-FILL-001",
+        "title": "Short-lived sessions and token negatives",
+        "status": "active",
+        "areas": [
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Use a short QA access lifetime where that application can log in, or wait the existing configured lifetime in synthetic functional accounts. Verify Chrome after actual expiry; exercise expired/invalid access, refresh rotation/replay and logout revocation with the auth harness. Record the exact lifetime and keep any hardened-login failure separate.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Expired/invalid access is 401; used/revoked refresh is denied; legitimate refresh and Chrome recovery work.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "469307a9c3e5da83d67e619f226453e83773fb000ad29aa307c62d498d4689de",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "900-second configured access lifetime: Chrome tabs held offline 920.254/912.915 seconds then concurrent protected requests produced real401→refresh200→retry200 and Documents in both. Logout204 followed by other-tab reload refresh401 returned login. Real HTTP expired/invalid/missing access401, rotation200, replayed old refresh401 and post-logout refresh401 all passed. Hardened-role login failure retained in its separate #644 run.",
+          "observed": {
+            "evidence": "auth-expiry-start.json; auth-expiry-restore.json; auth-concurrent-expiry.json; auth-logout-browser.json; auth-preferences-live.json",
+            "access_lifetime_seconds": 900
+          },
+          "captured_at": "2026-10-15T22:51:15.829Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-concurrent-expiry.json",
+          "path": "output/qa/777/auth-concurrent-expiry.json",
+          "sha256": "5e1c7d1cafd379ab8a2113f71af99518191c50513dcf8b775ffb423952589346"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-expiry-restore.json",
+          "path": "output/qa/777/auth-expiry-restore.json",
+          "sha256": "ea11ce498bfffbe47a60d01cdab47addc07701b0ae7372c883d62693b4c52fd2"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-expiry-start.json",
+          "path": "output/qa/777/auth-expiry-start.json",
+          "sha256": "f81607e848b67a60b2fd0f0f41609c9999f446d743bd697078401f0a22ffa5fa"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-logout-browser.json",
+          "path": "output/qa/777/auth-logout-browser.json",
+          "sha256": "f401f57b4525ae884b6d3978ad4cf93701589100c35f1d3c5a81670e196da88b"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-preferences-live.json",
+          "path": "output/qa/777/auth-preferences-live.json",
+          "sha256": "e9b693f7cb23fd06feef5c04944e98f169a4d8c1c230ebcaa7c7b1f8304ce874"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-FILL-037",
+      "definition": {
+        "id": "QA-FILL-037",
+        "title": "Forced 401 refresh retry",
+        "status": "active",
+        "areas": [
+          "QA-AREA-037"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Allow access expiry in the isolated app, trigger frontend requests, and run client refresh/retry/header tests.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "One valid rotation/retry recovers with correct credentials; invalid/revoked refresh returns to login.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "a636bdbae94be90a55babd548f3994ab43c78b2a03e4b899a99f4d50824c6018",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Both existing Chrome tabs made protected expired-access requests, refreshed once per tab and retried successfully. Logout then another-tab reload produced refresh401 and a stable login screen. Frontend refresh single-flight/credentials/header/retry assertions also passed.",
+          "observed": {
+            "evidence": "auth-concurrent-expiry.json; auth-logout-browser.json; frontend-residual.xml"
+          },
+          "captured_at": "2026-10-15T22:51:15.830Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-concurrent-expiry.json",
+          "path": "output/qa/777/auth-concurrent-expiry.json",
+          "sha256": "5e1c7d1cafd379ab8a2113f71af99518191c50513dcf8b775ffb423952589346"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-logout-browser.json",
+          "path": "output/qa/777/auth-logout-browser.json",
+          "sha256": "f401f57b4525ae884b6d3978ad4cf93701589100c35f1d3c5a81670e196da88b"
+        },
+        {
+          "kind": "artifact",
+          "description": "frontend-residual.xml",
+          "path": "output/qa/777/frontend-residual.xml",
+          "sha256": "cba2f1f1151210687ccbda82913fe7aa6f5cc291b13d76893d97bbc34ae2c3a3"
+        }
+      ],
+      "bugs": []
+    },
+    {
+      "case_id": "QA-FILL-066",
+      "definition": {
+        "id": "QA-FILL-066",
+        "title": "Concurrent expired refresh",
+        "status": "active",
+        "areas": [
+          "QA-GAP-014"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Wait the configured access lifetime (or a supported shorter QA lifetime), then trigger requests in multiple normal Chrome tabs plus deterministic refresh-race tests. Record actual expiry and lifetime without changing database roles.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Tabs recover or reach the documented login state without a persistent loop; rotation/replay assertions hold.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "42381d93504b30a4d65e2e8a7a6b51bf2ffa26bf7e39b075acae428b8885bf71",
+      "outcome": "passed",
+      "reason": "",
+      "residual_risk": "",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Restored two normal Chrome tabs after >900-second offline expiry, triggered protected navigation concurrently, captured401→refresh200→retry200 in each, and both rendered correct same-tenant Documents without a loop. Deterministic refresh-race/rotation and old-refresh replay negatives passed separately. This is a bounded two-tab timing observation, not all possible race interleavings.",
+          "observed": {
+            "evidence": "auth-concurrent-expiry.json; auth-expiry-restore.json; auth-preferences-live.json; frontend-residual.xml"
+          },
+          "captured_at": "2026-10-15T22:51:15.830Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-concurrent-expiry.json",
+          "path": "output/qa/777/auth-concurrent-expiry.json",
+          "sha256": "5e1c7d1cafd379ab8a2113f71af99518191c50513dcf8b775ffb423952589346"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-expiry-restore.json",
+          "path": "output/qa/777/auth-expiry-restore.json",
+          "sha256": "ea11ce498bfffbe47a60d01cdab47addc07701b0ae7372c883d62693b4c52fd2"
+        },
+        {
+          "kind": "artifact",
+          "description": "auth-preferences-live.json",
+          "path": "output/qa/777/auth-preferences-live.json",
+          "sha256": "e9b693f7cb23fd06feef5c04944e98f169a4d8c1c230ebcaa7c7b1f8304ce874"
+        },
+        {
+          "kind": "artifact",
+          "description": "frontend-residual.xml",
+          "path": "output/qa/777/frontend-residual.xml",
+          "sha256": "cba2f1f1151210687ccbda82913fe7aa6f5cc291b13d76893d97bbc34ae2c3a3"
+        }
+      ],
+      "bugs": []
+    }
+  ]
+}

@@ -1,0 +1,4159 @@
+{
+  "schema_version": 1,
+  "application": {
+    "images": [],
+    "source_state": "clean",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 clean-backend-offline",
+    "kind": "ci_offline",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "raw_junit_sha256": "b817cafc9ce1b3b7c3b20faf7f42efec55e5f02a85ffdde1f3d8fd586a454942"
+    },
+    "configuration": {
+      "scope": "verified main70c3c2e4 app tree; test fixtures0e9fd8f4",
+      "test_source_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313"
+    }
+  },
+  "ci": null,
+  "kind": "suite",
+  "run_id": "qa777-20261015-suite-clean-backend-offline",
+  "suite": {
+    "name": "clean-backend-offline",
+    "outcome": "passed",
+    "reason": "",
+    "counts": {
+      "passed": 1019,
+      "failed": 0,
+      "errored": 0,
+      "skipped": 9
+    },
+    "tests": [
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_compression::test_post_compaction_answer_stays_grounded_and_citation_correct",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_compression::test_gate_fails_when_compaction_drops_cited_evidence",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_overlap_matches_substring_either_direction",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_overlap_is_whitespace_and_case_insensitive",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_overlap_blank_never_matches",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_grounded_answer_with_citation_passes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_unsupported_claim_fails_groundedness",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_honest_refusal_with_no_citation_is_grounded",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_refusal_with_citations_fails_groundedness",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_correct_citation_to_expected_permitted_source_passes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_citation_to_non_permitted_passage_fails_inv3",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_citation_to_wrong_document_fails",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_no_citation_fails_correctness_for_answerable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_recall_true_when_supporting_passage_retrieved",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_metrics::test_recall_false_when_supporting_passage_absent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_offline::test_offline_eval_meets_thresholds",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_offline::test_offline_eval_refusal_item_has_zero_citations",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_offline::test_offline_eval_catches_an_ungrounded_answer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_summary::test_summarized_session_follow_up_stays_grounded_and_cited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.eval.test_eval_summary::test_gate_fails_when_the_evidence_digest_is_dropped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifact_retention::test_purge_removes_only_expired_rows_and_objects",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifact_retention::test_purge_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifact_retention::test_purge_is_tenant_scoped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_list_returns_only_callers_artifacts",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_list_filters_by_session_and_produced_by",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_list_cursor_pagination_walks_all_pages",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_get_artifact_returns_metadata",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_content_redirects_302_to_presigned_url",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_content_streams_inline_when_redirect_disabled",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_delete_removes_row_and_object",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_content_emits_artifact_downloaded_audit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_delete_emits_artifact_deleted_audit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_get_other_owner_same_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_get_cross_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_content_other_owner_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_delete_cross_tenant_is_404_and_leaves_row_and_object",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_list_excludes_other_owners_for_member",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_list_without_token_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_get_with_malformed_token_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_get_malformed_uuid_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_artifacts_api::test_delete_malformed_uuid_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_draft_returns_valid_config",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_missing_scope_surfaces_clarification",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_unknown_tool_and_foreign_scope_are_omitted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_high_risk_tool_surfaces_warning",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_disabled_gateway_degrades_to_minimal_draft",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_blank_description_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_draft_api::test_draft_requires_auth",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_admin_certifies_assistant_and_reads_back",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_admin_deprecates_and_features_assistant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_disabled_assistant_cannot_start_chat",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_disabled_assistant_cannot_be_scheduled",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_reenable_returns_assistant_to_draft",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_ownership_transfer_to_member",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_ownership_transfer_to_non_member_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_orphaned_assistant_flagged_and_bulk_disabled",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_non_admin_governance_mutation_is_403[post-/certify-payload0]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_non_admin_governance_mutation_is_403[post-/feature-payload1]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_non_admin_governance_mutation_is_403[post-/disable-payload2]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_non_admin_governance_mutation_is_403[post-/transfer-ownership-payload3]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_non_admin_list_and_bulk_are_403",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_governance_mutation_unauthenticated_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_cross_tenant_certify_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_unknown_governance_ids_emit_one_action_specific_denial_each",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_governance_denial_propagates_audit_failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_certify_emits_audit_event",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_ownership_transfer_is_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_governance_api::test_disable_emits_audit_event",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_write_file_is_simulated_no_artifact_or_transcript",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_run_python_is_denied_no_code_run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_debug_trace_has_prompt_retrieval_tools_outputs_timing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_cross_tenant_assistant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_non_owner_assistant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_unknown_assistant_is_404_with_exactly_one_safe_denial",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_test_denial_fails_closed_when_durable_audit_is_unavailable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_admin_may_test_any_assistant_in_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_test_run_is_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistant_test_service::test_preview_with_two_reads_stays_on_the_one_rollback_session",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_create_get_list_update_delete",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_create_rejects_blank_name",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_publish_blocked_without_backup_owner",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_publish_blocked_when_backup_equals_owner",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_publish_with_backup_owner_creates_version",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_unknown_tool_in_allowlist_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_known_tool_in_allowlist_is_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_update_rejects_unknown_tool",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_assistant_may_allowlist_its_own_mcp_tool",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_bogus_mcp_tool_name_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_cross_owner_mcp_tool_name_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_cross_tenant_mcp_tool_name_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_scope_unowned_collection_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_scope_group_granted_collection_is_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_scope_owned_collection_is_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_scope_granted_collection_is_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_scope_unowned_source_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_cross_tenant_get_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_non_owner_same_tenant_get_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_denial_does_not_commit_the_callers_transaction",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_tenant_admin_may_manage_others",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_mutations_are_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_rollback_appends_new_version_from_prior_snapshot",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_rollback_unknown_version_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_assistants_service::test_list_versions_cross_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_returns_token_and_sets_refresh_cookie",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_me_returns_current_user_after_login",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_refresh_rotates_and_old_token_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_logout_revokes_refresh_token",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_me_without_token_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_me_with_malformed_token_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_me_with_wrong_scheme_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_wrong_password_is_generic_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_unknown_account_is_same_generic_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_missing_password_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_empty_password_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_unknown_field_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_require_roles_blocks_wrong_role_with_403",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_require_roles_admits_correct_role",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_login_does_not_stall_the_event_loop",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_api::test_unknown_account_login_does_not_stall_the_event_loop",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_default_embedding_route_and_dimension_are_one_contract",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_embedding_fingerprint_changes_for_same_width_model_or_provider",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_access_ttl_ceiling_is_enforced",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_access_ttl_at_ceiling_is_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_dev_jwt_secret_rejected_outside_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_dev_jwt_secret_allowed_in_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_overridden_secret_boots_in_production",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_http_oauth_urls_rejected_outside_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_blank_gdrive_client_rejected_outside_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_blank_gdrive_client_allowed_in_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_dev_secrets_key_rejected_outside_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_dev_secrets_key_allowed_in_local",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_malformed_secrets_key_is_rejected_at_boot",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_valid_overridden_secrets_key_boots",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_version_is_sourced_from_package_single_source",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_negative_headroom_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_nonpositive_fallback_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_headroom_not_below_window_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_budget_margin_gap_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_valid_budget_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_compaction_knobs_reject_nonpositive",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_context_compaction_knobs_accept_valid",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_chat_tool_concurrency_defaults_and_rejects_out_of_range",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_config::test_chat_prompt_cache_kill_switch_defaults_on",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_hash_password_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_hash_password_salts_per_call",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_password_rejects_wrong_and_malformed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_dummy_verify_does_not_raise",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_password_async_matches_the_sync_result",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_password_async_runs_off_the_event_loop_thread",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_dummy_verify_async_still_pays_the_cost_off_the_loop",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verification_concurrency_is_bounded_by_a_dedicated_pool",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_both_login_paths_share_one_verification_queue",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_refresh_token_is_opaque_and_unique",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_refresh_token_hash_is_deterministic_and_hides_token",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_mint_then_verify_round_trips_claims",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_rejects_garbage_token",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_rejects_wrong_signature",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_rejects_wrong_issuer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_rejects_expired_token",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_rejects_missing_required_claims",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_verify_rejects_non_uuid_subject",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_auth_tokens::test_access_token_actually_expires_at_runtime",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_autonomy_rank_is_totally_ordered",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_clamped_to_lowers_but_never_raises",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_service_default_is_no_ceiling",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_service_set_and_reader_clamp",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_reader_is_tenant_scoped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_upsert_is_a_singleton",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_publish_rejected_above_cap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_publish_allowed_at_or_below_cap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_effective_autonomy_reflects_the_cap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_autonomy_policy::test_effective_autonomy_isolated_across_tenants",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_grounded_answer_full_lifecycle",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_citation_persisted_and_reloadable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_zero_citation_answer_is_honest",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_empty_model_answer_falls_back_to_honest_message",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_fallback_text_retracted_when_persistence_fails",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_tool_budget_exhaustion_forces_a_synthesized_answer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_per_tenant_override_caps_tool_turns",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_gateway_failure_ends_with_single_terminal_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_retrieval_and_answer_audit_events_emitted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_run_python_seam_wired_when_allowed_but_gated_by_approval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ad_hoc_session_never_wires_run_python_seam",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_custom_instructions_prepended_before_grounding",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_no_custom_instructions_leaves_bare_grounded_prompt",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_context_assembler_trims_history_end_to_end",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_oversized_tool_results_never_exceed_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_forced_synthesis_payload_is_budget_guarded",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_loop_compacts_old_results_and_answers_instead_of_refusing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_usage_summed_reported_and_recorded_with_cache_fields",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_usage_row_zeroed_when_provider_omits_usage_and_is_tenant_scoped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_step_events_bracket_the_run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_ends_turn_as_question",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_mixed_batch_executes_nothing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_malformed_recovers_to_normal_answer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_not_intercepted_when_non_interactive",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_emitted_after_answer",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_use_dedicated_model_not_the_answer_route",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_usage_attributed_to_the_dedicated_model",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_row_ledger_linkage_and_read_semantics",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_spend_recorded_on_parse_miss",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_default_to_the_answer_route_when_unconfigured",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_failure_is_silent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_turn_skips_suggestions",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_parse_suggestions_accepts_fenced_and_prose_json",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_parse_bounds",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_session_usage_totals_and_last",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_input_budget_for_model_matches_assembler_formula",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_pinned_document_ids_reach_retrieval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_hybrid_body_carries_document_terms_in_both_legs",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_not_intercepted_when_not_in_allowlist",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_ask_user_parse_hardening_round2",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_parse_suggestions_accepts_object_envelope",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_suggestions_skipped_for_no_sources_fallback",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_context_prompt_tokens_records_final_turn_not_billing_sum",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_concurrent_searches_overlap_and_transcript_keeps_call_order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_mid_batch_failure_keeps_dispatch_ordinals_and_full_trace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_hanging_call_times_out_alone_without_stalling_the_batch",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_concurrent_calls_get_isolated_sessions_not_the_runtime_session",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_side_effecting_call_serializes_after_the_read_only_batch",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_tool_concurrency_cap_bounds_parallelism",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cap_of_one_is_the_genuinely_serial_pre_412_path",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_denial_only_batch_opens_no_call_scopes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_scope_failure_reaps_cancelled_peer_without_waiting_on_failed_ordinal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_mid_batch_cancellation_aborts_atomically_with_one_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_transient_fault_retries_and_answers_normally",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_exhausted_primary_fails_over_and_records_actual_model",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_all_routes_exhausted_is_one_typed_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_terminal_fault_fails_fast_no_retry_no_fallback",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_retry_after_hint_stretches_and_caps_the_backoff",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_length_truncated_answer_gets_one_continuation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_still_truncated_continuation_is_accepted_once",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_midstream_fault_discards_partial_and_retries_cleanly",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_fallback_first_call_gets_refit_transcript",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_zero_text_length_turn_still_gets_continuation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_raw_config_bypass_is_capped_and_revalidated_at_runtime",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_done_payload_validates_against_the_canonical_contract",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_pending_done_and_post_terminal_suggestions_validate_the_contract",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_done_carries_the_server_suggestions_grace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_plain_done_omits_the_suggestions_grace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_spend_is_salvaged_when_all_routes_exhaust",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_salvage_disarmed_after_commit_no_dup_on_terminal_publish_failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_salvage_disarmed_after_commit_no_dup_on_post_commit_cancellation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_terminal_publish_failure_before_write_still_emits_a_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_terminal_publish_failure_after_write_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_anonymous_provider_fallback_is_not_skipped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_malformed_fallback_container_does_not_break_answers",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_continuation_never_fails_over_and_degrades_to_the_partial",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_keeps_send_time_cursor_when_summary_changes[True]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_keeps_send_time_cursor_when_summary_changes[False]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_summary_rides_the_prompt_between_system_and_history",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_evidence_digest_rehydrates_and_targets_get_document",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_revoked_evidence_is_silently_stripped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cited_answer_writes_the_evidence_digest",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_summary_segment_is_shed_before_refusal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_summary_injection_rides_as_data_not_system",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_mentioned_name_of_revoked_document_is_redacted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_rehydration_through_the_real_retrieval_service",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_run_reports_answer_outcome_for_enqueue_gating",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_interactive_timeout_bounds_a_hung_provider",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_interactive_budget_default_meets_the_30s_bound",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_interactive_timeout_bounds_a_hung_provider_at_the_max_override",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_a_slow_terminal_publish_still_lands_within_the_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_a_stalled_terminal_publish_degrades_within_the_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_interactive_max_attempts_caps_the_retry_ladder",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_tool_turn_narration_streams_before_tool_events",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_narration_closes_the_retry_window",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_narration_payload_validates_against_the_contract",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_signal_then_fault_closes_the_window_without_assembled_calls",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_signal_only_fault_closes_the_window",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cache_kpi_emitted_once_with_ratio",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cache_kpi_emitted_on_ask_user_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cache_kpi_emitted_without_usage_as_unreported",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cache_kpi_not_emitted_on_error_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cache_kpi_not_emitted_when_commit_fails",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_cache_key_is_the_session_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_answer_deltas_are_coalesced_without_changing_the_text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_a_pending_buffer_is_flushed_before_the_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_pending_narration_is_flushed_before_a_terminal_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_the_elapsed_deadline_flushes_before_the_character_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_lone_chunk_flushes_on_its_deadline_across_a_provider_stall",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_coalescing_is_disabled_by_a_zero_character_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_narration_is_coalesced_and_still_precedes_the_tool_events",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_a_long_answer_fits_the_bounded_replay_for_a_late_subscriber",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_answer_turn_streams_live_before_its_think_completed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_forced_synthesis_streams_live_before_its_think_completed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_speculative_text_retracted_when_the_turn_calls_a_tool",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_retraction_keeps_the_retry_window_open_across_live_streaming",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_retraction_discards_the_pending_coalesce_buffer_without_racing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_speculative_answer_retracted_on_terminal_fault",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_speculative_answer_retracted_on_interactive_timeout",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_answer_max_tokens_is_threaded_into_stream_tools",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_only_answer_keeps_source_provenance[citation-answer]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_only_answer_keeps_source_provenance[citation-question]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_only_answer_keeps_source_provenance[citation-forced]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_only_answer_keeps_source_provenance[mention-answer]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_only_answer_keeps_source_provenance[mention-question]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_chat_runtime::test_recall_only_answer_keeps_source_provenance[mention-forced]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_audit_snapshot_rejects_foreign_tenant_before_insert",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_audit_sink_rejects_foreign_tenant_snapshot_before_insert",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_tool_invocation_snapshot_rejects_foreign_tenant_before_insert",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_invocation_recovery_retains_only_locked_tenant_session_references",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_context_audit_sink_preserves_explicit_event_identity[False]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_context_audit_sink_preserves_explicit_event_identity[True]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_context_audit_sink_keeps_only_deep_copied_nondurable_records",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_context_restore_failure_emits_internal_error_without_committing_turn",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_audit_snapshots::test_simulated_context_rejection_skips_recovery_commit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_digests_superseded_cited_results_and_spares_the_newest",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_preserves_cited_snippet_beyond_digest_chars",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_leaves_cited_result_verbatim_when_snippet_dominates",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_is_off_by_default_in_the_assembler",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_never_compacts_the_only_tool_group",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_leaves_uncited_superseded_results_verbatim",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_does_not_break_citation_resolution_records",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_proactive_is_idempotent_across_turns",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_memoizing_counter_makes_fit_incremental_per_turn",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_context_proactive::test_memoizing_counter_returns_identical_counts",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_ingestion_locations_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_metadata_covers_every_mvp_table",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_every_revision_id_fits_alembic_version_column",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_migration_chain_is_linear_single_head",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_evidence_handles_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_reusable_sandbox_session_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_upgrade_sql_has_all_tables_and_vector_and_revoke",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_downgrade_sql_drops_all_tables",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_refresh_tokens_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_retrieval_indexes_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_embedding_contract_migration_is_lossless_and_reversible",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_audit_query_indexes_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_sources_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tenancy_rls_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_grants_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tenant_max_tool_turns_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tool_invocations_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_artifacts_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_secrets_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_assistants_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_runs_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_schedules_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_code_runs_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_mcp_servers_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tenant_tool_policy_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tenant_sandbox_policy_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_audit_index_names_match_model_and_migration",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_live_upgrade_then_downgrade_round_trip",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_live_embedding_upgrade_downgrade_preserves_both_vector_sets",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_live_embedding_migration_odd_state_matrix_is_explicit_and_lossless",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tenant_autonomy_policy_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_user_settings_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_toolinv_trace_migrations_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_llm_usage_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_tenant_fallback_models_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_llm_usage_answer_id_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_session_summaries_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_gdrive_acl_migration_drops_the_mode_default",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_db_migration::test_offline_direct_media_upload_migration_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_direct_upload_contract_admission_has_no_side_effects_and_recovers[embedding_dimension_mismatch]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_direct_upload_contract_admission_has_no_side_effects_and_recovers[embedding_space_changed]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_direct_upload_contract_gate_preserves_ownership_and_input_checks[True-audio/mpeg-1-404]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_direct_upload_contract_gate_preserves_ownership_and_input_checks[False-text/html-1-415]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_direct_upload_contract_gate_preserves_ownership_and_input_checks[False-audio/mpeg-0-422]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_direct_upload_contract_gate_preserves_ownership_and_input_checks[False-audio/mpeg-6442450944-413]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_legacy_binary_path_is_authenticated_410_without_file_parsing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiate_sign_complete_is_idempotent_and_hides_provider_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_rejects_foreign_collection_type_and_oversize",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[meeting.MP3-audio/mp3-audio/mpeg]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[voice.wav-audio/vnd.wave-audio/wav]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[voice.wav-audio/x-wav-audio/wav]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[recording.m4a-audio/x-m4a-audio/mp4]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[recording.flac-application/octet-stream-audio/flac]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[audio-only.mp4-audio/mp4-audio/mp4]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[camera.mp4-video/mp4; codecs=avc1-video/mp4]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[audio-only.webm-audio/webm-audio/webm]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_canonicalizes_only_safe_filename_mime_aliases[camera.webm-video/webm-video/webm]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_rejections_are_audited_and_never_reach_storage",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_provider_absence_retains_lifecycle_error_instead_of_permission_denial[list_multipart_parts-get]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_provider_absence_retains_lifecycle_error_instead_of_permission_denial[list_multipart_parts-complete]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_provider_absence_retains_lifecycle_error_instead_of_permission_denial[complete_multipart_upload-get]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_provider_absence_retains_lifecycle_error_instead_of_permission_denial[complete_multipart_upload-complete]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_janitor_expires_missing_provider_without_permission_denial",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_missing_foreign_and_nonowned_upload_controls_are_hidden_audited_and_io_free",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_invalid_part_requests_and_manifests_are_durably_audited_without_mutation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_initiation_locks_collection_against_concurrent_delete",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_storage_outages_return_opaque_503_across_upload_control_plane",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_foreign_media_access_and_transcript_are_hidden_and_durably_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_upload_session_is_owner_tenant_hidden_and_abort_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_completion_size_mismatch_fails_session_and_never_enqueues",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_completion_metadata_mismatch_fails_closed_and_commits_safe_audit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_illegal_upload_state_attempts_are_audited_without_further_storage_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_completion_recovers_after_provider_success_process_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_collection_delete_after_completion_commit_returns_audited_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_janitor_isolates_late_part_mutation_and_commits_terminal_audit[invalid_provider_part_layout]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_janitor_isolates_late_part_mutation_and_commits_terminal_audit[incomplete_provider_parts]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_janitor_isolates_late_part_mutation_and_commits_terminal_audit[invalid_provider_part_etag]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_get_recovers_crash_after_durable_boundary_before_provider_completion",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_expiry_transition_and_audit_commit_before_parts_conflict",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_transcript_around_time_is_half_open_and_bad_cursor_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_illegal_sign_or_abort_commits_completing_object_recovery[parts]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_illegal_sign_or_abort_commits_completing_object_recovery[abort]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_direct_upload_api::test_two_completers_cross_durable_boundary_only_complete_provider_once",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_discovery_migration::test_discovery_metadata_migration_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_errors::test_app_error_renders_declared_problem_shape",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_errors::test_problem_from_known_app_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_errors::test_problem_from_unknown_exception_is_opaque_500",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_errors::test_validation_error_carries_field_errors",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_errors::test_app_error_overrides_apply",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_document_grant_makes_doc_retrievable_by_grantee",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_collection_grant_cascades_to_its_documents",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_list_documents_includes_owned_and_granted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_list_documents_honors_collection_grant_cascade",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_list_documents_excludes_other_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_list_documents_excludes_revoked_grant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_list_documents_ignores_cross_tenant_grant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_non_granted_document_excluded_for_other_user",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_revoked_grant_excludes_document_again",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_cross_tenant_grant_is_invisible",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_only_owner_may_grant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_tenant_admin_may_grant_any_resource",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_grant_on_foreign_tenant_resource_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_grant_to_foreign_tenant_user_is_404_with_denied_audit_and_no_row",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_grant_to_nonexistent_user_is_404_with_no_row",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_grant_with_unsupported_principal_type_is_rejected_no_row[role]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_grant_emits_audit_event",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_denied_grant_emits_permission_denied_audit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_create_grant_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_live_hybrid_search_honors_grant",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_grants::test_live_agent_tools_share_owner_or_grant_path",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_membership_is_tenant_scoped_and_fails_closed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_system_group_membership_is_derived_not_stored",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_ensure_system_group_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_group_of_another_tenant_is_invisible",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_group_names_are_unique_per_tenant_case_insensitively",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_group_grant_admits_members_and_excludes_non_members",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_removing_a_member_revokes_on_the_next_request",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_deleting_a_group_cascades_membership",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_cross_tenant_group_grant_never_widens_the_filter",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_group_grant_to_foreign_tenant_group_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_role_principal_is_still_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_group_grant_reaches_the_engine_filter_not_just_sql",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_engine_filter_excludes_a_non_member",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_empty_group_set_degrades_to_user_only_grants",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_member_may_not_manage_groups",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_admin_creates_renames_and_deletes_a_group",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_duplicate_group_name_is_conflict_case_insensitively",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_blank_group_name_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_system_group_cannot_be_renamed_deleted_or_populated",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_foreign_tenant_group_is_404_for_admin",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_adding_a_foreign_tenant_user_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups::test_membership_changes_are_idempotent_and_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_admin_creates_lists_renames_and_deletes_a_group",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_membership_round_trip_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_non_admin_is_forbidden_on_every_groups_path[member]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_non_admin_is_forbidden_on_every_groups_path[security]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_missing_bearer_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_group_from_another_tenant_is_404_not_403",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_adding_a_user_from_another_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_duplicate_name_is_409_case_insensitively",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_invalid_name_is_422[]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_invalid_name_is_422[   ]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_invalid_name_is_422[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_unknown_field_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_system_group_is_created_by_the_api_listed_and_immutable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_adding_a_member_via_the_api_widens_retrieval_and_removing_revokes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_reserved_system_group_name_cannot_be_squatted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_cross_tenant_membership_writes_are_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_route_mutations_are_persisted_and_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_groups_api::test_lazy_system_group_creation_is_audited_exactly_once",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_handle_group_revocation::test_read_passages_rechecks_group_membership_after_revocation",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_offsets_round_trip_to_source",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_chunks_have_contiguous_ordinals_and_cover_the_text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_adjacent_chunks_overlap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_boundary_aware_cut_prefers_sentence_end",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_early_boundary_preserves_configured_overlap[sentence]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_early_boundary_preserves_configured_overlap[whitespace]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_extreme_overlap_with_boundaries_makes_strict_progress",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_boundary_shorter_than_overlap_plus_one_uses_hard_edge",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_zero_overlap_boundary_cut",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_empty_text_yields_no_chunks",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_whitespace_only_text_yields_no_chunks",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_text_shorter_than_window_is_one_chunk",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_no_chunk_exceeds_window_size",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_progress_is_guaranteed_terminates",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_misconfiguration_raises[0-0]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_misconfiguration_raises[-1-0]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_misconfiguration_raises[100-100]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_misconfiguration_raises[100-150]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_chunking::test_misconfiguration_raises[100--1]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_pdf_reports_blank_native_page_and_unknown_table_coverage",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_plain_text_counts_replacement_and_suspicious_controls_without_table_warning",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_empty_plain_text_is_distinguished_from_extracted_text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_native_tables_measure_omitted_cells_without_storing_cell_text[docx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_native_tables_measure_omitted_cells_without_storing_cell_text[pptx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_docx_split_runs_match_contiguous_parsed_cell_text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_sparse_workbook_counts_nonempty_cells_and_formula_without_cached_value",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_corrupt_ooxml_probe_raises_typed_parse_error[docx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_corrupt_ooxml_probe_raises_typed_parse_error[pptx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_renamed_ooxml_parts_ingest_and_count_native_cells[docx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_renamed_ooxml_parts_ingest_and_count_native_cells[pptx]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_presentation_inspects_only_relationship_referenced_slides",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_docx_content_controls_do_not_hide_missing_cell_text[row-controls]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_docx_content_controls_do_not_hide_missing_cell_text[cell-controls]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_docx_nested_tables_keep_cells_owned_by_their_nearest_table",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_unicode_c1_controls_are_counted_with_c0_and_del",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_ingestion_persists_diagnostics_before_embedding_failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_diagnostics::test_embedding_failure_keeps_prior_extraction_and_chunks_but_updates_diagnostics",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_text_plain",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_markdown",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_text_tolerates_content_type_parameters_and_case",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_text_replaces_invalid_utf8_rather_than_crashing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_pdf",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_docx",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_pptx",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_parse_xlsx",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_supported_mime_types_set_is_the_upload_allowlist",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_unsupported_mime_type_raises",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_corrupt_pdf_raises_parse_error_not_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_corrupt_docx_raises_parse_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_corrupt_xlsx_raises_parse_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_parsers::test_unsupported_is_a_document_parse_error_subclass",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_uses_source_title_and_numbers_untitled_content_slides",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_recursively_extracts_text_from_nested_group_shapes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_renders_table_rows_with_column_headers_and_units",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_contentless_table_yields_no_text_or_chunks[empty]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_contentless_table_yields_no_text_or_chunks[whitespace-only]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_merged_table_text_stays_at_anchor_and_covered_cell_is_blank",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_reads_notes_body_and_excludes_slide_number_placeholder",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_does_not_create_notes_slide_when_notes_are_absent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_explicit_paragraph_line_break",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[consecutive-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[consecutive-grouped]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[empty-middle-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[empty-middle-grouped]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[multiple-empty-middle-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[multiple-empty-middle-grouped]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[empty-edges-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_preserves_complete_text_frame_paragraphs[empty-edges-grouped]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_whitespace_only_paragraphs_yield_no_text_or_chunks[ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_whitespace_only_paragraphs_yield_no_text_or_chunks[grouped]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_pptx_with_no_content_slides_returns_empty_text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_slides::test_corrupt_pptx_raises_typed_parse_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_ingest_text_document_persists_chunks_and_marks_ready",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_each_supported_format_reaches_ready_with_configured_vectors[text/plain-plain dimension contract]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_each_supported_format_reaches_ready_with_configured_vectors[text/markdown-# Markdown dimension contract]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_each_supported_format_reaches_ready_with_configured_vectors[application/pdf-None]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_each_supported_format_reaches_ready_with_configured_vectors[application/vnd.openxmlformats-officedocument.wordprocessingml.document-None]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_each_supported_format_reaches_ready_with_configured_vectors[application/vnd.openxmlformats-officedocument.presentationml.presentation-None]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_each_supported_format_reaches_ready_with_configured_vectors[application/vnd.openxmlformats-officedocument.spreadsheetml.sheet-None]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_embeddings_are_batched",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_reingest_replaces_chunks_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_controlled_reembedding_preserves_legacy_vectors_and_chunk_ids",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_connector_content_revision_archives_legacy_and_stale_worker_cannot_clobber",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_stale_attempt_cannot_overwrite_newer_terminal_state",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_document_remains_processing_until_index_publication_succeeds",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_claim_database_fault_is_normalized_for_celery_retry",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_failure_finalizer_retries_after_transient_database_fault",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_unsupported_type_marks_failed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_corrupt_pdf_marks_failed_not_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_docx_extraction_limit_fails_before_chunking_or_embedding",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_empty_document_is_failed_empty_with_zero_chunks",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_missing_document_is_noop",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_storage_unavailable_raises_retryable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_embed_unavailable_raises_retryable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_bad_provider_vector_is_terminal_with_normalized_code",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_unexpected_chunk_insert_failure_is_terminal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_opensearch_failure_is_terminal_and_retryable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_wrapper_transient_fault_retries_with_exponential_backoff",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_wrapper_dependency_error_also_retries",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_wrapper_final_attempt_dead_letters_and_returns",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_wrapper_finalizer_database_fault_has_bounded_recovery_semantics",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_wrapper_success_returns_result_dict",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_enqueue_swallows_broker_outage",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_enqueue_publishes_once_with_string_args",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_task::test_enqueue_media_uses_the_bounded_media_queue",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_each_nonempty_sheet_and_repeats_header_units",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_keeps_column_coordinates_across_gaps_and_blank_cells",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_preserves_zero_and_false_as_values",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_retains_non_general_percent_number_format",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_reports_merged_ranges_and_leaves_covered_cells_blank",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_ignores_stored_merged_covered_values_before_selecting_headers[empty-anchor-numeric]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_ignores_stored_merged_covered_values_before_selecting_headers[empty-anchor-formula]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_ignores_stored_merged_covered_values_before_selecting_headers[heading-anchor-numeric]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_ignores_stored_merged_covered_values_before_selecting_headers[heading-anchor-formula]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_skips_rows_containing_only_stored_merged_covered_values",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_rejects_invalid_merged_ranges[B2:A1]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_rejects_invalid_merged_ranges[A:B]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_rejects_invalid_merged_ranges[A0:B1]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_rejects_invalid_merged_ranges[not-a-range]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_marks_formula_when_cached_value_is_unavailable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_marks_formula_and_supplied_cached_value_as_freshness_unknown",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_array_formula_expression_and_range_deterministically[uncached]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_array_formula_expression_and_range_deterministically[cached]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_data_table_formula_attributes_deterministically[one-input-uncached]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_data_table_formula_attributes_deterministically[one-input-cached]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_data_table_formula_attributes_deterministically[two-inputs-uncached]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_renders_data_table_formula_attributes_deterministically[two-inputs-cached]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-string-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-string-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-string-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[absent-string-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[absent-string-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[absent-string-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-numeric-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-numeric-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-numeric-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-default-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-default-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[empty-default-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[absent-default-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[absent-default-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[absent-default-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[zero-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[zero-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[zero-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[false-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[false-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[false-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[error-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[error-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[error-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[string-ordinary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[string-array]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_formula_cache_availability_preserves_source_presence_and_type[string-data-table]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_xlsx_with_no_nonblank_cells_returns_empty_text",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_ingestion_workbooks::test_corrupt_xlsx_raises_typed_parse_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_within_budget_keeps_everything_in_order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_over_budget_drops_oldest_first_and_reports",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_unknown_model_uses_fallback_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fixed_segments_over_budget_refuse_typed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_tool_schemas_spend_the_budget",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_projected_fixed_tool_schemas_refuse_before_provider[assembly]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_projected_fixed_tool_schemas_refuse_before_provider[transcript]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_tight_budget_shrinks_retrieval_k_and_max_k",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fit_transcript_within_budget_is_identity",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fit_transcript_sheds_oldest_history_preserving_live_tail",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fit_transcript_compacts_a_huge_tool_result_instead_of_refusing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fit_transcript_refuses_when_non_compactable_tail_overflows",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_resolver_ignores_output_only_max_tokens",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_resolver_none_uses_configured_fallback_not_refusal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_conservative_fallback_is_a_byte_upper_bound",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_token_counter_degrades_when_litellm_call_fails",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_token_counter_degrades_when_litellm_import_fails",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_estimate_counts_tool_call_arguments_not_just_content",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fit_transcript_refuses_on_oversized_tool_argument",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_more_than_twenty_short_turns_all_fit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_fit_transcript_never_orphans_a_tool_pair_in_history",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_context_digest_is_content_bearing_head_not_summary",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_compaction_digests_oldest_results_and_keeps_recent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_compaction_is_chunked_not_one_at_a_time",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_compaction_prefers_uncited_then_falls_back_to_cited_with_snippets",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_cited_digest_carries_multiple_snippets_beyond_the_head",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_compaction_never_applies_a_non_reducing_digest",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_compaction_shrinks_trailing_whitespace_heavy_content",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_already_digested_results_are_not_recompacted_or_recounted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_chunk_size_larger_than_candidate_count_is_safe",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_context::test_forged_marker_suffix_cannot_opt_out_of_compaction",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_discovers_models_and_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_update_base_url_re_discovers",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_api_key_is_never_returned_by_any_endpoint",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_rotating_and_clearing_the_key_never_returns_it",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_discovery_failure_is_status_error_not_a_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_discovery_malformed_response_is_status_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_blocked_or_non_https_base_url_is_422[https://127.0.0.1/v1-base_url_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_blocked_or_non_https_base_url_is_422[https://10.0.0.5/v1-base_url_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_blocked_or_non_https_base_url_is_422[https://169.254.169.254/v1-base_url_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_blocked_or_non_https_base_url_is_422[https://[::1]/v1-base_url_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_blocked_or_non_https_base_url_is_422[http://provider.example.com/v1-base_url_scheme]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_blocked_or_non_https_base_url_is_422[ftp://provider.example.com/v1-base_url_scheme]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_unsupported_provider_type_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_create_malformed_body_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_non_admin_is_403_on_every_path",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_cross_tenant_provider_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_missing_provider_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_unauthenticated_list_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_llm_providers_api::test_malformed_bearer_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_connect_list_tools_call_tool_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_one_shot_call_tool_helper_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_health_probe_reports_ready_with_tool_count",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_auth_pulled_from_vault_at_call_time",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_secret_never_appears_in_result_or_logs",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_tool_side_error_is_contained_as_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_unknown_tool_is_contained_as_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_downed_server_yields_ok_false_not_exception",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_slow_server_times_out_as_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_disabled_transport_is_refused",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_endpoint_allowlist_refuses_unlisted_host",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_client::test_rate_limit_refuses_when_window_exhausted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_connect_to_loopback_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_connect_to_metadata_ip_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_connect_to_private_ip_literal_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_non_https_scheme_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_redirect_to_loopback_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_allowed_public_host_is_pinned_to_its_ip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_egress::test_ssrf_guard_transport_wraps_an_inner_transport",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_test_list_get_tools_delete_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_secret_value_is_never_returned_by_any_endpoint",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_rotating_and_clearing_the_credential_never_returns_it",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_blocked_or_non_https_endpoint_is_422[https://127.0.0.1/mcp-endpoint_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_blocked_or_non_https_endpoint_is_422[https://10.0.0.5/mcp-endpoint_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_blocked_or_non_https_endpoint_is_422[https://169.254.169.254/mcp-endpoint_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_blocked_or_non_https_endpoint_is_422[https://[::1]/mcp-endpoint_blocked]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_blocked_or_non_https_endpoint_is_422[http://example.com/mcp-endpoint_scheme]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_blocked_or_non_https_endpoint_is_422[ftp://example.com/mcp-endpoint_scheme]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_stdio_transport_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_unknown_transport_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_register_malformed_body_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_update_to_blocked_endpoint_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_test_a_down_server_is_status_error_not_a_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_get_other_owner_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_mutations_cross_tenant_are_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_list_is_owner_scoped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_missing_server_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_unauthenticated_list_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_malformed_bearer_is_401",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_servers_api::test_transport_client_factory_binds_the_inner_transport",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_nullable_object_union_rejects_undeclared_payload_before_mcp[runner]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_nullable_object_union_rejects_undeclared_payload_before_mcp[bridge]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_discovered_tools_are_namespaced_and_risk_tiered",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_disabled_server_contributes_no_tools",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_allowlisted_readonly_mcp_tool_runs_and_is_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_mcp_tool_not_in_allowlist_is_not_permitted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_write_tier_mcp_tool_blocks_unapproved",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_write_tier_mcp_tool_runs_when_approved",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_schema_invalid_args_are_rejected_before_the_call",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_missing_required_arg_is_rejected",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_downed_server_is_ok_false_not_a_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_resolver_never_offers_a_disabled_or_foreign_server",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_extra_tools_do_not_shadow_the_static_registry",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_validate_args_closes_object_schemas_and_allows_empty_schema",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_mcp_tools_registry::test_end_to_end_discovered_tool_invokes_through_the_real_adapter",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_key_is_tenant_prefixed_and_content_addressed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_identical_bytes_dedupe_to_same_key",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_safe_filename_strips_paths_and_traversal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_key_rejects_unsafe_tenant_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_validate_tenant_id_accepts_safe_values",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_key_owned_by_allows_same_prefix",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_key_owned_by_refuses_cross_prefix",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_key_owned_by_refuses_prefix_confusion",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_artifact_key_is_namespaced_tenant_prefixed_and_content_addressed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_artifact_key_rejects_unsafe_tenant_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_artifact_key_sanitizes_filename",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_avatar_key_is_tenant_and_user_prefixed_and_content_addressed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_avatar_key_rejects_unsafe_tenant_or_user_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_build_avatar_key_sanitizes_filename",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_artifact_key_owned_by_allows_same_prefix",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_artifact_key_owned_by_refuses_cross_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_artifact_key_owned_by_refuses_missing_namespace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_assert_artifact_key_owned_by_refuses_prefix_confusion",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_validate_upload_accepts_allowed_type_within_limit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_validate_upload_accepts_type_with_parameters",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_validate_upload_rejects_disallowed_type",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_validate_upload_rejects_over_limit",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_validate_upload_rejects_empty",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_ensure_bucket_merges_named_incomplete_multipart_lifecycle",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_ensure_bucket_upserts_only_lumen_lifecycle_rule",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_externally_managed_cors_skips_bucket_api_but_keeps_lifecycle_and_readiness",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_externally_managed_minio_controls_skip_unsupported_bucket_apis",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_ping_requires_successful_full_bucket_bootstrap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_cors_bootstrap_failure_keeps_readiness_degraded",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_ping_reaches_provider_after_successful_bootstrap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_validates_then_stores",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_rejects_disallowed_type_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_rejects_over_limit_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_get_round_trips_for_owning_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_get_refuses_cross_tenant_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_get_missing_object_maps_to_not_found",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_download_to_path_streams_and_returns_metadata",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_download_to_path_maps_vendor_failure_to_typed_dependency",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_delete_refuses_cross_tenant_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_delete_calls_client_for_owning_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_put_returns_key_and_url_with_ttl",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_put_validates_before_minting_url",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_get_refuses_cross_tenant_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_get_returns_url_for_owning_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[create-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[create-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[sign_part-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[sign_part-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[list_parts-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[list_parts-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[complete-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[complete-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[abort-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[abort-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[head-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[head-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[access_url-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[access_url-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[delete-client]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_direct_transfer_provider_failures_are_opaque_dependencies[delete-transport]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_no_such_multipart_upload_preserves_terminal_semantics[list]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_no_such_multipart_upload_preserves_terminal_semantics[complete]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_no_such_multipart_upload_preserves_terminal_semantics[abort]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_artifact_validates_then_stores_under_namespace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_artifact_rejects_disallowed_type_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_artifact_rejects_over_artifact_cap_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_get_artifact_round_trips_for_owning_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_get_artifact_refuses_cross_tenant_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_delete_artifact_refuses_cross_tenant_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_get_artifact_refuses_cross_tenant_before_io",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_get_artifact_returns_url_for_owning_tenant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_get_uses_public_endpoint_when_configured",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_put_uses_public_endpoint_when_configured",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_presign_get_defaults_to_internal_endpoint_when_unset",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_put_keeps_internal_endpoint_when_public_configured",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_minio_put_get_round_trip",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_minio_rejects_disallowed_type_without_storing",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_object_store::test_minio_direct_multipart_cors_etag_and_range_round_trip",
+        "outcome": "skipped"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_fresh_user_gets_implicit_default_without_writing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_set_then_clear_default_model",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_unknown_default_model_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_patch_empty_body_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_new_session_uses_preference_default",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_preferences_are_per_user",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_preferences_requires_auth",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_fresh_user_custom_instructions_null",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_set_then_clear_custom_instructions",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_blank_custom_instructions_clears",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_custom_instructions_over_limit_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_custom_instructions_and_default_model_are_independent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_preferences_api::test_custom_instructions_are_per_user",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_non_recall_document_context_is_withheld_after_revocation[get_document-answer]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_non_recall_document_context_is_withheld_after_revocation[get_document-question]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_non_recall_document_context_is_withheld_after_revocation[get_document-forced]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_non_recall_document_context_is_withheld_after_revocation[search_text-question]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_non_recall_document_context_is_withheld_after_revocation[list_documents-answer]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_live_history_preserves_multi_hop_document_dependencies",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_recall_then_live_history_copy_preserves_dependencies",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_unknown_prompt_provenance_is_never_known_empty[history]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_unknown_prompt_provenance_is_never_known_empty[tool]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_unknown_prompt_provenance_is_never_known_empty[error]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_unknown_prompt_provenance_is_never_known_empty[summary]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_provably_empty_context_remains_recallable",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_complete_tool_result_unions_all_provenance_fields",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_prompt_provenance::test_evidence_context_without_source_metadata_is_unknown",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_provider_models::test_make_and_parse_round_trip",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_provider_models::test_raw_id_with_colons_survives",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_provider_models::test_config_id_is_not_a_provider_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_provider_models::test_malformed_provider_ids_parse_to_none",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[other_owner-GET-code--code_run.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[other_owner-POST-code-/cancel-code_run.cancel]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[other_owner-GET-chat-/sandbox-sandbox_session.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[other_owner-POST-chat-/sandbox/reset-sandbox_session.reset]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[other_owner-DELETE-chat-/sandbox-sandbox_session.close]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[foreign-GET-code--code_run.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[foreign-POST-code-/cancel-code_run.cancel]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[foreign-GET-chat-/sandbox-sandbox_session.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[foreign-POST-chat-/sandbox/reset-sandbox_session.reset]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[foreign-DELETE-chat-/sandbox-sandbox_session.close]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[unknown-GET-code--code_run.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[unknown-POST-code-/cancel-code_run.cancel]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[unknown-GET-chat-/sandbox-sandbox_session.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[unknown-POST-chat-/sandbox/reset-sandbox_session.reset]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_hidden_target_is_404_and_one_trusted_denial[unknown-DELETE-chat-/sandbox-sandbox_session.close]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_unauthenticated_and_sink_failure_do_not_disappear[GET-code--code_run.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_unauthenticated_and_sink_failure_do_not_disappear[POST-code-/cancel-code_run.cancel]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_unauthenticated_and_sink_failure_do_not_disappear[GET-chat-/sandbox-sandbox_session.read]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_unauthenticated_and_sink_failure_do_not_disappear[POST-chat-/sandbox/reset-sandbox_session.reset]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_denial_audit::test_sandbox_unauthenticated_and_sink_failure_do_not_disappear[DELETE-chat-/sandbox-sandbox_session.close]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_root_is_contained_without_host_mounts_socket_or_network",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_no_automatic_time_resource_or_pid_limits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_the_shipped_default_sends_no_cpu_memory_or_pid_bound",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_a_deploy_may_opt_into_bounding_the_session_container",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_output_collection_is_bounded_by_the_configured_cap",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_curated_session_env_contains_no_application_secret_keys",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_inputs_remain_explicit_read_only_bytes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_runtime_is_an_explicit_runner_setting[runc]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_runtime_is_an_explicit_runner_setting[runsc]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_isolation::test_non_local_enabled_sandbox_requires_gvisor",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_tool_runner::test_submit_runs_captures_and_returns_summary",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_tool_runner::test_streams_code_output_then_one_code_result",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_tool_runner::test_disabled_tenant_is_denied_without_calling_runner",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_sandbox_tool_runner::test_runner_crash_becomes_failed_terminal_not_exception",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_fire_enqueues_run_and_records_summary",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_overlap_skip_prevents_second_concurrent_run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_overlap_allow_runs_concurrently",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_rate_cap_defers_fire_without_dropping",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_concurrency_cap_defers_fire",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_fire_on_disabled_schedule_is_noop",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_fire_on_missing_schedule_is_noop",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_fire_non_owner_assistant_records_system_denial_without_fabricated_user",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_scheduler_dispatch::test_fire_propagates_durable_denial_sink_failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_schedule_returns_next_run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_structured_cadence_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_bad_cron_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_unknown_timezone_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_disabled_assistant_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_cross_tenant_assistant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_cadence_requires_exactly_one_form",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_list_requires_auth",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_create_requires_auth",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_list_returns_only_callers_schedules",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_list_filters_by_enabled",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_get_cross_tenant_schedule_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_get_unknown_schedule_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_patch_updates_cadence",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_patch_empty_body_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_patch_bad_timezone_is_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_delete_then_get_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_pause_then_resume",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_pause_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_run_now_returns_202_and_run_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_run_now_on_paused_schedule_is_409",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_api::test_run_now_cross_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_create_computes_next_run_and_projects_and_audits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_create_disabled_starts_paused_no_next_run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_create_rejects_disabled_assistant",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_create_rejects_cross_tenant_assistant_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_create_rejects_unknown_timezone_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_get_cross_tenant_schedule_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_get_other_owner_same_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_admin_may_manage_another_owners_schedule",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_update_cadence_recomputes_next_run_and_audits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_update_rejects_bad_cron_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_update_cross_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_pause_disables_removes_entry_and_clears_next_run",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_pause_is_idempotent",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_resume_re_enables_recomputes_next_run_and_audits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_delete_removes_entry_and_audits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_run_now_enqueues_manual_run_and_audits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_run_now_on_paused_schedule_is_409",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_run_now_cross_tenant_is_404",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_run_now_rejects_since_disabled_assistant_422",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_list_returns_only_callers_schedules",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_schedules_service::test_list_filters_by_enabled",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_evidence_digest_round_trips_and_clears",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_summary_upserts_are_forward_only",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_malformed_stored_evidence_is_tolerated",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_task_skips_below_batch_threshold",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_task_summarizes_preserving_the_verbatim_tail",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_task_second_pass_rolls_forward",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_dead_gateway_leaves_summary_state_untouched",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_wrapper_contains_every_failure",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_concurrent_upserts_converge_without_errors",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_same_second_ties_advance_only_in_id_order",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_cross_tenant_repository_sees_nothing",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_evidence_and_summary_caps_hold_at_write",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_redaction_removes_cited_snippets",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_summary_route_resolves_provider_sessions",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_summary_route_uses_fast_default_not_the_frontier_session_model",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_summary_route_honors_a_pinned_dedicated_model",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_mention_map_holds_forty_entries",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_same_second_backlog_converges_across_passes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_default_summary_thresholds_reach_first_compaction_before_turn_seven",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_six_message_session_summarises_under_retuned_defaults",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_a_control_token_completion_is_refused_and_the_cursor_stays_put",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_a_completion_under_the_absolute_floor_is_refused",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_a_completion_over_the_floor_but_tiny_for_many_turns_is_refused",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_the_bar_never_exceeds_what_the_model_is_allowed_to_write",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_a_refused_summary_still_records_its_spend_and_audits",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_a_genuine_summary_is_still_accepted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_session_summary::test_an_empty_completion_is_as_expensive_as_a_refusal",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_gate_denies_when_no_policy_row",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_gate_denies_when_enabled_but_still_requires_approval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_gate_denies_when_disabled_even_if_preapproved",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_gate_allows_when_enabled_and_preapproved",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_gate_is_tenant_scoped",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_gate_fails_closed_on_read_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_runner_denies_gated_tool_without_policy",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_runner_executes_gated_tool_once_admin_preapproves",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_an_approval_names_the_admin_the_policy_row_and_the_call",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_a_refusal_records_no_approval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_the_recorded_hash_is_the_runner_s_own_not_a_second_one",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_a_deprovisioned_admin_records_none_rather_than_inventing_one",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_the_audit_names_who_authorised_an_executed_t2_call",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_a_denied_call_records_no_approver",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_policy_gate::test_a_prompt_injected_call_in_a_preapproved_tenant_still_executes",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_use_policy::test_grounded_answer_prompt_v4_broadens_short_searches_and_refines_thin_results",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_use_policy::test_grounded_answer_prompt_cites_recalled_passages_and_never_document_labels",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_use_policy::test_grounded_answer_prompt_stops_when_sufficient_asks_intent_and_avoids_repeats",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tool_use_policy::test_grounded_answer_prompt_does_not_depend_on_a_provider_specific_tool_api",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_risk_tier_write_tiers_are_t2_and_above",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_read_only_tool_must_be_t0",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_read_only_tool_cannot_require_approval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_write_tier_tool_must_require_approval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_write_tier_tool_with_approval_is_allowed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_tool_definition_requires_a_name",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_tool_result_success_must_not_carry_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_tool_result_failure_must_carry_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_tool_result_failure_factory_sets_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_registry_discovers_retrieval_tools",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_default_allowlist_is_read_only_tools",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_tool_specs_none_renders_all_registered",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_chat_runtime_invokes_tools_only_through_the_runner",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_domain::test_no_legacy_chat_tools_module",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_run_python_is_registered_and_governed_as_highest_tier",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_run_python_absent_from_default_allowlist",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_success_returns_status_artifacts_and_run_id",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_package_requirements_are_forwarded",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_no_sandbox_seam_is_ok_false_not_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_disabled_or_over_quota_tenant_denied_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_timeout_terminal_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_killed_terminal_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_failed_terminal_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_a_sandbox_denial_carries_its_typed_reason_code",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_a_killed_run_does_not_lift_its_stderr_into_the_trace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_a_typed_failure_reason_still_reaches_the_trace",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_a_sandbox_denial_reason_reaches_the_durable_invocation_row",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_empty_code_is_ok_false_before_seam",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_missing_code_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_unapproved_run_python_is_not_executed_but_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_off_allowlist_run_python_is_not_permitted",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_run_python::test_approved_run_python_executes_through_gate",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_web_search_is_discovered",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_web_search_is_t0_read_only_no_approval",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_web_search_is_off_by_default_allowlist",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_web_search_schema_is_query_and_optional_k",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_web_search_can_be_advertised_when_explicitly_allowed",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_disabled_returns_tool_result_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_disabled_does_not_call_provider",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_enabled_returns_web_results_and_web_citation_payload",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_enabled_empty_results",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_enabled_missing_query",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_rate_limited_maps_to_distinct_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_unavailable_maps_to_distinct_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_web_search::test_unexpected_error_is_opaque_tool_error",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_write_file_is_registered_and_governed_as_t1",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_text_write_persists_and_round_trips",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_base64_write_round_trips_binary",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_oversize_payload_is_ok_false_not_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_disallowed_content_type_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_malformed_base64_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_missing_filename_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_non_string_content_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_bad_encoding_is_ok_false",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_no_writer_wired_is_ok_false_not_crash",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_delegates_to_service_with_tool_origin",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_write_is_audited",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "clean-backend-offline::tests.test_tools_write_file::test_read_only_mode_simulates_without_persisting",
+        "outcome": "passed"
+      }
+    ]
+  },
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T22:09:27.821404+00:00",
+  "finished_at": "2026-10-15T22:11:15.955404+00:00",
+  "notes": "verified main70c3c2e4 app tree; test fixtures0e9fd8f4. Raw JUnit retained at output/qa/777/residual-clean-offline.xml. Suite skips are explicit; clean offline skipped9 =8 ordinary live exclusions plus1 known xfail421. A passing suite is not a catalog-area certification."
+}

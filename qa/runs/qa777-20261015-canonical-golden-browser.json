@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "application": {
+    "images": [
+      {
+        "digest": "sha256:5cc09be8b6c5c697636d83f6d25680599728ef0295a09fbd6f2b14066719fe5e",
+        "service": "backend"
+      },
+      {
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6",
+        "service": "frontend"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "environment": {
+    "label": "QA777 functional Alpha/Beta on existing canonical local configuration",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/inclusionai/ling-3.0-flash"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "collection_id": "c2a0443f-6047-4218-86a3-9cf5aef750f1",
+      "assistant_id": "78099d47-77c9-47e8-af42-4e3decfc33a9",
+      "assistant_version": 1,
+      "session_id": "2f8d9433-365c-4fc0-9667-e9ca06f70f68",
+      "method": "six sequential normal-Chrome questions, summaries enabled; distinct from protocol single-question evaluation"
+    },
+    "configuration": {
+      "llm_model": "openrouter/inclusionai/ling-3.0-flash",
+      "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+      "embedding_dimensions": 2048,
+      "access_lifetime_seconds": 900,
+      "refresh_lifetime_seconds": 1209600,
+      "summaries_enabled": true,
+      "summary_keep_messages": 4,
+      "summary_min_batch": 2,
+      "sandbox_enabled": true,
+      "web_search_enabled": true,
+      "search_index": "lumen-chunks-v2",
+      "base_url": "http://localhost:47180",
+      "db_posture": "existing standard local compose connection; role not changed, no RLS backstop certification",
+      "source_reference": "exact baked images verified by prior clean-3c022fcc baseline; no application source mounts or changed .py files in container diff"
+    }
+  },
+  "ci": null,
+  "run_id": "qa777-20261015-canonical-golden-browser",
+  "definitions": {
+    "commit": "aca946cf207b043613fcc7a4c6d9cbae321324f5",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "b4d0d6c2803e32d73cd0f1ac763341ffd19a0e2898040e072da796080eb706d7"
+  },
+  "started_at": "2026-10-15T22:54:49Z",
+  "finished_at": "2026-10-15T23:08:57.563Z",
+  "notes": "Issue777 residual execution, not a rewrite of historical area outcomes. Observations and raw artifacts are retained locally under output/qa/777; hashes identify exact bytes. App/model/runtime context does not transfer between phases. Earlier setup failures remain indexed. Product fixes are separate issues; no merge performed.",
+  "results": [
+    {
+      "case_id": "QA-FILL-050",
+      "definition": {
+        "id": "QA-FILL-050",
+        "title": "Golden quality thresholds",
+        "status": "active",
+        "areas": [
+          "QA-AREA-050"
+        ],
+        "steps": [
+          "Provision only the isolated QA 777 prerequisites documented in docs/qa/777-residual-gaps.md.",
+          "Run existing fake and live golden evaluation harnesses on isolated fixtures and retain metrics/thresholds.",
+          "Record browser observations separately from supplemental protocol/automated assertions; retain exact runtime/config/definition provenance and every residual limitation."
+        ],
+        "expected": "Configured retrieval, groundedness and citation correctness thresholds pass with evidence-preserving reports.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/777-residual-gaps.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "6600fc234ba8ade5f3ec3f0ec88e88c43c2543c2c82f5bcbdc631167dd9c5103",
+      "outcome": "partial",
+      "reason": "Supported breach-notification question falsely refused despite available retrieved72-hour passage (#785).",
+      "residual_risk": "Sequential Chrome companion has different summary/conversation context from single-question protocol evaluation; neither result transfers unchanged.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "Normal Chrome companion used existing three-document/six-question golden corpus in a new uploaded-only assistant, sequential conversation with summaries enabled: four of five supported questions correct and cited; fifth refused despite exact runbook passage retrieved and source handle bound (#785). Unsupported stock ticker was honestly refused without invented symbol. All six transcripts retained; no retry selected for a passing result. Separate summaries-disabled protocol aggregate remains0.8333/0.8333/1.0 above0.8thresholds; scorer clarification false-negative tracked#784.",
+          "observed": {
+            "evidence": "golden-ui-results.json; golden-ui-transcript.json; golden-missed-evidence.json; ws-golden-window.json",
+            "supported_correct": 4,
+            "supported_total": 5,
+            "unsupported_negative_correct": true
+          },
+          "captured_at": "2026-10-15T23:08:57.563Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "golden-missed-evidence.json",
+          "path": "output/qa/777/golden-missed-evidence.json",
+          "sha256": "7708bdd09c53bdd8e134bcc9d771980bf2b44dbf95587765f24be3f41dd683ea"
+        },
+        {
+          "kind": "artifact",
+          "description": "golden-supported-question-refused.jpg",
+          "path": "output/qa/777/golden-supported-question-refused.jpg",
+          "sha256": "9bf184f394cbcc272c633de13b375a0b574ee2787a7890c8154a99304302fec5"
+        },
+        {
+          "kind": "artifact",
+          "description": "golden-ui-results.json",
+          "path": "output/qa/777/golden-ui-results.json",
+          "sha256": "dcba0867ecc497c8d0e23f7359ee695bd1de65fccc5ae62b25bd99b65800278e"
+        },
+        {
+          "kind": "artifact",
+          "description": "golden-ui-transcript.json",
+          "path": "output/qa/777/golden-ui-transcript.json",
+          "sha256": "97aab1581e2a100821f7a205024d9142ffbea963a6dfe9de43e34b50ea9e5053"
+        },
+        {
+          "kind": "artifact",
+          "description": "ws-golden-window.json",
+          "path": "output/qa/777/ws-golden-window.json",
+          "sha256": "addbc5d43cd49e5d7938ec7aa1133c14866deb3fdcf352cf0632f8514006abbf"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/785",
+        "https://github.com/k-sandhu/lumen-copilot/issues/784"
+      ]
+    }
+  ]
+}

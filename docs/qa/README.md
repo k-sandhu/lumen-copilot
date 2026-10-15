@@ -104,6 +104,13 @@ and skipped coverage. Its modified backend, frontend image and model context
 are recorded separately from the clean local baseline; results do not transfer
 between those environments.
 
+The [residual coverage follow-up](777-residual-gaps.md) exercises the 39 remaining
+partial-check scenarios with synthetic prerequisites, normal Chrome, and scoped
+live/offline harnesses. Its separate phase ledgers retain application images,
+definition revisions, configuration, failures and cleanup evidence. The
+protocol golden thresholds and sequential Chrome companion are separate results;
+neither silently promotes an entire catalog area or certifies another runtime.
+
 The initial local observation predates this tracking implementation. Import it
 as a retrospective observation, retaining its original timestamp, application
 revision, model/fixture context and source fingerprint; do not claim the new

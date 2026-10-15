@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "application": {
+    "images": [
+      {
+        "service": "harness-base",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      }
+    ],
+    "source_state": "clean",
+    "commit": "70c3c2e4775aeb031012625bc018f6dd2d96ba04"
+  },
+  "environment": {
+    "label": "QA777 rls-permission-clean-live",
+    "kind": "live_local",
+    "browser": null,
+    "models": [],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "raw_junit_sha256": "1d7ca35f622d7ca41157b9676e70b22fc4718315104c68366e489c84a696f0fa"
+    },
+    "configuration": {
+      "scope": "verified main70c3c2e4 clean archive; temporary non-superuser/non-bypass roles; fixture0e9fd8f4",
+      "test_source_commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+      "model_method": "Deterministic gateway fixtures with real PostgreSQL restricted roles; not provider quality evaluation."
+    }
+  },
+  "ci": null,
+  "kind": "suite",
+  "run_id": "qa777-20261015-suite-rls-permission-clean-live",
+  "suite": {
+    "name": "rls-permission-clean-live",
+    "outcome": "passed",
+    "reason": "",
+    "counts": {
+      "passed": 6,
+      "failed": 0,
+      "errored": 0,
+      "skipped": 0
+    },
+    "tests": [
+      {
+        "test_id": "rls-permission-clean-live::tests.test_rls::test_bind_tenant_is_noop_on_sqlite",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "rls-permission-clean-live::tests.test_rls::test_rls_backstop_isolates_tenants_on_postgres",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "rls-permission-clean-live::tests.test_rls::test_parallel_call_scopes_keep_rls_isolation_on_postgres",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "rls-permission-clean-live::tests.test_rls::test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "rls-permission-clean-live::tests.test_recall_permission_snapshot_postgres::test_committed_revocation_uses_one_permission_snapshot[mention_preselection]",
+        "outcome": "passed"
+      },
+      {
+        "test_id": "rls-permission-clean-live::tests.test_recall_permission_snapshot_postgres::test_committed_revocation_uses_one_permission_snapshot[source_postselection]",
+        "outcome": "passed"
+      }
+    ]
+  },
+  "definitions": {
+    "commit": "0e9fd8f43b0a5358eda3e1f99e3712eee9135313",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "8abe685b3ba441e5f55f4c1e48538d952c2fd1c29787413ebd0f5cb89b04750e"
+  },
+  "started_at": "2026-10-15T22:38:04.193179+00:00",
+  "finished_at": "2026-10-15T22:38:17.622179+00:00",
+  "notes": "verified main70c3c2e4 clean archive; temporary non-superuser/non-bypass roles; fixture0e9fd8f4. Raw JUnit retained at output/qa/777/rls-permission-clean-live.xml. Suite skips are explicit; clean offline skipped9 =8 ordinary live exclusions plus1 known xfail421. A passing suite is not a catalog-area certification."
+}
