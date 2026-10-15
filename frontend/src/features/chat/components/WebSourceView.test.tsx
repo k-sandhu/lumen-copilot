@@ -8,16 +8,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { WebSourceView } from './WebSourceView';
-import type { UiCitation } from '../model/citation';
+import type { UiWebCitation } from '../model/citation';
 
-const WEB: UiCitation = {
+const WEB: UiWebCitation = {
+  kind: 'web',
+  handle: 'W1',
   id: 'w1',
-  documentId: '',
-  documentName: 'EU AI Act overview',
-  chunkId: '',
   snippet: 'The Act phases in through 2026.',
-  charStart: 0,
-  charEnd: 30,
   url: 'https://www.example.org/eu-ai-act',
   webTitle: 'EU AI Act overview',
 };
@@ -42,9 +39,7 @@ describe('WebSourceView', () => {
   });
 
   it('renders NO outbound link for an unsafe url (never an unsafe link)', () => {
-    render(
-      <WebSourceView citation={{ ...WEB, url: 'javascript:alert(1)' }} onClose={() => {}} />,
-    );
+    render(<WebSourceView citation={{ ...WEB, url: 'javascript:alert(1)' }} onClose={() => {}} />);
     expect(screen.queryByRole('link', { name: /open page/i })).not.toBeInTheDocument();
   });
 

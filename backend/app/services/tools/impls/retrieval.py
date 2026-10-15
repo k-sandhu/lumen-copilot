@@ -81,6 +81,14 @@ def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
     return text.strip()
 
 
+def rendered_evidence(passage: RetrievedPassage, handle: str) -> str:
+    """Handle-labelled complete evidence with the source's player provenance."""
+    return (
+        f"[{handle}] {passage.document_name}{_media_provenance(passage)}\n"
+        f"{rendered_snippet(passage.text)}"
+    )
+
+
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
     # An omitted/invalid ``k`` falls back to ``default`` — but still clamped to the
     # ceiling (#424 re-review): under a tight budget ``maximum`` can be lower than

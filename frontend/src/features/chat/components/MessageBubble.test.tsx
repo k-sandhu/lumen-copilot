@@ -11,7 +11,8 @@ import userEvent from '@testing-library/user-event';
 import { MessageBubble } from './MessageBubble';
 import type { UiCitation } from '../model/citation';
 
-const CITATION: UiCitation = {
+const CITATION: Extract<UiCitation, { kind: 'document' }> = {
+  kind: 'document',
   id: 'c1',
   documentId: 'doc-9',
   documentName: 'Q4 strategy.pdf',
@@ -22,7 +23,8 @@ const CITATION: UiCitation = {
 };
 
 /** A citation whose document the reader has since lost access to (#536). */
-const REDACTED_CITATION: UiCitation = {
+const REDACTED_CITATION: Extract<UiCitation, { kind: 'document' }> = {
+  kind: 'document',
   id: 'c2',
   documentId: 'doc-gone',
   // The server sends these EMPTY — the filename is itself disclosing.
@@ -34,16 +36,13 @@ const REDACTED_CITATION: UiCitation = {
   redacted: true,
 };
 
-const WEB_CITATION: UiCitation = {
+const WEB_CITATION: Extract<UiCitation, { kind: 'web' }> = {
+  kind: 'web',
+  handle: 'W1',
   id: 'w1',
-  documentId: '',
-  documentName: 'Latest AI regulations',
-  chunkId: '',
-  snippet: 'The EU AI Act enters into force in stages through 2026.',
-  charStart: 0,
-  charEnd: 54,
-  url: 'https://www.example.org/ai/regulations?ref=1',
+  url: 'https://example.com',
   webTitle: 'Latest AI regulations',
+  snippet: 'The EU AI Act enters into force in stages through 2026.',
 };
 
 describe('MessageBubble', () => {
@@ -77,6 +76,50 @@ describe('MessageBubble', () => {
     await user.click(chip);
     // The chip opens the inspector with the citation (and optional source meta).
     expect(onOpen).toHaveBeenCalledWith(CITATION, undefined);
+  });
+
+  it('opens the exact corpus citation referenced by an inline [S#] handle', async () => {
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    const citation = { ...CITATION, handle: 'S1' };
+    render(
+      <MessageBubble
+        role="assistant"
+        content="The claim is supported here [S1]."
+        citations={[citation]}
+        onOpenCitation={onOpen}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Citation S1: Q4 strategy.pdf' }));
+    expect(onOpen).toHaveBeenCalledWith(citation, undefined);
+    expect(
+      screen.getByRole('button', { name: /citation 1: Q4 strategy\.pdf/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('opens an inline [W#] source and keeps it out of the corpus sources strip', async () => {
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    const web = {
+      kind: 'web' as const,
+      id: 'w1',
+      handle: 'W1',
+      url: 'https://www.example.org/ai/regulations?ref=1',
+      webTitle: 'Latest AI regulations',
+      snippet: 'The EU AI Act enters into force in stages through 2026.',
+    };
+    render(
+      <MessageBubble
+        role="assistant"
+        content="The public source says [W1]."
+        citations={[web]}
+        onOpenCitation={onOpen}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Citation W1: Latest AI regulations' }));
+    expect(onOpen).toHaveBeenCalledWith(web, undefined);
+    expect(screen.queryByText('Sources used')).not.toBeInTheDocument();
+    expect(screen.getByText('Web sources')).toBeInTheDocument();
   });
 
   it('shows a FreshnessPill on a cited source when freshness is known (#89)', () => {
@@ -125,9 +168,19 @@ describe('MessageBubble', () => {
   it('renders one card per document and keeps citation numbers flat across groups (#248)', async () => {
     const onOpen = vi.fn();
     const user = userEvent.setup();
-    const docA: UiCitation = { ...CITATION, id: 'a1', documentId: 'A', documentName: 'A.pdf' };
-    const docA2: UiCitation = { ...docA, id: 'a2', chunkId: 'ka2' };
-    const docB: UiCitation = { ...CITATION, id: 'b1', documentId: 'B', documentName: 'B.pdf' };
+    const docA: Extract<UiCitation, { kind: 'document' }> = {
+      ...CITATION,
+      id: 'a1',
+      documentId: 'A',
+      documentName: 'A.pdf',
+    };
+    const docA2: Extract<UiCitation, { kind: 'document' }> = { ...docA, id: 'a2', chunkId: 'ka2' };
+    const docB: Extract<UiCitation, { kind: 'document' }> = {
+      ...CITATION,
+      id: 'b1',
+      documentId: 'B',
+      documentName: 'B.pdf',
+    };
     render(
       <MessageBubble
         role="assistant"
@@ -300,7 +353,7 @@ describe('MessageBubble', () => {
     expect(screen.getByText('Web sources')).toBeInTheDocument();
     expect(screen.queryByText('Sources used')).not.toBeInTheDocument();
     // Host is surfaced (www. stripped) and the snippet is shown.
-    expect(screen.getByText('example.org')).toBeInTheDocument();
+    expect(screen.getByText('example.com')).toBeInTheDocument();
     expect(screen.getByText(/EU AI Act enters into force/i)).toBeInTheDocument();
     // The external link opens in a new tab with rel="noopener noreferrer".
     const link = screen.getByRole('link', { name: /open .* in a new tab/i });
@@ -362,7 +415,7 @@ describe('MessageBubble', () => {
     );
     // A javascript: URL is not classified as web (no host) → it isn't rendered as
     // a web source at all, and certainly no outbound link is produced.
-    expect(screen.queryByText('Web sources')).not.toBeInTheDocument();
+    expect(screen.getByText('Web sources')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /open .* in a new tab/i })).not.toBeInTheDocument();
   });
 

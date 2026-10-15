@@ -22,8 +22,10 @@ Headlines:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -134,8 +136,24 @@ class _ScriptedGateway:
         else:
             turn = self._turns[min(self.auto_calls, len(self._turns) - 1)]
             self.auto_calls += 1
+        # Tests can mark a grounded answer with the S1 placeholder. Resolve it
+        # from the actual preceding tool result so this fake never invents a
+        # citation handle or cites evidence when retrieval returned none.
+        messages_seq = cast(Sequence[ChatMessage], messages)
+        passage_handles = [
+            handle
+            for message in messages_seq
+            if message.role is LlmRole.TOOL
+            for handle in re.findall(r"\[(S\d+)\]", message.content)
+        ]
+        cite_handle = passage_handles[0] if passage_handles else ""
         for ev in turn:
-            yield ev
+            if ev.text is not None and "[S1]" in ev.text:
+                marker = f"[{cite_handle}]" if cite_handle else ""
+                rewritten = ev.text.replace("[S1]", marker)
+                yield replace(ev, text=rewritten)
+            else:
+                yield ev
 
 
 class _BoomGateway:
@@ -160,6 +178,7 @@ class _FakeRetrieval:
     def __init__(self, passages: list[RetrievedPassage]) -> None:
         self._passages = passages
         self.queries: list[str] = []
+        self._search_principal: object | None = None
 
     async def search_text(
         self,
@@ -171,7 +190,28 @@ class _FakeRetrieval:
         document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.queries.append(query)
+        if self._search_principal is None:
+            self._search_principal = principal
         return list(self._passages)
+
+    async def read_passages(
+        self,
+        *,
+        principal: object,
+        chunk_ids: list[uuid.UUID],
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        """Treat configured passages as the explicit currently-permitted set."""
+        del collection_ids, document_ids
+        searched = self._search_principal
+        if searched is None or any(
+            getattr(searched, field, None) != getattr(principal, field, None)
+            for field in ("user_id", "tenant_id")
+        ):
+            return []
+        wanted = set(chunk_ids)
+        return [passage for passage in self._passages if passage.chunk_id in wanted]
 
     async def search_documents(
         self, *, principal: object, name_or_query: str, k: int = 10
@@ -399,7 +439,7 @@ async def test_grounded_answer_full_lifecycle(ctx: _Ctx) -> None:
             # Turn 2: the model answers using the retrieved passage.
             [
                 StreamEvent(text="The 2024 standard deduction "),
-                StreamEvent(text="is $14,600."),
+                StreamEvent(text="is $14,600 [S1]."),
                 StreamEvent(finish_reason="stop"),
             ],
         ]
@@ -453,7 +493,7 @@ async def test_citation_persisted_and_reloadable(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="Grounded answer."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="Grounded answer. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()
@@ -473,7 +513,7 @@ async def test_citation_persisted_and_reloadable(ctx: _Ctx) -> None:
         messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in messages if m.role.value == "assistant"]
         assert len(assistant) == 1
-        assert assistant[0].content == "Grounded answer."
+        assert assistant[0].content == "Grounded answer. [S1]"
         assert assistant[0].model == "anthropic/claude-opus-4.8"
         citations = await CitationRepository(session, ctx.tenant_id).list_for_message_hydrated(
             assistant[0].id
@@ -793,7 +833,7 @@ async def test_retrieval_and_answer_audit_events_emitted(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="A."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="A. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()
@@ -3506,7 +3546,7 @@ async def test_scope_failure_reaps_cancelled_peer_without_waiting_on_failed_ordi
     async def fail_first_call_scope(session: AsyncSession, tenant_id: uuid.UUID) -> None:
         nonlocal binds
         binds += 1
-        if binds == 2:  # runtime scope is first; ordinal 0's scope is second
+        if binds == 3:  # runtime bind + reservation rebind precede ordinal 0
             await entered.wait()  # ordinal 1 is executing before ordinal 0 fails
             raise RuntimeError("scope binding failed")
         await original_bind(session, tenant_id)
@@ -5136,7 +5176,7 @@ async def test_cited_answer_writes_the_evidence_digest(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="Cited answer."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="Cited answer. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()

@@ -90,7 +90,8 @@ export function buildRetrievalSummary(
   tools: ToolActivity[],
   excludedCount = 0,
 ): RetrievalSummary {
-  const sourceCount = new Set(citations.map((c) => c.documentId)).size;
+  const sourceCount = new Set(citations.map((c) => (c.kind === 'document' ? c.documentId : c.id)))
+    .size;
   const passageCount = tools.reduce((sum, t) => sum + (t.hitCount ?? 0), 0);
 
   // Only lead with the source count when there ARE cited sources. During
@@ -193,9 +194,13 @@ export interface CitationGroup {
  * in the answer — grouping is visual only; it never renumbers.
  */
 export function groupCitationsByDocument(citations: UiCitation[]): CitationGroup[] {
+  const documentCitations = citations.filter(
+    (citation): citation is Extract<UiCitation, { kind: 'document' }> =>
+      citation.kind === 'document',
+  );
   const order: string[] = [];
   const byDoc = new Map<string, CitationGroup>();
-  citations.forEach((citation, i) => {
+  documentCitations.forEach((citation, i) => {
     let group = byDoc.get(citation.documentId);
     if (!group) {
       group = {
@@ -217,7 +222,7 @@ export function groupCitationsByDocument(citations: UiCitation[]): CitationGroup
  * don't get sub-span offsets within the snippet from the wire, so the whole
  * cited passage is the highlight — which is exactly what was cited.
  */
-export function passageFromCitation(citation: UiCitation): SourcePassage {
+export function passageFromCitation(citation: Pick<UiCitation, 'snippet'>): SourcePassage {
   const text = citation.snippet.trim();
   if (!text) return { runs: [] };
   return { runs: [{ text, highlight: true }] };
@@ -427,13 +432,13 @@ export function usedWebSearch(citations: UiCitation[], tools: ToolActivity[]): b
  * presence until the contract types it (see citation.ts TODO).
  */
 export function partitionCitations(citations: UiCitation[]): {
-  web: UiCitation[];
-  documents: UiCitation[];
+  web: Extract<UiCitation, { kind: 'web' }>[];
+  documents: Extract<UiCitation, { kind: 'document' }>[];
 } {
-  const web: UiCitation[] = [];
-  const documents: UiCitation[] = [];
+  const web: Extract<UiCitation, { kind: 'web' }>[] = [];
+  const documents: Extract<UiCitation, { kind: 'document' }>[] = [];
   for (const c of citations) {
-    if (kindOfCitation(c) === 'web') web.push(c);
+    if (c.kind === 'web') web.push(c);
     else documents.push(c);
   }
   return { web, documents };

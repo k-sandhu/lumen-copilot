@@ -188,7 +188,25 @@ function MessageBubbleComponent({
                   }
                 : {})}
             >
-              <MarkdownView className="lc-answer" streaming={streaming}>
+              <MarkdownView
+                className="lc-answer"
+                streaming={streaming}
+                resolveCitationHandle={(handle) => {
+                  const citation = citations.find((c) => c.handle === handle);
+                  return citation
+                    ? {
+                        title: citation.kind === 'web' ? citation.webTitle : citation.documentName,
+                        onClick: () =>
+                          onOpenCitation(
+                            citation,
+                            citation.kind === 'document'
+                              ? sourceMeta?.[citation.documentId]
+                              : undefined,
+                          ),
+                      }
+                    : undefined;
+                }}
+              >
                 {content}
               </MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
@@ -266,31 +284,37 @@ function MessageBubbleComponent({
                               : `Cited passages from ${group.documentName}`
                           }
                         >
-                          {group.passages.map((p) => (
-                            <button
-                              key={p.citation.id}
-                              type="button"
-                              className="lc-source-row__num-btn"
-                              disabled={group.redacted}
-                              aria-label={
-                                group.redacted
-                                  ? `Citation ${p.number}: source no longer available`
-                                  : `Citation ${p.number}: ${group.documentName}${
-                                      p.citation.timeStartMs !== undefined
-                                        ? ` at ${formatMediaTimestamp(p.citation.timeStartMs)}`
-                                        : ''
-                                    }`
-                              }
-                              onClick={() => onOpenCitation(p.citation, meta)}
-                            >
-                              {p.number}
-                              {p.citation.timeStartMs !== undefined ? (
-                                <span className="ml-1 font-mono text-[0.65rem]">
-                                  · {formatMediaTimestamp(p.citation.timeStartMs)}
-                                </span>
-                              ) : null}
-                            </button>
-                          ))}
+                          {group.passages.map((p) => {
+                            // Groups contain corpus citations. Keep this guard at
+                            // the display boundary so web evidence can never be
+                            // mistaken for a document/media source.
+                            if (p.citation.kind !== 'document') return null;
+                            return (
+                              <button
+                                key={p.citation.id}
+                                type="button"
+                                className="lc-source-row__num-btn"
+                                disabled={group.redacted}
+                                aria-label={
+                                  group.redacted
+                                    ? `Citation ${p.number}: source no longer available`
+                                    : `Citation ${p.number}: ${group.documentName}${
+                                        p.citation.timeStartMs !== undefined
+                                          ? ` at ${formatMediaTimestamp(p.citation.timeStartMs)}`
+                                          : ''
+                                      }`
+                                }
+                                onClick={() => onOpenCitation(p.citation, meta)}
+                              >
+                                {p.number}
+                                {p.citation.timeStartMs !== undefined ? (
+                                  <span className="ml-1 font-mono text-[0.65rem]">
+                                    · {formatMediaTimestamp(p.citation.timeStartMs)}
+                                  </span>
+                                ) : null}
+                              </button>
+                            );
+                          })}
                         </span>
                         {/* Honest by construction: the backend re-checks INV-2 on
                             every READ, not just when the citation was written
@@ -358,7 +382,7 @@ function WebSources({
   citations,
   onOpen,
 }: {
-  citations: UiCitation[];
+  citations: Extract<UiCitation, { kind: 'web' }>[];
   onOpen: (citation: UiCitation) => void;
 }) {
   return (
@@ -367,7 +391,7 @@ function WebSources({
       <ul className="lc-web-sources" aria-label="Web sources">
         {citations.map((citation) => {
           const host = hostOf(citation.url);
-          const title = citation.webTitle ?? citation.documentName ?? host ?? 'Web result';
+          const title = citation.webTitle ?? host ?? 'Web result';
           const safeHref = isSafeHttpUrl(citation.url) ? citation.url : undefined;
           return (
             <li key={citation.id} className="lc-web-source">

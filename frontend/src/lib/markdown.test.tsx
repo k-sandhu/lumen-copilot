@@ -6,7 +6,7 @@
  * injection) — and that the override is resilient to a partial code fence
  * mid-stream (the chat renders partial markdown while the answer streams).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -95,5 +95,64 @@ describe('MarkdownView streaming reparse coalescing (#166)', () => {
     // flows through remark-gfm + sanitize, not a stale/plain copy).
     expect(screen.getByRole('table')).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: '1' })).toBeInTheDocument();
+  });
+});
+
+describe('MarkdownView inline evidence handles (#436)', () => {
+  it('renders valid corpus and web handles as accessible buttons resolved by the caller', async () => {
+    const user = userEvent.setup();
+    const onCorpus = vi.fn();
+    const onWeb = vi.fn();
+    render(
+      <MarkdownView
+        resolveCitationHandle={(handle) =>
+          handle === 'S1'
+            ? { title: 'Plan.pdf', onClick: onCorpus }
+            : handle === 'W1'
+              ? { title: 'Public page', onClick: onWeb }
+              : undefined
+        }
+      >
+        {'Claim supported by [S1] and [W1].'}
+      </MarkdownView>,
+      { wrapper: MemoryRouter },
+    );
+
+    const corpus = screen.getByRole('button', { name: 'Citation S1: Plan.pdf' });
+    const web = screen.getByRole('button', { name: 'Citation W1: Public page' });
+    await user.click(corpus);
+    await user.click(web);
+    expect(onCorpus).toHaveBeenCalledOnce();
+    expect(onWeb).toHaveBeenCalledOnce();
+  });
+
+  it('does not treat a user-authored synthetic evidence URL as a citation handle', () => {
+    render(
+      <MarkdownView resolveCitationHandle={() => ({ title: 'Plan.pdf', onClick: () => {} })}>
+        {'[ordinary link](#lc-evidence:S1)'}
+      </MarkdownView>,
+      { wrapper: MemoryRouter },
+    );
+
+    expect(screen.queryByRole('button', { name: /Citation S1/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'ordinary link' })).toHaveAttribute(
+      'href',
+      '#lc-evidence:S1',
+    );
+  });
+
+  it('does not convert handle-looking text in inline code or ordinary links', () => {
+    render(
+      <MarkdownView resolveCitationHandle={() => ({ title: 'Plan.pdf', onClick: () => {} })}>
+        {'`[S1]` and [ordinary link](https://example.com/S1)'}
+      </MarkdownView>,
+      { wrapper: MemoryRouter },
+    );
+    expect(screen.queryByRole('button', { name: /Citation S1/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'ordinary link' })).toHaveAttribute(
+      'href',
+      'https://example.com/S1',
+    );
+    expect(screen.getByText('[S1]')).toBeInTheDocument();
   });
 });

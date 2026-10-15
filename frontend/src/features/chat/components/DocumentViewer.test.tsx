@@ -8,9 +8,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { setAccessToken, clearAccessToken } from '@/api';
 import { DocumentViewer } from './DocumentViewer';
-import type { UiCitation } from '../model/citation';
+import type { UiDocumentCitation } from '../model/citation';
 
-const CITATION: UiCitation = {
+const CITATION: UiDocumentCitation = {
+  kind: 'document',
   id: 'c1',
   documentId: 'doc-9',
   documentName: 'Q4 strategy.pdf',

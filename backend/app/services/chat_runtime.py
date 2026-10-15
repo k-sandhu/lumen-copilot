@@ -60,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.auth.principal import Principal
 from app.core.errors import AppError, DependencyError
 from app.core.logging import get_logger
+from app.db.evidence_handles import HandleRepository, WebCitationRepository
 from app.db.repositories import (
     AuditEventRepository,
     CitationRepository,
@@ -71,7 +72,7 @@ from app.db.repositories import (
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation
+from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation, WebCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec
 from app.domain.tools import ToolResult
@@ -103,6 +104,7 @@ from app.services.provider_models import (
 )
 from app.services.tools.context_audit import ContextAuditSink
 from app.services.tools.gate import PolicyApprovalGate
+from app.services.tools.handles import EvidenceHandles, select_cited_handles
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
 from app.services.tools.impls.recall import READ_CONVERSATION_TOOL_NAME
@@ -151,6 +153,8 @@ def _citation_event_data(citation: GroundedCitation) -> dict[str, object]:
         "charStart": citation.char_start,
         "charEnd": citation.char_end,
     }
+    if citation.handle is not None:
+        payload["handle"] = citation.handle
     if citation.score is not None:
         payload["score"] = citation.score
     if start is not None and end is not None:
@@ -1190,6 +1194,9 @@ class ChatRuntime:
         # Keep this snapshot independently of fit_transcript: content that a
         # prior model call saw can still influence the answer after compaction.
         prompt_context = list(messages)
+        # One chunk can change during an answer. Preserve each observed revision
+        # by handle; final permission/identity checks select the cited revision.
+        corpus_evidence: dict[str, GroundedCitation] = {}
         # Which tool CALL carried which passages — (chunk_id, RENDERED snippet)
         # pairs in passage order (#415). The rendered snippet (trimmed to the
         # run's snippet budget, exactly as ``_render_passages`` showed it) is what
@@ -1214,6 +1221,19 @@ class ChatRuntime:
         self._salvage = (route_state, usage)
         finish_reason = "stop"
         total_hits = 0
+        # Reserve before tools can write forward-referencing trace rows. The
+        # reservation commit leaves gaps after aborts instead of reusing handles.
+        # Reuse the coordinator: serial/denial-only paths must not acquire an
+        # extra pool connection. Preview's injected commit remains flush-only.
+        handle_repo = HandleRepository(session, self._principal, session_id)
+        first_handle = await handle_repo.reserve()
+        await session.commit()
+        # SET LOCAL resets at commit; restore the tenant on the new transaction.
+        await bind_tenant(session, tenant_id)
+        handles = EvidenceHandles(first=first_handle, existing=await handle_repo.load())
+        available_handles: set[str] = set()
+        web_evidence: dict[str, WebCitation] = {}
+        web_snippets: dict[str, tuple[str, ...]] = {}
         # Set iff a turn ended with a valid ``ask_user`` call (spec 0006 #429):
         # the loop breaks and the turn persists as a clarifying question.
         # (Named ask_question: ``question`` is this method's user-question param.)
@@ -1289,7 +1309,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(model_id),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
 
         budget_exhausted = True
@@ -1308,7 +1330,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(route_state.route.model),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
             await self._emit_step(
                 state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
@@ -1410,6 +1434,51 @@ class ChatRuntime:
             )
             for call, result in zip(turn_tool_calls, results, strict=True):
                 total_hits += result.hit_count
+                content = result.content
+                if result.passages:
+                    blocks: list[str] = []
+                    for passage in result.passages:
+                        handle = handles.passage(passage)
+                        available_handles.add(handle)
+                        blocks.append(_retrieval_impl.rendered_evidence(passage, handle))
+                    evidence_content = "\n\n".join(blocks)
+                    # Generic tools can carry distinct, transitive source content
+                    # alongside passages. Preserve it and its complete provenance.
+                    content = (
+                        evidence_content
+                        if call.name == "search_text"
+                        else f"{content}\n\n{evidence_content}"
+                    )
+                elif result.ok and result.payload.get("sourceType") == "web":
+                    blocks = []
+                    for item in result.payload.get("results", []):
+                        if not isinstance(item, dict):
+                            continue
+                        body = str(item.get("fetchedPassage") or item.get("snippet") or "").strip()
+                        visible = body[:700]
+                        if not visible:
+                            continue
+                        url, title = str(item.get("url") or ""), str(item.get("title") or "")
+                        handle = handles.web(url, title, visible)
+                        try:
+                            web_evidence[handle] = WebCitation(
+                                id=uuid.uuid4(),
+                                handle=handle,
+                                url=url,
+                                title=title,
+                                snippet=visible,
+                            )
+                        except ValueError:
+                            continue
+                        available_handles.add(handle)
+                        marker = "\n[Truncated web excerpt.]" if len(body) > len(visible) else ""
+                        blocks.append(f"[{handle}] {title}\n{url}\n{visible}{marker}")
+                    web_snippets[call.id] = tuple(blocks)
+                    content = "\n\n".join(blocks) or "No usable web evidence. Try another query."
+                for document_id in result.document_ids:
+                    handle = handles.document(document_id)
+                    content = content.replace(str(document_id), handle)
+                result = replace(result, content=content)
                 # Transcript messages append in ORIGINAL call order (#412) —
                 # the provider protocol pairs each tool reply to its request,
                 # and a deterministic order keeps the prompt prefix stable for
@@ -1445,16 +1514,16 @@ class ChatRuntime:
                     result_passage_snippets[call.id] = tuple(
                         (
                             p.chunk_id,
-                            _retrieval_impl.rendered_snippet(p.text, assembled.snippet_budget),
+                            _retrieval_impl.rendered_evidence(p, handles.passage(p)),
                         )
                         for p in result.passages
                     )
                 # Record + emit citations for each newly-seen permitted passage.
                 for passage in result.passages:
-                    if passage.chunk_id in cited:
-                        continue
-                    citation = GroundedCitation.from_passage(passage)
-                    cited[passage.chunk_id] = citation
+                    handle = handles.passage(passage)
+                    citation = replace(GroundedCitation.from_passage(passage), handle=handle)
+                    corpus_evidence[handle] = citation
+                    cited.setdefault(passage.chunk_id, citation)
 
         if budget_exhausted:
             # The whole budget went to tool turns and the model never volunteered a
@@ -1472,7 +1541,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(route_state.route.model),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
             await self._emit_step(
                 state,
@@ -1506,6 +1577,7 @@ class ChatRuntime:
             answer_chunks = turn_text
 
         if ask_question is not None:
+            await handle_repo.append(handles.created)
             # The clarifying-question turn (spec 0006 #429). The question text IS
             # the assistant message; it persists with the structured payload so
             # the options re-render after reload, and with ZERO citations — a
@@ -1600,7 +1672,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(route_state.route.model),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
             try:
                 _, finish_reason, extra_chunks = await self._stream_turn_resilient(
@@ -1644,6 +1718,67 @@ class ChatRuntime:
         # value — a strip here makes the stored message differ from what streamed.
         # Stripping is used ONLY to detect emptiness below (whether to fall back).
         answer_text = "".join(answer_chunks)
+        cleaned_answer, selected_handles = select_cited_handles(answer_text, available_handles)
+        selected_corpus = {
+            handle: citation
+            for handle, citation in corpus_evidence.items()
+            if handle in selected_handles
+        }
+        if selected_corpus:
+            requested_passages = len(selected_corpus)
+            fresh = await retrieval.read_passages(
+                principal=self._principal,
+                chunk_ids=list(dict.fromkeys(c.chunk_id for c in selected_corpus.values())),
+                collection_ids=effective_collection_ids,
+                document_ids=document_ids,
+            )
+            valid = {
+                handles.passage(passage): passage
+                for passage in fresh
+                if handles.resolve(handles.passage(passage)) is not None
+            }
+            selected_corpus = {
+                handle: citation
+                for handle, citation in selected_corpus.items()
+                if citation.handle in valid
+                and valid[citation.handle].document_id == citation.document_id
+            }
+            await audit.emit(
+                action=AuditAction.EVIDENCE_REHYDRATED,
+                actor=AuditActor.user(self._principal.user_id),
+                resource_type="session",
+                resource_id=str(session_id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "requested_passages": requested_passages,
+                    "permitted_passages": len(selected_corpus),
+                },
+            )
+            if len(selected_corpus) != requested_passages:
+                # A marker alone cannot isolate the prose derived from a source.
+                # Fail closed for the whole answer when selected evidence changed
+                # or became forbidden between the tool read and final persistence.
+                cleaned_answer = NO_SOURCES_FALLBACK
+                selected_corpus = {}
+                web_evidence = {}
+                selected_handles = []
+        allowed_final = {c.handle for c in selected_corpus.values() if c.handle is not None}
+        allowed_final.update(h for h in selected_handles if h in web_evidence)
+        cleaned_answer, selected_handles = select_cited_handles(cleaned_answer, allowed_final)
+        if cleaned_answer != answer_text:
+            await self._retract_answer(state)
+            await self._publish_text(state, [cleaned_answer])
+        answer_text = cleaned_answer
+        cited = {
+            citation.chunk_id: citation
+            for citation in sorted(
+                selected_corpus.values(),
+                key=lambda citation: selected_handles.index(citation.handle or ""),
+            )
+        }
+        selected_web = [web_evidence[h] for h in selected_handles if h in web_evidence]
 
         # Persist the assistant message and its citations (INV-3): the citations
         # are exactly the permitted passages the tools returned — never more.
@@ -1656,6 +1791,8 @@ class ChatRuntime:
             if state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT:
                 await self._retract_answer(state)
             answer_text = NO_SOURCES_FALLBACK
+            cited = {}
+            selected_web = []
             # Emit the fallback through the TRACKED ``_stream_text`` seam (#488), not a
             # raw ``_publish``: that sets ``answer_on_wire``, so a later persistence /
             # commit failure RETRACTS the fallback like any other answer delta instead
@@ -1674,6 +1811,10 @@ class ChatRuntime:
             citations=list(cited.values()),
             prompt_context=prompt_context,
         )
+        await handle_repo.append(handles.created)
+        web_repo = WebCitationRepository(session, tenant_id)
+        for web_citation in selected_web:
+            await web_repo.add(assistant_message_id, web_citation)
         # Evidence carry-forward WRITE (#416): the NEXT answer's digest is this
         # answer's cited ids — IDs only (ADR-0016 §3.2), replaced wholesale (a
         # zero-citation answer clears it). Rides the answer transaction; the
@@ -1687,6 +1828,22 @@ class ChatRuntime:
         # a distinct permitted passage — one event each, no extra guard needed.
         for citation in stored_citations:
             await self._emit_citation(state, citation)
+        for web_citation in selected_web:
+            await self._publish(
+                state,
+                envelopes.event(
+                    state.stream_id,
+                    await self._next_seq(state),
+                    name="web_citation",
+                    data={
+                        "id": str(web_citation.id),
+                        "handle": web_citation.handle,
+                        "url": web_citation.url,
+                        "title": web_citation.title,
+                        "snippet": web_citation.snippet,
+                    },
+                ),
+            )
 
         await self._audit_answer(
             audit=audit,
@@ -1694,7 +1851,7 @@ class ChatRuntime:
             assistant_message_id=assistant_message_id,
             question=question,
             model=route_state.model,
-            citation_count=len(stored_citations),
+            citation_count=len(stored_citations) + len(selected_web),
             retrieved_hits=total_hits,
             # Distinct cited documents, first-appearance order — the provenance
             # the Audit "Answers cited" KPI reads (#249).
@@ -1719,7 +1876,7 @@ class ChatRuntime:
         run_result = _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
-            citation_count=len(stored_citations),
+            citation_count=len(stored_citations) + len(selected_web),
             citations=tuple(stored_citations),
             prompt_tokens=answer_usage.prompt_tokens,
             completion_tokens=answer_usage.completion_tokens,
@@ -2833,6 +2990,7 @@ class ChatRuntime:
                 transcript_segment_id=citation.transcript_segment_id,
                 speaker_id=citation.speaker_id,
                 speaker_name=citation.speaker_name,
+                handle=citation.handle,
             )
             stored.append(
                 GroundedCitation(
@@ -2849,6 +3007,7 @@ class ChatRuntime:
                     transcript_segment_id=citation.transcript_segment_id,
                     speaker_id=citation.speaker_id,
                     speaker_name=citation.speaker_name,
+                    handle=citation.handle,
                 )
             )
         return stored
@@ -3444,6 +3603,7 @@ def _hash_query(query: str) -> str:
 def _cited_snippets_by_call(
     result_passage_snippets: dict[str, tuple[tuple[UUID, str], ...]],
     cited: dict[UUID, GroundedCitation],
+    web_snippets: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Map each tool ``call.id`` to the RENDERED snippets the answer cited from it (#415).
 
@@ -3456,9 +3616,7 @@ def _cited_snippets_by_call(
     chunk in passage order (deterministic); chunks the answer did not cite
     contribute nothing.
     """
-    if not cited:
-        return {}
-    out: dict[str, tuple[str, ...]] = {}
+    out: dict[str, tuple[str, ...]] = dict(web_snippets or {})
     for call_id, pairs in result_passage_snippets.items():
         seen: set[UUID] = set()
         snippets: list[str] = []
