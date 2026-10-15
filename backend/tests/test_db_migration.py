@@ -159,7 +159,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0048_evidence_handles"]
+    assert list(script.get_heads()) == ["0049_discovery_metadata"]
     locations = script.get_revision("0047_ingestion_locations")
     assert locations is not None
     assert locations.down_revision == "0046_message_source_provenance"
@@ -274,6 +274,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     evidence_handles = script.get_revision("0048_evidence_handles")
     assert evidence_handles is not None
     assert evidence_handles.down_revision == "0047_ingestion_locations"
+    discovery_metadata = script.get_revision("0049_discovery_metadata")
+    assert discovery_metadata is not None
+    assert discovery_metadata.down_revision == "0048_evidence_handles"
 
 
 def test_offline_evidence_handles_migration_round_trips(

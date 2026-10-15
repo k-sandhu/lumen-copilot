@@ -1134,7 +1134,9 @@ async def test_no_custom_instructions_leaves_bare_grounded_prompt(ctx: _Ctx) -> 
     assert gateway.system_prompt == GROUNDED_SYSTEM_PROMPT
 
 
-async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
+async def test_context_assembler_trims_history_end_to_end(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#410: the runtime assembles under a budget — a tiny window trims old history.
 
     Proves the assembler is actually wired into the runtime (not just unit-tested):
@@ -1144,22 +1146,37 @@ async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
     """
     from app.domain.llm import ChatMessage
     from app.domain.llm import Role as LlmRole
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     gateway = _CapturingGateway()
     backplane = InMemoryBackplane()
-    # A moderate window (fallback 6000 − 1024 margin ⇒ ~4976 budget) that easily
-    # holds the fixed segments (grounded prompt + tool schemas + question) but is
-    # dwarfed by the two ENORMOUS ancient turns below — so the assembler trims
-    # them and keeps the tiny recent turn, rather than refusing. The unknown model
-    # id (not in the litellm map) exercises the fallback resolver (AC-3) too.
+
+    # The current fixed catalog plus slack fits recent turns, while the
+    # enormous ancient turns still require history trimming.
+    def bytecounter(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="the new question"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=bytecounter,
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=6000, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0
+        ),
     )
+    monkeypatch.setattr(runtime, "_token_counter_for", lambda _model: bytecounter)
     long_history = [
         ChatMessage(role=LlmRole.USER, content="ancient question " * 3000),
         ChatMessage(role=LlmRole.ASSISTANT, content="ancient answer " * 3000),
@@ -1324,7 +1341,7 @@ async def test_forced_synthesis_payload_is_budget_guarded(
     import sys
     import types as _types
 
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
 
     def _raise(**_kw: object) -> int:
         raise RuntimeError("no tokenizer in test")
@@ -1342,20 +1359,40 @@ async def test_forced_synthesis_payload_is_budget_guarded(
         char_end=8000,
         score=0.9,
     )
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
+
     gateway = _RecordingSearchGateway()
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
+
     # max_tool_turns=1: one tool turn, then the loop is exhausted and the runtime
-    # makes the forced-synthesis call. Budget 4000 (5024 − 1024); the one huge
+    # makes the forced-synthesis call. The measured fixed cost plus slack fits
+    # the first request; the one huge
     # result makes the synthesis payload oversized ⇒ must be refused, not sent.
+    def bytecounter(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="summarize the big doc"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=bytecounter,
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([huge]),
         backplane=backplane,
         default_max_tool_turns=1,
-        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0
+        ),
     )
+    monkeypatch.setattr(runtime, "_token_counter_for", lambda _model: bytecounter)
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
     await runtime.run(
@@ -1366,10 +1403,13 @@ async def test_forced_synthesis_payload_is_budget_guarded(
         history=[],
         collection_ids=None,
     )
-    await asyncio.wait_for(consumer, timeout=2.0)
-    budget = 5024 - 1024
+    events = await asyncio.wait_for(consumer, timeout=2.0)
     # No payload (ordinary or forced-synthesis) exceeded budget.
     assert all(e <= budget for e in gateway.estimates), gateway.estimates
+
+    assert len(gateway.estimates) == 1
+    assert events[-1]["type"] == "error"
+    assert events[-1]["problem"]["code"] == "context_too_large"
 
 
 class _BigDocRetrieval(_FakeRetrieval):
@@ -5203,11 +5243,16 @@ async def test_cited_answer_writes_the_evidence_digest(ctx: _Ctx) -> None:
     assert row.summary is None  # the TEXT summary is the async task's job
 
 
-async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
+async def test_summary_segment_is_shed_before_refusal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#446 finding 4 (degrade order): an oversize summary must SHED, not turn
     a fitting question into context_too_large — the answer degrades to the
     verbatim window."""
     from app.llm.context import ContextConfig as _CC
+    from app.llm.context import estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     retrieval = _FakeRetrieval([])
     gateway = _RecordingScriptedGateway(
@@ -5217,13 +5262,27 @@ async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
     stream_id = uuid.uuid4().hex
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
+
+    def bytecounter(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="q"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=bytecounter,
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=retrieval,
         backplane=backplane,
-        context_config=_CC(fallback_max_input_tokens=3_000, output_headroom_tokens=0),
+        context_config=_CC(fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0),
     )
+    monkeypatch.setattr(runtime, "_token_counter_for", lambda _model: bytecounter)
     await runtime.run(
         stream_id=stream_id,
         session_id=ctx.session_id,
@@ -5231,7 +5290,7 @@ async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
         model="fake/unknown-model",
         history=[],
         collection_ids=None,
-        summary="H" * 40_000,  # far beyond the 3k-token window
+        summary="H" * 40_000,  # far beyond the measured fixed cost plus slack
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
     assert envs[-1]["type"] == "done"  # no context_too_large terminal
