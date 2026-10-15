@@ -50,18 +50,31 @@ live-validated against — ADR-0016 §2.4). The kill-switch
 |---|---|---|
 | `openrouter/anthropic/…` (e.g. Claude Opus/Haiku — the **default chat route**) | `cache_control` breakpoints on message 0 + a moving mark on the last cacheable block | **> 0 from turn 2 on**; ratio climbs as the transcript grows |
 | `openrouter/openai/…` (e.g. GPT-5.5) | `extra_body.prompt_cache_key = session_id` (implicit caching, messages untouched) | **> 0 once the stable prefix ≥ the provider minimum** (OpenAI auto-caches ≥1024-token prefixes); provider-dependent |
-| `openrouter/google/…` (Gemini) | **none** | **0 by design** |
-| `openrouter/deepseek/…` (DeepSeek) | **none** | **0 by design** |
-| `openrouter/qwen/…` (Qwen) | **none** | **0 by design** |
+| `openrouter/google/…` (Gemini) | **none** | provider-implicit: Gemini 2.5+ caches automatically, so **> 0 is normal** |
+| `openrouter/deepseek/…`, `openrouter/z-ai/…` (DeepSeek, GLM) | **none** | provider-implicit: **> 0 is normal**, but erratic. These upstreams are served by 30+ OpenRouter providers, each with its own cache. Measured on 2026-10-14/15: 47% / 41% answer hit, with 12% / 28% of calls 2+ at zero cache ([#760 spike](../audits/prompt-cache-scope-spike-2026-10-15.md)) |
+| `openrouter/qwen/…` (Qwen) | **none** | provider-dependent: Alibaba-served Qwen caches only with explicit `cache_control`; other providers may cache implicitly |
 | any **non-OpenRouter** `api_base` (a tenant's own OpenAI-compatible endpoint) | **none — fail-safe** | **0 by design**, even when the model is *named* `claude`/`gpt` |
 | any id **without** the `openrouter/` adapter prefix and no OpenRouter `api_base` | **none — fail-safe** | **0 by design** |
 | kill-switch `CHAT_PROMPT_CACHE_ENABLED=false` | **none** | **0 everywhere** |
 
-**0-by-design routes (do not page on these):** every `google/`, `deepseek/`,
-`qwen/` upstream; every non-OpenRouter transport; and the kill-switch-off case.
-For these the pass-through was never validated, so the gateway emits nothing
-rather than send a directive a transport might reject — a route's model *name*
-never earns directives its *transport* wasn't proven to accept.
+**No-directive routes (do not page on a low or zero KPI here):** every `google/`,
+`deepseek/`, `z-ai/` and `qwen/` upstream; every non-OpenRouter transport; and the
+kill-switch-off case. The gateway emits nothing for them. On non-OpenRouter
+transports and with the kill switch off, that is because the pass-through was
+never validated: a route's model *name* never earns directives its *transport*
+wasn't proven to accept. The OpenRouter upstreams in this list may still show
+hits from the provider's own implicit caching; how many depends on which
+provider served each call. Only the non-OpenRouter transports and the
+kill-switch case are truly **0 by design**.
+
+**Decided, not yet built ([ADR-0016](../architecture/0016-context-engine-and-cache-first-prompting.md) §2 amendment, #760).**
+- The `openai/` key becomes an opaque **tenant** scope instead of the session
+  id. Today a new chat on `openai/…` reads 0 on call 1 by construction, because
+  the key partitions the provider cache per session.
+- Every OpenRouter route gains a sticky `session_id`.
+- Proactive compaction defaults off (§3.1 amendment).
+
+Update the table above when that lands.
 
 **Beyond the answer loop.** Only `stream_tools` (the answer loop) emits
 directives. The follow-up-suggestions completion, the `/search` direct answer,
@@ -70,7 +83,15 @@ spends are cache-cold by construction and do not appear in this KPI (it is a
 per-*answer* series). #490 moved suggestions and summaries onto a dedicated FAST
 route, so their cache-coldness is cheap.
 
-## Open question — is the `tools` array inside the cached prefix?
+## Settled (2026-10-15, #760): the `tools` array IS inside the cached prefix
+
+On `openrouter/anthropic/claude-haiku-5.5`, a new session asking a **different**
+question re-read 2,242 of its 2,375 call-1 prompt tokens. Only the question
+(~133 tokens) was uncached, and the ~950-token default tool schemas are part of
+that prompt. GLM and GPT-6 Luna show the same under a shared key. The analysis
+below is kept for its reasoning about *why* the code alone could not settle it.
+
+## Formerly open — is the `tools` array inside the cached prefix?
 
 **Statically (what the repo does):** No. `_apply_cache_directives`
 (`app/llm/gateway.py`) rewrites entries of the serialized **`messages`** list
