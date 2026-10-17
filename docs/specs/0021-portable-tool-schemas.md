@@ -14,7 +14,13 @@ The governed runner validates after resolving the tool and checking its
 allow-list, before approval prompts, handler execution or call-scope I/O.
 Optional provider nulls restore documented omission defaults, including nested
 objects; required nullable values remain present. Unknown null properties are
-still rejected. Declared types, enums, bounds and nested constraints use the
+still rejected. Read-only tools also omit the placeholders `""`, `"null"` and
+`[]` from optional fields, at every depth, unless that field's own `enum` or
+`const` names the value (#773). Some models fill every optional field this way;
+an omitted filter takes its documented default instead of matching nothing.
+Required fields keep their exact values, and side-effecting tools receive empty
+values unchanged, because there `""` can mean "clear this field".
+Declared types, enums, bounds and nested constraints use the
 same recursive validator for built-ins and MCP tools. MCP direct invocation
 retains its validation boundary as defense in depth.
 Object members of nullable type unions obey the same closure policy, including
@@ -44,6 +50,7 @@ schemas, for both initial assembly and later transcript fitting. Oversized fixed
 segments retain the existing context_too_large refusal before provider I/O.
 
 Verification covers nested schemas, legacy omissions, optional/required nulls,
+read-only placeholders (including a runner replay of placeholder-filled corpus calls),
 unknown properties, bounds/enums, bad references, unchanged source schemas and
 zero handler calls for invalid input. Discovery/range tools and call
 deduplication are separate changes.

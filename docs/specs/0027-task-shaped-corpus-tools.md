@@ -11,6 +11,13 @@ New ad-hoc conversations offer `search_passages`, `find_documents` and
 tools remain registered. A canonical or legacy deny applies to the complete
 capability family. No immutable assistant configuration is rewritten.
 
+Placeholder filters are not scopes (#773). The runner omits `[]`, `""` and
+`"null"` in optional fields of these read-only tools before the handler runs
+(spec 0021), so `collection_ids: []` or `source: ""` means "no filter", exactly
+like null or omission. Answer scope still applies: placeholder omission never
+widens a pinned or assistant scope, and an empty effective scope, such as a pin
+to a revoked document, still returns nothing without disclosure.
+
 Discovery searches literal substrings in title, filename, source path and public
 document metadata, never connector configuration or credentials. Connector
 sync preserves its fetched title, URL and modified timestamp; uploads fall back
