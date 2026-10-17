@@ -81,12 +81,20 @@ def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
     return text.strip()
 
 
-def rendered_evidence(passage: RetrievedPassage, handle: str) -> str:
-    """Handle-labelled complete evidence with the source's player provenance."""
-    return (
-        f"[{handle}] {passage.document_name}{_media_provenance(passage)}\n"
-        f"{rendered_snippet(passage.text)}"
-    )
+def rendered_evidence(
+    passage: RetrievedPassage, handle: str, *, document: str | None = None
+) -> str:
+    """Handle-labelled complete evidence with the source's player provenance.
+
+    ``document`` adds the passage's D handle and character range, so a search
+    hit shows exactly the tokens ``read_document`` accepts (#772).
+    """
+    location = _media_provenance(passage)
+    if document is not None:
+        location = (
+            f" (document {document}, chars {passage.char_start}-{passage.char_end}{location})"
+        )
+    return f"[{handle}] {passage.document_name}{location}\n{rendered_snippet(passage.text)}"
 
 
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:

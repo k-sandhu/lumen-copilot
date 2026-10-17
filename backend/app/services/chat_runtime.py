@@ -76,6 +76,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation, WebCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec
+from app.domain.retrieval import RetrievedPassage
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
 from app.llm.context import (
@@ -1459,7 +1460,7 @@ class ChatRuntime:
                     for passage in result.passages:
                         handle = handles.passage(passage)
                         available_handles.add(handle)
-                        blocks.append(_retrieval_impl.rendered_evidence(passage, handle))
+                        blocks.append(_evidence(call, passage, handles))
                     evidence_content = "\n\n".join(blocks)
                     # Canonical range reads already render from this handle book;
                     # retain their navigation instructions in the provider transcript.
@@ -1531,11 +1532,7 @@ class ChatRuntime:
                 # ellipsis and all, so the two can never drift.
                 if result.passages:
                     result_passage_snippets[call.id] = tuple(
-                        (
-                            p.chunk_id,
-                            _retrieval_impl.rendered_evidence(p, handles.passage(p)),
-                        )
-                        for p in result.passages
+                        (p.chunk_id, _evidence(call, p, handles)) for p in result.passages
                     )
                 # Record + emit citations for each newly-seen permitted passage.
                 for passage in result.passages:
@@ -3626,6 +3623,16 @@ def _hash_query(query: str) -> str:
     reviewer correlate retrieval + answer events for the same turn.
     """
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+def _evidence(call: ToolCall, passage: RetrievedPassage, handles: EvidenceHandles) -> str:
+    """The provider-visible evidence block, shared by the transcript and compaction.
+
+    A ``search_passages`` hit also names its D handle and range, the tokens
+    ``read_document`` accepts (#772); D handles navigate and are never citations.
+    """
+    document = handles.document(passage.document_id) if call.name == "search_passages" else None
+    return _retrieval_impl.rendered_evidence(passage, handles.passage(passage), document=document)
 
 
 def _cited_snippets_by_call(

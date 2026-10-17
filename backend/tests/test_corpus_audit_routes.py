@@ -27,7 +27,7 @@ from tests.test_chat_handle_routes import _send_and_collect
     [
         ("search_passages", {"query": "fact"}),
         ("find_documents", {"query": "taxes"}),
-        ("read_document", {"document": "seeded-document"}),
+        ("read_document", {"handle": "seeded-document"}),
     ],
     ids=["search-passages", "find-documents", "read-document"],
 )
@@ -47,7 +47,7 @@ async def test_canonical_corpus_tools_emit_committed_retrieval_audit(
     from tests import test_chat_api
 
     if tool_name == "read_document":
-        arguments = {"document": str(seeded.alice_doc)}  # type: ignore[attr-defined]
+        arguments = {"handle": str(seeded.alice_doc)}  # type: ignore[attr-defined]
 
     async def find_documents(
         self: object,
