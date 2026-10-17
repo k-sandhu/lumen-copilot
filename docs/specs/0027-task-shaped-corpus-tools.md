@@ -60,6 +60,19 @@ Both declared tool families emit `retrieval.query` alongside their generic tool
 events. Audited reads and uncited refusals commit through the chat route;
 independent read-back transactions verify those events and zero citations.
 
+`document_ids` filters on all three tools take the D handles the tools show
+(#774), resolved through the same conversation registry as reads, or document
+UUIDs. Every value must name a document the requester can read now. A filename,
+an S handle, another conversation's or a forged handle, an unknown UUID and a
+revoked document all get one field-specific `tool_bad_args` that echoes only
+the offending values (at most three, each at most 40 characters), says the field
+takes D handles and names `find_documents` only when it is offered. No search,
+discovery or read runs over an unresolved filter. Resolved values still
+intersect pinned scope. When a filter leaves no permitted document in scope, or
+a filtered search finds nothing, the reply blames the filter rather than the
+query. Whether the `find_documents` cursor should stop embedding a decodable
+document UUID is left to owner triage.
+
 Acceptance tests cover real metadata discovery, stable paging, literal wildcard
 characters, filter intersections, whole overlapping chunks, exact continuation,
 unknown/conversation handles, revoked permission, committed canonical-tool

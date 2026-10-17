@@ -89,6 +89,12 @@ class _FakeRetrieval:
             next_start=None,
         )
 
+    async def permitted_document_names(
+        self, *, principal: object, document_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        # Filters check every document value against current permissions (#774).
+        return {d: "Quarterly Plan.pdf" for d in document_ids if self.readable and d == _DOC}
+
     async def get_document(self, **kwargs: Any) -> SimpleNamespace | None:
         self.calls.append(("get_document", kwargs))
         if not self.readable:
