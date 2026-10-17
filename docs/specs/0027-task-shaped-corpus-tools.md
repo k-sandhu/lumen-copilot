@@ -39,11 +39,11 @@ header is `[S3] name (document D2, chars a-b)`, followed by media provenance
 when present. The D handle comes from the same conversation registry as
 `find_documents`, and a second hit in the same document reuses it. Compaction
 re-embeds this exact block. D handles navigate and never support a claim.
-A `document` value that names no available document (a filename, an S handle,
-an unknown or foreign handle or UUID, or a revoked document) gets one
-`tool_not_found` reply: it says `document` takes a D handle, naming only the
-offered tools that show one, and that `around` takes an S handle. It discloses
-nothing about the value.
+A read `handle` that names no available document or passage gets one
+`tool_not_found` reply. That covers a filename, an unknown or foreign handle or
+UUID, a revoked document, and changed evidence. The reply says `handle` takes a
+D or S handle, names only the offered tools that show one, and discloses nothing
+about the value.
 
 All structured filters intersect with answer scope and current permissions:
 source kind, MIME type, creation or source-modified dates, collection IDs and document IDs. An empty
@@ -51,7 +51,23 @@ intersection remains empty. Passage filtering uses bounded relational discovery
 before the existing search engine; too many eligible documents require narrower
 filters rather than silent truncation.
 
-`read_document` accepts a document UUID or D handle, or reads around an S handle.
+`read_document` takes one required `handle` (#771). A D handle or document UUID
+reads the document's character range (`start`/`end`). An S handle reads 1200
+characters either side of that passage and ignores any range, because some
+models fill every optional field. There is no pair of mutually exclusive
+parameters. Decision, from notebook 08 section 9 (2026-10-16):
+- **Chosen: one `handle` parameter (option a).**
+- **Rejected: a separate `read_around(passage)` tool (option b).**
+- Why not the old pair: under `document`/`around`, 21–38% of identifier calls
+  failed for three models, and on plain schemas gpt-6-luna sent both on every
+  read. Actionable errors alone did not lower that (28–40%).
+- Why (a) over (b): both measured 0% identifier failures, with 91–95% accuracy
+  for three models and 91% for gpt-6-luna in Lumen's wire format. A single
+  parameter keeps the three-tool canonical family unchanged, along with its
+  legacy alias, policy resolution and default catalog.
+- No alias is kept for the old `document`/`around` arguments, since one would
+  bring back the exclusive pair. The runner rejects them as unknown properties
+  before any I/O.
 Handles are navigation identities, never authorization. Around reads rehydrate
 the original passage and reject changed evidence, including changed media
 timestamps, transcript segment and speaker provenance even when text is unchanged.

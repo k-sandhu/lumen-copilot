@@ -153,7 +153,7 @@ def test_task_tool_aliases_are_registered_as_flat_read_only_t0_tools() -> None:
     assert {"query", "limit", "cursor", "sort", "source", "mime_type"} <= set(
         get_tool("find_documents").json_schema["properties"]
     )
-    assert {"document", "around", "start", "end", "max_passages"} <= set(
+    assert {"handle", "start", "end", "max_passages"} <= set(
         get_tool("read_document").json_schema["properties"]
     )
 
@@ -260,11 +260,11 @@ async def test_read_document_resolves_document_and_passage_handles() -> None:
     handles = _handles()
 
     by_document = await get_tool("read_document").handler(
-        {"document": "D1", "start": 0, "max_passages": 3},
+        {"handle": "D1", "start": 0, "max_passages": 3},
         _context(retrieval, handles=handles),
     )
     by_passage = await get_tool("read_document").handler(
-        {"around": "S1", "start": 0, "max_passages": 3},
+        {"handle": "S1", "start": 0, "max_passages": 3},
         _context(retrieval, handles=handles),
     )
 
@@ -298,7 +298,7 @@ async def test_changed_passage_handle_fingerprint_is_not_readable() -> None:
     handles = _handles()
 
     result = await get_tool("read_document").handler(
-        {"around": "S1"}, _context(retrieval, handles=handles)
+        {"handle": "S1"}, _context(retrieval, handles=handles)
     )
 
     assert not result.ok
@@ -314,7 +314,7 @@ async def test_empty_scope_intersection_returns_no_document_content() -> None:
     allowed_collection = uuid.UUID("00000000-0000-0000-0000-000000000201")
     disallowed_collection = uuid.UUID("00000000-0000-0000-0000-000000000202")
     result = await get_tool("read_document").handler(
-        {"document": "D1", "collection_ids": [str(disallowed_collection)]},
+        {"handle": "D1", "collection_ids": [str(disallowed_collection)]},
         _context(retrieval, handles=_handles(), collection_ids=[allowed_collection]),
     )
 
@@ -329,8 +329,8 @@ async def test_forged_or_other_conversation_handle_reveals_nothing() -> None:
     retrieval = _FakeRetrieval()
     ctx = _context(retrieval, handles=_handles(second_conversation=True))
 
-    forged = await get_tool("read_document").handler({"document": "D999"}, ctx)
-    foreign = await get_tool("read_document").handler({"around": "S1"}, ctx)
+    forged = await get_tool("read_document").handler({"handle": "D999"}, ctx)
+    foreign = await get_tool("read_document").handler({"handle": "S1"}, ctx)
 
     assert not forged.ok and not foreign.ok
     assert retrieval.calls == []
@@ -343,7 +343,7 @@ async def test_forged_or_other_conversation_handle_reveals_nothing() -> None:
 async def test_revoked_document_permission_returns_no_metadata_or_body() -> None:
     retrieval = _FakeRetrieval(readable=False)
     result = await get_tool("read_document").handler(
-        {"document": "D1"}, _context(retrieval, handles=_handles())
+        {"handle": "D1"}, _context(retrieval, handles=_handles())
     )
 
     assert result.hit_count in (None, 0)
@@ -377,7 +377,7 @@ async def test_read_around_rejects_changed_media_provenance(field: str, value: o
     handle = handles.passage(retrieval.passage)
     retrieval.passage = replace(retrieval.passage, **{field: value})
     result = await get_tool("read_document").handler(
-        {"around": handle}, _context(retrieval, handles=handles)
+        {"handle": handle}, _context(retrieval, handles=handles)
     )
     assert not result.ok
     assert result.error == ERROR_NOT_FOUND
@@ -395,7 +395,7 @@ async def test_read_around_accepts_unchanged_media_provenance() -> None:
     handles = EvidenceHandles()
     handle = handles.passage(retrieval.passage)
     result = await get_tool("read_document").handler(
-        {"around": handle}, _context(retrieval, handles=handles)
+        {"handle": handle}, _context(retrieval, handles=handles)
     )
     assert result.ok
     assert _SECRET in result.content
