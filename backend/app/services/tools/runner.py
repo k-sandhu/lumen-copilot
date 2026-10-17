@@ -375,7 +375,11 @@ class ToolRunner:
 
         # Validate after identity/governance visibility and before approval or I/O.
         # Optional provider nulls preserve the legacy documented omission default.
-        arguments = legacy_arguments(call.arguments, definition.json_schema)
+        # Read-only tools also omit "", "null" and [] placeholders, so a model
+        # that fills every optional field never turns them into filters (#773).
+        arguments = legacy_arguments(
+            call.arguments, definition.json_schema, omit_placeholders=definition.read_only
+        )
         argument_error = validate_arguments(arguments, definition.json_schema)
         if argument_error is not None:
             return await self._finalise(
