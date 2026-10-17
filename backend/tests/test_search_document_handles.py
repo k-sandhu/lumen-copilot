@@ -2,8 +2,9 @@
 
 Notebook 08 (section 9) measured every filename read failing until the search
 output showed a D handle. These tests pin the header in both the handler and
-the provider transcript, the compaction snippet's byte identity, and the
-corrective, non-disclosing reply when ``document`` names something else.
+the provider transcript and the compaction snippet's byte identity. The
+corrective reply for an unavailable read lives with ``read_document``'s
+``handle`` parameter (#771, tests/test_read_document_handle.py).
 """
 
 # ruff: noqa: F811
@@ -18,13 +19,12 @@ import pytest
 
 from app.domain.llm import Role as LlmRole
 from app.domain.llm import StreamEvent, ToolCall
-from app.domain.tools import ERROR_NOT_FOUND
 from app.realtime.backplane import InMemoryBackplane
 from app.services.tools.handles import EvidenceHandles
 from app.services.tools.registry import get_tool
 from tests.test_chat_runtime import _Ctx, _FakeRetrieval, _passage, _runtime
 from tests.test_chat_runtime import ctx as ctx
-from tests.test_task_tools import _DOC, _SECRET, _context, _handles
+from tests.test_task_tools import _DOC, _SECRET, _context
 from tests.test_task_tools import _FakeRetrieval as _ToolRetrieval
 
 
@@ -137,70 +137,3 @@ async def test_provider_transcript_shows_document_handle_and_compaction_keeps_it
     assert registry["D2"] == {"kind": "document", "document_id": str(ctx.document_id)}
     # The D handle navigates; only the inline S handle becomes a citation.
     assert [citation.chunk_id for citation in citations] == [ctx.chunk_id]
-
-
-@pytest.mark.parametrize(
-    "document",
-    [
-        pytest.param("Quarterly Plan.pdf", id="filename"),
-        pytest.param("S1", id="passage-handle"),
-        pytest.param("D999", id="unknown-handle"),
-        pytest.param(str(uuid.uuid4()), id="unknown-uuid"),
-        pytest.param("Quarterly Plan", id="filename-stem"),
-    ],
-)
-async def test_unresolvable_document_gets_one_corrective_non_disclosing_reply(
-    document: str,
-) -> None:
-    retrieval = _ToolRetrieval(readable=False)
-    context = replace(
-        _context(retrieval, handles=_handles()),
-        allowed_tools=frozenset({"search_passages", "find_documents", "read_document"}),
-    )
-
-    result = await get_tool("read_document").handler({"document": document}, context)
-
-    assert not result.ok
-    assert result.error == ERROR_NOT_FOUND
-    assert result.content == (
-        "No document is available for that value in this conversation and scope. "
-        "document takes a D handle (for example D2) shown by search_passages or "
-        "find_documents. To read around a passage, pass its S handle as around "
-        "instead of document."
-    )
-    assert _SECRET not in result.content
-
-
-async def test_foreign_and_revoked_documents_match_the_unknown_reply() -> None:
-    allowed = frozenset({"search_passages", "find_documents", "read_document"})
-    revoked = replace(
-        _context(_ToolRetrieval(readable=False), handles=_handles()), allowed_tools=allowed
-    )
-    other_conversation = replace(
-        _context(_ToolRetrieval(), handles=_handles(second_conversation=True)),
-        allowed_tools=allowed,
-    )
-    unknown = replace(_context(_ToolRetrieval(), handles=_handles()), allowed_tools=allowed)
-    tool = get_tool("read_document")
-
-    replies = [
-        await tool.handler({"document": "D1"}, revoked),
-        await tool.handler({"document": "D1"}, other_conversation),
-        await tool.handler({"document": "notes.txt"}, unknown),
-    ]
-
-    assert len({(r.ok, r.error, r.content, r.summary) for r in replies}) == 1
-    assert "Quarterly Plan" not in replies[0].content
-
-
-async def test_corrective_reply_names_only_offered_discovery_tools() -> None:
-    context = replace(
-        _context(_ToolRetrieval(), handles=_handles()),
-        allowed_tools=frozenset({"read_document"}),
-    )
-
-    result = await get_tool("read_document").handler({"document": "plan.pdf"}, context)
-
-    assert "search_passages" not in result.content
-    assert "find_documents" not in result.content
-    assert "D handle (for example D2) shown earlier in this conversation" in result.content
