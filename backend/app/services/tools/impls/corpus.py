@@ -22,6 +22,55 @@ def _ids(value: object, scope: list[UUID] | None) -> list[UUID] | None:
     return ids if scope is None else [item for item in ids if item in scope]
 
 
+def _document_identity(value: str, ctx: ToolContext) -> UUID | None:
+    """A current-conversation D handle or a UUID; navigation identity, never a grant."""
+    document_id = ctx.handles.document_id(value) if ctx.handles else None
+    if document_id is not None:
+        return document_id
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def _unavailable_documents(values: list[str], ctx: ToolContext) -> str:
+    shown = [repr(value if len(value) <= 40 else value[:40] + "…") for value in values[:3]]
+    if len(values) > 3:
+        shown.append(f"{len(values) - 3} more")
+    listed = ", ".join(shown[:-1]) + (" and " if len(shown) > 1 else "") + shown[-1]
+    returns = ", which find_documents returns," if "find_documents" in ctx.allowed_tools else ","
+    return (
+        f"document_ids has {'values that name' if len(values) > 1 else 'a value that names'} "
+        f"no available document: {listed}. document_ids takes D handles shown in this "
+        f"conversation (for example D2){returns} or omit it to search every permitted document."
+    )
+
+
+async def _document_ids(value: object, ctx: ToolContext) -> list[UUID] | None:
+    """Resolve D handles or UUIDs to readable documents, then intersect pinned scope.
+
+    Every value must name a document the principal can read now. A filename, an S
+    handle, another conversation's handle, an unknown UUID and a revoked document
+    all get the same field-specific error, so it discloses nothing (INV-2).
+    """
+    if value is None:
+        return ctx.document_ids
+    if not isinstance(value, list) or len(value) > 50:
+        raise ValueError("Use at most 50 values in each scope filter.")
+    resolved = {str(item): _document_identity(str(item), ctx) for item in value}
+    wanted = list(dict.fromkeys(item for item in resolved.values() if item is not None))
+    permitted = (
+        await ctx.retrieval.permitted_document_names(principal=ctx.principal, document_ids=wanted)
+        if wanted
+        else {}
+    )
+    unavailable = [raw for raw, item in resolved.items() if item is None or item not in permitted]
+    if unavailable:
+        raise ValidationError(_unavailable_documents(unavailable, ctx))
+    scope = ctx.document_ids
+    return wanted if scope is None else [item for item in wanted if item in scope]
+
+
 def _date(value: object) -> datetime | None:
     if value is None:
         return None
@@ -31,10 +80,10 @@ def _date(value: object) -> datetime | None:
     return date
 
 
-def _filters(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+async def _filters(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     return {
         "collection_ids": _ids(args.get("collection_ids"), ctx.collection_ids),
-        "document_ids": _ids(args.get("document_ids"), ctx.document_ids),
+        "document_ids": await _document_ids(args.get("document_ids"), ctx),
         "source": args.get("source"),
         "mime_type": args.get("mime_type"),
         "created_after": _date(args.get("created_after")),
@@ -73,7 +122,7 @@ def _document_unavailable(ctx: ToolContext) -> str:
 
 async def _find(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     try:
-        filters = _filters(args, ctx)
+        filters = await _filters(args, ctx)
         page = await ctx.retrieval.find_documents(
             principal=ctx.principal,
             query=str(args.get("query") or "").strip(),
@@ -111,7 +160,7 @@ async def _find(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
 
 async def _search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     try:
-        filters = _filters(args, ctx)
+        filters = await _filters(args, ctx)
         if any(
             filters[key] is not None
             for key in (
@@ -148,8 +197,19 @@ async def _search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
         query = str(args.get("query") or "").strip()
         if not query:
             return _bad_args()
+        filtered = any(args.get(key) is not None for key in _FILTERS)
         if filters["document_ids"] == [] or filters["collection_ids"] == []:
             passages = []
+            if filtered:
+                return ToolHandlerResult(
+                    source_document_ids=(),
+                    content=(
+                        "No permitted documents in this conversation's scope match these "
+                        "filters. Remove or change a filter."
+                    ),
+                    summary="0 passages",
+                    hit_count=0,
+                )
         else:
             passages = await ctx.retrieval.search_text(
                 principal=ctx.principal,
@@ -172,7 +232,13 @@ async def _search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     return ToolHandlerResult(
         source_document_ids=(),
         content="\n\n".join(blocks)
-        or "No matching permitted passages. Try a short broader query or find_documents by title.",
+        or (
+            "No matching permitted passages in the filtered documents. Try a broader query "
+            "or remove a filter."
+            if filtered
+            else "No matching permitted passages. Try a short broader query or find_documents "
+            "by title."
+        ),
         summary=f"{len(passages)} passages",
         hit_count=len(passages),
         passages=tuple(passages),
@@ -190,7 +256,7 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
         end = int(args["end"]) if args.get("end") is not None else None
         scopes = {
             "collection_ids": _ids(args.get("collection_ids"), ctx.collection_ids),
-            "document_ids": _ids(args.get("document_ids"), ctx.document_ids),
+            "document_ids": await _document_ids(args.get("document_ids"), ctx),
         }
         if around:
             entry = ctx.handles.resolve(str(around)) if ctx.handles else None
@@ -310,9 +376,10 @@ _FILTERS: dict[str, Any] = {
     "document_ids": {
         "type": "array",
         "maxItems": 50,
-        "items": {"type": "string", "format": "uuid"},
+        "items": {"type": "string"},
         "description": (
-            "Up to 50 document UUIDs intersected with pinned scope; omitted keeps " "its scope."
+            "Up to 50 D handles shown in this conversation (e.g. D2) or document UUIDs, "
+            "intersected with pinned scope; omitted keeps its scope."
         ),
     },
 }
