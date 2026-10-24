@@ -19,6 +19,8 @@ changes:
 
 from __future__ import annotations
 
+import pytest
+
 from app.domain.llm import ChatMessage, Role, ToolCall, ToolSpec
 from app.llm.context import (
     ContextConfig,
@@ -158,7 +160,7 @@ def test_proactive_leaves_cited_result_verbatim_when_snippet_dominates() -> None
 
 def test_proactive_is_off_by_default_in_the_assembler() -> None:
     """The pure assembler default is conservative: proactive compaction is opt-in
-    (the runtime turns it on via Settings), so an under-budget fit is the identity
+    (the runtime also defaults off via Settings), so an under-budget fit is the identity
     even with cited superseded results — no surprise mutation for existing callers."""
     messages = _three_searches()
     fitted = _fit_proactive(
@@ -218,7 +220,7 @@ def test_proactive_is_idempotent_across_turns() -> None:
     transcript next turn does not re-compact it (strict cost guard) — the prefix
     stays stable, preserving provider cache hits."""
     messages = _three_searches()
-    cited = {"c1": ("a",), "c2": ("b",), "c3": ("c",)}
+    cited: dict[str, tuple[str, ...]] = {"c1": ("a",), "c2": ("b",), "c3": ("c",)}
     once = _fit_proactive(messages, cited_snippets=cited)
     # Grow by one more search turn and refit — c3 is now superseded and compacts,
     # but c1/c2 (already digested) are untouched.
@@ -286,3 +288,52 @@ def test_memoizing_counter_returns_identical_counts() -> None:
     assert memo("hello") == 5  # cache hit — same value
     assert memo("héllo") == len("héllo".encode())
     assert calls == ["hello", "héllo"]  # the repeat did NOT re-invoke base
+
+
+def test_chat_default_preserves_under_budget_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.config import Settings
+
+    monkeypatch.delenv("CONTEXT_PROACTIVE_COMPACTION_ENABLED", raising=False)
+    settings = Settings()
+    assert settings.context_proactive_compaction_enabled is False
+    messages = _three_searches()
+    fitted = _fit_proactive(
+        messages,
+        cited_snippets={"c1": ("a",), "c2": ("b",), "c3": ("c",)},
+        enabled=settings.context_proactive_compaction_enabled,
+    )
+    assert fitted == messages
+
+
+def test_default_settings_still_compact_an_over_budget_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from app.core.config import Settings
+    from app.llm.context import estimate_message_tokens, input_budget_for_model
+
+    monkeypatch.delenv("CONTEXT_PROACTIVE_COMPACTION_ENABLED", raising=False)
+    settings = Settings()
+    config = ContextConfig(
+        fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
+        output_headroom_tokens=settings.context_output_headroom_tokens,
+        compaction_digest_chars=settings.context_compaction_digest_chars,
+        compaction_chunk_size=settings.context_compaction_chunk_size,
+        proactive_compaction_enabled=settings.context_proactive_compaction_enabled,
+    )
+    messages = [
+        replace(message, content=message.content * 40) if message.role is Role.TOOL else message
+        for message in _three_searches()
+    ]
+    budget, _ = input_budget_for_model("fake/model", config, resolver=lambda _: None)
+    fitted = fit_transcript(
+        messages,
+        model="fake/model",
+        config=config,
+        counter=len,
+        max_input_resolver=lambda _: None,
+    )
+    assert estimate_message_tokens(messages, counter=len) > budget
+    assert estimate_message_tokens(fitted, counter=len) <= budget
+    assert any("truncated to fit" in message.content for message in fitted)

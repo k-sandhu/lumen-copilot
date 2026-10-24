@@ -1,20 +1,16 @@
-"""AC-1 offline token-economics harness for a scripted 3-tool answer (#491).
+"""Deterministic prompt/cache economics (#764, superseding #658's raw ceiling).
 
-We cannot spend real provider tokens here, so this does the next best *real*
-thing: it assembles the EXACT prompts a scripted 3-tool grounded answer sends —
-the real ``GROUNDED_SYSTEM_PROMPT``, an explicit compatibility tool catalog, and
-realistically sized rendered search results — and COUNTS the cumulative input
-tokens with the SAME tokeniser the context engine uses
-(``litellm_token_counter`` via ``estimate_message_tokens``). It reports the
-BEFORE (no proactive compaction) and AFTER (proactive compaction on) cumulative
-totals; the numbers in the acceptance record come from RUNNING this, never an
-estimate.
-
-Baseline reference from the issue: ~11,060 cumulative input tokens, ~5,400 of it
-re-transmitted evidence. AC-1 asks the AFTER total to drop measurably.
+Four calls of the historical #491 three-search workload, counted with the
+context engine tokenizer. Every complete retrieved passage is citation-backed,
+as in the runtime; no 200-character evidence substitute. Prices are normalized
+input-token units, NOT provider invoices: cached reads 0.1x, writes/uncached
+spans 1.25x. The model caches complete identical message prefixes; a rewrite
+invalidates the changed message and everything after it (no suffix reuse).
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from app.domain.llm import ChatMessage, Role, ToolCall
 from app.llm.context import (
@@ -28,35 +24,33 @@ from app.services.prompts.grounded_answer import GROUNDED_SYSTEM_PROMPT
 from app.services.tools.impls.retrieval import rendered_snippet
 from app.services.tools.registry import tool_specs
 
-# A FRONTIER model, pinned deliberately to exercise its tokeniser for the
-# token-budget arithmetic below. NOT the registry default — since #490 the default
-# is a FAST-tier model (claude-haiku-4.5); this constant is independent of it.
 _MODEL = "openrouter/anthropic/claude-opus-4.8"
-
-# An immutable compatibility catalog for this historical #491 measurement.
-# Keep the four legacy retrieval tools and ask_user schemas stable as the runtime's
-# canonical default catalog evolves; web search was never part of this benchmark.
 _LEGACY_BENCHMARK_TOOLS = frozenset(
     {"search_text", "search_documents", "list_documents", "get_document", "ask_user"}
 )
 _TOOLS = tool_specs(_LEGACY_BENCHMARK_TOOLS)
+_READ_MULTIPLIER = 0.1
+_WRITE_MULTIPLIER = 1.25
 
 
-def _rendered_search_result(doc: str, *, k: int = 6) -> str:
-    """A realistic ``search_text`` reply: k complete rendered passages, each
-    labeled with its document, chunk ID, and character range."""
+def _passages(doc: str, *, k: int = 6) -> tuple[str, ...]:
     body = (
         "In fiscal year 2024 the company reported material changes across every "
         "operating segment, and management discussed the drivers at length. "
     ) * 10
-    blocks: list[str] = []
-    for i in range(1, k + 1):
-        chunk_id = f"{doc}-chunk-{i:04d}-9f2c1a"
-        snippet = rendered_snippet(f"Passage {i} of {doc}. {body}")
-        blocks.append(
-            f"[{i}] {doc}.pdf (chunk {chunk_id}, chars {i * 600}-{i * 600 + 600}):\n{snippet}"
-        )
-    return "\n\n".join(blocks)
+    return tuple(rendered_snippet(f"Passage {i} of {doc}. {body}") for i in range(1, k + 1))
+
+
+def _rendered_passage_blocks(doc: str, *, k: int = 6) -> tuple[str, ...]:
+    return tuple(
+        f"[{i}] {doc}.pdf (chunk {doc}-chunk-{i:04d}-9f2c1a, "
+        f"chars {i * 600}-{i * 600 + 600}):\n{snippet}"
+        for i, snippet in enumerate(_passages(doc, k=k), start=1)
+    )
+
+
+def _rendered_search_result(doc: str, *, k: int = 6) -> str:
+    return "\n\n".join(_rendered_passage_blocks(doc, k=k))
 
 
 def _tool_call(call_id: str, query: str) -> ChatMessage:
@@ -71,42 +65,63 @@ def _result(call_id: str, content: str) -> ChatMessage:
     return ChatMessage(role=Role.TOOL, content=content, tool_call_id=call_id, name="search_text")
 
 
-# The three tool exchanges of the scripted answer (search → search → search →
-# synthesize). This benchmark explicitly marks each exchange as represented in
-# cited evidence for the proactive-compaction precondition; the runtime selects
-# final inline citations separately.
-_EXCHANGES = [
-    ("call_1", "annual revenue by segment", _rendered_search_result("annual-report")),
-    ("call_2", "operating margin drivers", _rendered_search_result("mdna")),
-    ("call_3", "guidance for next fiscal year", _rendered_search_result("earnings-call")),
+_SEARCHES = [
+    ("call_1", "annual revenue by segment", "annual-report"),
+    ("call_2", "operating margin drivers", "mdna"),
+    ("call_3", "guidance for next fiscal year", "earnings-call"),
 ]
-_CITED_SNIPPETS = {call_id: (content[:200],) for call_id, _q, content in _EXCHANGES}
+_EXCHANGES = [(call, query, _rendered_search_result(doc)) for call, query, doc in _SEARCHES]
+# Runtime _evidence protects the full labeled block, not just its passage body.
+_CITED_SNIPPETS = {call: _rendered_passage_blocks(doc) for call, _query, doc in _SEARCHES}
 
 
-def _cumulative_input_tokens(*, proactive: bool) -> int:
-    """Sum the input tokens SENT across the 4 round-trips of a 3-tool answer.
+@dataclass(frozen=True)
+class Economics:
+    raw_tokens: int
+    cached_tokens: int
+    written_tokens: int
+    priced_tokens: float
 
-    The runtime refits the grown transcript before every model turn; we mirror
-    that (identity under budget when proactive is off; the budget-independent
-    proactive pass when on) and count each round-trip's outgoing wire with the
-    engine's own metric.
-    """
+
+def _price_prompts(prompts: list[list[ChatMessage]]) -> Economics:
+    counter = memoizing_token_counter(litellm_token_counter(_MODEL))
+    raw = cached = 0
+    previous: list[ChatMessage] = []
+    for current in prompts:
+        tokens = estimate_message_tokens(current, _TOOLS, counter=counter)
+        common = 0
+        for old, new in zip(previous, current, strict=False):
+            if old != new:
+                break
+            common += 1
+        # The tool schemas are identical on every call, including when the first
+        # message changes. First call is cold; later calls reuse schemas + whole
+        # stable messages, never a suffix past a rewritten result.
+        reuse = (
+            estimate_message_tokens(current[:common], _TOOLS, counter=counter) if previous else 0
+        )
+        raw += tokens
+        cached += reuse
+        previous = current
+    written = raw - cached
+    return Economics(raw, cached, written, cached * _READ_MULTIPLIER + written * _WRITE_MULTIPLIER)
+
+
+def _prompts(*, proactive: bool) -> list[list[ChatMessage]]:
     counter = memoizing_token_counter(litellm_token_counter(_MODEL))
     config = ContextConfig(
-        # A frontier-sized window so the budget branch never trips — only the
-        # proactive pass can shrink anything (the exact #491 condition).
         fallback_max_input_tokens=1_000_000,
         output_headroom_tokens=8_000,
         proactive_compaction_enabled=proactive,
     )
-    messages: list[ChatMessage] = [
+    messages = [
         ChatMessage(role=Role.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
         ChatMessage(role=Role.USER, content="Summarise the FY2024 results by segment."),
     ]
-
-    def _refit() -> list[ChatMessage]:
-        return fit_transcript(
-            messages,
+    prompts = [list(messages)]
+    for call_id, query, content in _EXCHANGES:
+        messages = fit_transcript(
+            [*messages, _tool_call(call_id, query), _result(call_id, content)],
             model=_MODEL,
             tools=_TOOLS,
             config=config,
@@ -114,37 +129,60 @@ def _cumulative_input_tokens(*, proactive: bool) -> int:
             max_input_resolver=lambda _m: 1_000_000,
             cited_snippets=_CITED_SNIPPETS,
         )
-
-    total = 0
-    # Round-trip 1: system + tools + question.
-    messages = _refit()
-    total += estimate_message_tokens(messages, _TOOLS, counter=counter)
-    # Round-trips 2-4: each appends the previous turn's tool call + result, refits
-    # (proactive shrinks the now-superseded older results), and re-sends.
-    for call_id, query, content in _EXCHANGES:
-        messages = [*messages, _tool_call(call_id, query), _result(call_id, content)]
-        messages = _refit()
-        total += estimate_message_tokens(messages, _TOOLS, counter=counter)
-    return total
+        prompts.append(list(messages))
+    return prompts
 
 
-def test_ac1_cumulative_input_tokens_drop_with_proactive_compaction() -> None:
-    before = _cumulative_input_tokens(proactive=False)
-    after = _cumulative_input_tokens(proactive=True)
-
-    # Recorded to the run log so the acceptance numbers come from execution.
+def test_complete_cited_passage_economics() -> None:
+    default_prompts = _prompts(proactive=False)
+    opt_in_prompts = _prompts(proactive=True)
+    default = _price_prompts(default_prompts)
+    opt_in = _price_prompts(opt_in_prompts)
     print(
-        f"\n[#491 AC-1] cumulative input tokens: before={before} after={after} "
-        f"saved={before - after} ({100 * (before - after) / before:.1f}%)"
+        f"\n[#764 / #658] default_off={default} proactive_on={opt_in} "
+        f"raw_delta={default.raw_tokens - opt_in.raw_tokens} "
+        f"priced_savings={opt_in.priced_tokens - default.priced_tokens:.2f}"
     )
+    # Retain the historical realistic-workload ceiling. Complete evidence is the
+    # ground truth even if keeping it erases the old >=10% shrink assertion.
+    assert 8_000 <= default.raw_tokens <= 20_000
+    for prompts in (default_prompts, opt_in_prompts):
+        for call_id, snippets in _CITED_SNIPPETS.items():
+            for prompt in prompts:
+                for message in prompt:
+                    if message.tool_call_id == call_id:
+                        assert all(snippet in message.content for snippet in snippets)
+    assert opt_in.raw_tokens <= default.raw_tokens
+    assert default.priced_tokens <= opt_in.priced_tokens
+    assert default.cached_tokens >= opt_in.cached_tokens
 
-    # The baseline is in the ballpark the issue measured (~11,060) — a guard that
-    # the harness assembles a realistic 3-tool answer, not that it hit an exact
-    # figure (tokeniser drift is expected). #618 deliberately shows the agent
-    # complete passages, which lifted this baseline to ~16.8k (#659); the ceiling
-    # still fails a ~2x prompt bloat.
-    assert 8_000 <= before <= 20_000
-    # AC-1: the AFTER total drops measurably (the superseded evidence stops riding
-    # every later turn at full size).
-    assert after < before
-    assert (before - after) / before >= 0.10
+
+def test_rewriting_an_early_result_prices_the_entire_suffix_as_uncached() -> None:
+    from dataclasses import replace
+
+    prompts = _prompts(proactive=False)
+    original = prompts[-1]
+    # Remove only an uncited wrapper, never a passage or its source label.
+    # Every complete cited block remains verbatim in BOTH priced transcripts.
+    annotated = [
+        replace(message, content="Diagnostic source metadata. " * 8 + message.content)
+        if message.tool_call_id == "call_1"
+        else message
+        for message in original
+    ]
+    stable = _price_prompts([annotated, annotated])
+    churned = _price_prompts([annotated, original])
+    for transcript in (annotated, original):
+        for message in transcript:
+            if message.tool_call_id is not None and message.tool_call_id in _CITED_SNIPPETS:
+                assert all(
+                    block in message.content for block in _CITED_SNIPPETS[message.tool_call_id]
+                )
+    print(
+        f"\n[#764 rewrite probe] stable={stable} rewritten={churned} "
+        f"priced_penalty={churned.priced_tokens - stable.priced_tokens:.2f}"
+    )
+    assert churned.raw_tokens < stable.raw_tokens
+    assert churned.cached_tokens < stable.cached_tokens
+    assert churned.written_tokens > stable.written_tokens
+    assert churned.priced_tokens > stable.priced_tokens

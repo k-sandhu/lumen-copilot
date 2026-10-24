@@ -900,24 +900,14 @@ class Settings(PasswordHashingSettings):
     context_compaction_chunk_size: int = Field(
         default=4, gt=0, alias="CONTEXT_COMPACTION_CHUNK_SIZE"
     )
-    # PROACTIVE tool-result compaction (ADR-0016 §3.1 amendment, issue #491). The
-    # reactive compaction above only fires when the transcript is over budget,
-    # which a frontier-sized window never reaches — so on the default routes a
-    # superseded search result rides every later turn at full size (the re-sent
-    # -evidence tax #491 measured). With this ON, ``fit_transcript`` digests a tool
-    # result once it is BOTH superseded by a later tool group AND represented in
-    # citations — the newest tool group (the evidence a pending call is about to
-    # reference) is always preserved. The digest is the SAME ``_context_digest`` the
-    # reactive path builds: the bounded content-bearing head (capped at
-    # CONTEXT_COMPACTION_DIGEST_CHARS) PLUS every cited snippet re-embedded VERBATIM
-    # (BE-2 / R2-9, INV-3 — a citation must resolve to evidence the model actually
-    # saw in the prompt, not merely to a record kept elsewhere; a cited passage
-    # beyond the head would otherwise be truncated away). The strict cost-reduction
-    # guard still gates each result, so one whose verbatim snippet cannot be kept
-    # while shrinking is left VERBATIM. Default ON for the chat answer path; a
-    # kill-switch, not a tuning knob (the retained-HEAD size is the tuning knob above).
+    # Proactive compaction is opt-in for deployments whose routes DO NOT cache
+    # (ADR-0016 §3.1 amendment #760 / #764). Rewriting superseded results breaks
+    # the cached prefix; the saved raw tokens cost more than their cache reads.
+    # The budget-threshold reactive path is unchanged. If explicitly enabled,
+    # only superseded, cited results may shrink, with every cited snippet kept
+    # verbatim and the newest tool group protected (INV-3 / #491).
     context_proactive_compaction_enabled: bool = Field(
-        default=True, alias="CONTEXT_PROACTIVE_COMPACTION_ENABLED"
+        default=False, alias="CONTEXT_PROACTIVE_COMPACTION_ENABLED"
     )
     # How many of one turn's read-only tool calls execute at once (#412,
     # ADR-0016 §5). Each concurrently EXECUTING call briefly opens its own DB

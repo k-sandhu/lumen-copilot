@@ -38,6 +38,56 @@ prefix (system + tools + prior turns) — turn 1 writes, every later turn reads.
 The first turn of a fresh session is a pure write (`cached_prompt_tokens` ≈ 0,
 `cache_write_tokens` > 0); that is expected, not a miss.
 
+## Preserve cached prefixes: proactive compaction defaults off (#764)
+
+`CONTEXT_PROACTIVE_COMPACTION_ENABLED=false` is the default. Leave it off on
+caching routes: rewriting a superseded tool result invalidates the cached prefix
+from that result onward. The [#760 live spike](../audits/prompt-cache-scope-spike-2026-10-15.md)
+measured little raw-token saving but thousands of lost cache-read tokens per
+rewrite. Enable the flag only for a deployment whose routes do **not** cache.
+The global flag does not adapt to mixed routes. Existing explicit `true`
+overrides remain effective; remove them or set `false` to adopt the new default.
+
+Budget-threshold reactive compaction remains active: an over-budget transcript
+still compacts in chunks, uncited results first, preserving cited snippets
+verbatim. The proactive mechanism remains available behind the flag with the
+same evidence protection. Neither path changes what constitutes a citation.
+
+The deterministic `backend/tests/test_prompt_economics.py` harness now protects
+every complete retrieved passage using `rendered_snippet`, matching runtime
+citation semantics. This supersedes [#658](https://github.com/k-sandhu/lumen-copilot/issues/658)'s
+legacy ceiling question: the 8k–20k raw-token guard remains, but the former
+10% savings requirement based on 200-character evidence substitutes is removed.
+It prints raw tokens, cached reads, uncached/written tokens and normalized cost
+for both policies. Pricing assumes 0.1x cache reads and 1.25x uncached/cache
+writes, complete identical message-prefix reuse, and no suffix reuse after a
+rewrite. It excludes TTL/eviction, provider block rounding and partial-message
+prefix reuse; these are modeled input-cost units, not provider billing claims.
+The separate rewrite probe verifies that a small raw-token saving can increase
+priced cost by invalidating the later suffix.
+
+Measured offline with the pinned tokenizer: the three-search workload sends
+17,292 cumulative input tokens under either policy (10,305 cached reads,
+6,987 uncached/written, 9,764.25 normalized cost units). Complete evidence leaves
+no profitable digest in this fixture; it demonstrates **zero** policy saving,
+rather than the former 10% claim. In the separate wrapper-rewrite probe, all
+cited blocks remain complete: removing 33 raw tokens drops cached reads from
+7,020 to 1,716 and raises modeled cost from 9,477 to 15,535.35 units (+6,058.35).
+This is a deterministic invalidation example, not a measured provider invoice.
+
+Run from `backend/`:
+
+```powershell
+uv run --extra dev pytest tests/test_prompt_economics.py -n 0 -o addopts= -q -s
+uv run --extra dev pytest tests/eval/test_eval_compression.py -n 0 -o addopts= -q
+```
+
+The compression-regression eval is the **blocking groundedness gate**; the
+runtime prefix regression and any live notebook accuracy results supplement it
+and never replace it. Its default-policy case keeps the superseded result's
+passage labels and evidence byte-identical. The existing positive/negative
+reactive-compaction grounding cases remain in place.
+
 ## Per route family
 
 Cache directives are decided **inside the gateway**, keyed off the *resolved
@@ -74,7 +124,7 @@ expected and a nonzero as normal. Neither is a Lumen regression.
   because the key partitions the provider cache per session.
 - Every OpenRouter route gains an opaque, per-**conversation** sticky
   `session_id`, so a conversation stays on one provider from its first call.
-- Proactive compaction defaults off (§3.1 amendment).
+- Proactive compaction now defaults off (#764, §3.1 amendment); see above.
 
 Update the table above when that lands.
 
