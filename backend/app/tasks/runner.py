@@ -16,6 +16,11 @@ coroutine on a fresh loop (as before) and then disposes the engine **inside that
 same loop**, before the loop closes, so no pooled connection ever outlives the
 loop that created it. The next task starts from a clean, lazily-rebuilt engine.
 
+The gateway's OpenAI embedding transports follow the same rule (#780):
+``aclose_embedding_clients`` retires only this task loop's owned clients before
+it closes. This does not clear LiteLLM's process-global caches or close a client
+belonging to another active loop.
+
 This is fix option 1 from #140 (dispose-per-run); the alternatives — a single
 persistent worker loop, or ``NullPool`` — are heavier and recorded there.
 """
@@ -27,12 +32,13 @@ from collections.abc import Coroutine
 from typing import TypeVar
 
 from app.db.session import dispose_engine
+from app.llm import aclose_embedding_clients
 
 _T = TypeVar("_T")
 
 
 def run_task(coro: Coroutine[object, object, _T]) -> _T:
-    """Run ``coro`` on a private event loop, disposing the DB engine afterwards.
+    """Run ``coro`` on a private loop, then retire its provider/DB/Redis resources.
 
     The disposal runs in a ``finally`` *within* the loop, so the engine's pooled
     connections are closed by the loop that owns them — even when ``coro`` raises
@@ -45,6 +51,8 @@ def run_task(coro: Coroutine[object, object, _T]) -> _T:
         try:
             return await coro
         finally:
+            # Provider transports are owned by this loop, just like DB/Redis.
+            await aclose_embedding_clients()
             await dispose_engine()
             # Same rule for the rate limiter's pooled Redis client (#527): a
             # headless tool run (MCP / web search) can open one on this loop, and

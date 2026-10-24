@@ -869,6 +869,16 @@ class LLMGateway:
                 return [Embedding(vector=normalized, model=model_id)]
 
         try:
+            from app.llm.embedding_clients import embedding_client
+
+            credentials = self._credentials(api_key=api_key, api_base=effective_api_base or None)
+            client = embedding_client(
+                model=model_id,
+                api_key=credentials["api_key"],
+                api_base=credentials.get("api_base"),
+                timeout=self._settings.llm_timeout_seconds,
+            )
+            client_kwargs = {"client": client} if client is not None else {}
             response = await litellm.aembedding(
                 model=model_id,
                 input=list(inputs),
@@ -880,7 +890,8 @@ class LLMGateway:
                 # "No embedding data received" (#430). Floats are what this
                 # gateway consumes; every provider serves them.
                 encoding_format="float",
-                **self._credentials(api_key=api_key, api_base=effective_api_base or None),
+                **credentials,
+                **client_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
@@ -1085,11 +1096,19 @@ async def aclose_litellm_clients() -> None:
     next (see issue #94). Closing them here releases every upstream socket
     deterministically.
 
+    Legacy isolated-test cleanup only: production task/app teardown uses
+    ``aclose_embedding_clients`` instead, which closes only the owning loop and
+    never mutates LiteLLM's process-global cache. This compatibility helper also
+    retires the current loop's gateway-owned clients before its legacy cleanup.
+
     Confined to ``app/llm/`` because it is the only importer of LiteLLM
     (ADR-0004). Best-effort and idempotent: a missing attribute or a failing
     close is swallowed so teardown never masks the test's own result. Safe to
     call even when no live call was made (closing an unused client is a no-op).
     """
+    from app.llm.embedding_clients import aclose_embedding_clients
+
+    await aclose_embedding_clients()
     import litellm  # lazy: keep the litellm import inside app/llm/
 
     async def _close_handler(handler: Any) -> None:

@@ -200,3 +200,10 @@ warnings, flush global SDK caches, or change the provider or 30-second AC-7 budg
 to obtain a pass. Offline regressions cover logging, correlation failure/isolation,
 and bounded cancellation-safe subscriber cleanup in `test_logging_config.py`,
 `test_correlation_middleware.py`, and `test_realtime_subscriber_cleanup.py`.
+
+## Embedding transport teardown (#780)
+
+The seed fixture closes its loop-owned embedding clients before its private loop
+ends, and app lifespan does the same after answer producers drain. See the
+[embedding lifecycle runbook](embedding-client-lifecycle.md) for worker boundaries,
+native OpenAI compatibility, generic-provider limits and the two-task regression.
