@@ -1,7 +1,7 @@
 # 30. Adopt SaaS Backbone as the platform layer, with Rust in the backbone's data plane
 
-- **Status:** Proposed *(direction and the five owner decisions below approved in session 2026-10-09; acceptance waits on the verification pass in §10 and owner approval of the proposed `AGENTS.md` diff)*
-- **Date:** 2026-10-09
+- **Status:** Proposed *(direction and the owner decisions below approved in session 2026-10-09; verified against the backbone source on 2026-10-24, see §10. Acceptance needs the owner's explicit accept and approval of the proposed `AGENTS.md` diff. Merging this ADR while it is Proposed authorizes no implementation and waives no gate, including the licence cutover gate in §9.)*
+- **Date:** 2026-10-09 *(proposed as 0028)* · 2026-10-24 *(verification recorded; renumbered to 0030 because #698 took 0028)*
 - **Tracking:** [#716](https://github.com/k-sandhu/lumen-copilot/issues/716)
 - **Supersedes, in part:** [ADR-0003](0003-application-stack.md) §§1, 4, 5, 6, 7 (runtime mechanisms only); [ADR-0004](0004-architecture-boundaries-and-adapters.md) boundary-table rows; [ADR-0005](0005-local-run-and-developer-workflow.md) compose topology; [ADR-0010](0010-dedicated-text-search-engine.md) §3 module ownership; [ADR-0015](0015-scheduling-and-headless-runs.md) §§1, 4; [ADR-0022](0022-group-access-model.md) storage of groups and grants. The precise scope is in §8.
 - **Amends a proposal:** *Rust ingestion core* ([#662](https://github.com/k-sandhu/lumen-copilot/issues/662), PR [#699](https://github.com/k-sandhu/lumen-copilot/pull/699), not yet accepted; numbered 0026 on its branch, a number `main` now gives to the CI ADR) — its rules stand; its home moves (§5). Below it is called *the Rust-core proposal*.
@@ -47,13 +47,7 @@ Three facts make the decision pressing for Copilot.
    Moving runs onto queue workers with a function-scoped unit of work fixes the first two by construction; the backbone `observability` module addresses the third.
 3. **Demo data only.** Copilot holds no customer tenants, so schemas can be replaced rather than migrated in place.
 
-**Evidence basis.** This ADR was written without read access to `sual-ai/saas-backbone`. The session's GitHub credential does not reach the `sual-ai` organization. Backbone facts come from three sources:
-
-- the 1–5 Oct backbone build session;
-- the accountant's ADR-0022, migration plan and platform research;
-- accountant code on `backbone-migration@94bd30a`, which imports the real ports. Examples are `backbone.search.ports.IndexSpec/EmbeddingSpec`, `backbone.authz.ports.ParentPolicy` and `backbone.assistant.ports.AnswerValidator`.
-
-Claims marked **(verify)** must be checked against the backbone source before the package that depends on them starts (§10). Copilot facts come from `main@69a74c5`.
+**Evidence basis.** The first draft (2026-10-09) was written without read access to `sual-ai/saas-backbone`, from the backbone build session, the accountant's ADR-0022 and migration plan, and accountant code that imports the real ports. On 2026-10-24 every backbone claim and upstream item was checked against the source at `sual-ai/saas-backbone@12b81e9`, the backbone's head since 2026-10-02. §10 records the findings and §6 gives each upstream item's status. Copilot facts come from `main@69a74c5`.
 
 ## Decision
 
@@ -67,7 +61,7 @@ bb = Backbone(modules=[*PLATFORM_MODULES, *copilot_modules()])
 app = create_app(bb)
 ```
 
-- **One image, every role.** The product image is built `FROM` a pinned backbone runtime image (by digest). It runs the API (`backbone serve`), the business worker with outbox relay (`backbone worker --with-relay`), the scheduler (`backbone scheduler`) and migrations (`backbone db upgrade`). It moves Python from 3.12 to the backbone runtime's version (3.13 as of 2026-10-02 **(verify)**).
+- **One image, every role.** The product image is built `FROM` a pinned backbone runtime image (by digest). It runs the API (`backbone serve`), the business worker with outbox relay (`backbone worker --with-relay`), the scheduler (`backbone scheduler`) and migrations (`backbone db upgrade`). It moves Python from 3.12 to the backbone runtime's 3.13 (`deploy/docker/python.Dockerfile`).
 - **Product code becomes modules.** Each product area is a `backbone.kernel.Module` contributing:
   - routers, models, and migrations on its own Alembic branch;
   - an OpenFGA fragment;
@@ -102,7 +96,8 @@ These stay in Copilot as product modules, ported to backbone ports:
 - citations and `citation_access`;
 - assistants (ADR-0011), schedules and runs as product data;
 - connectors (`gdrive`, `web`);
-- MCP, the sandbox (the Python side; `sandbox_runner` stays a separate service), web search;
+- the sandbox (the Python side; `sandbox_runner` stays a separate service) and web search;
+- MCP server records and policy, on top of the backbone assistant's MCP client (§6, U6);
 - the context engine (ADR-0016) as assistant hooks;
 - prompts and evals;
 - the `AuditAction` taxonomy, as data validated before `uow.audit`.
@@ -135,7 +130,7 @@ These capabilities Copilot has and the backbone lacks or may lack go **upstream*
 | `sandbox-runner` + exec image | code execution |
 | `frontend` | UI |
 
-**Removed:** `redis` as broker and backplane, the Celery `worker`, `media-worker` and `beat`, the MinIO multipart reaper (if the backbone handles incomplete uploads **(verify)**), and the `alembic upgrade head` entrypoint.
+**Removed:** `redis` as broker and backplane, the Celery `worker`, `media-worker` and `beat`, the MinIO multipart reaper (the backbone tracks multipart sessions and cleans them up), and the `alembic upgrade head` entrypoint.
 
 **Runtime rules**
 
@@ -185,7 +180,7 @@ OpenSearch remains the single retrieval store (ADR-0010 §§1–2, 4–5 stand).
 4. **New Rust is added only in the backbone, and only after a profile.** These candidates come from code reading; none is measured, and none ships without a before/after benchmark:
    - **Context fitter.** `fit_transcript` runs before each of up to 20 turns and rebuilds a `ToolNameMap` per message (`llm/context.py:491–529`).
    - **Embedding pipeline.** Per-coordinate validation and NDJSON encoding of 2,048-float vectors (`llm/gateway.py:350–368`, `search/store.py:657–712`).
-   - **Gateway AG-UI control.** Assistant control over `bb-gateway` (U10).
+   - **Gateway AG-UI control.** Assistant control over `bb-gateway` (U10). This is a proposal to the backbone owner only: the backbone's working agreement keeps AG-UI on the in-process hub as application code.
    - **Snippet redaction.** Aho-Corasick redaction to replace the O(W²) window scan in `tasks/summarize.py:323`. Fix the algorithm first.
    - **Shared egress guard.** One SSRF guard exposed to Python (U7).
    - **Web extraction.** HTML, feed and sitemap extraction.
@@ -199,22 +194,22 @@ OpenSearch remains the single retrieval store (ADR-0010 §§1–2, 4–5 stand).
 
 ### 6. Upstream backbone work
 
-Each item below is filed in the backbone repository and blocks the package named. An item found already present in the §10 verification pass is dropped, and the ADR follow-up records that.
+Status is as verified on 2026-10-24 against `saas-backbone@12b81e9` (§10). Paths are relative to `packages/backbone/src/backbone/` unless they start with `crates/`. Open items are filed in the backbone repository in package 0 and block the package named. Items already present need no upstream work.
 
-| # | Capability | Blocks |
-|---|---|---|
-| U1 | OpenSearch search engine (§4) | R |
-| U2 | Relocated Rust document core (§5.2) | D (per-format cutover) |
-| U3 | Assistant: tenant-authored, versioned agents loaded from data; streamed tool calls; speculative/narration streaming hooks; a context-engine hook (fit and compact per turn); transcript read-back | A |
-| U4 | LLM: per-tenant bring-your-own provider credentials via `secrets`; prompt-cache directives with cached-read and cached-write token usage | A |
-| U5 | Connectors: converge on Copilot's SDK (ADR-0009/0019: protocol, OAuth with PKCE, incremental changes, ACL mirroring, conformance kit) | E |
-| U6 | MCP client as an assistant tool provider (ADR-0012) | E (until then a product module) |
-| U7 | Shared egress/SSRF guard: Rust core, Python binding, used by connectors, MCP, provider catalog and web search | E |
-| U8 | Append-only audit for the app role (`UPDATE`/`DELETE` rejected). This was open on 2026-10-02. | F exit |
-| U9 | Human-only approval decisions (API keys and system principals cannot approve T2+) | A |
-| U10 | `bb-gateway` AG-UI assistant control | not blocking; A uses the API WebSocket until then |
-| U11 | Multipart presigned uploads (ADR-0023 parity) | D |
-| U12 | Readiness that probes OpenFGA, search and storage, not only Postgres | T |
+| # | Capability | Status | Blocks |
+|---|---|---|---|
+| U1 | OpenSearch search engine (§4) | **Missing.** Only `search/adapters/postgres.py` and `search/adapters/meilisearch.py` exist. | R |
+| U2 | Relocated Rust document core (§5.2) | **Missing.** The crates are `bb-common`, `bb-extract`, `bb-gateway`, `bb-jobs`, `bb-py` and `bb-worker`. | D (per-format cutover) |
+| U3 | Assistant | **Partial.** Present: streamed tool-call arguments (`assistant/runner.py:938`), history compaction (`assistant/compaction.py`), runs as worker jobs, org and user memories (`assistant/models.py:186`), tool grants, org-managed MCP servers. Missing: tenant-authored, versioned agents (agents are code contributions only, `assistant/agents.py:92`), a narration or speculative-streaming hook, and a transcript read-back tool. | A |
+| U4 | LLM per-tenant keys and prompt caching | **Present.** Per-tenant BYOK keys from `SecretVault` (`llm/settings.py:52–55`, `llm/adapters/litellm_provider.py`), cache-control injection (`litellm_provider.py:276`) and cached-token usage (`llm/streaming.py:92`). Package A checks parity with Copilot's OpenRouter cache-write accounting (#759). | — |
+| U5 | Connectors | **Partial.** A full framework exists in `connectors/` (SDK, OAuth, sync, webhooks, circuit breaker, network guard), with built-in Google Drive and Slack connectors in `connectors_builtin/`. Remaining: converge on Copilot's ACL mirroring with a freshness window, and its conformance kit. | E |
+| U6 | MCP client | **Present.** `assistant/mcp.py`: streamable HTTP, org-managed servers in `assistant_mcp_servers`, public-address pinning, credentials from the vault. Package E maps ADR-0012's "discovered tools default to T2" onto tool grants. | — |
+| U7 | Shared egress/SSRF guard | **Partial.** Python guards exist in `connectors/network.py` (`blocked`, `public_addresses`, pinning at the TCP boundary) and in `assistant/mcp.py`; a Rust guard is in `crates/bb-worker/src/handlers/network.rs`. Remaining: expose one guard as a port, so product modules (web search, provider catalog) don't import another module's internals. | E |
+| U8 | Append-only audit for the app role | **Present.** Migration `20261002_b41e9d02a611_audit_immutability` (append-only trigger and revokes) and `migrations/security.py:142`. | — |
+| U9 | Human-only approval decisions | **Present.** `approvals/service.py:314` refuses any principal whose kind is not `user`. API keys, service accounts and system principals are distinct kinds (`kernel/context.py:20`). | — |
+| U10 | `bb-gateway` AG-UI assistant control | **Missing, and against a backbone rule.** The gateway serves only `/health`, `/metrics`, `/realtime/ws` and `/realtime/sse` (`crates/bb-gateway/src/app.rs:122–125`), and the backbone keeps AG-UI on the in-process hub as application code. A proposal to the backbone owner, not a dependency. | — (A uses the API WebSocket) |
+| U11 | Multipart presigned uploads | **Present.** `files/multipart.py` and `files/cleanup.py`. | — |
+| U12 | Readiness beyond Postgres | **Missing.** `/ready` pings only the database (`web/app.py:141–146`). | T |
 
 ### 7. Invariants (spec 0004) after the migration
 
@@ -227,8 +222,8 @@ The platform carries mechanisms; it does not satisfy an invariant by being adopt
 | INV-3 citations | product `AnswerValidator`: every citation is a permitted, retrieved passage with exact offsets; `citation_access` re-checks at read time | an uncited or forbidden citation is blocked |
 | INV-4 authn | backbone `identity` | missing or expired credential → 401 |
 | INV-5 authz | org membership roles + product FGA relations (`member`, `admin`, `security`); `require_dep` at routes | wrong role → 403 |
-| INV-6 audit | `uow.audit` in the business transaction; `AuditLog.record` for denials; `AuditAction` envelope validation; U8 | a missing audit event fails the test; app-role `UPDATE`/`DELETE` on audit rows is rejected |
-| INV-7 read-before-write | `actions` (`effect`, `confirm`) + `approvals`; the product tier gate checks the tier and a human approver (U9). Generic confirmation is never the approval. | an unapproved T2+ action is forbidden; a tool cannot approve itself |
+| INV-6 audit | `uow.audit` in the business transaction; `AuditLog.record` for denials; `AuditAction` envelope validation; the backbone's append-only audit trigger (U8) | a missing audit event fails the test; app-role `UPDATE`/`DELETE` on audit rows is rejected |
+| INV-7 read-before-write | `actions` (`effect`, `confirm`) + `approvals`; the product tier gate checks the tier, and `approvals` already refuses non-human approvers (U9). Generic confirmation is never the approval. | an unapproved T2+ action is forbidden; a tool cannot approve itself |
 | INV-8 input/state | `kernel.errors` problem codes | malformed input → 422; illegal transition → 409 |
 
 ### 8. Supersession scope
@@ -265,13 +260,13 @@ ADRs 0006–0009, 0011–0014, 0016–0021 and 0023–0025 remain binding, as do
 
 | Pkg | Scope | Exit gate |
 |---|---|---|
-| **0** | This ADR; owner decisions; §10 verification pass; upstream issues U1–U12; re-point #661 | ADR accepted, `AGENTS.md` diff approved |
-| **F** | Composition, image, compose, identity/tenancy/authz, `copilot.fga` draft, unit of work and app role, settings, errors, secrets, audit. Delete `core/`, `auth/` and the `db/` plumbing. T scaffold and the no-duplicate guard. | INV-1, INV-4, INV-5 and INV-6 negatives green on the new stack; U8 |
+| **0** | This ADR; owner decisions; §10 verification (done 2026-10-24); upstream issues for the open items in §6; re-point #661 | ADR accepted, `AGENTS.md` diff approved |
+| **F** | Composition, image, compose, identity/tenancy/authz, `copilot.fga` draft, unit of work and app role, settings, errors, secrets, audit. Delete `core/`, `auth/` and the `db/` plumbing. T scaffold and the no-duplicate guard. | INV-1, INV-4, INV-5 and INV-6 negatives green on the new stack, including app-role `UPDATE`/`DELETE` on audit rows rejected |
 | **J** | 12 Celery tasks → `@task`; RedBeat → backbone scheduler; backplane → `RealtimePublisher` + `bb-gateway` | idempotent enqueue; schedules fire; stream resume from a sequence number |
-| **D** | `ObjectStore` → `FileAccess`; ingestion on the files pipeline + `backbone_native`; media queue; Rust core per format in shadow mode | U11; per-format parity on the ADR-0025 evaluation |
+| **D** | `ObjectStore` → `FileAccess`; ingestion on the files pipeline + `backbone_native`; media queue; Rust core per format in shadow mode | multipart upload parity check; per-format parity on the ADR-0025 evaluation |
 | **R** | U1, then `retrieval/` on `Searcher`; delete `search/` | INV-2 negatives incl. revocation; quality and latency ≥ `main` |
-| **A** | Chat runtime → backbone `assistant` (agents, actions, approvals, `AnswerValidator`, context hooks); runs on workers; assistants as data-defined agents | U3, U4, U9; INV-3, INV-7; chat latency harness (#486) p50 time-to-first-answer-token not worse than `main` |
-| **E** | Connectors, MCP, sandbox, web search, schedules and runs as product modules on backbone ports | U5–U7 or product modules; connector conformance kit green |
+| **A** | Chat runtime → backbone `assistant` (agents, actions, approvals, `AnswerValidator`, context hooks); runs on workers; assistants as data-defined agents | U3; INV-3, INV-7; chat latency harness (#486) p50 time-to-first-answer-token not worse than `main` |
+| **E** | Connectors, MCP, sandbox, web search, schedules and runs as product modules on backbone ports | U5 and U7, or product modules until they land; connector conformance kit green |
 | **W** | Frontend auth/org shell and AG-UI chat transport; regenerated client | required before cutover, since `main` must keep working |
 | **T** | INV-1…INV-8 matrix; no-duplicate-platform guard; contracts regenerated; local/CI parity | the cutover PR |
 
@@ -288,17 +283,22 @@ From package A onward it also fails if `backend/` runs its own agent loop outsid
 - **Cutover precondition.** Merging into `main` requires the backbone to be published under an OSI licence, so that the public repository stays buildable by anyone and `main`'s CI keeps needing no secrets. Only the owner can waive this, in writing on #716.
 - **Pin.** The backbone commit and image digests are pinned in one place and bumped by PR.
 
-### 10. Verification before acceptance
+### 10. Verification against the backbone source
 
-A session with read access to `sual-ai/saas-backbone` checks each **(verify)** claim and each U-item, and records the result here as an amendment before this ADR moves to Accepted:
+Checked on 2026-10-24 against `sual-ai/saas-backbone@12b81e9`, unchanged since 2026-10-02. Paths are relative to `packages/backbone/src/backbone/` unless they start with `crates/` or `deploy/`.
 
-- module list and contribution names;
-- the Python version;
-- the S3 adapter against MinIO;
-- incomplete-upload handling;
-- whether U1–U12 exist;
-- the backbone's licence;
-- `observability` contents.
+| Question | Finding |
+|---|---|
+| Modules and contribution names | Modules: actions, analytics, approvals, assistant, audio, audit, authz, automations, cache, config, connectors, connectors_builtin, consent, customfields, docgen, domains, events, extract, feedback, files, flags, history, i18n, identity, imports, jobs, llm, migrations, notifications, observability, privacy, realtime, search, secrets, tenancy, usage, webhooks, plus `kernel` and `web`. Every contribution key this ADR relies on exists: `tasks`, `schedules`, `search_indexes`, `authz_models`, `resource_parent_policies`, `assistant_agents`, `context_providers`, `actions`, `privacy_handlers`, `connectors`. |
+| Ports named in §§1–4 and §7 | All exist: the function-scoped `Uow` (`web/deps.py:110`); the non-owner `create-app-role` with `NOBYPASSRLS` (`migrations/security.py:124`) and `backbone doctor` (`cli.py:484`); the `app.tenant_id` GUC (`kernel/uow.py:94`); `JobQueue.enqueue` and `Schedule` (`jobs/ports.py:155, 73`); `RealtimePublisher` and `TicketIssuer` (`realtime/ports.py:32, 58`); `IndexSpec(acl_from, acl_parents, embedding)` (`search/ports.py`); `uow.audit` (`kernel/uow.py:130`) and `AuditLog.record`/`verify` (`audit/ports.py:88, 101`); `ParentPolicy` (`authz/ports.py:81`); `AnswerValidator` and `ProcessingContextResolver` (`assistant/ports.py:181, 65`); tenancy groups (`tenancy/models.py:131`, `group_member_ids`); `SecretVault` (`secrets/ports.py:37`); `audio` transcription (`audio/ports.py:65`); `ActionDef.effect`/`confirm` (`actions/ports.py:72–81`). |
+| Search post-check | `post_check` defaults to off (`search/settings.py:73`). Copilot must turn it on (INV-2). |
+| Python and Rust versions | Python 3.13 (`deploy/docker/python.Dockerfile`) and Rust 1.90 (the backbone working agreement). |
+| S3 adapter against MinIO | Files use `obstore`, built on the Rust `object_store` crate, for any S3-compatible store, path-style by default (`files/adapters/obstore_store.py`, `files/settings.py:25`). The reference stack uses SeaweedFS. MinIO should work but is untested upstream, so package F runs a real put, get and presign check before keeping it. |
+| Incomplete uploads | Multipart sessions are tracked and cleaned up (`files/multipart.py`, `files/cleanup.py`), so Copilot's MinIO multipart reaper can go. |
+| Where assistant runs execute | On the worker, as `assistant.run` jobs on the `assistant` queue (`assistant/tasks.py:11`, `assistant/execution.py:52`). This confirms the admission-control and session-lifetime claims in Context. |
+| Observability | OpenTelemetry traces and metrics with ASGI, httpx and SQLAlchemy instrumentation, trace propagation, and optional OTLP and Sentry exporters (`observability/`). This covers Copilot's missing metrics and traces. |
+| Licence | No licence file, and the Rust workspace declares `UNLICENSED`. The backbone is not OSI-licensed, so the §9 cutover precondition stands. |
+| Upstream items | See the status column in §6: five items already exist (U4, U6, U8, U9, U11), three are partial (U3, U5, U7), three are missing (U1, U2, U12), and U10 conflicts with a backbone design rule. |
 
 ## Consequences
 
@@ -307,7 +307,7 @@ A session with read access to `sual-ai/saas-backbone` checks each **(verify)** c
 - **Better structural defaults.** Runs move off the API process, fixing admission control and the database session held across model latency. Streams gain sequence resume. Jobs gain idempotency keys. The permission predicate is written once (OpenFGA) instead of twice.
 - **Rust grows in one place.** It grows in the backbone, benefits every product, and is measured before it grows further. Copilot's #661 contributors work in the backbone repository from now on.
 - **Cost of the migration.** The migration is large: nine packages, serial, with a platform freeze on `main` once F starts. Copilot's velocity on new platform features drops during that window. Product work continues but carries porting cost.
-- **External dependencies.** Some Copilot capabilities depend on upstream work (U1–U12). If an item stalls, the dependent surface stays disabled on the migration branch; a local copy is never the fallback.
+- **External dependencies.** Some Copilot capabilities depend on upstream work still open after verification (U1, U2, U3, U5, U7, U12). If an item stalls, the dependent surface stays disabled on the migration branch; a local copy is never the fallback.
 - **Wire changes.** The API contract changes (auth, org selection, AG-UI chat events, problem codes, pagination). The frontend package W is therefore mandatory before cutover, even though this program is backend-first.
 - **Public buildability.** Until the backbone is OSI-published, outside contributors cannot build the migration branch.
 
