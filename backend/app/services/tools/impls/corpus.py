@@ -58,6 +58,19 @@ def _bad_args(detail: str | None = None) -> ToolHandlerResult:
     )
 
 
+def _document_unavailable(ctx: ToolContext) -> str:
+    """Say what ``document`` takes; identical for missing, foreign and revoked (INV-2)."""
+    shown_by = " or ".join(
+        name for name in ("search_passages", "find_documents") if name in ctx.allowed_tools
+    )
+    source = f"shown by {shown_by}" if shown_by else "shown earlier in this conversation"
+    return (
+        "No document is available for that value in this conversation and scope. "
+        f"document takes a D handle (for example D2) {source}. To read around a "
+        "passage, pass its S handle as around instead of document."
+    )
+
+
 async def _find(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     try:
         filters = _filters(args, ctx)
@@ -152,10 +165,10 @@ async def _search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     blocks = []
     for passage in passages:
         label = ctx.handles.passage(passage) if ctx.handles else str(passage.chunk_id)
-        blocks.append(
-            f"[{label}] {passage.document_name} "
-            f"(chars {passage.char_start}-{passage.char_end})\n{passage.text}"
+        document = (
+            ctx.handles.document(passage.document_id) if ctx.handles else str(passage.document_id)
         )
+        blocks.append(rendered_evidence(passage, label, document=document))
     return ToolHandlerResult(
         source_document_ids=(),
         content="\n\n".join(blocks)
@@ -202,7 +215,11 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
             if entry is None or entry.get("kind") != "document":
                 raise LookupError
             identifier = entry["document_id"]
-        document_id = UUID(str(identifier))
+        try:
+            document_id = UUID(str(identifier))
+        except ValueError:
+            # Filenames and S handles get the same reply as unknown ids (INV-2).
+            raise LookupError from None
         page = await ctx.retrieval.read_document(
             principal=ctx.principal,
             document_id=document_id,
@@ -224,7 +241,9 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
             error=ERROR_NOT_FOUND,
             hit_count=0,
             content=(
-                "Document or handle not available in this conversation and scope. " "Search again."
+                "Document or handle not available in this conversation and scope. Search again."
+                if around
+                else _document_unavailable(ctx)
             ),
             summary="document unavailable",
         )
@@ -323,7 +342,8 @@ TOOLS = (
         "search_passages",
         (
             "Search relevant complete passages, then read around a passage for context. "
-            "Cite S handles, never navigation IDs."
+            "Each hit shows its S handle, its document's D handle and its character "
+            "range, which read_document accepts. Cite S handles, never navigation IDs."
         ),
         {
             "query": {

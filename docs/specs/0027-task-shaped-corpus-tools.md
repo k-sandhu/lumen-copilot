@@ -34,6 +34,17 @@ rechecks current ACLs, ownership, grants and group membership. Limits are 1–50
 Unknown modified timestamps sort last and never satisfy a bounded modified-date
 filter; source dates are not replaced with ingestion dates.
 
+Each `search_passages` hit names the tokens `read_document` accepts (#772): its
+header is `[S3] name (document D2, chars a-b)`, followed by media provenance
+when present. The D handle comes from the same conversation registry as
+`find_documents`, and a second hit in the same document reuses it. Compaction
+re-embeds this exact block. D handles navigate and never support a claim.
+A `document` value that names no available document (a filename, an S handle,
+an unknown or foreign handle or UUID, or a revoked document) gets one
+`tool_not_found` reply: it says `document` takes a D handle, naming only the
+offered tools that show one, and that `around` takes an S handle. It discloses
+nothing about the value.
+
 All structured filters intersect with answer scope and current permissions:
 source kind, MIME type, creation or source-modified dates, collection IDs and document IDs. An empty
 intersection remains empty. Passage filtering uses bounded relational discovery

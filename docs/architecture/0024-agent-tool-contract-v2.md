@@ -15,7 +15,7 @@ The agent currently sees at most 600 characters of each retrieved passage and th
 
 | Tool | Parameters and bounds | Result |
 |---|---|---|
-| `search_passages` | `query`; nullable `collection_ids`, `document_ids`, `source`, `mime_type`, source-modified or creation-date bounds; `k` 1–20 (default 6) | Ranked **complete** passages with S handles and known location; narrower filters when bounded candidate discovery would exceed 1000 documents |
+| `search_passages` | `query`; nullable `collection_ids`, `document_ids`, `source`, `mime_type`, source-modified or creation-date bounds; `k` 1–20 (default 6) | Ranked **complete** passages with S handles, the document's D handle, character range and known location; narrower filters when bounded candidate discovery would exceed 1000 documents |
 | `find_documents` | Nullable literal `query` over title, filename, path and available metadata; same filters; title/created/modified ascending or descending sort; `limit` 1–50 (default 10); nullable opaque `cursor` | D handles, actual title, filename, MIME type, source/path and known modified date; `next_cursor` and explicit continuation |
 | `read_document` | `document` (D handle or UUID), nullable `start` >=0 and exclusive `end`, or nullable `around` (S handle, fixed 1200-character window); `max_passages` 1–20 (default 5) | Complete intersecting passages with S handles, half-open returned range, `total_length`, explicit truncation and next start; no silently split passages |
 | `web_search` | Existing `query` and `k` vocabulary retained | Validated title, URL and evidence with W handles; identical calls reuse evidence within one answer |
