@@ -526,9 +526,7 @@ async def test_get_missing_object_maps_to_not_found(store: ObjectStore, code: st
 
     key = build_key("tenant-a", b"x", "gone.txt")
     client = MagicMock()
-    client.get_object = AsyncMock(
-        side_effect=ClientError({"Error": {"Code": code}}, "GetObject")
-    )
+    client.get_object = AsyncMock(side_effect=ClientError({"Error": {"Code": code}}, "GetObject"))
     _install_mock_client(store, client)
 
     with pytest.raises(NotFoundError):
