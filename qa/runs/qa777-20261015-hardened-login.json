@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "kind": "cases",
+  "run_id": "qa777-20261015-hardened-login",
+  "started_at": "2026-10-15T21:16:58.979Z",
+  "finished_at": "2026-10-15T21:18:46.331911Z",
+  "application": {
+    "source_state": "modified",
+    "images": [
+      {
+        "service": "backend",
+        "digest": "sha256:22530ff587646a2ece741e314f4a0936040aa2bf9faf27bbbd6b44b64512714f"
+      },
+      {
+        "service": "frontend",
+        "digest": "sha256:7a99a3e280ae0fa99e1eee9a424f08e9e598058421faf98991f061ad9e2da8f6"
+      }
+    ],
+    "commit": "3c022fcc4880228636a3cfda067c7014c89441f9"
+  },
+  "definitions": {
+    "commit": "da2abe219b24ffa882f9cb4b0a006f8630fa2ae0",
+    "dirty": false,
+    "catalog_sha256": "dcb615a9fe8541cb3882fd4ae26cb5af749ec28cceb394f9bbf4f3a68e00af2c",
+    "cases_sha256": "71ef338859209837e522be608561a89ff3eda55f71cc5527030e67de286b03e9"
+  },
+  "environment": {
+    "label": "QA777 hardened PostgreSQL role / Chrome",
+    "kind": "live_local",
+    "browser": "normal Chrome / Kamal profile",
+    "models": [
+      "openrouter/openai/gpt-6-luna"
+    ],
+    "database_schema": "0049_discovery_metadata",
+    "data": {
+      "fixture": "five synthetic users in QA 777 Alpha/Beta; no documents yet",
+      "database": "lumentest_qa777",
+      "app_database_role": "qa777_app (NOSUPERUSER/NOBYPASSRLS)"
+    },
+    "configuration": {
+      "LLM_MODEL": "openrouter/openai/gpt-6-luna",
+      "LLM_EMBEDDING_MODEL": "openai/openai/text-embedding-3-large",
+      "LLM_EMBEDDING_DIMENSIONS": "2048",
+      "CHAT_SUMMARY_ENABLED": "true",
+      "CHAT_SUMMARY_KEEP_MESSAGES": "2",
+      "CHAT_SUMMARY_MIN_BATCH": "1",
+      "SANDBOX_ENABLED": "true",
+      "WEB_SEARCH_ENABLED": "true",
+      "OPENSEARCH_INDEX": "qa777-chunks-v2",
+      "S3_BUCKET": "lumen-qa777",
+      "access_lifetime_seconds": "45",
+      "refresh_lifetime_seconds": "600",
+      "base_url": "http://localhost:47480",
+      "backend_commit": "3c022fcc4880228636a3cfda067c7014c89441f9",
+      "backend_patch_sha256": "ea4797f203d11025da7728e62a6f65a23eba786d18ceb7eb1fa40c580ca40ecf",
+      "nginx_sha256": "bdf29baab929a03bcef58b95070d4aa51b0e03f7917f8962e469c060b4547df6",
+      "purpose": "deliberate non-superuser bootstrap/login probe"
+    }
+  },
+  "ci": null,
+  "notes": "Isolated hardened-role setup probe before functional QA. Standard seed fails casting bypass to UUID; operator-only provisioning then creates five test users, but Chrome valid login still returns generic error with the restricted application DB role. Matches existing #644. Readiness was all green, so readiness does not prove identity usability. No role privilege was changed to turn this result into a pass; any later functional configuration is a separate run. No product fixes. Docker runtime socket directories were renamed aside to recover initial startup; no data-volume reset.",
+  "results": [
+    {
+      "case_id": "QA-WALK-001",
+      "definition": {
+        "id": "QA-WALK-001",
+        "title": "Authentication, Tokens, and Sessions — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-001"
+        ],
+        "steps": [
+          "Login, refresh, replay old token, logout.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "Valid access works; invalid/revoked refresh tokens fail.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "2529717f4862e99ac9c4e0213f395df03223a60d1c68e653697fe128ef67dae9",
+      "outcome": "failed",
+      "reason": "Known #644 affects deliberate global lookup under this hardened DB role.",
+      "residual_risk": "Functional login cannot proceed under this role; no RLS pass is claimed.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "The isolated app passed readiness and five users were seeded via an operator-only bootstrap connection. Valid owner login in Chrome using the NOSUPERUSER/NOBYPASSRLS app connection returned a generic sign-in error. Backend/seed paths report InvalidTextRepresentationError on UUID cast of bypass.",
+          "observed": {
+            "related_issue": 644,
+            "db_role": "qa777_app NOSUPERUSER NOBYPASSRLS"
+          },
+          "captured_at": "2026-10-15T21:16:58.979Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "Known-valid seeded owner login fails under asserted NOSUPERUSER/NOBYPASSRLS app role.",
+          "path": "output/qa/777/hardened-login-failure.jpg",
+          "sha256": "f074cbe1094600f08a69c7cccd80043ffa5b05179b7119cdb372192f81d63b5b"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/644"
+      ]
+    },
+    {
+      "case_id": "QA-WALK-002",
+      "definition": {
+        "id": "QA-WALK-002",
+        "title": "Tenant Isolation and RLS — systematic Chrome coverage",
+        "status": "active",
+        "areas": [
+          "QA-AREA-002"
+        ],
+        "steps": [
+          "Access another tenant’s records through API and database.",
+          "Use normal Chrome with the populated Eval account. Record observed UI behavior and unexercised parts separately; do not claim backend-only guarantees from UI evidence."
+        ],
+        "expected": "API returns 404; database excludes foreign rows.",
+        "method": "manual_browser",
+        "references": [
+          "docs/qa/README.md",
+          "docs/qa/770-systematic-chrome.md",
+          "docs/specs/0004-security-and-domain-invariants.md"
+        ]
+      },
+      "definition_sha256": "b5aa8ed2183cf2447a97c4f4514882614c7b9e63e8c8caee67d87e00edba2b90",
+      "outcome": "failed",
+      "reason": "The current policy relies on SQL Boolean short-circuiting and fails for this lookup, matching #644.",
+      "residual_risk": "The hardened deployment cannot complete this identity path; tenant-scoped role/grant tests are still pending.",
+      "evidence": [
+        {
+          "kind": "observation",
+          "description": "The deliberate RLS-bypass lookup in the standard seed/login path fails under the non-superuser/non-bypass role: invalid UUID input bypass.",
+          "observed": {
+            "related_issue": 644
+          },
+          "captured_at": "2026-10-15T21:16:58.980Z"
+        },
+        {
+          "kind": "artifact",
+          "description": "Known-valid seeded owner login fails under asserted NOSUPERUSER/NOBYPASSRLS app role.",
+          "path": "output/qa/777/hardened-login-failure.jpg",
+          "sha256": "f074cbe1094600f08a69c7cccd80043ffa5b05179b7119cdb372192f81d63b5b"
+        }
+      ],
+      "bugs": [
+        "https://github.com/k-sandhu/lumen-copilot/issues/644"
+      ]
+    }
+  ]
+}

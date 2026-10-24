@@ -1,0 +1,1 @@
+Synthetic disposable QA 777 delete fixture. Verification code QA777-DELETE-555. Explicitly disposable after its upload/download/deletion checks.
