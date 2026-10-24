@@ -91,6 +91,15 @@ export function SearchScreen() {
 
   const hasQuery = submitted.trim().length > 0;
   const hasFilter = Boolean(filters.collectionId || filters.source || filters.type);
+  const announcement = !hasQuery
+    ? 'Ready to search.'
+    : query.isFetching
+      ? 'Searching.'
+      : query.isError
+        ? 'Search failed. Try again.'
+        : query.isSuccess
+          ? `${results.length} ${results.length === 1 ? 'result' : 'results'} for ${submitted}.`
+          : '';
   const isLoading = hasQuery && query.isLoading;
   const isError = hasQuery && query.isError;
   const isEmpty =
@@ -109,10 +118,17 @@ export function SearchScreen() {
           </header>
           <SearchTypeahead
             value={draft}
-            onChange={setDraft}
+            onChange={(next) => {
+              setDraft(next);
+              if (!next.trim()) {
+                setSubmitted('');
+                setFilters({});
+                setPreview(null);
+              }
+            }}
             onRunQuery={(q) => {
               setDraft(q);
-              setSubmitted(q);
+              setSubmitted(q.trim());
             }}
             onApplySaved={(s) => {
               setDraft(s.query);
@@ -121,13 +137,16 @@ export function SearchScreen() {
                 ...(s.source ? { source: s.source } : {}),
                 ...(s.type ? { type: s.type } : {}),
               });
-              setSubmitted(s.query);
+              setSubmitted(s.query.trim());
             }}
-            busy={isLoading || query.isFetching}
+            busy={hasQuery && (isLoading || query.isFetching)}
           />
         </div>
       </div>
 
+      <p role="status" aria-live="polite" className="sr-only">
+        {announcement}
+      </p>
       {/* Independently scrollable results pane. */}
       <ScrollArea viewportClassName="px-6 py-6">
         <div className="mx-auto w-full max-w-5xl">

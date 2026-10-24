@@ -4,8 +4,9 @@
  * trimmed server suggestions. Choosing runs the query (saved → applies filters);
  * keyboard nav works. Drives the real api/ client against a mocked fetch.
  */
+import { useState } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { setAccessToken, clearAccessToken } from '@/api';
@@ -47,7 +48,10 @@ function mockApi() {
   });
 }
 
-function setup(value: string, overrides: Partial<React.ComponentProps<typeof SearchTypeahead>> = {}) {
+function setup(
+  value: string,
+  overrides: Partial<React.ComponentProps<typeof SearchTypeahead>> = {},
+) {
   const onRunQuery = vi.fn();
   const onApplySaved = vi.fn();
   renderWithQuery(
@@ -86,7 +90,9 @@ describe('SearchTypeahead', () => {
     await user.click(screen.getByRole('combobox'));
     const saved = await screen.findByRole('option', { name: /acme deals/i });
     await user.click(saved);
-    expect(onApplySaved).toHaveBeenCalledWith(expect.objectContaining({ name: 'Acme deals', query: 'acme' }));
+    expect(onApplySaved).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Acme deals', query: 'acme' }),
+    );
   });
 
   it('typing shows server suggestions; choosing a document runs its title', async () => {
@@ -121,4 +127,36 @@ describe('SearchTypeahead', () => {
       expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(true),
     );
   });
+});
+
+it('suppresses old-prefix suggestions immediately and cancels debounce on clear (#596)', async () => {
+  const spy = mockApi();
+  function Controlled() {
+    const [value, setValue] = useState('acme');
+    return (
+      <SearchTypeahead
+        value={value}
+        onChange={setValue}
+        onRunQuery={vi.fn()}
+        onApplySaved={vi.fn()}
+      />
+    );
+  }
+  renderWithQuery(<Controlled />);
+  const user = userEvent.setup();
+  const box = screen.getByRole('combobox');
+  await user.click(box);
+  await screen.findByRole('option', { name: /Acme Memo/ });
+  await user.type(box, 'x');
+  expect(screen.queryByRole('option', { name: /Acme Memo/ })).not.toBeInTheDocument();
+  await user.clear(box);
+  const suggestCalls = () =>
+    spy.mock.calls.filter(([input]) => String(input).includes('/search/suggest'));
+  const before = suggestCalls().length;
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 220));
+  });
+  expect(suggestCalls()).toHaveLength(before);
+  expect(screen.queryByRole('option', { name: /Acme Memo/ })).not.toBeInTheDocument();
+  expect(await screen.findByRole('option', { name: 'acme renewal' })).toBeInTheDocument();
 });

@@ -103,3 +103,16 @@ describe('useSearchCollections', () => {
     expect(result.current.data?.items).toEqual([]);
   });
 });
+
+it('drops previous results when the query clears (#596)', async () => {
+  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(json(empty)));
+  const { result, rerender } = renderHook(({ q }) => useSearch({ q }), {
+    initialProps: { q: 'old' },
+    wrapper: wrapper(),
+  });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  rerender({ q: '   ' });
+  expect(result.current.data).toBeUndefined();
+  expect(result.current.fetchStatus).toBe('idle');
+  expect(spy).toHaveBeenCalledTimes(1);
+});

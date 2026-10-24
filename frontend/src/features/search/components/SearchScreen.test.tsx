@@ -5,7 +5,7 @@
  * mocked fetch so a contract match is an integration match (ADR-0006 Phase 1).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { setAccessToken, clearAccessToken } from '@/api';
@@ -45,9 +45,7 @@ function urlOf(input: RequestInfo | URL): string {
  * request URL so a test can assert / honor the server-side filter params (the
  * content-type facet is a server `type` param — spec 0004 INV-3, #118).
  */
-function mockSearch(
-  searchResponse: Response | ((url: string) => Response | Promise<Response>),
-) {
+function mockSearch(searchResponse: Response | ((url: string) => Response | Promise<Response>)) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = urlOf(input);
     // The typeahead fires suggest/recent/saved on mount + as you type; route them
@@ -184,7 +182,9 @@ describe('SearchScreen', () => {
   });
 
   it('shows the EMPTY state for a submitted query with no results', async () => {
-    mockSearch(json({ query: 'no hits here', results: [], hidden_count: 0 } satisfies SearchResponse));
+    mockSearch(
+      json({ query: 'no hits here', results: [], hidden_count: 0 } satisfies SearchResponse),
+    );
     renderWithQuery(<SearchScreen />);
     await runSearch('no hits here');
     expect(await screen.findByText(/no results for/i)).toBeInTheDocument();
@@ -272,9 +272,7 @@ describe('SearchScreen', () => {
     // Narrow to the "message" content type → the server query carries `type=message`
     // and only the chat result remains.
     await userEvent.setup().click(within(filters).getByRole('checkbox', { name: /^message/i }));
-    expect(
-      await screen.findByRole('heading', { name: /pricing thread/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /pricing thread/i })).toBeInTheDocument();
     const list = screen.getByRole('list', { name: /search results/i });
     expect(within(list).queryByRole('heading', { name: /PTO Policy/i })).toBeNull();
 
@@ -350,9 +348,9 @@ describe('SearchScreen', () => {
     await runSearch('pricing');
 
     const filters = await screen.findByRole('navigation', { name: /search filters/i });
-    await userEvent.setup().click(
-      within(filters).getByRole('checkbox', { name: /uploaded documents/i }),
-    );
+    await userEvent
+      .setup()
+      .click(within(filters).getByRole('checkbox', { name: /uploaded documents/i }));
 
     // Filtered-empty: a status (not the bare "no results for" empty) AND the sidebar
     // is still on screen so the scope can be cleared.
@@ -391,5 +389,70 @@ describe('SearchScreen', () => {
 
     expect(await screen.findByRole('article', { name: /PTO Policy 2026/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /open pto policy 2026/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('clearing search (#596)', () => {
+  it.each(['empty', 'error', 'success'])('resets %s without a new search', async (state) => {
+    const spy = mockSearch(() =>
+      state === 'error'
+        ? problem(503, 'Unavailable')
+        : json(
+            state === 'success' ? fullResponse : { query: 'missing', results: [], hidden_count: 0 },
+          ),
+    );
+    renderWithQuery(<SearchScreen />);
+    const user = await runSearch('missing');
+    if (state === 'error') await screen.findByRole('alert');
+    else if (state === 'success') await screen.findByRole('list', { name: 'Search results' });
+    else await screen.findByText(/No results for/);
+    const calls = () => spy.mock.calls.filter(([input]) => /\/search\?/.test(urlOf(input)));
+    await user.clear(screen.getByRole('combobox'));
+    expect(screen.getByText(/Search across your connected sources/)).toBeInTheDocument();
+    expect(screen.queryByText(/No results for/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Search results' })).not.toBeInTheDocument();
+    await user.keyboard('{Enter}');
+    expect(calls()).toHaveLength(1);
+  });
+
+  it('ignores a pending response after selection+delete, then searches anew', async () => {
+    let resolve!: (r: Response) => void;
+    const pending = new Promise<Response>((r) => {
+      resolve = r;
+    });
+    const spy = mockSearch((url) => (url.includes('q=old') ? pending : json(fullResponse)));
+    renderWithQuery(<SearchScreen />);
+    const user = await runSearch('old');
+    await screen.findByLabelText('Searching');
+    const oldRequest = spy.mock.calls.find(([input]) => urlOf(input).includes('q=old'));
+    const oldSignal = oldRequest?.[1]?.signal;
+    await user.click(screen.getByRole('combobox'));
+    await user.keyboard('{Control>}a{/Control}{Backspace}');
+    expect(screen.getByText(/Search across your connected sources/)).toBeInTheDocument();
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => resolve(json({ query: 'old', results: [], hidden_count: 0 })));
+    expect(screen.queryByText(/No results for/)).not.toBeInTheDocument();
+    await user.type(screen.getByRole('combobox'), 'pto policy{Enter}');
+    expect(await screen.findByRole('list', { name: 'Search results' })).toBeInTheDocument();
+  });
+
+  it('clear button restores focus and idle state', async () => {
+    mockSearch(() => json(fullResponse));
+    renderWithQuery(<SearchScreen />);
+    const user = await runSearch();
+    await screen.findByRole('list', { name: 'Search results' });
+    await user.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(screen.getByRole('combobox')).toHaveFocus();
+    expect(screen.getByText(/Search across your connected sources/)).toBeInTheDocument();
+  });
+
+  it('does not submit an IME composition Enter', async () => {
+    const spy = mockSearch(() => json(fullResponse));
+    renderWithQuery(<SearchScreen />);
+    const box = screen.getByRole('combobox');
+    fireEvent.change(box, { target: { value: '日本' } });
+    fireEvent.keyDown(box, { key: 'Enter', isComposing: true, keyCode: 229 });
+    expect(spy.mock.calls.filter(([input]) => /\/search\?/.test(urlOf(input)))).toHaveLength(0);
   });
 });
