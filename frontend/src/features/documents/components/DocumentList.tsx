@@ -327,7 +327,7 @@ function DocumentRow({
             >
               {kind.slice(0, 4)}
             </span>
-            <div className="min-w-0">
+            <div className="min-w-0 max-w-[12rem] sm:max-w-xs">
               <div className="truncate font-medium text-foreground" title={doc.filename}>
                 {doc.filename}
               </div>

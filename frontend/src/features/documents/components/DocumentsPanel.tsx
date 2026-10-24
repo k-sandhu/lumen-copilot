@@ -7,10 +7,11 @@
  * Local UI state (selected collection, the document open in the viewer) lives
  * here; everything else is server state via the queries hooks.
  */
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import type { Document } from '@/api';
 import { useCurrentUser } from '@/features/auth';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { cn } from '@/lib/cn';
 import { ScrollArea } from '@/components/ScrollArea';
 import { useCollections } from '../model/queries';
 import { CollectionsSidebar } from './CollectionsSidebar';
@@ -21,15 +22,21 @@ import { DocumentViewer } from './DocumentViewer';
 export function DocumentsPanel() {
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [openDoc, setOpenDoc] = useState<Document | null>(null);
+  const [collectionsOpen, setCollectionsOpen] = useState(false);
+  const collectionPanelId = useId();
+  const collectionTrigger = useRef<HTMLButtonElement>(null);
+
+  const closeCollections = () => {
+    setCollectionsOpen(false);
+    collectionTrigger.current?.focus();
+  };
 
   // Auto-select the first collection once they load (so the right pane isn't
   // empty when collections already exist). Read-only — does not mirror state.
   const collections = useCollections();
   const firstId = collections.data?.items[0]?.id;
   const effectiveId =
-    selectedId && collections.data?.items.some((c) => c.id === selectedId)
-      ? selectedId
-      : firstId;
+    selectedId && collections.data?.items.some((c) => c.id === selectedId) ? selectedId : firstId;
   const selectedCollection = collections.data?.items.find((c) => c.id === effectiveId);
 
   // Identify the signed-in user so the Owner column can read "You" for their own
@@ -38,11 +45,50 @@ export function DocumentsPanel() {
   const currentUserId = me.data?.id;
 
   return (
-    <div className="flex h-full min-h-0">
+    <div
+      className="flex h-full min-h-0 min-w-0 flex-col md:flex-row"
+      onKeyDown={(event) => {
+        if (collectionsOpen && event.key === 'Escape') {
+          event.preventDefault();
+          closeCollections();
+        }
+      }}
+    >
+      <div className="shrink-0 border-b border-border p-3 md:hidden">
+        <button
+          ref={collectionTrigger}
+          type="button"
+          aria-expanded={collectionsOpen}
+          aria-controls={collectionPanelId}
+          onClick={() => setCollectionsOpen((open) => !open)}
+          className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md border border-border bg-surface px-3 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span className="min-w-0 truncate">
+            <span className="font-medium">Choose collection</span>
+            {selectedCollection ? `: ${selectedCollection.name}` : ''}
+          </span>
+          <span aria-hidden="true" className="shrink-0">
+            {collectionsOpen ? '−' : '+'}
+          </span>
+        </button>
+      </div>
       {/* Left: collections sidebar — independently scrollable */}
-      <aside className="flex w-72 shrink-0 flex-col border-r border-border">
+      <aside
+        id={collectionPanelId}
+        aria-label="Document collections"
+        className={cn(
+          'h-64 max-h-[50%] w-full shrink-0 flex-col border-b border-border md:flex md:h-full md:max-h-none md:w-72 md:border-b-0 md:border-r',
+          collectionsOpen ? 'flex' : 'hidden',
+        )}
+      >
         <ErrorBoundary label="Collections">
-          <CollectionsSidebar selectedId={effectiveId} onSelect={setSelectedId} />
+          <CollectionsSidebar
+            selectedId={effectiveId}
+            onSelect={(id) => {
+              setSelectedId(id);
+              if (collectionsOpen) closeCollections();
+            }}
+          />
         </ErrorBoundary>
       </aside>
 
@@ -72,7 +118,7 @@ export function DocumentsPanel() {
           ) : (
             <ScrollArea viewportClassName="p-6">
               <p className="text-sm text-foreground-muted">
-                Create a collection on the left to start uploading and organizing documents.
+                Create a collection in Collections to start uploading and organizing documents.
               </p>
             </ScrollArea>
           )}
