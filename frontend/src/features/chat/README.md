@@ -172,3 +172,17 @@ Contract-true today against mocks. At integration, confirm: the send response's
 `stream_id`, the WS path the backend expects for subscription, and that
 `event:citation` payloads preserve optional paired `timeStartMs/timeEndMs`, transcript
 segment and speaker fields in addition to the canonical character span.
+
+## Public entry points (#531)
+
+Other feature slices that only need model selection or session UI state import
+`ModelPicker` and `useChatStore` from **`@/features/chat/controls`**. This supported
+public entry point re-exports the existing component and Zustand singleton; it
+creates no second store and cannot depend on ChatView, streaming or Markdown.
+The existing `@/features/chat` surface stays compatible for full chat consumers.
+Internal component/model paths are not cross-feature entry points.
+
+Assistants uses the lightweight entry point for its editor and Start chat action.
+The production import-closure regression in `features/assistants/route-loading.test.ts`
+rejects static Markdown/ChatView dependencies while requiring the picker, shared
+store and deferred chat/preview modules to remain in the production output.

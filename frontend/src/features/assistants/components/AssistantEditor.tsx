@@ -22,7 +22,7 @@ import { useNavigate } from 'react-router-dom';
 import { ApiError } from '@/api';
 import type { Assistant, ChatModelInfo, ProblemFieldError } from '@/api';
 import { Icon } from '@/ui';
-import { ModelPicker } from '@/features/chat';
+import { ModelPicker } from '@/features/chat/controls';
 import {
   useAssistant,
   useCreateAssistant,

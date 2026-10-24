@@ -15,7 +15,7 @@ import type { ReactElement } from 'react';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { setAccessToken, clearAccessToken } from '@/api';
 import type { Assistant, AssistantList } from '@/api';
-import { useChatStore } from '@/features/chat';
+import { useChatStore } from '@/features/chat/controls';
 import { AssistantLibrary } from './AssistantLibrary';
 
 function json(body: unknown, status = 200): Response {
@@ -189,6 +189,10 @@ describe('AssistantLibrary — Start chat (AC-2)', () => {
     // …and the workspace navigated to `/` with the new session bound.
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/'));
     expect(useChatStore.getState().activeSessionId).toBe('sess-1');
+    expect(useChatStore.getState().sessionScope).toEqual({
+      sessionId: 'sess-1',
+      modes: ['company'],
+    });
   });
 
   it('surfaces a per-card error when create-session fails (404/403 → no crash, AC-5)', async () => {

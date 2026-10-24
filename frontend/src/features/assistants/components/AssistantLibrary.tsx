@@ -19,7 +19,7 @@ import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, createChatSession } from '@/api';
 import type { Assistant, AssistantStatus } from '@/api';
-import { useChatStore } from '@/features/chat';
+import { useChatStore } from '@/features/chat/controls';
 import { ScrollArea } from '@/components/ScrollArea';
 import { Icon } from '@/ui';
 import { useMutation } from '@tanstack/react-query';
