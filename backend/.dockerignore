@@ -1,14 +1,25 @@
-# Keep the build context (and the bind-mounted /app) lean and reproducible.
-.venv/
-venv/
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.git/
-.gitignore
-*.egg-info/
-.env
-.env.*
+# Docker ignore is independent of Git ignore; it does not affect bind mounts.
+# Recursive directory rules prune before walking foreign symlinks/reparse points.
+**/.venv/
+**/venv/
+**/*-venv/
+# ASCII colon and Windows private-use U+F03A escaped drive roots.
+**/[A-Za-z]:/
+**/[A-Za-z]/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.uv/
+**/.uv-cache/
+**/.tox/
+**/.nox/
+**/.tmp/
+**/.cache/uv/
+**/.git/
+**/.gitignore
+**/*.egg-info/
+**/.env
+**/.env.*
