@@ -91,12 +91,12 @@ async def test_provider_transcript_keeps_truncated_read_range_and_continuation(c
             ],
         )
         await session.commit()
-    gateway, events = await _run_read(ctx, {"document": str(ctx.document_id), "max_passages": 1})
+    gateway, events = await _run_read(ctx, {"handle": str(ctx.document_id), "max_passages": 1})
     assert events[-1]["type"] == "done"
     content = "\n".join(gateway.tool_messages)
     assert "[S1] taxes.pdf\nfirst passage" in content
     assert "Available range: 0-27; returned 0-13." in content
-    assert "continue read_document(document=D2, start=13, end=null)" in content
+    assert "continue read_document(handle=D2, start=13, end=null)" in content
     assert "second passage" not in content
 
 
@@ -109,9 +109,7 @@ async def test_sql_range_and_around_reads_preserve_media_identity(
         owner, _, passage = await _seed_media(session, kind=kind)
         handles = EvidenceHandles()
         handle = handles.passage(passage)
-        arguments = (
-            {"document": str(passage.document_id)} if selector == "document" else {"around": handle}
-        )
+        arguments = {"handle": str(passage.document_id) if selector == "document" else handle}
         result = await get_tool("read_document").handler(
             arguments,
             ToolContext(
@@ -149,9 +147,7 @@ async def test_sql_media_read_citation_persists_after_final_rehydration(
         chunk_id=passage.chunk_id,
         tenant_id=owner.tenant_id,
     )
-    arguments = (
-        {"document": str(passage.document_id)} if selector == "document" else {"around": "S1"}
-    )
+    arguments = {"handle": str(passage.document_id) if selector == "document" else "S1"}
     gateway, events = await _run_read(media_ctx, arguments)
     assert gateway.tool_messages
     assert "time 00:01.250-00:03.400" in "\n".join(gateway.tool_messages)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -107,16 +108,16 @@ def _bad_args(detail: str | None = None) -> ToolHandlerResult:
     )
 
 
-def _document_unavailable(ctx: ToolContext) -> str:
-    """Say what ``document`` takes; identical for missing, foreign and revoked (INV-2)."""
+def _handle_unavailable(ctx: ToolContext) -> str:
+    """Say what ``handle`` takes; identical for missing, foreign and revoked (INV-2)."""
     shown_by = " or ".join(
         name for name in ("search_passages", "find_documents") if name in ctx.allowed_tools
     )
     source = f"shown by {shown_by}" if shown_by else "shown earlier in this conversation"
     return (
-        "No document is available for that value in this conversation and scope. "
-        f"document takes a D handle (for example D2) {source}. To read around a "
-        "passage, pass its S handle as around instead of document."
+        "No document or passage is available for that handle in this conversation and "
+        "scope. handle takes a D handle (for example D2) or an S handle (for example S3) "
+        f"{source}. If a passage may have changed, search again."
     )
 
 
@@ -248,18 +249,16 @@ async def _search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
 
 async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     try:
-        identifier = args.get("document")
-        around = args.get("around")
-        if bool(identifier) == bool(around):
-            return _bad_args()
+        handle = str(args.get("handle") or "").strip()
         start = int(args.get("start") or 0)
         end = int(args["end"]) if args.get("end") is not None else None
         scopes = {
             "collection_ids": _ids(args.get("collection_ids"), ctx.collection_ids),
             "document_ids": await _document_ids(args.get("document_ids"), ctx),
         }
-        if around:
-            entry = ctx.handles.resolve(str(around)) if ctx.handles else None
+        if re.fullmatch(r"S[1-9][0-9]*", handle):
+            # An S handle opens the text around that passage; any range is ignored.
+            entry = ctx.handles.resolve(handle) if ctx.handles else None
             if entry is None or entry.get("kind") != "passage":
                 raise LookupError
             chunk = UUID(str(entry["chunk_id"]))
@@ -268,24 +267,22 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
             )
             # Compare the complete identity, including media provenance, in an
             # isolated book so a stale read cannot allocate conversation handles.
-            if (
-                not fresh
-                or EvidenceHandles(existing={str(around): entry}).passage(fresh[0]) != around
-            ):
+            if not fresh or EvidenceHandles(existing={handle: entry}).passage(fresh[0]) != handle:
                 raise LookupError
-            identifier = entry["document_id"]
+            document_id = UUID(str(entry["document_id"]))
             start = max(0, fresh[0].char_start - 1200)
             end = fresh[0].char_end + 1200
-        elif isinstance(identifier, str) and identifier.startswith("D"):
-            entry = ctx.handles.resolve(identifier) if ctx.handles else None
-            if entry is None or entry.get("kind") != "document":
+        elif re.fullmatch(r"D[1-9][0-9]*", handle):
+            resolved = ctx.handles.document_id(handle) if ctx.handles else None
+            if resolved is None:
                 raise LookupError
-            identifier = entry["document_id"]
-        try:
-            document_id = UUID(str(identifier))
-        except ValueError:
-            # Filenames and S handles get the same reply as unknown ids (INV-2).
-            raise LookupError from None
+            document_id = resolved
+        else:
+            try:
+                document_id = UUID(handle)
+            except ValueError:
+                # Filenames get the same reply as unknown handles (INV-2).
+                raise LookupError from None
         page = await ctx.retrieval.read_document(
             principal=ctx.principal,
             document_id=document_id,
@@ -306,11 +303,7 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
             ok=False,
             error=ERROR_NOT_FOUND,
             hit_count=0,
-            content=(
-                "Document or handle not available in this conversation and scope. Search again."
-                if around
-                else _document_unavailable(ctx)
-            ),
+            content=_handle_unavailable(ctx),
             summary="document unavailable",
         )
     blocks = []
@@ -324,7 +317,7 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     if page.next_start is not None:
         document = ctx.handles.document(page.document_id) if ctx.handles else str(page.document_id)
         range_text += (
-            f" Truncated: continue read_document(document={document}, start={page.next_start}"
+            f" Truncated: continue read_document(handle={document}, start={page.next_start}"
             f", end={end if end is not None else 'null'})."
         )
     return ToolHandlerResult(
@@ -474,38 +467,34 @@ TOOLS = (
     _tool(
         "read_document",
         (
-            "Read complete passages in a character range or around S evidence; use "
-            "returned continuation to read omitted passages. Every read rechecks "
-            "permissions."
+            "Open a handle from this conversation: a D handle reads its document's "
+            "complete passages in a character range; an S handle reads the text around "
+            "that passage. Use returned continuation to read omitted passages. Every "
+            "read rechecks permissions."
         ),
         {
-            "document": {
+            "handle": {
                 "type": "string",
                 "description": (
-                    "Document UUID or current conversation D handle; required unless "
-                    "around is supplied."
-                ),
-            },
-            "around": {
-                "type": "string",
-                "pattern": "^S[1-9][0-9]*$",
-                "description": (
-                    "Current conversation S handle; reads 1200 characters either "
-                    "side, ignoring start/end. Supply instead of document."
+                    "A D handle (document) or S handle (passage) shown in this "
+                    "conversation, e.g. D2 or S5; a document UUID also works. An S "
+                    "handle reads 1200 characters either side of the passage."
                 ),
             },
             "start": {
                 "type": "integer",
                 "minimum": 0,
                 "description": (
-                    "Inclusive character start, default 0; full chunks may begin earlier."
+                    "Inclusive character start for a D handle, default 0; full chunks may "
+                    "begin earlier. Ignored for S handles."
                 ),
             },
             "end": {
                 "type": "integer",
                 "minimum": 1,
                 "description": (
-                    "Exclusive character end greater than start; omitted reads to " "document end."
+                    "Exclusive character end greater than start for a D handle; omitted "
+                    "reads to document end. Ignored for S handles."
                 ),
             },
             "max_passages": {
@@ -517,7 +506,7 @@ TOOLS = (
             "collection_ids": _FILTERS["collection_ids"],
             "document_ids": _FILTERS["document_ids"],
         },
-        [],
+        ["handle"],
         _read,
     ),
 )

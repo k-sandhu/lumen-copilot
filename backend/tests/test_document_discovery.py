@@ -715,7 +715,7 @@ async def test_bounded_overlap_read_has_actionable_budget_error(
         retrieval=_service(session),
         handles=handles,
     )
-    arguments = {"document": document, "start": 0, "end": 8, "max_passages": 1}
+    arguments = {"handle": document, "start": 0, "end": 8, "max_passages": 1}
     result = await get_tool("read_document").handler(arguments, context)
     assert not result.ok, "Whole chunk crosses end=8; start=10,end=8 cannot continue"
     assert result.error == ERROR_BAD_ARGS
