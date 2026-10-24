@@ -10,7 +10,6 @@
  * is cached independently and an in-flight request is cancelled via the signal.
  */
 import {
-  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -63,8 +62,10 @@ export function useSearch(query: SearchQuery): UseQueryResult<SearchResponse> {
     queryKey: searchKey(query),
     queryFn: ({ signal }) => search({ ...query, q: trimmed }, signal),
     enabled: trimmed.length > 0,
-    // Keep the prior page visible while a refined query loads (no flash to empty).
-    placeholderData: keepPreviousData,
+    // Retain data only for refinements of the same nonempty query; a cleared or
+    // different query must never inherit another query's terminal presentation.
+    placeholderData: (previous) =>
+      trimmed && previous?.query.trim() === trimmed ? previous : undefined,
     staleTime: 30_000,
   });
 }

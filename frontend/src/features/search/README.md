@@ -31,8 +31,9 @@ Feature (`features/search`):
   (splitting answer text into plain runs and resolvable `[n]` citation markers).
 - `model/queries.ts` — `useSearch` plus `useSearchCollections` (#118), which loads
   the caller's collections (`GET /collections`) to back the collection scope filter.
-- `components/SearchComposer.tsx` — the type-to-query input; a real `<form>` so
-  Enter and the button submit the trimmed query; empty queries never submit.
+- `components/SearchTypeahead.tsx` — the accessible, debounced suggestion combobox.
+  Enter submits trimmed text (except during IME composition); empty queries never
+  submit. Clear search restores input focus and recent/saved options without deleting history.
 - `components/SearchFilters.tsx` (#118) — the LEFT filter sidebar of the two-column
   layout. Every facet is backed by the REAL `/search` contract + data: a
   **collection** scope (`collection_id`), a **source** scope (the frozen
@@ -122,3 +123,24 @@ integration (#83), confirm: `GET /search?q=…` returns `SearchResponse` with
 `results[]` (permission-trimmed), an optional `direct_answer` whose `citations[]`
 reference present `result_id`s, and `hidden_count`; empty `q` → 422; missing token
 → 401.
+
+## Query clearing and async isolation (#596)
+
+`SearchScreen` owns draft/submitted text and filters. Clearing by keyboard, input
+replacement, or Clear search resets the submitted query, filters and preview in
+the same update. Whitespace is empty. The guidance state replaces loading, errors,
+no-results and results immediately; its live announcement cannot describe the old
+query. Empty text disables search and suggestion requests. Suggestions only use
+the current settled debounce value; an old prefix is never offered for new text.
+Search query keys include normalized text and filters, consume cancellation signals,
+and only retain placeholder data for the same nonempty normalized query.
+
+Search is component-owned, not URL-backed: `/search` has no query/cursor URL state
+or pagination UI. Clearing does not change browser history or delete server-side
+recent/saved searches. Applying a saved search still restores its recorded filters;
+after clearing, a newly submitted query has no inherited filters.
+
+Verification: component/hook regressions cover terminal and pending state clearing,
+late response isolation, IME Enter and focus. `tests/e2e/search-clear.spec.ts` checks
+keyboard/button/whitespace clearing, filter reset, preserved history and no empty
+requests at desktop and 390px widths, against intercepted contract-shaped APIs.

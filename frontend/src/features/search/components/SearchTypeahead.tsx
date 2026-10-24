@@ -50,12 +50,20 @@ export function SearchTypeahead({
   onApplySaved,
   busy = false,
 }: SearchTypeaheadProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
   const inputId = useId();
   const listId = useId();
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const [debounced, setDebounced] = useState(value);
   const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (blurTimer.current) clearTimeout(blurTimer.current);
+    },
+    [],
+  );
 
   const trimmed = value.trim();
 
@@ -65,7 +73,7 @@ export function SearchTypeahead({
     return () => clearTimeout(t);
   }, [value]);
 
-  const suggest = useSuggest(open ? debounced : '');
+  const suggest = useSuggest(open && trimmed && debounced.trim() === trimmed ? debounced : '');
   const recent = useRecentSearches();
   const saved = useSavedSearches();
   const clearRecent = useClearRecentSearches();
@@ -104,7 +112,7 @@ export function SearchTypeahead({
       icon: 'search',
       run: () => onRunQuery(trimmed),
     });
-    for (const s of suggest.data?.suggestions ?? []) {
+    for (const s of (debounced.trim() === trimmed ? suggest.data?.suggestions : []) ?? []) {
       if (s.kind === 'saved_search') {
         const match = savedItems.find((x) => x.id === s.saved_search_id);
         out.push({
@@ -126,7 +134,7 @@ export function SearchTypeahead({
       }
     }
     return out;
-  }, [trimmed, recent.data, saved.data, suggest.data, onRunQuery, onApplySaved]);
+  }, [trimmed, debounced, recent.data, saved.data, suggest.data, onRunQuery, onApplySaved]);
 
   // Keep the active index in range as the option set changes.
   useEffect(() => {
@@ -142,6 +150,7 @@ export function SearchTypeahead({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setOpen(true);
@@ -170,10 +179,14 @@ export function SearchTypeahead({
         Search your sources
       </label>
       <div className="relative flex items-center">
-        <span className="pointer-events-none absolute left-3 text-foreground-muted" aria-hidden="true">
+        <span
+          className="pointer-events-none absolute left-3 text-foreground-muted"
+          aria-hidden="true"
+        >
           <Icon name="search" />
         </span>
         <input
+          ref={inputRef}
           id={inputId}
           type="text"
           role="combobox"
@@ -196,8 +209,25 @@ export function SearchTypeahead({
           }}
           placeholder="Search across your permitted sources…"
           aria-label="Search your sources"
-          className="w-full rounded-md border border-border bg-surface py-2 pl-10 pr-3 text-sm text-foreground placeholder:text-foreground-muted focus:outline-none focus:ring-2 focus:ring-accent"
+          className="w-full rounded-md border border-border bg-surface py-2 pl-10 pr-10 text-sm text-foreground placeholder:text-foreground-muted focus:outline-none focus:ring-2 focus:ring-accent"
         />
+        {value.length > 0 ? (
+          <button
+            type="button"
+            aria-label="Clear search"
+            className="absolute right-2 rounded p-1 text-foreground-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            onClick={() => {
+              if (blurTimer.current) clearTimeout(blurTimer.current);
+              onChange('');
+              setDebounced('');
+              setActive(-1);
+              setOpen(true);
+              inputRef.current?.focus();
+            }}
+          >
+            <Icon name="x" className="h-4 w-4" />
+          </button>
+        ) : null}
       </div>
 
       {hasDropdown ? (
