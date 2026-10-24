@@ -304,19 +304,28 @@ class ObjectStore:
         Enforces the tenant-prefix seam first (AC-5): a key outside the caller's
         ``{tenant_id}/`` prefix is refused with ``ForbiddenError`` before any I/O,
         so cross-tenant reads are impossible. A missing object maps to a typed
-        ``NotFoundError`` (never a leaked vendor error).
+        ``NotFoundError``. Provider failures during client creation, request or
+        body consumption map to ``DependencyError(storage_unavailable)`` with
+        safe public text. Cancellation propagates; context managers still close
+        the body and client on success or failure.
         """
         assert_key_owned_by(key, tenant_id)
-        async with self._client() as client:
-            try:
+        try:
+            async with self._client() as client:
                 response = await client.get_object(Bucket=self._bucket, Key=key)
-            except ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code in {"NoSuchKey", "404", "NotFound"}:
-                    raise NotFoundError("object not found", code="object_not_found") from exc
-                raise
-            async with response["Body"] as stream:
-                body: bytes = await stream.read()
+                async with response["Body"] as stream:
+                    body: bytes = await stream.read()
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                raise NotFoundError("object not found", code="object_not_found") from exc
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
+        except BotoCoreError as exc:
+            raise DependencyError(
+                "Object storage is unavailable.", code="storage_unavailable"
+            ) from exc
         return body
 
     async def download_to_path(

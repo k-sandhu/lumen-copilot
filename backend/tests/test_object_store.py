@@ -15,6 +15,7 @@ Three layers:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import socket
@@ -496,14 +497,16 @@ async def test_put_rejects_over_limit_before_io(store: ObjectStore) -> None:
 
 
 async def test_get_round_trips_for_owning_tenant(store: ObjectStore) -> None:
-    data = b"stored bytes"
+    data = b"stored bytes\x00\xff"
     key = build_key("tenant-a", data, "notes.txt")
     client = MagicMock()
-    client.get_object = AsyncMock(return_value={"Body": _streaming_body(data)})
+    body = _streaming_body(data)
+    client.get_object = AsyncMock(return_value={"Body": body})
     _install_mock_client(store, client)
 
     assert await store.get("tenant-a", key) == data
     client.get_object.assert_awaited_once_with(Bucket="unit-bucket", Key=key)
+    body.__aexit__.assert_awaited_once_with(None, None, None)
 
 
 async def test_get_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
@@ -517,18 +520,80 @@ async def test_get_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
     client.get_object.assert_not_awaited()
 
 
-async def test_get_missing_object_maps_to_not_found(store: ObjectStore) -> None:
+@pytest.mark.parametrize("code", ["NoSuchKey", "404", "NotFound"])
+async def test_get_missing_object_maps_to_not_found(store: ObjectStore, code: str) -> None:
     from botocore.exceptions import ClientError
 
     key = build_key("tenant-a", b"x", "gone.txt")
     client = MagicMock()
     client.get_object = AsyncMock(
-        side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        side_effect=ClientError({"Error": {"Code": code}}, "GetObject")
     )
     _install_mock_client(store, client)
 
     with pytest.raises(NotFoundError):
         await store.get("tenant-a", key)
+
+
+@pytest.mark.parametrize("stage", ["create", "enter", "request", "body_enter", "read"])
+@pytest.mark.parametrize("failure", ["connection", "service", "cancel"])
+async def test_get_failure_boundary_and_cleanup(
+    store: ObjectStore, stage: str, failure: str
+) -> None:
+    """#783: every provider stage is guarded without swallowing cancellation."""
+    error: BaseException
+    if failure == "connection":
+        error = EndpointConnectionError(endpoint_url="https://private-storage.invalid")
+    elif failure == "service":
+        error = ClientError(
+            {"Error": {"Code": "InternalError", "Message": "private provider detail"}},
+            "GetObject",
+        )
+    else:
+        error = asyncio.CancelledError()
+    body = _streaming_body(b"exact bytes\x00\xff")
+    client = MagicMock()
+    client.get_object = AsyncMock(return_value={"Body": body})
+    manager = MagicMock()
+    manager.__aenter__ = AsyncMock(return_value=client)
+    manager.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=manager)
+    store._client = factory  # type: ignore[method-assign]
+    target = {
+        "create": factory,
+        "enter": manager.__aenter__,
+        "request": client.get_object,
+        "body_enter": body.__aenter__,
+        "read": body.read,
+    }[stage]
+    target.side_effect = error
+
+    expected = asyncio.CancelledError if failure == "cancel" else DependencyError
+    with pytest.raises(expected) as raised:
+        await store.get("tenant-a", "tenant-a/abc/notes.txt")
+    if failure == "cancel":
+        assert raised.value is error
+    else:
+        assert isinstance(raised.value, DependencyError)
+        assert raised.value.code == "storage_unavailable"
+        assert raised.value.detail == "Object storage is unavailable."
+        assert raised.value.__cause__ is error
+    if stage in {"request", "body_enter", "read"}:
+        manager.__aexit__.assert_awaited_once()
+    else:
+        manager.__aexit__.assert_not_awaited()
+    if stage == "read":
+        body.__aexit__.assert_awaited_once()
+    else:
+        body.__aexit__.assert_not_awaited()
+
+
+async def test_get_cross_tenant_never_creates_client(store: ObjectStore) -> None:
+    factory = MagicMock(side_effect=AssertionError("provider must not be touched"))
+    store._client = factory  # type: ignore[method-assign]
+    with pytest.raises(ForbiddenError):
+        await store.get("tenant-a", "tenant-b/abc/private.txt")
+    factory.assert_not_called()
 
 
 async def test_download_to_path_streams_and_returns_metadata(
