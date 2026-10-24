@@ -34,7 +34,7 @@ sync_mod = importlib.import_module("app.tasks.sync_source")
 
 
 class _FakeRedis:
-    """Minimal in-memory stand-in for ``redis.Redis`` (INCR/EXPIRE/close only).
+    """In-memory Redis stand-in with both legacy split calls and atomic EVAL.
 
     Backs the fixed-window limiter without a server. ``expirable`` records which
     keys had a TTL armed so a test can assert the window is set on the first hit.
@@ -43,6 +43,7 @@ class _FakeRedis:
     store: dict[str, int] = {}
     expired: dict[str, int] = {}
     from_url_kwargs: dict[str, object] = {}
+    calls: list[str] = []
 
     def __init__(self) -> None:
         # Shared class-level dicts so every ``from_url`` returns the same view —
@@ -54,14 +55,25 @@ class _FakeRedis:
         cls.store = {}
         cls.expired = {}
         cls.from_url_kwargs = {}
+        cls.calls = []
 
     def incr(self, key: str) -> int:
+        _FakeRedis.calls.append("incr")
         _FakeRedis.store[key] = _FakeRedis.store.get(key, 0) + 1
         return _FakeRedis.store[key]
 
     def expire(self, key: str, seconds: int) -> bool:
+        _FakeRedis.calls.append("expire")
         _FakeRedis.expired[key] = seconds
         return True
+
+    def eval(self, script: str, numkeys: int, key: str, seconds: int | str) -> int:
+        assert numkeys == 1
+        _FakeRedis.calls.append("eval")
+        count = _FakeRedis.store[key] = _FakeRedis.store.get(key, 0) + 1
+        if count == 1:
+            _FakeRedis.expired[key] = int(seconds)
+        return count
 
     def close(self) -> None:  # noqa: D401 - parity with redis.Redis
         return None
@@ -109,6 +121,14 @@ def test_limiter_arms_window_ttl_on_first_hit(fake_redis: type[_FakeRedis]) -> N
     limiter.try_acquire(tenant)
     key = f"lumen:ratelimit:source_sync:{tenant}"
     assert fake_redis.expired == {key: 42}
+
+
+def test_sync_admission_is_one_atomic_server_call(fake_redis: type[_FakeRedis]) -> None:
+    limiter = RedisFixedWindowRateLimiter(
+        "redis://localhost/0", max_per_window=1, window_seconds=42
+    )
+    assert limiter.try_acquire(uuid.uuid4())
+    assert fake_redis.calls == ["eval"]
 
 
 def test_limiter_client_carries_socket_timeouts(fake_redis: type[_FakeRedis]) -> None:
@@ -260,6 +280,7 @@ class _FakeAsyncRedis:
     built = 0
     store: dict[str, int] = {}
     expired: dict[str, int] = {}
+    calls: list[str] = []
 
     def __init__(self, *, fail: bool = False) -> None:
         _FakeAsyncRedis.built += 1
@@ -271,16 +292,29 @@ class _FakeAsyncRedis:
         cls.built = 0
         cls.store = {}
         cls.expired = {}
+        cls.calls = []
 
     async def incr(self, key: str) -> int:
+        _FakeAsyncRedis.calls.append("incr")
         if self._fail:
             raise redis.RedisError("counter store unreachable")
         _FakeAsyncRedis.store[key] = _FakeAsyncRedis.store.get(key, 0) + 1
         return _FakeAsyncRedis.store[key]
 
     async def expire(self, key: str, seconds: int) -> bool:
+        _FakeAsyncRedis.calls.append("expire")
         _FakeAsyncRedis.expired[key] = seconds
         return True
+
+    async def eval(self, script: str, numkeys: int, key: str, seconds: int | str) -> int:
+        assert numkeys == 1
+        _FakeAsyncRedis.calls.append("eval")
+        if self._fail:
+            raise redis.RedisError("counter store unreachable")
+        count = _FakeAsyncRedis.store[key] = _FakeAsyncRedis.store.get(key, 0) + 1
+        if count == 1:
+            _FakeAsyncRedis.expired[key] = int(seconds)
+        return count
 
     async def aclose(self) -> None:
         self.closed = True
@@ -311,6 +345,45 @@ async def test_async_limiter_matches_the_sync_window_semantics() -> None:
         f"lumen:ratelimit:source_sync:{tenant}": 60,
         f"lumen:ratelimit:source_sync:{other}": 60,
     }
+
+
+async def test_async_admission_is_one_atomic_server_call() -> None:
+    _FakeAsyncRedis.reset()
+    assert await _async_limiter().try_acquire_async(uuid.uuid4())
+    assert _FakeAsyncRedis.calls == ["eval"]
+
+
+async def test_cancellation_after_server_write_cannot_strand_a_counter_without_ttl() -> None:
+    _FakeAsyncRedis.reset()
+    written = asyncio.Event()
+
+    class InterruptedClient(_FakeAsyncRedis):
+        async def incr(self, key: str) -> int:
+            result = await super().incr(key)
+            written.set()
+            await asyncio.Future()
+            return result
+
+        async def eval(self, script: str, numkeys: int, key: str, seconds: int | str) -> int:
+            result = await super().eval(script, numkeys, key, seconds)
+            written.set()
+            await asyncio.Future()
+            return result
+
+    limiter = RedisFixedWindowRateLimiter(
+        "redis://localhost/0",
+        max_per_window=1,
+        window_seconds=42,
+        async_client_factory=InterruptedClient,
+    )
+    tenant = uuid.uuid4()
+    task = asyncio.create_task(limiter.try_acquire_async(tenant))
+    await asyncio.wait_for(written.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _FakeAsyncRedis.expired == {f"lumen:ratelimit:source_sync:{tenant}": 42}
+    await limiter.aclose()
 
 
 async def test_async_limiter_reuses_one_pooled_client_across_calls() -> None:

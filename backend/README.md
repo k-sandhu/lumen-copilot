@@ -100,3 +100,21 @@ and exits with status 1 before ticking; CRUD projection remains best-effort.
 
 [ADR-0003]: ../docs/architecture/0003-application-stack.md
 [ADR-0004]: ../docs/architecture/0004-architecture-boundaries-and-adapters.md
+
+## Fixed-window admission
+
+The sync and async Redis limiters use one `EVAL` per admission to increment the
+tenant counter and set expiry on the first hit atomically (#547). Later hits keep
+the original expiry. A cancelled or interrupted client cannot leave a gap between
+increment and expiry; an already executed attempt can still spend budget even if
+the client never receives its result. Tenant keys, configured prefixes, caps and
+windows retain their existing semantics. Redis errors remain fail-open;
+cancellation propagates. Async pool ownership and sync client lifetime are unchanged.
+
+Compared with the former split calls, the first hit needs one counter-operation
+round trip instead of two; later hits still need one. Redis still performs the
+increment and conditional expiry internally. This is a command/round-trip change,
+not a measured latency or throughput claim. `tests/test_source_sync_rate_limit.py`
+covers offline regressions; the opt-in `tests/test_rate_limit_live.py` verifies
+concurrent sync/async admission, TTL, cancellation/process exit and cleanup against
+real Redis (`RUN_LIVE=1`, `REDIS_URL` pointing to an isolated instance).
