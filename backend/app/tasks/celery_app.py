@@ -11,7 +11,8 @@ The ``ping`` task is a smoke task proving the worker round-trips; real tasks
 
 from __future__ import annotations
 
-from celery import Celery
+import structlog
+from celery import Celery, signals
 
 from app.core.config import get_settings
 
@@ -77,6 +78,32 @@ celery_app.conf.update(
         }
     },
 )
+
+
+@celery_app.on_after_finalize.connect  # type: ignore[misc]  # Celery signals are untyped
+def _configure_periodic_tasks(sender: object, **kwargs: object) -> None:
+    # Beat finalizes the app before constructing RedBeat (which snapshots conf).
+    # beat_init alone is too late for its static entries/prefix/leader lock.
+    from app.tasks.scheduler import configure_beat
+
+    configure_beat()
+
+
+@signals.beat_init.connect  # type: ignore[misc]  # Celery signals are untyped
+def _reconcile_beat_schedules(sender: object, **kwargs: object) -> None:
+    if getattr(sender, "app", None) is not celery_app:
+        return
+    from app.tasks.scheduler import reconcile_from_postgres
+
+    log = structlog.get_logger(__name__)
+    try:
+        count = reconcile_from_postgres()
+    except Exception as exc:
+        log.error("schedule.boot_reconcile_failed", error_type=type(exc).__name__)
+        # Celery Signal.send swallows Exception. SystemExit must escape so Beat
+        # never starts ticking after a failed required boot reconciliation.
+        raise SystemExit(1) from exc
+    log.info("schedule.boot_reconciled", schedules=count)
 
 
 @celery_app.task(name="lumen.ping")  # type: ignore[misc]  # celery's task decorator is untyped

@@ -104,11 +104,13 @@ class RedBeatScheduleProjector:
     truth; the boot reconcile rebuilds any missed entry) so a CRUD request never
     fails on a transient Redis blip. The RedBeat crontab carries the schedule's IANA
     timezone so RedBeat's own next-fire math is DST-correct and agrees with our
-    ``compute_next_run``.
+    ``compute_next_run``. Boot opts into ``strict=True`` so a projection failure
+    aborts startup instead of being reported as successful reconciliation.
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, strict: bool = False) -> None:
         self._settings = settings or get_settings()
+        self._strict = strict
 
     def sync(self, schedule: Schedule) -> None:
         if not schedule.enabled:
@@ -145,6 +147,8 @@ class RedBeatScheduleProjector:
                 schedule_id=str(schedule.id),
                 error=type(exc).__name__,
             )
+            if self._strict:
+                raise
 
     def remove(self, schedule_id: UUID) -> None:
         try:
@@ -344,10 +348,9 @@ def configure_beat(settings: Settings | None = None) -> None:
     Sets the RedBeat scheduler class, the key prefix, and the leader-lock timeout on
     the celery conf so ``celery -A app.tasks.celery_app beat --scheduler
     redbeat.RedBeatScheduler`` reads them, plus the **static** periodic entries the
-    Beat always fires regardless of any user schedule — currently the run-digest sweep
-    (#238), which rolls pending low-urgency deliveries into an in-app digest every
-    ``RUN_DIGEST_INTERVAL_SECONDS`` (RedBeat merges ``beat_schedule`` entries with the
-    dynamic per-tenant ones). Idempotent.
+    Beat always fires regardless of any user schedule: expired uploads, run digests
+    and connector polling. RedBeat merges these with dynamic per-tenant entries.
+    Called on app finalization, before RedBeat snapshots its configuration. Idempotent.
     """
     settings = settings or get_settings()
     celery_app.conf.update(
@@ -384,7 +387,8 @@ async def _reconcile_from_postgres(settings: Settings) -> int:
     schedule read that spans tenants — a deliberate system path, never a request).
     Returns the number of entries reprojected.
     """
-    projector = RedBeatScheduleProjector(settings)
+    # CRUD stays best-effort; boot must not count a failed projection as success.
+    projector = RedBeatScheduleProjector(settings, strict=True)
     count = 0
     async with session_scope() as session:
         await bind_bypass(session)

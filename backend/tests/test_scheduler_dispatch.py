@@ -285,6 +285,17 @@ async def test_fire_on_disabled_schedule_is_noop(ctx: _Ctx) -> None:
     assert await _active_run_count(ctx, schedule_id) == 0
 
 
+async def test_fire_cannot_use_a_schedule_from_another_tenant(ctx: _Ctx) -> None:
+    schedule_id = await _make_schedule(ctx)
+    assert (
+        await scheduler._dispatch_fire(
+            schedule_id, uuid.uuid4(), settings=_settings(), rate_limiter=_AlwaysLimiter()
+        )
+        == "no_schedule"
+    )
+    assert await _active_run_count(ctx, schedule_id) == 0
+
+
 async def test_fire_on_missing_schedule_is_noop(ctx: _Ctx) -> None:
     outcome = await scheduler._dispatch_fire(
         uuid.uuid4(), ctx.tenant_a, settings=_settings(), rate_limiter=_AlwaysLimiter()
