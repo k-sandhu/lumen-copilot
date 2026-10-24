@@ -132,13 +132,24 @@ def _remote_reference(node: Any) -> bool:
     return any(_remote_reference(value) for value in node.values())
 
 
-def legacy_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
-    """Treat provider nulls for optional parameters as the legacy omission default."""
+#: Values some models put in every optional field they do not mean to use (#773).
+_PLACEHOLDERS: tuple[Any, ...] = ("", "null", [])
+
+
+def legacy_arguments(
+    arguments: dict[str, Any], schema: dict[str, Any], *, omit_placeholders: bool = False
+) -> dict[str, Any]:
+    """Treat provider nulls for optional parameters as the legacy omission default.
+
+    With ``omit_placeholders`` (read-only tools), ``""``, ``"null"`` and ``[]`` in
+    an optional field are omitted the same way, unless that field's own ``enum``
+    or ``const`` names the value. Required fields keep their exact values.
+    """
     # Leave rejected input intact so the runner can finalize its original hash.
     if schema_error(schema) is not None:
         return deepcopy(arguments)
     try:
-        return _legacy_arguments(arguments, schema, schema)
+        return _legacy_arguments(arguments, schema, schema, omit_placeholders)
     except Exception:
         # Invalid local references/configuration must reach validate_arguments,
         # which returns a safe repair message through normal audited finalization.
@@ -176,14 +187,24 @@ def _local_schema(node: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
 
 
 def _legacy_arguments(
-    arguments: dict[str, Any], schema: dict[str, Any], root: dict[str, Any]
+    arguments: dict[str, Any], schema: dict[str, Any], root: dict[str, Any], placeholders: bool
 ) -> dict[str, Any]:
-    result = _legacy_value(arguments, schema, root)
+    result = _legacy_value(arguments, schema, root, placeholders)
     assert isinstance(result, dict)
     return result
 
 
-def _legacy_value(value: Any, schema: dict[str, Any], root: dict[str, Any]) -> Any:
+def _placeholder(value: Any, schema: Any, root: dict[str, Any]) -> bool:
+    if not any(value == item and type(value) is type(item) for item in _PLACEHOLDERS):
+        return False
+    schema = _local_schema(schema, root) if isinstance(schema, dict) else {}
+    # A schema that names the value makes it a real choice, not a placeholder.
+    return value not in schema.get("enum", []) and schema.get("const", object()) != value
+
+
+def _legacy_value(
+    value: Any, schema: dict[str, Any], root: dict[str, Any], placeholders: bool = False
+) -> Any:
     schema = _composed(_local_schema(schema, root), root)
     result = deepcopy(value)
     if isinstance(result, dict):
@@ -191,22 +212,25 @@ def _legacy_value(value: Any, schema: dict[str, Any], root: dict[str, Any]) -> A
         required = set(schema.get("required", []))
         for name, child_value in list(result.items()):
             child = properties.get(name)
-            if child_value is None and name in properties and name not in required:
+            optional = name in properties and name not in required
+            if optional and (
+                child_value is None or (placeholders and _placeholder(child_value, child, root))
+            ):
                 result.pop(name)
             elif isinstance(child, dict):
-                result[name] = _legacy_value(child_value, child, root)
+                result[name] = _legacy_value(child_value, child, root, placeholders)
     elif isinstance(result, list):
         items = schema.get("items")
         prefix = schema.get("prefixItems", [])
         for index, item in enumerate(result):
             child = prefix[index] if index < len(prefix) else items
             if isinstance(child, dict):
-                result[index] = _legacy_value(item, child, root)
+                result[index] = _legacy_value(item, child, root, placeholders)
     for key in ("anyOf", "oneOf"):
         for branch in schema.get(key, []):
             if not isinstance(branch, dict):
                 continue
-            candidate = _legacy_value(result, branch, root)
+            candidate = _legacy_value(result, branch, root, placeholders)
             validator = Draft202012Validator(_closed(root), registry=Registry()).evolve(
                 schema=_closed(branch, root)
             )
