@@ -12,10 +12,15 @@ COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/ffprobe
 # Faster, quieter Python in a container.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_PROJECT_ENVIRONMENT=/tmp/lumen-dev-venv
 
 # uv: fast resolver/installer. Pinned copy from the official distroless image.
-COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /bin/uv-real
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uvx /bin/uvx
+
+COPY docker-uv.py /bin/uv
+RUN chmod +x /bin/uv
 
 WORKDIR /app
 
