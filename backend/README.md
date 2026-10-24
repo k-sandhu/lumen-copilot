@@ -73,5 +73,12 @@ system's client and returns **domain types, not vendor types**. A router
 importing SQLAlchemy, a service importing LiteLLM, or `domain/` doing I/O is a
 review/smoke failure. Everything is async end-to-end; slow work goes to Celery.
 
+`ObjectStore.get` checks tenant ownership before creating a provider client.
+Missing objects raise `NotFoundError(object_not_found)`; provider connectivity
+and service failures during client setup, request, or body consumption raise
+`DependencyError(storage_unavailable)` with safe public text. Cancellation
+propagates, and body/client context managers retain responsibility for cleanup.
+Regression coverage lives in `tests/test_object_store.py` (#783).
+
 [ADR-0003]: ../docs/architecture/0003-application-stack.md
 [ADR-0004]: ../docs/architecture/0004-architecture-boundaries-and-adapters.md
