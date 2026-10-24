@@ -80,5 +80,23 @@ and service failures during client setup, request, or body consumption raise
 propagates, and body/client context managers retain responsibility for cleanup.
 Regression coverage lives in `tests/test_object_store.py` (#783).
 
+## Beat startup
+
+The composed `celery -A app.tasks.celery_app beat --scheduler redbeat.RedBeatScheduler`
+finalizes the app before constructing RedBeat. Finalization registers the existing
+expired-upload, run-digest and connector-poll jobs and applies RedBeat's configured
+prefix and leader-lock timeout. The `beat_init` hook then rebuilds enabled schedules
+from PostgreSQL before the first tick. It is deliberately too late in that hook to
+configure RedBeat, which has already captured the app settings.
+
+PostgreSQL remains authoritative; projection keys are schedule IDs, so repeated
+startup updates the same entries. Disabled/deleted schedules and mismatched tenant
+arguments cannot create runs because the dispatcher rechecks the tenant-scoped row
+and its enabled state at fire time. Existing overlap/timezone policy is unchanged.
+Boot reconciliation logs `schedule.boot_reconciled` only after every projection
+succeeds. A database or projection failure logs `schedule.boot_reconcile_failed`
+and exits with status 1 before ticking; CRUD projection remains best-effort.
+`tests/test_beat_startup.py` exercises the actual Beat lifecycle (#718).
+
 [ADR-0003]: ../docs/architecture/0003-application-stack.md
 [ADR-0004]: ../docs/architecture/0004-architecture-boundaries-and-adapters.md
