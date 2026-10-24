@@ -134,3 +134,26 @@ addition to the initial unfiltered request. The regression suite covers clear,
 status, collection, unmount and ingestion polling; the browser regression
 `tests/e2e/document-filename-debounce.spec.ts` verifies the same typing and scope
 behavior with intercepted contract-shaped APIs.
+
+## Narrow-width collection navigation (#776)
+
+Below the `md` breakpoint (768 CSS pixels), the existing Collections sidebar is a
+labelled disclosure above the full-width document workspace. Choose collection
+shows the selected name and exposes `aria-expanded` / `aria-controls`. The panel
+is independently scrollable and bounded to 256px / half the feature height.
+Selecting a collection or pressing Escape closes it and restores focus to the
+trigger. Upload and document filters keep the same collection selection and query
+behavior, including the 250ms filename debounce. At desktop widths the 288px
+sidebar remains visible beside the independently scrolling document workspace.
+
+Long filenames truncate inside a bounded name cell, retaining their full title
+and accessible row label; horizontal table scrolling keeps all metadata/actions
+reachable without widening the main pane. Empty guidance refers to Collections
+rather than assuming a sidebar on the left. No API or shell behavior changes.
+
+Browser regression `tests/e2e/mobile-documents.spec.ts` measures 354/390px mobile
+and 1440px desktop views, keyboard selection/focus, upload-picker access, debounce,
+status filtering and loading/error/empty/long-name states. Before the fix, the
+mobile main widths were 66px and 102px; afterward they are 354px and 390px, with
+no page overflow. Desktop retains a 904px main beside a 288px Collections pane
+in the 1192px shell content region. Screenshots are written to `output/playwright`.
