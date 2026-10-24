@@ -216,6 +216,7 @@ describe('DocumentList', () => {
     // The filtered-empty message differs from the empty-collection message.
     expect(await screen.findByText(/no documents match these filters/i)).toBeInTheDocument();
 
+    await waitFor(() => expect(String(fetchSpy.mock.calls.at(-1)?.[0])).toContain('q=msa'));
     const last = fetchSpy.mock.calls.at(-1)?.[0] as string;
     expect(last).toContain('collection_id=col-1');
     expect(last).toContain('status=failed');
