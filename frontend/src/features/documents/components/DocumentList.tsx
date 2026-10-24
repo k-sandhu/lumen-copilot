@@ -18,6 +18,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { ScrollArea } from '@/components/ScrollArea';
 import { FreshnessPill, PermissionPill, StatusDot } from '@/ui';
 import { cn } from '@/lib/cn';
+import { useFilenameFilter } from '../model/useFilenameFilter';
 import { useDeleteDocument, useDocuments, type DocumentFilters } from '../model/queries';
 import {
   documentFreshness,
@@ -71,14 +72,15 @@ export function DocumentList({
 }: DocumentListProps) {
   const [status, setStatus] = useState<DocumentStatus | 'all'>('all');
   const [q, setQ] = useState('');
+  const filename = useFilenameFilter(q, collectionId, status);
 
   const filters: DocumentFilters = {
     collectionId,
     status: status === 'all' ? undefined : status,
-    q: q.trim() || undefined,
+    q: filename,
   };
   const query = useDocuments(filters);
-  const filtered = status !== 'all' || q.trim().length > 0;
+  const filtered = status !== 'all' || Boolean(filename);
 
   return (
     <div className="flex h-full min-h-0 flex-col">

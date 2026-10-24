@@ -115,3 +115,22 @@ permissioned API; frontend roles never grant document visibility. Counts describ
 the latest extraction attempt and may outlive a subsequent embedding failure.
 Blank parts are not classified as scans. Unknown table coverage stays unknown;
 native cell text presence does not prove row/column fidelity or visual completeness.
+
+## Filename request timing (#530)
+
+`DocumentList` keeps the filename input immediate and passes the value settled by
+`model/useFilenameFilter.ts` to `useDocuments`. Typing settles after 250 ms; the
+wire still receives the same trimmed filename substring, collection and status.
+Clearing (including whitespace) applies immediately. A status or collection change
+applies the current input immediately in the new scope and cancels pending typing;
+unmount cancels the timer. The hook never stores server rows. `useDocuments` keeps
+its previous-row placeholders, cancellation signal, query keys and 2.5 s ingestion
+polling unchanged. Empty copy follows the applied filter rather than pending text.
+
+Deterministic fake-timer measurement: typing `handbook` at 20 ms per character
+previously sent **8 filename requests** (`h` through `handbook`); with the debounce
+it sends **0 during typing + 1 settled request** for `handbook` (87.5% fewer), in
+addition to the initial unfiltered request. The regression suite covers clear,
+status, collection, unmount and ingestion polling; the browser regression
+`tests/e2e/document-filename-debounce.spec.ts` verifies the same typing and scope
+behavior with intercepted contract-shaped APIs.
