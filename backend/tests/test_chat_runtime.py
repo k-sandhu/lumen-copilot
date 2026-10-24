@@ -7404,3 +7404,135 @@ async def test_recall_only_answer_keeps_source_provenance(
         )
         assert provenance[copied] == (ctx.document_id,)
     assert retrieval.queries == [], "recall must not fabricate retrieved passages or citations"
+
+
+async def test_default_keeps_superseded_cited_result_and_prefix_verbatim(
+    ctx: _Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#764: each later model turn reuses exact cited evidence and prior prefix."""
+    import json
+
+    from app.core.config import Settings
+    from app.llm.context import ContextConfig, _message_wire_text
+
+    monkeypatch.delenv("CONTEXT_PROACTIVE_COMPACTION_ENABLED", raising=False)
+    settings = Settings()
+    import sys
+    from types import SimpleNamespace
+
+    def unavailable(**kwargs: object) -> int:
+        raise RuntimeError("use deterministic fallback counter")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            token_counter=unavailable,
+            get_model_info=unavailable,
+        ),
+    )
+    assert settings.context_proactive_compaction_enabled is False
+    passage = replace(
+        _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf"),
+        text=("The standard deduction for 2024 is $14,600. " * 100).strip(),
+    )
+    passages = [passage]
+
+    class RecordingGateway(_ScriptedGateway):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    [
+                        StreamEvent(
+                            tool_calls=(
+                                ToolCall(
+                                    id="c1", name="search_text", arguments={"query": "deduction"}
+                                ),
+                            ),
+                            finish_reason="tool_calls",
+                        )
+                    ],
+                    [
+                        StreamEvent(
+                            tool_calls=(
+                                ToolCall(
+                                    id="c2", name="search_documents", arguments={"query": "other"}
+                                ),
+                            ),
+                            finish_reason="tool_calls",
+                        )
+                    ],
+                    [
+                        StreamEvent(
+                            tool_calls=(
+                                ToolCall(
+                                    id="c3", name="search_documents", arguments={"query": "other"}
+                                ),
+                            ),
+                            finish_reason="tool_calls",
+                        )
+                    ],
+                    [
+                        StreamEvent(text="The deduction is $14,600 [S1]."),
+                        StreamEvent(finish_reason="stop"),
+                    ],
+                ]
+            )
+            self.transcripts: list[list[ChatMessage]] = []
+
+        async def stream_tools(self, messages: object, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+            self.transcripts.append(list(cast(Sequence[ChatMessage], messages)))
+            async for event in super().stream_tools(messages, **kwargs):
+                yield event
+
+    gateway = RecordingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval(passages),
+        backplane=backplane,
+        default_max_tool_turns=5,
+        context_config=ContextConfig(
+            fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
+            output_headroom_tokens=settings.context_output_headroom_tokens,
+            compaction_digest_chars=settings.context_compaction_digest_chars,
+            compaction_chunk_size=settings.context_compaction_chunk_size,
+            proactive_compaction_enabled=settings.context_proactive_compaction_enabled,
+        ),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="What is the deduction?",
+        model="fake/model",
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert envs[-1]["type"] == "done", envs[-1]
+    assert envs[-1]["data"]["citationCount"] == 1  # type: ignore[index]
+    assert len(gateway.transcripts) == 4
+    first = next(m for m in gateway.transcripts[1] if m.tool_call_id == "c1")
+    assert all(passage.text in first.content for passage in passages)
+    assert "[S1]" in first.content
+    for transcript in gateway.transcripts[2:]:
+        later = next(m for m in transcript if m.tool_call_id == "c1")
+        assert passage.text in later.content
+        assert later == first
+
+    def serialize(messages: Sequence[ChatMessage]) -> bytes:
+        return json.dumps([_message_wire_text(message) for message in messages]).encode("utf-8")
+
+    stable = [
+        serialize(before) == serialize(after[: len(before)])
+        for before, after in zip(gateway.transcripts, gateway.transcripts[1:], strict=False)
+    ]
+    assert all(stable)
+    logged = capsys.readouterr().out
+    assert "context.tool_results_proactively_compacted" not in logged

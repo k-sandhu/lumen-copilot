@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from app.domain.llm import ChatMessage, Role, ToolCall
 from app.llm.context import ContextConfig, fit_transcript
 from tests.eval.metrics import (
@@ -143,3 +145,38 @@ def test_gate_fails_when_compaction_drops_cited_evidence() -> None:
     # …so the faithful model refused while citations were persisted — exactly the
     # ungrounded shape the metric must catch (refusal + citations ⇒ FAIL).
     assert groundedness(observed) is False
+
+
+def test_default_keeps_superseded_cited_labels_and_evidence_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#764 blocking gate: default fits preserve whole cited evidence + labels."""
+    from app.core.config import Settings
+
+    monkeypatch.delenv("CONTEXT_PROACTIVE_COMPACTION_ENABLED", raising=False)
+    settings = Settings()
+    from dataclasses import replace
+
+    original = _transcript()
+    original[3] = replace(
+        original[3], content=original[3].content.replace("notes " * 80, "notes " * 400)
+    )
+    fitted = fit_transcript(
+        original,
+        model="fake/model",
+        config=ContextConfig(
+            proactive_compaction_enabled=settings.context_proactive_compaction_enabled,
+        ),
+        counter=len,
+        max_input_resolver=lambda _: 100_000,
+        cited_snippets={"c1": (_EVIDENCE,)},
+    )
+    assert fitted == original
+    assert fitted[3].content.startswith(f"[1] {_DOC_NAME} (chunk c1, chars 0-500):")
+    assert _EVIDENCE in fitted[3].content
+    observed = _observed(_faithful_model_answer(fitted), uuid.uuid4())
+    assert groundedness(observed) is True
+    assert (
+        citation_correctness(observed, expected_passage=_EVIDENCE, expected_document_name=_DOC_NAME)
+        is True
+    )
