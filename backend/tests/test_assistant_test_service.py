@@ -61,6 +61,7 @@ from tests._audit_helpers import (
     denial_context_from_session,
 )
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 # --- Fakes ------------------------------------------------------------------
 
@@ -171,7 +172,7 @@ class _RunPythonGateway:
             )
 
 
-class _Retrieval:
+class _Retrieval(UUIDDocumentResolver):
     """Returns the fixed passage only to test principals explicitly granted access."""
 
     def __init__(self, passage: RetrievedPassage, *, allowed_users: set[uuid.UUID]) -> None:

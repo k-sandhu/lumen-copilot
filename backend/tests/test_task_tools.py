@@ -19,13 +19,14 @@ from app.services.tools.compatibility import permitted_names
 from app.services.tools.handles import EvidenceHandles
 from app.services.tools.registry import default_allowlist, get_tool, registered_names
 from app.services.tools.types import ToolContext
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 _DOC = uuid.UUID("00000000-0000-0000-0000-000000000101")
 _CHUNK = uuid.UUID("00000000-0000-0000-0000-000000000102")
 _SECRET = "restricted document body must never escape"
 
 
-class _FakeRetrieval:
+class _FakeRetrieval(UUIDDocumentResolver):
     def __init__(self, *, readable: bool = True, passage_text: str = _SECRET) -> None:
         self.readable = readable
         self.passage_text = passage_text

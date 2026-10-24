@@ -62,6 +62,7 @@ from app.services.provider_models import make_provider_model_id
 from app.services.secrets_service import build_secrets_service
 from tests._audit_helpers import RecordingDurableAuditTransactions
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -166,7 +167,7 @@ class _CapturingGateway:
         yield StreamEvent(finish_reason="stop")
 
 
-class _FakeRetrieval:
+class _FakeRetrieval(UUIDDocumentResolver):
     def __init__(
         self,
         passage: RetrievedPassage,

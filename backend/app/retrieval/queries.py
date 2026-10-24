@@ -718,3 +718,57 @@ async def load_document_text(
         document_name=filename,
         text="".join(texts),
     )
+
+
+async def document_id_for_permitted_chunk(
+    session: AsyncSession,
+    *,
+    allow_set: AllowSet,
+    chunk_id: UUID,
+) -> UUID | None:
+    """The containing document of a chunk the caller may see, or ``None`` (#758).
+
+    Resolves a chunk id shown by ``search_text`` to its document under the
+    identical tenant + owner-or-grant predicate as :func:`load_document_text`
+    (``_permission_filter`` over the chunk↔document join). A chunk of a
+    document the caller may not see — another owner's, another tenant's, or a
+    missing chunk — yields ``None``, exactly like an unknown id (INV-2).
+    """
+    stmt = (
+        select(models.Chunk.document_id)
+        .join(models.Document, models.Chunk.document_id == models.Document.id)
+        .where(models.Chunk.id == chunk_id)
+    )
+    stmt = _permission_filter(stmt, allow_set)
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return row
+
+
+async def documents_by_exact_name(
+    session: AsyncSession,
+    *,
+    allow_set: AllowSet,
+    name: str,
+    k: int,
+) -> list[DocumentRow]:
+    """Permitted documents whose filename equals ``name`` exactly (#758).
+
+    Case-insensitive exact match (the caller trims whitespace) under the
+    identical tenant + owner-or-grant predicate as :func:`load_document_text`.
+    Only permitted documents can appear, so an ambiguous-name reply listing
+    these candidates never discloses a foreign document (INV-2). Ordered by
+    filename then id for a deterministic candidate list; ``k`` caps the count.
+    """
+    stmt = (
+        select(models.Document.id, models.Document.filename)
+        .where(
+            models.Document.tenant_id == allow_set.tenant_id,
+            _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
+            func.lower(models.Document.filename) == func.lower(name.strip()),
+        )
+        .order_by(models.Document.filename.asc(), models.Document.id.asc())
+        .limit(k)
+    )
+    result = await session.execute(stmt)
+    return [DocumentRow(document_id=did, document_name=fname) for did, fname in result.all()]

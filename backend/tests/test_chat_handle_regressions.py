@@ -193,10 +193,18 @@ async def test_persisted_document_handle_rechecks_access_and_conversation(
         await session.commit()
     revoked = _DocumentGateway()
     await _document_turn(ctx, revoked)
-    assert revoked.replies[-1] == "Document not found."
+    corrective = (
+        "Document not found. No accessible document matches that document_id. "
+        "document_id takes a document UUID, a current conversation D handle, "
+        "the 'document id:' value or chunk id from search_text results, "
+        "an id from search_documents or list_documents, a D handle from find_documents, "
+        "a chunk UUID, or an exact filename as displayed. "
+        "To find a document by filename, call find_documents."
+    )
+    assert revoked.replies[-1] == corrective
     foreign_conversation = _DocumentGateway()
     await _document_turn(ctx, foreign_conversation, other.id)
-    assert foreign_conversation.replies[-1] == "Invalid document id."
+    assert foreign_conversation.replies[-1] == corrective
     assert all("$14,600" not in reply for reply in revoked.replies + foreign_conversation.replies)
 
 

@@ -25,10 +25,11 @@ records the ``tool_invocations`` row for each.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
 
-from app.domain.retrieval import RetrievedPassage
+from app.domain.retrieval import DocumentResolution, RetrievedPassage
 from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
 from app.services.tools.types import ToolContext, ToolDefinition
 
@@ -123,11 +124,44 @@ def _render_passages(
     for i, p in enumerate(passages, start=1):
         snippet = rendered_snippet(p.text, snippet_budget)
         blocks.append(
-            f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}"
+            f"[{i}] {p.document_name} (document id: {p.document_id}, chunk {p.chunk_id}, "
+            f"chars {p.char_start}-{p.char_end}"
             f"{_media_provenance(p)}):\n"
             f"{snippet}"
         )
     return "\n\n".join(blocks)
+
+
+def _document_not_found_content(ctx: ToolContext) -> str:
+    """The one non-disclosing reply for a handle that resolves to nothing (#758).
+
+    Missing, malformed, another owner's and another tenant's handles all get
+    this identical corrective message (INV-2) — it says what ``document_id``
+    accepts and where to get an id, naming only tools in ``ctx.allowed_tools``
+    (as the truncation-recovery text does), and discloses no length or range.
+    """
+    allowed = ctx.allowed_tools
+    accepted = ["a document UUID"]
+    if ctx.handles is not None or ctx.document_id_resolver is not None:
+        accepted.append("a current conversation D handle")
+    if "search_text" in allowed:
+        accepted.append("the 'document id:' value or chunk id from search_text results")
+    id_tools = [name for name in ("search_documents", "list_documents") if name in allowed]
+    if id_tools:
+        accepted.append("an id from " + " or ".join(id_tools))
+    if "find_documents" in allowed:
+        value = "a D handle" if ctx.handles is not None else "a document id"
+        accepted.append(value + " from find_documents")
+    accepted.extend(("a chunk UUID", "an exact filename as displayed"))
+    content = (
+        "Document not found. No accessible document matches that document_id. "
+        "document_id takes " + ", ".join(accepted[:-1]) + ", or " + accepted[-1] + "."
+    )
+    if "find_documents" in allowed:
+        content += " To find a document by filename, call find_documents."
+    elif "search_documents" in allowed:
+        content += " To find a document by filename, call search_documents."
+    return content
 
 
 async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
@@ -240,27 +274,50 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
 
 async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     raw_id = str(args.get("document_id") or "").strip()
-    if raw_id.startswith("D") and ctx.handles is not None:
-        entry = ctx.handles.resolve(raw_id)
-        raw_id = str(entry["document_id"]) if entry and entry.get("kind") == "document" else ""
-    try:
-        resolved = ctx.document_id_resolver(raw_id) if ctx.document_id_resolver else None
-        document_id = resolved if resolved is not None else UUID(raw_id)
-    except ValueError:
-        # A malformed id is a tool-specific rejection, not a crash — the runner
-        # passes the ``ok=False`` through and the run continues (issue #207 §7).
+    # Use the conversation handle grammar (EvidenceHandles), never a prefix
+    # test: e.g. "Document Control Plan.pdf" is still a literal filename.
+    # An active registry is authoritative for S/D/W identities, including misses.
+    handle_only = ctx.handles is not None and re.fullmatch(r"[SDW][1-9][0-9]*", raw_id) is not None
+    resolved = None
+    if handle_only and ctx.handles is not None:
+        resolved = ctx.handles.document_id(raw_id)
+    elif ctx.document_id_resolver is not None:
+        resolved = ctx.document_id_resolver(raw_id)
+    if isinstance(resolved, UUID):
+        resolution = DocumentResolution(
+            document=await ctx.retrieval.get_document(principal=ctx.principal, document_id=resolved)
+        )
+    elif handle_only:
+        resolution = DocumentResolution()  # No retrieval I/O for rejected handles.
+    else:
+        # UUID → chunk UUID → literal name → stripped name stays inside retrieval/,
+        # under its shared tenant + owner-or-grant predicate (#758).
+        resolution = await ctx.retrieval.resolve_document_text(
+            principal=ctx.principal, handle=raw_id
+        )
+    if resolution.candidates:
+        lines = [f"- {c.document_name} (id: {c.document_id})" for c in resolution.candidates]
         return ToolHandlerResult(
             source_document_ids=(),
-            content="Invalid document id.",
+            content=(
+                "Several accessible documents have that exact name. "
+                "Retry with one document id:\n" + "\n".join(lines)
+            ),
             ok=False,
             error=ERROR_BAD_ARGS,
-            summary="invalid id",
+            summary="ambiguous name",
+            payload={"document_ids": [str(c.document_id) for c in resolution.candidates]},
         )
-    doc = await ctx.retrieval.get_document(principal=ctx.principal, document_id=document_id)
+    doc = resolution.document
     if doc is None:
-        # Existence non-disclosure (INV-2): a foreign/missing doc is "not found".
+        # Existence non-disclosure (INV-2): missing, malformed, foreign and
+        # cross-tenant handles share this one corrective outcome (#758).
         return ToolHandlerResult(
-            source_document_ids=(), content="Document not found.", summary="not found"
+            source_document_ids=(),
+            content=_document_not_found_content(ctx),
+            ok=False,
+            error=ERROR_BAD_ARGS,
+            summary="not found",
         )
     # Bound the returned body to the budget-derived snippet allowance (#424 third
     # re-review): a document read is ~4× a passage snippet, and a tight context
@@ -312,7 +369,9 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "Hybrid semantic + keyword search over the documents the user can "
             "access (their own and any shared with them). Use this to find "
             "evidence for the question. Returns ranked passages with their source "
-            "document and complete passage text. Count limits and the context "
+            "document and complete passage text; each passage header shows its "
+            "document id (as 'document id: ...'), usable with get_document. "
+            "Count limits and the context "
             "engine bound evidence cost. If no "
             "passages match, broaden the query, use search_documents to locate a "
             "document by filename, or list_documents to see available documents."
@@ -410,8 +469,11 @@ TOOLS: tuple[ToolDefinition, ...] = (
         name="get_document",
         default_offered=False,
         description=(
-            "Read a prefix of an accessible document by the id returned by "
-            "search_documents or list_documents. Use this for an overview, not to "
+            "Read a prefix of an accessible document. document_id accepts the "
+            "current conversation D handle, a document UUID, the "
+            "'document id:' value from search_text results, an id returned by "
+            "search_documents or list_documents, a chunk id shown by search_text, "
+            "or an exact filename as displayed. Use this for an overview, not to "
             "conclude that unseen text contains no answer. Returns up to 2,400 "
             "characters, less under a tight context budget, with the returned range "
             "and total length. A truncated read explicitly marks omitted text; use "
@@ -425,7 +487,13 @@ TOOLS: tuple[ToolDefinition, ...] = (
             "properties": {
                 "document_id": {
                     "type": "string",
-                    "description": "The document id to fetch.",
+                    "description": (
+                        "The document to fetch: a current conversation D handle, "
+                        "a document UUID, a 'document id:' value from "
+                        "search_text, an id from search_documents or "
+                        "list_documents, a chunk id shown by search_text, or an "
+                        "exact filename as displayed."
+                    ),
                 }
             },
             "required": ["document_id"],

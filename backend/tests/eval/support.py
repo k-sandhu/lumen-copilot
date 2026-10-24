@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.principal import Principal
 from app.db import models
 from app.domain.llm import Embedding
-from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
+from app.domain.retrieval import DocumentMatch, DocumentResolution, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
 from app.retrieval import RetrievalService
 from app.retrieval.permissions import AllowSet
@@ -147,6 +147,10 @@ class RetrievalLike(Protocol):
     async def get_document(
         self, *, principal: Principal, document_id: UUID
     ) -> DocumentText | None: ...
+
+    async def resolve_document_text(
+        self, *, principal: Principal, handle: str
+    ) -> DocumentResolution: ...
 
 
 class DeterministicEmbedder:
@@ -288,6 +292,14 @@ class OfflineRetrieval:
         )
         rows = (await self._session.execute(stmt)).all()
         return [DocumentMatch(document_id=did, document_name=name, score=1.0) for did, name in rows]
+
+    async def resolve_document_text(
+        self, *, principal: Principal, handle: str
+    ) -> DocumentResolution:
+        # Handle resolution is relational: exercise the production path in the
+        # offline eval too, including chunk/name resolution and permission checks.
+        service = RetrievalService(self._session, gateway=self._embedder)  # type: ignore[arg-type]
+        return await service.resolve_document_text(principal=principal, handle=handle)
 
     async def get_document(self, *, principal: Principal, document_id: UUID) -> DocumentText | None:
         allow = AllowSet.for_principal(principal)
