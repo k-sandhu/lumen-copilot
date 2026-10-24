@@ -22,11 +22,11 @@ import { Icon, SourceInspector } from '@/ui';
 import { DocumentPreviewBody } from '@/components/DocumentPreviewBody';
 import { cn } from '@/lib/cn';
 import { formatMediaTimestamp } from '@/lib/mediaTime';
-import type { UiCitation } from '../model/citation';
+import type { UiDocumentCitation } from '../model/citation';
 import { passageFromCitation, sourceMetadataRows } from '../model/presentation';
 
 export interface DocumentViewerProps {
-  citation: UiCitation;
+  citation: UiDocumentCitation;
   /**
    * Source owner for the metadata grid (#120), when known. The chat/citation
    * wire doesn't carry it today, so the grid shows "Not available" rather than

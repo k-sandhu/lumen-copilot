@@ -10,8 +10,8 @@ Layering (ADR-0004): orchestration only. It composes — never *is* — its
 collaborators:
 
 * the #36 ``llm/`` gateway (``stream_tools``) — the only model caller;
-* the #45 ``retrieval/`` service tools (``search_text`` / ``search_documents`` /
-  ``get_document``) — the only retrieval path, permission-filtered inside (INV-2);
+* the permissioned ``retrieval/`` tools (``search_passages`` / ``find_documents`` /
+  ``read_document`` plus callable legacy adapters) — the retrieval path (INV-2);
 * the ``realtime/`` backplane — the only pub/sub; the producer here publishes
   envelopes a decoupled WS consumer relays;
 * the ``db/`` message + citation repositories (the only SQL) and the #23 audit
@@ -60,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.auth.principal import Principal
 from app.core.errors import AppError, DependencyError
 from app.core.logging import get_logger
+from app.db.evidence_handles import HandleRepository, WebCitationRepository
 from app.db.repositories import (
     AuditEventRepository,
     CitationRepository,
@@ -67,13 +68,15 @@ from app.db.repositories import (
     MessageRepository,
     SessionSummaryRepository,
     TenantRepository,
+    TenantToolPolicyRepository,
     ToolInvocationRepository,
 )
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation
+from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation, WebCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec
+from app.domain.retrieval import RetrievedPassage
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
 from app.llm.context import (
@@ -101,7 +104,11 @@ from app.services.provider_models import (
     ModelRouteResolver,
     is_provider_model_id,
 )
+from app.services.tools.compatibility import LEGACY, permitted_names
+from app.services.tools.context_audit import ContextAuditSink
 from app.services.tools.gate import PolicyApprovalGate
+from app.services.tools.handles import EvidenceHandles, select_cited_handles
+from app.services.tools.impls import corpus as _corpus_impl
 from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
 from app.services.tools.impls.recall import READ_CONVERSATION_TOOL_NAME
@@ -150,6 +157,8 @@ def _citation_event_data(citation: GroundedCitation) -> dict[str, object]:
         "charStart": citation.char_start,
         "charEnd": citation.char_end,
     }
+    if citation.handle is not None:
+        payload["handle"] = citation.handle
     if citation.score is not None:
         payload["score"] = citation.score
     if start is not None and end is not None:
@@ -469,9 +478,9 @@ class _Usage:
     cache_write_tokens: int = 0
     # The LAST answer-loop turn's prompt size — window occupancy, not billing
     # (#434 NEW-1). Set ONLY by ``_stream_one_turn`` (each loop turn overwrites,
-    # so the final turn wins); the suggestions nicety folds into the sums via
-    # :meth:`add` but never touches this. ``None`` ⇒ the provider reported no
-    # usage.
+    # so the final turn wins); the suggestions nicety accumulates into its OWN
+    # ``_Usage`` (recorded on its own ledger row) and never touches this.
+    # ``None`` ⇒ the provider reported no usage.
     last_turn_prompt_tokens: int | None = None
 
     def add(self, usage: TokenUsage) -> None:
@@ -733,6 +742,7 @@ class ChatRuntime:
         # API wires ``Settings.chat_answer_max_tokens``. A 0 from config is treated
         # as unbounded (the setting's documented kill switch).
         self._answer_max_tokens = answer_max_tokens or None
+        self._context_audit: ContextAuditSink | None = None
 
     def _token_counter_for(self, model: str) -> TokenCounter:
         """The memoizing token counter for ``model`` (#491) — one per answer/model.
@@ -806,6 +816,7 @@ class ChatRuntime:
         performs NO real side effect (the load-bearing property of the harness).
         """
         state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
+        self._context_audit = None
         # Mint the absolute producer→terminal deadline for the interactive path
         # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
         # leaving the reserved margin; this anchors the WHOLE path so the terminal
@@ -841,24 +852,49 @@ class ChatRuntime:
                 # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
                 # runs AFTER that commit in its own independent transaction (it cannot
                 # roll the answer back), so this block has no trailing commit.
-                result = await self._answer(
-                    session=session,
-                    state=state,
-                    session_id=session_id,
-                    assistant_message_id=assistant_message_id,
-                    question=question,
-                    model=model,
-                    history=history,
-                    collection_ids=collection_ids,
-                    document_ids=document_ids,
-                    assistant_config=assistant_config,
-                    custom_instructions=custom_instructions,
-                    simulate_writes=simulate_writes,
-                    summary=summary,
-                    evidence=evidence,
-                    mentioned_documents=mentioned_documents,
-                    compaction_cursor=compaction_cursor,
-                )
+                try:
+                    result = await self._answer(
+                        session=session,
+                        state=state,
+                        session_id=session_id,
+                        assistant_message_id=assistant_message_id,
+                        question=question,
+                        model=model,
+                        history=history,
+                        collection_ids=collection_ids,
+                        document_ids=document_ids,
+                        assistant_config=assistant_config,
+                        custom_instructions=custom_instructions,
+                        simulate_writes=simulate_writes,
+                        summary=summary,
+                        evidence=evidence,
+                        mentioned_documents=mentioned_documents,
+                        compaction_cursor=compaction_cursor,
+                    )
+                except AppError as exc:
+                    if (
+                        exc.code == "context_too_large"
+                        and not simulate_writes
+                        and self._context_audit is not None
+                        and self._context_audit.events
+                    ):
+                        records = await ToolInvocationRepository(
+                            session, self._principal.tenant_id
+                        ).list_for_messages([assistant_message_id])
+                        # Release the failed transaction before acquiring the
+                        # restoration session. Never commit business writes or
+                        # forward references to an absent assistant message.
+                        await session.rollback()
+                        async with self._sessionmaker() as recovery:
+                            await bind_tenant(recovery, self._principal.tenant_id)
+                            await AuditSink(
+                                AuditEventRepository(recovery, self._principal.tenant_id)
+                            ).restore_context_rejected(self._context_audit.events)
+                            await ToolInvocationRepository(
+                                recovery, self._principal.tenant_id
+                            ).restore_context_rejected(records.get(assistant_message_id, []))
+                            await recovery.commit()
+                    raise
         except asyncio.CancelledError:
             # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
             # cancels every in-flight producer on SIGTERM, issue #156). In Python
@@ -927,7 +963,8 @@ class ChatRuntime:
         """The tool-calling loop: search → ground → stream → persist."""
         tenant_id = self._principal.tenant_id
         retrieval = self._retrieval_factory(session)
-        audit = AuditSink(AuditEventRepository(session, tenant_id))
+        audit = ContextAuditSink(AuditEventRepository(session, tenant_id))
+        self._context_audit = audit
         # Live run-phase progress (spec 0006 #429): transient ``event:step``
         # envelopes bracketing the phases. Nothing else streams while a model
         # turn is in flight (turns are buffered, #148), so these are what keeps
@@ -959,6 +996,17 @@ class ChatRuntime:
         # ``tool_invocations`` row, and emits ``tool.invoked``/``tool.result``
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
         allowed = assistant_config.allowed if assistant_config is not None else default_allowlist()
+        policies = await TenantToolPolicyRepository(session, tenant_id).list_all()
+        blocked = {
+            policy.tool_name
+            for policy in policies
+            if not policy.enabled or policy.requires_approval
+            if policy.tool_name in LEGACY | {"search_passages", "find_documents", "read_document"}
+        }
+        allowed = permitted_names(allowed, blocked)
+        executable = (
+            permitted_names(allowed | LEGACY, blocked) if assistant_config is None else allowed
+        )
         # The tenant's registered+enabled MCP tools (issue #227), resolved per-run
         # (never a global registration — they are tenant-scoped and dynamic, so a
         # cross-tenant leak is impossible; INV-1). Resolved ONLY when the allow-list
@@ -999,7 +1047,7 @@ class ChatRuntime:
             session, tenant_id, assistant_config
         )
         runner = ToolRunner(
-            allowed=allowed,
+            allowed=executable,
             invocations=ToolInvocationRepository(session, tenant_id),
             audit=audit,
             actor=AuditActor.user(self._principal.user_id),
@@ -1077,6 +1125,19 @@ class ChatRuntime:
                 "document(s) to this message; document searches for this answer "
                 "are scoped to them. Search them before answering.]"
             )
+        # Reserve before tools can write forward-referencing trace rows. The
+        # reservation commit leaves gaps after aborts instead of reusing handles.
+        # It must precede carry-forward audit writes too: recovery snapshots
+        # contain only records still owned by the answer transaction.
+        # Reuse the coordinator: serial/denial-only paths must not acquire an
+        # extra pool connection. Preview's injected commit remains flush-only.
+        handle_repo = HandleRepository(session, self._principal, session_id)
+        first_handle = await handle_repo.reserve()
+        await session.commit()
+        # SET LOCAL resets at commit; restore the tenant on the new transaction.
+        await bind_tenant(session, tenant_id)
+        handles = EvidenceHandles(first=first_handle, existing=await handle_repo.load())
+
         # Evidence carry-forward rehydration (#416, ADR-0016 §3.2): the stored
         # digest is IDs ONLY; ONE bounded, permission-filtered metadata query
         # (#446 finding 4) re-checks every id against the requester's CURRENT
@@ -1161,6 +1222,9 @@ class ChatRuntime:
         # Keep this snapshot independently of fit_transcript: content that a
         # prior model call saw can still influence the answer after compaction.
         prompt_context = list(messages)
+        # One chunk can change during an answer. Preserve each observed revision
+        # by handle; final permission/identity checks select the cited revision.
+        corpus_evidence: dict[str, GroundedCitation] = {}
         # Which tool CALL carried which passages — (chunk_id, RENDERED snippet)
         # pairs in passage order (#415). The rendered snippet (trimmed to the
         # run's snippet budget, exactly as ``_render_passages`` showed it) is what
@@ -1185,6 +1249,9 @@ class ChatRuntime:
         self._salvage = (route_state, usage)
         finish_reason = "stop"
         total_hits = 0
+        available_handles: set[str] = set()
+        web_evidence: dict[str, WebCitation] = {}
+        web_snippets: dict[str, tuple[str, ...]] = {}
         # Set iff a turn ended with a valid ``ask_user`` call (spec 0006 #429):
         # the loop breaks and the turn persists as a clarifying question.
         # (Named ask_question: ``question`` is this method's user-question param.)
@@ -1207,13 +1274,15 @@ class ChatRuntime:
         sandbox = self._build_sandbox_seam(
             session=session,
             state=state,
-            allowed=allowed,
+            allowed=executable,
             session_id=session_id,
             assistant_message_id=assistant_message_id,
         )
         tool_context = ToolContext(
             principal=self._principal,
+            handles=handles,
             retrieval=retrieval,
+            document_id_resolver=handles.document_id,
             collection_ids=effective_collection_ids,
             # Pinned documents (spec 0007 #429): passage search narrows to these
             # ids — an ADDITIONAL filter over the caller's allow-set, applied
@@ -1260,7 +1329,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(model_id),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
 
         budget_exhausted = True
@@ -1279,7 +1350,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(route_state.route.model),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
             await self._emit_step(
                 state, key="think", label="Thinking", step_state="started", turn=turn_index + 1
@@ -1381,6 +1454,51 @@ class ChatRuntime:
             )
             for call, result in zip(turn_tool_calls, results, strict=True):
                 total_hits += result.hit_count
+                content = result.content
+                if result.passages:
+                    blocks: list[str] = []
+                    for passage in result.passages:
+                        handle = handles.passage(passage)
+                        available_handles.add(handle)
+                        blocks.append(_evidence(call, passage, handles))
+                    evidence_content = "\n\n".join(blocks)
+                    # Canonical range reads already render from this handle book;
+                    # retain their navigation instructions in the provider transcript.
+                    if call.name in {"search_text", "search_passages"}:
+                        content = evidence_content
+                    elif call.name != "read_document":
+                        # Generic tools can also carry transitive source content.
+                        content = f"{content}\n\n{evidence_content}"
+                elif result.ok and result.payload.get("sourceType") == "web":
+                    blocks = []
+                    for item in result.payload.get("results", []):
+                        if not isinstance(item, dict):
+                            continue
+                        body = str(item.get("fetchedPassage") or item.get("snippet") or "").strip()
+                        visible = body[:700]
+                        if not visible:
+                            continue
+                        url, title = str(item.get("url") or ""), str(item.get("title") or "")
+                        handle = handles.web(url, title, visible)
+                        try:
+                            web_evidence[handle] = WebCitation(
+                                id=uuid.uuid4(),
+                                handle=handle,
+                                url=url,
+                                title=title,
+                                snippet=visible,
+                            )
+                        except ValueError:
+                            continue
+                        available_handles.add(handle)
+                        marker = "\n[Truncated web excerpt.]" if len(body) > len(visible) else ""
+                        blocks.append(f"[{handle}] {title}\n{url}\n{visible}{marker}")
+                    web_snippets[call.id] = tuple(blocks)
+                    content = "\n\n".join(blocks) or "No usable web evidence. Try another query."
+                for document_id in result.document_ids:
+                    handle = handles.document(document_id)
+                    content = content.replace(str(document_id), handle)
+                result = replace(result, content=content)
                 # Transcript messages append in ORIGINAL call order (#412) —
                 # the provider protocol pairs each tool reply to its request,
                 # and a deterministic order keeps the prompt prefix stable for
@@ -1414,18 +1532,14 @@ class ChatRuntime:
                 # ellipsis and all, so the two can never drift.
                 if result.passages:
                     result_passage_snippets[call.id] = tuple(
-                        (
-                            p.chunk_id,
-                            _retrieval_impl.rendered_snippet(p.text, assembled.snippet_budget),
-                        )
-                        for p in result.passages
+                        (p.chunk_id, _evidence(call, p, handles)) for p in result.passages
                     )
                 # Record + emit citations for each newly-seen permitted passage.
                 for passage in result.passages:
-                    if passage.chunk_id in cited:
-                        continue
-                    citation = GroundedCitation.from_passage(passage)
-                    cited[passage.chunk_id] = citation
+                    handle = handles.passage(passage)
+                    citation = replace(GroundedCitation.from_passage(passage), handle=handle)
+                    corpus_evidence[handle] = citation
+                    cited.setdefault(passage.chunk_id, citation)
 
         if budget_exhausted:
             # The whole budget went to tool turns and the model never volunteered a
@@ -1443,7 +1557,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(route_state.route.model),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
             await self._emit_step(
                 state,
@@ -1477,6 +1593,7 @@ class ChatRuntime:
             answer_chunks = turn_text
 
         if ask_question is not None:
+            await handle_repo.append(handles.created)
             # The clarifying-question turn (spec 0006 #429). The question text IS
             # the assistant message; it persists with the structured payload so
             # the options re-render after reload, and with ZERO citations — a
@@ -1571,7 +1688,9 @@ class ChatRuntime:
                 tools=advertised,
                 config=self._context_config,
                 counter=self._token_counter_for(route_state.route.model),
-                cited_snippets=_cited_snippets_by_call(result_passage_snippets, cited),
+                cited_snippets=_cited_snippets_by_call(
+                    result_passage_snippets, cited, web_snippets
+                ),
             )
             try:
                 _, finish_reason, extra_chunks = await self._stream_turn_resilient(
@@ -1615,6 +1734,67 @@ class ChatRuntime:
         # value — a strip here makes the stored message differ from what streamed.
         # Stripping is used ONLY to detect emptiness below (whether to fall back).
         answer_text = "".join(answer_chunks)
+        cleaned_answer, selected_handles = select_cited_handles(answer_text, available_handles)
+        selected_corpus = {
+            handle: citation
+            for handle, citation in corpus_evidence.items()
+            if handle in selected_handles
+        }
+        if selected_corpus:
+            requested_passages = len(selected_corpus)
+            fresh = await retrieval.read_passages(
+                principal=self._principal,
+                chunk_ids=list(dict.fromkeys(c.chunk_id for c in selected_corpus.values())),
+                collection_ids=effective_collection_ids,
+                document_ids=document_ids,
+            )
+            valid = {
+                handles.passage(passage): passage
+                for passage in fresh
+                if handles.resolve(handles.passage(passage)) is not None
+            }
+            selected_corpus = {
+                handle: citation
+                for handle, citation in selected_corpus.items()
+                if citation.handle in valid
+                and valid[citation.handle].document_id == citation.document_id
+            }
+            await audit.emit(
+                action=AuditAction.EVIDENCE_REHYDRATED,
+                actor=AuditActor.user(self._principal.user_id),
+                resource_type="session",
+                resource_id=str(session_id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={
+                    "requested_passages": requested_passages,
+                    "permitted_passages": len(selected_corpus),
+                },
+            )
+            if len(selected_corpus) != requested_passages:
+                # A marker alone cannot isolate the prose derived from a source.
+                # Fail closed for the whole answer when selected evidence changed
+                # or became forbidden between the tool read and final persistence.
+                cleaned_answer = NO_SOURCES_FALLBACK
+                selected_corpus = {}
+                web_evidence = {}
+                selected_handles = []
+        allowed_final = {c.handle for c in selected_corpus.values() if c.handle is not None}
+        allowed_final.update(h for h in selected_handles if h in web_evidence)
+        cleaned_answer, selected_handles = select_cited_handles(cleaned_answer, allowed_final)
+        if cleaned_answer != answer_text:
+            await self._retract_answer(state)
+            await self._publish_text(state, [cleaned_answer])
+        answer_text = cleaned_answer
+        cited = {
+            citation.chunk_id: citation
+            for citation in sorted(
+                selected_corpus.values(),
+                key=lambda citation: selected_handles.index(citation.handle or ""),
+            )
+        }
+        selected_web = [web_evidence[h] for h in selected_handles if h in web_evidence]
 
         # Persist the assistant message and its citations (INV-3): the citations
         # are exactly the permitted passages the tools returned — never more.
@@ -1627,6 +1807,8 @@ class ChatRuntime:
             if state.answer_on_wire or state.buffer.kind == _ANSWER_TEXT:
                 await self._retract_answer(state)
             answer_text = NO_SOURCES_FALLBACK
+            cited = {}
+            selected_web = []
             # Emit the fallback through the TRACKED ``_stream_text`` seam (#488), not a
             # raw ``_publish``: that sets ``answer_on_wire``, so a later persistence /
             # commit failure RETRACTS the fallback like any other answer delta instead
@@ -1645,6 +1827,10 @@ class ChatRuntime:
             citations=list(cited.values()),
             prompt_context=prompt_context,
         )
+        await handle_repo.append(handles.created)
+        web_repo = WebCitationRepository(session, tenant_id)
+        for web_citation in selected_web:
+            await web_repo.add(assistant_message_id, web_citation)
         # Evidence carry-forward WRITE (#416): the NEXT answer's digest is this
         # answer's cited ids — IDs only (ADR-0016 §3.2), replaced wholesale (a
         # zero-citation answer clears it). Rides the answer transaction; the
@@ -1658,6 +1844,22 @@ class ChatRuntime:
         # a distinct permitted passage — one event each, no extra guard needed.
         for citation in stored_citations:
             await self._emit_citation(state, citation)
+        for web_citation in selected_web:
+            await self._publish(
+                state,
+                envelopes.event(
+                    state.stream_id,
+                    await self._next_seq(state),
+                    name="web_citation",
+                    data={
+                        "id": str(web_citation.id),
+                        "handle": web_citation.handle,
+                        "url": web_citation.url,
+                        "title": web_citation.title,
+                        "snippet": web_citation.snippet,
+                    },
+                ),
+            )
 
         await self._audit_answer(
             audit=audit,
@@ -1665,7 +1867,7 @@ class ChatRuntime:
             assistant_message_id=assistant_message_id,
             question=question,
             model=route_state.model,
-            citation_count=len(stored_citations),
+            citation_count=len(stored_citations) + len(selected_web),
             retrieved_hits=total_hits,
             # Distinct cited documents, first-appearance order — the provenance
             # the Audit "Answers cited" KPI reads (#249).
@@ -1684,13 +1886,15 @@ class ChatRuntime:
         # The answer's summed usage as reported on the terminal — the ANSWER's cost
         # (turn loop + any failover scopes), computed BEFORE the suggestions nicety
         # runs. ``done.usage`` is the answer terminal, so it must not wait on (nor
-        # include) the post-terminal nicety; the suggestions tokens are still
-        # accounted on the same DB row (#409 / AC-3) by the post-commit UPDATE below.
+        # include) the post-terminal nicety; the suggestions tokens are accounted
+        # afterwards on their OWN message-less ledger row — linked by ``answer_id``,
+        # tagged ``run_id = answer_id``, attributed to the actual suggestions model
+        # (ADR-0016 §2.6 #490 amendment) — by the post-terminal transaction below.
         answer_usage = _answer_usage_totals(route_state, usage)
         run_result = _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
-            citation_count=len(stored_citations),
+            citation_count=len(stored_citations) + len(selected_web),
             citations=tuple(stored_citations),
             prompt_tokens=answer_usage.prompt_tokens,
             completion_tokens=answer_usage.completion_tokens,
@@ -1702,11 +1906,12 @@ class ChatRuntime:
         # Record the answer's BASE token/cache usage (#409) — one row per answer, in
         # the SAME transaction as the message it accounts for. This is the ANSWER's
         # cost only (turn loop + any failover scopes); the post-terminal suggestions
-        # nicety folds its own cost onto this same row afterwards, in its own
-        # transaction (BE-1). ``model`` is the requested id so a per-tenant
-        # ``provider:`` id stays attributable, matching the message row. Zeroed fields
-        # (a provider that omitted usage) still record: "no usage reported" must be
-        # visible, not a gap.
+        # nicety records its own cost afterwards on its OWN message-less row
+        # (``answer_id``-linked, ``run_id = answer_id``, the actual suggestions
+        # model), in its own transaction (BE-1). ``model`` is the requested id
+        # so a per-tenant ``provider:`` id stays attributable, matching the
+        # message row. Zeroed fields (a provider that omitted usage) still
+        # record: "no usage reported" must be visible, not a gap.
         await self._record_usage_scopes(
             session=session,
             tenant_id=tenant_id,
@@ -1752,8 +1957,9 @@ class ChatRuntime:
         # (BE-1) that cannot roll the committed answer back, and delivered as a
         # bounded POST-terminal ``event:suggestions`` (#489). Any failure / timeout /
         # parse miss ⇒ no event, never touching the already-published terminal
-        # (AC-6). Its token spend still folds onto the answer's single llm_usage row
-        # via the UPDATE inside that transaction (#409 / AC-3).
+        # (AC-6). Its token spend lands on its OWN message-less llm_usage row inside
+        # that transaction — linked by ``answer_id``, tagged ``run_id = answer_id``,
+        # attributed to the actual suggestions model (#409, ADR-0016 §2.6 #490).
         if will_suggest:
             suggestions = await self._run_followup_suggestions(
                 session_id=session_id,
@@ -2690,6 +2896,7 @@ class ChatRuntime:
                 # invariant — no finalise waiter survives the abort.
                 for task in tasks:
                     task.cancel()
+                await runner.abort_persistence()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
             # The fanned-out retrieval audits (call order), now that the
@@ -2803,6 +3010,7 @@ class ChatRuntime:
                 transcript_segment_id=citation.transcript_segment_id,
                 speaker_id=citation.speaker_id,
                 speaker_name=citation.speaker_name,
+                handle=citation.handle,
             )
             stored.append(
                 GroundedCitation(
@@ -2819,6 +3027,7 @@ class ChatRuntime:
                     transcript_segment_id=citation.transcript_segment_id,
                     speaker_id=citation.speaker_id,
                     speaker_name=citation.speaker_name,
+                    handle=citation.handle,
                 )
             )
         return stored
@@ -2943,8 +3152,11 @@ class ChatRuntime:
         retrieved passages or tool output — so it cannot surface anything the
         caller wasn't already shown (spec 0006 §5). Every failure mode (gateway
         error, timeout, unparseable output) returns ``[]``: the nicety must
-        never degrade the answer. Its token usage folds into ``usage`` so the
-        answer's llm_usage row accounts for it (#409).
+        never degrade the answer. Its token usage folds into the caller's
+        SEPARATE ``usage`` accumulator, which the caller records on the
+        suggestions scope's OWN message-less llm_usage row — linked by
+        ``answer_id``, tagged ``run_id = answer_id``, attributed to the actual
+        suggestions model (#409, ADR-0016 §2.6 #490 amendment).
         """
         request = render_follow_up_request(
             question=question[:_SUGGESTIONS_QUESTION_HEAD_CHARS],
@@ -3000,9 +3212,11 @@ class ChatRuntime:
 
         Moved out of ``run`` into ``_answer`` so the terminal settles the UI BEFORE
         the follow-up-suggestions nicety runs (AC-1). ``done.usage`` carries the
-        ANSWER's summed usage (the suggestions call had not run yet); its cost is
-        still recorded on the DB usage row afterwards (#409). ``pending_suggestions``
-        declares that one post-terminal ``event:suggestions`` may still follow within
+        ANSWER's summed usage (the suggestions call had not run yet); the nicety's
+        cost is recorded afterwards on its OWN message-less usage row, linked by
+        ``answer_id`` and tagged ``run_id = answer_id`` (#409, ADR-0016 §2.6 #490
+        amendment). ``pending_suggestions`` declares that one post-terminal
+        ``event:suggestions`` may still follow within
         the consumer's grace window, and (BE-5) carries the server's own grace as
         ``suggestionsGraceMs`` so the consumer waits exactly the server's window
         rather than a hard-coded default; absent/false keeps the classic
@@ -3411,9 +3625,20 @@ def _hash_query(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
+def _evidence(call: ToolCall, passage: RetrievedPassage, handles: EvidenceHandles) -> str:
+    """The provider-visible evidence block, shared by the transcript and compaction.
+
+    A ``search_passages`` hit also names its D handle and range, the tokens
+    ``read_document`` accepts (#772); D handles navigate and are never citations.
+    """
+    document = handles.document(passage.document_id) if call.name == "search_passages" else None
+    return _retrieval_impl.rendered_evidence(passage, handles.passage(passage), document=document)
+
+
 def _cited_snippets_by_call(
     result_passage_snippets: dict[str, tuple[tuple[UUID, str], ...]],
     cited: dict[UUID, GroundedCitation],
+    web_snippets: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Map each tool ``call.id`` to the RENDERED snippets the answer cited from it (#415).
 
@@ -3426,9 +3651,7 @@ def _cited_snippets_by_call(
     chunk in passage order (deterministic); chunks the answer did not cite
     contribute nothing.
     """
-    if not cited:
-        return {}
-    out: dict[str, tuple[str, ...]] = {}
+    out: dict[str, tuple[str, ...]] = dict(web_snippets or {})
     for call_id, pairs in result_passage_snippets.items():
         seen: set[UUID] = set()
         snippets: list[str] = []
@@ -3446,17 +3669,18 @@ def _is_retrieval_call(call: ToolCall) -> bool:
 
     The retrieval tools additionally emit the retrieval-semantics audit event
     (query hash + document ids + hit count, spec 0004 §2.4) on top of the generic
-    ``tool.*`` events the runner emits for every tool. Keyed off the retrieval impl's
+    ``tool.*`` events the runner emits for every tool. Keyed off the corpus impls'
     declared names (``_RETRIEVAL_TOOL_NAMES``, read from ``TOOLS``) so a newly added
     retrieval tool is covered automatically and a non-retrieval tool never is.
     """
     return call.name in _RETRIEVAL_TOOL_NAMES
 
 
-# The retrieval tools' names, read once from their impl module (the single source
-# of truth for what a "retrieval tool" is) so the retrieval-specific audit stays
-# correct as tools are added elsewhere.
-_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(defn.name for defn in _retrieval_impl.TOOLS)
+# Include both declared families so canonical calls and legacy adapters receive
+# the same retrieval-semantics audit, including successful reads and refusals.
+_RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
+    defn.name for defn in (*_retrieval_impl.TOOLS, *_corpus_impl.TOOLS)
+)
 
 
 __all__ = [

@@ -15,6 +15,7 @@ allow-set — there is no constructor that takes a raw chunk id from the model.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from app.domain.retrieval import RetrievedPassage
@@ -45,6 +46,7 @@ class GroundedCitation:
     transcript_segment_id: UUID | None = None
     speaker_id: str | None = None
     speaker_name: str | None = None
+    handle: str | None = None
 
     @classmethod
     def from_passage(cls, passage: RetrievedPassage) -> GroundedCitation:
@@ -70,6 +72,20 @@ class GroundedCitation:
             speaker_id=passage.speaker_id,
             speaker_name=passage.speaker_name,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class WebCitation:
+    id: UUID
+    handle: str
+    url: str
+    title: str
+    snippet: str
+
+    def __post_init__(self) -> None:
+        parsed = urlsplit(self.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+            raise ValueError("Web evidence requires a safe public HTTP URL.")
 
 
 @dataclass(frozen=True, slots=True)

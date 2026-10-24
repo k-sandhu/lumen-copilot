@@ -13,19 +13,19 @@
  * snippet still renders its title/host and the link (never a blank pane).
  */
 import { Icon, SourceInspector } from '@/ui';
-import type { UiCitation } from '../model/citation';
+import type { UiWebCitation } from '../model/citation';
 import { hostOf, isSafeHttpUrl } from '../model/citation';
 import { passageFromCitation } from '../model/presentation';
 
 export interface WebSourceViewProps {
-  citation: UiCitation;
+  citation: UiWebCitation;
   onClose: () => void;
 }
 
 export function WebSourceView({ citation, onClose }: WebSourceViewProps) {
   const host = hostOf(citation.url);
   const safeHref = isSafeHttpUrl(citation.url) ? citation.url : undefined;
-  const title = citation.webTitle ?? citation.documentName ?? host ?? 'Web result';
+  const title = citation.webTitle ?? host ?? 'Web result';
   const hasSnippet = citation.snippet.trim().length > 0;
 
   return (

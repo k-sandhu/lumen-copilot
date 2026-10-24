@@ -49,6 +49,7 @@ from app.services.chat_runtime import ChatRuntime, _narrow_collection_ids
 from app.services.prompts import GROUNDED_SYSTEM_PROMPT
 from app.services.tools.registry import default_allowlist
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -150,7 +151,7 @@ def test_narrow_disjoint_is_empty_not_widened() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _RecordingRetrieval:
+class _RecordingRetrieval(UUIDDocumentResolver):
     """A retrieval stand-in that records the collection_ids each search saw."""
 
     def __init__(self, passages: list[RetrievedPassage]) -> None:

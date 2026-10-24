@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from unittest.mock import AsyncMock, Mock
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -23,19 +27,30 @@ from sqlalchemy.pool import StaticPool
 from app.auth.principal import Principal
 from app.core.config import CANONICAL_EMBEDDING_DIMENSIONS
 from app.db.repositories import (
+    AuditEventRepository,
     ChunkInput,
     ChunkRepository,
     CollectionRepository,
     DocumentRepository,
     TenantRepository,
+    ToolInvocationRepository,
     UserRepository,
 )
+from app.domain.audit import AuditActor
 from app.domain.entities import DocumentStatus, Role
-from app.domain.llm import Embedding
-from app.domain.tools import ERROR_BAD_ARGS, RiskTier
+from app.domain.llm import Embedding, ToolCall
+from app.domain.retrieval import RetrievedPassage
+from app.domain.tools import ERROR_BAD_ARGS, ERROR_NOT_PERMITTED, RiskTier
 from app.retrieval import RetrievalService
+from app.services.assistant_runtime import assemble_run_config
+from app.services.assistants_service import AssistantsService
+from app.services.audit import AuditSink
+from app.services.tools.compatibility import LEGACY
+from app.services.tools.handles import EvidenceHandles
 from app.services.tools.registry import default_allowlist, get_tool, registered_names, tool_specs
+from app.services.tools.runner import ToolRunner
 from app.services.tools.types import ToolContext
+from tests._audit_helpers import RecordingDurableAuditTransactions, denial_context
 from tests._db_helpers import copy_sqlite_schema
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
@@ -148,7 +163,13 @@ async def _doc(
 
 def _ctx(session: AsyncSession, principal: Principal) -> ToolContext:
     service = RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
-    return ToolContext(principal=principal, retrieval=service, collection_ids=None, default_k=6)
+    return ToolContext(
+        principal=principal,
+        retrieval=service,
+        collection_ids=None,
+        default_k=6,
+        allowed_tools=_RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS,
+    )
 
 
 async def _call(session: AsyncSession, principal: Principal, name: str, args: dict[str, object]):
@@ -161,6 +182,7 @@ async def _call(session: AsyncSession, principal: Principal, name: str, args: di
 
 
 _RETRIEVAL_TOOLS = frozenset({"search_text", "search_documents", "list_documents", "get_document"})
+_CANONICAL_RETRIEVAL_TOOLS = frozenset({"search_passages", "find_documents", "read_document"})
 
 #: The non-retrieval tools that are ALSO on the ad-hoc default allow-list. Named
 #: exhaustively, deliberately: this set is a governance surface, so adding a
@@ -187,20 +209,20 @@ def test_retrieval_tools_are_t0_read_only_no_approval() -> None:
 
 def test_default_allowlist_is_the_read_only_retrieval_tools() -> None:
     # Ad-hoc chat's default allow-list = the read-only default-offered tools:
-    # the four retrieval tools (list_documents auto-joined on discovery, #371)
-    # plus the non-retrieval defaults enumerated above.
-    assert default_allowlist() == _RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS
+    # Canonical corpus tools plus main's non-retrieval defaults. Legacy tool
+    # names remain callable, but are not default offered.
+    assert default_allowlist() == _CANONICAL_RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS
 
 
 def test_tool_specs_render_the_allowlist_to_llm_specs() -> None:
     specs = tool_specs(default_allowlist())
     names = {s.name for s in specs}
-    assert names == _RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS
+    assert names == _CANONICAL_RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS
     # Each spec carries the JSON-Schema parameters the model fills in.
     by_name = {s.name: s for s in specs}
-    assert by_name["search_text"].parameters["required"] == ["query"]
-    # list_documents is a pure enumeration — no required args (no query needed).
-    assert by_name["list_documents"].parameters.get("required", []) == []
+    assert by_name["search_passages"].parameters["required"] == ["query"]
+    # find_documents can enumerate with an empty query and needs no required args.
+    assert by_name["find_documents"].parameters.get("required", []) == []
 
 
 # --- search_documents -------------------------------------------------------
@@ -327,10 +349,256 @@ async def test_get_document_invalid_id_is_a_bad_args_rejection(
         {"document_id": "not-a-uuid"},
     )
     # A malformed id is a tool-specific rejection the runner passes through, not a
-    # crash: the handler returns ok=False with the bad-args code.
+    # crash: the handler returns ok=False with the bad-args code and a corrective
+    # message the model can act on (#758), not the old dead-end line.
     assert result.ok is False
     assert result.error == ERROR_BAD_ARGS
-    assert "invalid" in result.content.lower()
+    assert result.content != "Invalid document id."
+    assert "document id:" in result.content
+    assert "search_text" in result.content
+    assert "search_documents" in result.content
+
+
+async def test_get_document_long_text_returns_bounded_range_and_truncation_metadata(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    """A roomy document read returns the 2400-char context prefix with explicit bounds."""
+    session, world = session_and_world
+    text = "x" * 3000
+    document_id = await _doc(session, world.tenant_a, world.alice, "long.txt", text)
+    await session.commit()
+
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(document_id)},
+    )
+
+    assert result.ok is True
+    assert result.payload["returned_range"] == [0, 2400]
+    assert result.payload["total_length"] == 3000
+    assert result.payload["truncated"] is True
+    assert "Returned range: 0-2400 of 3000 characters (end-exclusive)." in result.content
+    assert "x" * 2400 in result.content
+    assert "truncated" in result.content.lower()
+    assert "search_text" in result.content
+
+
+async def test_get_document_long_text_obeys_tight_context_budget(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    text = "y" * 3000
+    document_id = await _doc(session, world.tenant_a, world.alice, "tight.txt", text)
+    await session.commit()
+    ctx = ToolContext(
+        principal=_principal(world.alice, world.tenant_a),
+        retrieval=RetrievalService(session, gateway=_FakeGateway()),  # type: ignore[arg-type]
+        collection_ids=None,
+        snippet_budget=300,
+        allowed_tools=_RETRIEVAL_TOOLS | _OTHER_DEFAULT_TOOLS,
+    )
+
+    result = await get_tool("get_document").handler({"document_id": str(document_id)}, ctx)
+
+    assert result.ok is True
+    assert result.payload["returned_range"] == [0, 1200]
+    assert result.payload["total_length"] == 3000
+    assert result.payload["truncated"] is True
+    assert "Returned range: 0-1200 of 3000 characters (end-exclusive)." in result.content
+    assert "y" * 1200 in result.content
+    assert "truncated" in result.content.lower()
+    assert "search_text" in result.content
+
+
+async def test_get_document_short_text_has_exact_range_and_no_truncation(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    document_id = await _doc(session, world.tenant_a, world.alice, "short.txt", "short body")
+    await session.commit()
+
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(document_id)},
+    )
+
+    assert result.ok is True
+    assert result.payload["returned_range"] == [0, len("short body")]
+    assert result.payload["total_length"] == len("short body")
+    assert result.payload["truncated"] is False
+    assert "Returned range: 0-10 of 10 characters (end-exclusive)." in result.content
+    assert "truncated" not in result.content.lower()
+
+
+@pytest.mark.parametrize("search_allowed", [False, True], ids=["prefix-only", "search-capable"])
+@pytest.mark.parametrize("isolated_scope", [False, True], ids=["serial", "isolated"])
+async def test_get_document_recovery_matches_published_assistant_catalog(
+    session_and_world: tuple[AsyncSession, _World],
+    monkeypatch: pytest.MonkeyPatch,
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+    search_allowed: bool,
+    isolated_scope: bool,
+) -> None:
+    """#610 / R1-001: follow the offered recovery without widening a frozen allowlist."""
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    excerpt = "APPROVAL CODE: 42"
+    text = "x" * 2400 + excerpt
+    document_id = await _doc(session, world.tenant_a, world.alice, "approval.txt", text)
+    await session.commit()
+    audit = AuditSink(AuditEventRepository(session, world.tenant_a))
+    assistants = AssistantsService(
+        session,
+        tenant_id=world.tenant_a,
+        owner_id=world.alice,
+        roles=principal.roles,
+        audit=audit,
+        denials=denial_context(
+            durable_audit_ledger,
+            session,
+            world.tenant_a,
+            world.alice,
+            request_id="pr616-r2",
+            source_ip="127.0.0.1",
+        ),
+    )
+    names = ("get_document", "search_text") if search_allowed else ("get_document",)
+    assistant = await assistants.create(
+        name="Approval reader", tool_allowlist=names, backup_owner_id=world.bob
+    )
+    version = await assistants.publish(assistant.id)
+    config = assemble_run_config(version.config)
+    assert config.allowed == frozenset(names)
+    assert {spec.name for spec in tool_specs(config.allowed)} == set(names)
+
+    def runner(allowed: frozenset[str]) -> ToolRunner:
+        return ToolRunner(
+            allowed=allowed,
+            invocations=ToolInvocationRepository(session, world.tenant_a),
+            audit=audit,
+            actor=AuditActor.user(world.alice),
+            request_id="pr616-r2",
+            source_ip="127.0.0.1",
+        )
+
+    search_queries: list[str] = []
+
+    async def search_text(self: RetrievalService, **kwargs: object) -> list[RetrievedPassage]:
+        assert kwargs["principal"] == principal
+        assert kwargs["query"] == "approval code"
+        search_queries.append(str(kwargs["query"]))
+        return [
+            RetrievedPassage(
+                chunk_id=uuid.uuid4(),
+                document_id=document_id,
+                document_name="approval.txt",
+                ord=1,
+                text=excerpt,
+                char_start=2400,
+                char_end=len(text),
+                score=1.0,
+            )
+        ]
+
+    monkeypatch.setattr(RetrievalService, "search_text", search_text)
+
+    @asynccontextmanager
+    async def scope() -> AsyncIterator[ToolContext]:
+        # A separate context must receive the same authoritative catalog.
+        yield _ctx(session, principal)
+
+    governed = runner(config.allowed)
+    result = await governed.run(
+        call=ToolCall(
+            id="prefix", name="get_document", arguments={"document_id": str(document_id)}
+        ),
+        context=_ctx(session, principal),
+        scope=scope if isolated_scope else None,
+    )
+    assert result.ok is True
+    assert excerpt not in result.content
+    assert "Returned range: 0-2400 of 2417 characters (end-exclusive)." in result.content
+    assert result.payload["truncated"] is True
+    assert "characters 2400-2417 are not shown" in result.content
+
+    if search_allowed:
+        assert "use search_text with a targeted query" in result.content
+    else:
+        assert "This assistant cannot inspect the omitted text" in result.content
+        assert "supply the relevant excerpt" in result.content
+        assert "switch to an authorized search-capable assistant" in result.content
+        assert "use search_text" not in result.content
+        denied = await governed.run(
+            call=ToolCall(id="denied", name="search_text", arguments={"query": "approval code"}),
+            context=_ctx(session, principal),
+        )
+        assert denied.ok is False
+        assert denied.error == ERROR_NOT_PERMITTED
+        assert search_queries == []
+        repeated = await governed.run(
+            call=ToolCall(
+                id="repeat", name="get_document", arguments={"document_id": str(document_id)}
+            ),
+            context=_ctx(session, principal),
+        )
+        assert repeated.content == result.content
+        # Follow the suggested switch through a separately published, authorized catalog.
+        recovery_assistant = await assistants.create(
+            name="Search recovery",
+            tool_allowlist=("get_document", "search_text"),
+            backup_owner_id=world.bob,
+        )
+        recovery_version = await assistants.publish(recovery_assistant.id)
+        governed = runner(assemble_run_config(recovery_version.config).allowed)
+
+    recovered = await governed.run(
+        call=ToolCall(id="recovery", name="search_text", arguments={"query": "approval code"}),
+        context=_ctx(session, principal),
+    )
+    assert recovered.ok is True
+    assert excerpt in recovered.content
+    assert recovered.passages[0].document_id == document_id
+    assert recovered.passages[0].char_start == 2400
+    assert search_queries == ["approval code"]
+    versions = await assistants.list_versions(assistant.id, cursor=None, limit=10)
+    assert len(versions.items) == 1
+    assert versions.items[0].config["toolAllowlist"] == list(names)
+
+
+def test_get_document_description_conditions_search_recovery_on_availability() -> None:
+    description = get_tool("get_document").description
+    assert "search_text when available" in description
+    assert "supply the relevant excerpt" in description
+
+
+async def test_get_document_forbidden_response_discloses_no_length_or_range(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    private_text = "z" * 3000
+    private_document_id = await _doc(
+        session, world.tenant_a, world.bob, "private-long.txt", private_text
+    )
+    await session.commit()
+
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(private_document_id)},
+    )
+
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert "not found" in result.content.lower()
+    assert "total_length" not in result.payload
+    assert "returned_range" not in result.payload
+    assert "3000" not in result.content
+    assert "range" not in result.content.lower()
 
 
 class _RecordingRetrieval:
@@ -454,3 +722,681 @@ async def test_search_text_returns_the_complete_passage_at_any_snippet_budget(
         assert result.passages[0].text == text
         assert text in result.content
         assert "LATE FACT: the launch date is 2031-04-19." in result.content
+
+
+# --- #758: get_document accepts what search shows ---------------------------
+
+
+async def _chunk_id(session: AsyncSession, document_id: uuid.UUID) -> uuid.UUID:
+    from sqlalchemy import select
+
+    from app.db import models
+
+    row = (
+        await session.execute(
+            select(models.Chunk.id).where(models.Chunk.document_id == document_id)
+        )
+    ).scalar_one()
+    return row  # type: ignore[no-any-return]
+
+
+def _outcome(result: object) -> tuple[object, ...]:
+    return (
+        result.content,  # type: ignore[attr-defined]
+        result.ok,  # type: ignore[attr-defined]
+        result.error,  # type: ignore[attr-defined]
+        result.document_ids,  # type: ignore[attr-defined]
+        result.payload,  # type: ignore[attr-defined]
+        result.hit_count,  # type: ignore[attr-defined]
+    )
+
+
+def test_search_text_header_carries_document_id() -> None:
+    from app.services.tools.impls.retrieval import _render_passages
+
+    doc_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    passage = RetrievedPassage(
+        chunk_id=chunk_id,
+        document_id=doc_id,
+        document_name="permit.pdf",
+        ord=0,
+        text="evidence body",
+        char_start=3,
+        char_end=16,
+        score=1.0,
+    )
+    rendered = _render_passages([passage])
+    assert rendered.startswith(
+        f"[1] permit.pdf (document id: {doc_id}, chunk {chunk_id}, chars 3-16):"
+    )
+    assert f"document id: {doc_id}" in rendered
+
+    media = RetrievedPassage(
+        chunk_id=chunk_id,
+        document_id=doc_id,
+        document_name="meeting.mp4",
+        ord=1,
+        text="hello",
+        char_start=0,
+        char_end=5,
+        score=1.0,
+        time_start_ms=61_250,
+        time_end_ms=64_900,
+        speaker_id="speaker-2",
+        speaker_name="John",
+    )
+    rendered_media = _render_passages([media])
+    assert f"document id: {doc_id}" in rendered_media
+    assert "time 01:01.250-01:04.900, John (speaker-2)" in rendered_media
+
+
+async def test_get_document_accepts_chunk_uuid(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": str(chunk_id)},
+    )
+    assert result.ok is True
+    assert result.hit_count == 1
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+async def test_get_document_accepts_exact_name(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "alice-taxes.txt"},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+@pytest.mark.parametrize(
+    ("filename", "fallback"),
+    [
+        pytest.param("Document Control Plan.pdf", "Control Plan.pdf", id="document-prefix"),
+        pytest.param("Chunk sizes.txt", "sizes.txt", id="chunk-prefix"),
+        pytest.param("Budget (2024)", "Budget", id="parenthetical"),
+        pytest.param("document: notes.md", "notes.md", id="document-colon"),
+        pytest.param("Document 1.docx", "1.docx", id="word-default"),
+    ],
+)
+async def test_get_document_literal_name_precedes_stripping(
+    session_and_world: tuple[AsyncSession, _World], filename: str, fallback: str
+) -> None:
+    session, world = session_and_world
+    literal_id = await _doc(session, world.tenant_a, world.alice, filename, "Literal body.")
+    await _doc(session, world.tenant_a, world.alice, fallback, "Fallback body.")
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": filename},
+    )
+    assert result.ok is True
+    assert result.document_ids == (literal_id,)
+    assert "Literal body." in result.content
+    assert "Fallback body." not in result.content
+
+
+async def test_get_document_literal_ambiguity_excludes_fallback(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    literal_ids = {
+        await _doc(session, world.tenant_a, world.alice, "document alice-taxes.txt", body)
+        for body in ("First literal.", "Second literal.")
+    }
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "document alice-taxes.txt"},
+    )
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert result.payload == {"document_ids": [str(did) for did in sorted(literal_ids)]}
+    assert str(world.alice_doc) not in result.content
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        pytest.param("document alice-taxes.txt", id="document-prefix"),
+        pytest.param("chunk: alice-taxes.txt", id="chunk-colon"),
+        pytest.param("alice-taxes.txt (copied header)", id="parenthetical"),
+    ],
+)
+async def test_get_document_stripped_name_fallback(
+    session_and_world: tuple[AsyncSession, _World], handle: str
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session, _principal(world.alice, world.tenant_a), "get_document", {"document_id": handle}
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        pytest.param("document bob-secret.txt", id="foreign-owner"),
+        pytest.param("document carol.txt", id="cross-tenant"),
+    ],
+)
+async def test_get_document_stripped_name_fallback_inv2(
+    session_and_world: tuple[AsyncSession, _World], handle: str
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    unknown = await _call(session, principal, "get_document", {"document_id": "unknown.txt"})
+    result = await _call(session, principal, "get_document", {"document_id": handle})
+    assert unknown.ok is False
+    assert unknown.error == ERROR_BAD_ARGS
+    assert _outcome(result) == _outcome(unknown)
+
+
+@pytest.mark.parametrize("filename", [pytest.param("Über.pdf", id="non-ascii-exact-case")])
+async def test_get_document_exact_non_ascii_name(
+    session_and_world: tuple[AsyncSession, _World], filename: str
+) -> None:
+    session, world = session_and_world
+    document_id = await _doc(session, world.tenant_a, world.alice, filename, "Unicode body.")
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": filename},
+    )
+    assert result.ok is True
+    assert result.document_ids == (document_id,)
+    assert "Unicode body." in result.content
+
+
+async def test_get_document_accepts_name_case_whitespace_quote_variant(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": '  "ALICE-TAXES.TXT"  '},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+
+
+async def test_get_document_accepts_chunk_prefix(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": f"chunk {chunk_id}"},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_accepts_document_prefix(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": f"document {world.alice_doc}"},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_accepts_header_fragment_with_document_id(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    fragment = f"alice-taxes.txt (document id: {world.alice_doc}, chunk {chunk_id}, chars 0-17)"
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": fragment},
+    )
+    assert result.ok is True
+    assert result.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_ambiguous_name_lists_permitted_candidates(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    dup_id = await _doc(session, world.tenant_a, world.alice, "alice-taxes.txt", "Second copy.")
+    bob_dup = await _doc(session, world.tenant_a, world.bob, "alice-taxes.txt", "Bob copy.")
+    await session.commit()
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "alice-taxes.txt"},
+    )
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert str(world.alice_doc) in result.content
+    assert str(dup_id) in result.content
+    assert "alice-taxes.txt" in result.content
+    assert "retry" in result.content.lower()
+    assert str(bob_dup) not in result.content
+    assert "Second copy" not in result.content
+
+
+async def test_get_document_unknown_name_returns_corrective_error(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    result = await _call(
+        session,
+        _principal(world.alice, world.tenant_a),
+        "get_document",
+        {"document_id": "no-such-file.pdf"},
+    )
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert result.content != "Invalid document id."
+    assert "document id:" in result.content
+    assert "search_text" in result.content
+    assert "search_documents" in result.content
+    assert "list_documents" in result.content
+    assert "by filename" in result.content
+
+
+async def test_get_document_malformed_value_returns_same_corrective_error(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    unknown = await _call(session, principal, "get_document", {"document_id": "no-such-file.pdf"})
+    assert unknown.ok is False
+    assert unknown.error == ERROR_BAD_ARGS
+    assert "document id:" in unknown.content
+    assert "search_documents" in unknown.content
+    assert "by filename" in unknown.content
+    for bad in ("not-a-uuid", "1", ""):
+        result = await _call(session, principal, "get_document", {"document_id": bad})
+        assert _outcome(result) == _outcome(unknown), bad
+
+
+async def test_get_document_inv2_chunk_and_name_indistinguishable(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    bob_chunk = await _chunk_id(session, world.bob_doc)
+    carol_chunk = await _chunk_id(session, world.carol_doc)
+    # Even an accessible filename that looks like a handle cannot bypass the
+    # active conversation registry. Foreign identities remain navigation only.
+    await _doc(session, world.tenant_a, world.alice, "S999", "Handle-shaped filename.")
+    await session.commit()
+    handles = EvidenceHandles()
+    forbidden_handles = [handles.document(did) for did in (world.bob_doc, world.carol_doc)]
+    ctx = replace(_ctx(session, principal), handles=handles)
+    handler = get_tool("get_document").handler
+    unknown = await handler({"document_id": str(uuid.uuid4())}, ctx)
+    assert unknown.ok is False
+    assert unknown.error == ERROR_BAD_ARGS
+    for handle in (
+        str(world.bob_doc),
+        str(world.carol_doc),
+        str(bob_chunk),
+        str(carol_chunk),
+        f"chunk {bob_chunk}",
+        "bob-secret.txt",
+        "carol.txt",
+        "document bob-secret.txt",
+        "document carol.txt",
+        "no-such-file.pdf",
+        "not-a-uuid",
+        "",
+        "D999",
+        "S999",
+        "W999",
+        *forbidden_handles,
+    ):
+        result = await handler({"document_id": handle}, ctx)
+        assert _outcome(result) == _outcome(unknown), handle
+        assert "Bob private" not in result.content
+        assert "Carol notes" not in result.content
+
+
+async def test_get_document_corrective_only_names_allowed_tools(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    ctx = ToolContext(
+        principal=principal,
+        retrieval=RetrievalService(session, gateway=_FakeGateway()),  # type: ignore[arg-type]
+        collection_ids=None,
+        allowed_tools=frozenset({"get_document"}),
+    )
+    result = await get_tool("get_document").handler({"document_id": "no-such-file.pdf"}, ctx)
+    assert result.ok is False
+    assert result.error == ERROR_BAD_ARGS
+    assert result.content.startswith("Document not found.")
+    assert "chunk" in result.content
+    assert "exact filename" in result.content
+    assert "search_text" not in result.content
+    assert "search_documents" not in result.content
+    assert "list_documents" not in result.content
+
+
+def test_get_document_descriptions_match_accepted_shapes() -> None:
+    defn = get_tool("get_document")
+    description = defn.description.lower()
+    param = defn.json_schema["properties"]["document_id"]["description"].lower()
+    for text in (description, param):
+        assert "d handle" in text
+        assert "chunk" in text
+        assert "filename" in text or "exact name" in text or "document name" in text
+    assert "search_text" in description
+    # Closed portable schema unchanged in shape (#634): one required string.
+    assert list(defn.json_schema["properties"]) == ["document_id"]
+    assert defn.json_schema["properties"]["document_id"]["type"] == "string"
+    assert defn.json_schema["required"] == ["document_id"]
+    assert defn.json_schema["additionalProperties"] is False
+    assert "anyOf" not in str(defn.json_schema)
+    assert "oneOf" not in str(defn.json_schema)
+    search_text_desc = get_tool("search_text").description
+    assert "document id" in search_text_desc.lower()
+
+
+@pytest.mark.parametrize(
+    "offline", [pytest.param(False, id="service"), pytest.param(True, id="eval")]
+)
+async def test_retrieval_service_resolve_document_text_shapes_and_permissions(
+    session_and_world: tuple[AsyncSession, _World],
+    offline: bool,
+) -> None:
+    from tests.eval.support import DeterministicEmbedder, OfflineRetrieval
+
+    session, world = session_and_world
+    svc = (
+        OfflineRetrieval(session, embedder=DeterministicEmbedder())
+        if offline
+        else RetrievalService(session, gateway=_FakeGateway())  # type: ignore[arg-type]
+    )
+    alice = _principal(world.alice, world.tenant_a)
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    bob_chunk = await _chunk_id(session, world.bob_doc)
+    carol_chunk = await _chunk_id(session, world.carol_doc)
+
+    by_doc = await svc.resolve_document_text(principal=alice, handle=str(world.alice_doc))
+    assert by_doc.document is not None
+    assert by_doc.document.document_id == world.alice_doc
+    assert by_doc.candidates == ()
+
+    by_chunk = await svc.resolve_document_text(principal=alice, handle=f"chunk {chunk_id}")
+    assert by_chunk.document is not None
+    assert by_chunk.document.document_id == world.alice_doc
+
+    by_name = await svc.resolve_document_text(principal=alice, handle="  'ALICE-TAXES.TXT' ")
+    assert by_name.document is not None
+    assert by_name.document.document_id == world.alice_doc
+
+    unknown = await svc.resolve_document_text(principal=alice, handle=str(uuid.uuid4()))
+    assert unknown.document is None
+    assert unknown.candidates == ()
+    for forbidden in (
+        str(world.bob_doc),
+        str(world.carol_doc),
+        str(bob_chunk),
+        str(carol_chunk),
+        "bob-secret.txt",
+        "carol.txt",
+        "no-such-file.pdf",
+    ):
+        resolved = await svc.resolve_document_text(principal=alice, handle=forbidden)
+        assert resolved.document is None, forbidden
+        assert resolved.candidates == (), forbidden
+
+    dup_id = await _doc(session, world.tenant_a, world.alice, "alice-taxes.txt", "Second copy.")
+    await session.commit()
+    ambiguous = await svc.resolve_document_text(principal=alice, handle="alice-taxes.txt")
+    assert ambiguous.document is None
+    assert {c.document_id for c in ambiguous.candidates} == {world.alice_doc, dup_id}
+
+
+async def test_runner_replay_get_document_argument_shapes(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    chunk_id = await _chunk_id(session, world.alice_doc)
+    runner = ToolRunner(
+        allowed=LEGACY,
+        invocations=ToolInvocationRepository(session, world.tenant_a),
+        audit=AuditSink(AuditEventRepository(session, world.tenant_a)),
+        actor=AuditActor.user(world.alice),
+        request_id="issue-758",
+        source_ip="127.0.0.1",
+    )
+
+    async def run(call_id: str, arguments: dict[str, object]):  # type: ignore[no-untyped-def]
+        return await runner.run(
+            call=ToolCall(id=call_id, name="get_document", arguments=arguments),
+            context=_ctx(session, principal),
+        )
+
+    ok_doc = await run("ok-doc", {"document_id": str(world.alice_doc)})
+    assert ok_doc.ok is True
+    assert "Alice tax notes" in ok_doc.content
+
+    ok_name = await run("ok-name", {"document_id": "alice-taxes.txt"})
+    assert ok_name.ok is True
+    assert "Alice tax notes" in ok_name.content
+
+    ok_chunk = await run("ok-chunk", {"document_id": str(chunk_id)})
+    assert ok_chunk.ok is True
+    assert "Alice tax notes" in ok_chunk.content
+
+    ok_chunk_prefix = await run("ok-chunk-prefix", {"document_id": f"chunk {chunk_id}"})
+    assert ok_chunk_prefix.ok is True
+
+    bad_index = await run("bad-index", {"document_id": "1"})
+    assert bad_index.ok is False
+    assert bad_index.error == ERROR_BAD_ARGS
+    assert "document id:" in bad_index.content
+    assert "search_documents" in bad_index.content
+
+    bad_int = await run("bad-int", {"document_id": 1})
+    assert bad_int.ok is False
+    assert bad_int.error == ERROR_BAD_ARGS
+    assert "must satisfy type string" in bad_int.content
+    assert "Correct the arguments and retry" in bad_int.content
+
+    for i, key in enumerate(("document_name", "name", "id", "chunk_id", "documentId")):
+        rejected = await run(f"bad-key-{i}", {key: "alice-taxes.txt"})
+        assert rejected.ok is False, key
+        assert rejected.error == ERROR_BAD_ARGS, key
+        assert "Correct the arguments and retry" in rejected.content, key
+        assert "unknown" in rejected.content or "required" in rejected.content, key
+
+
+async def test_get_document_handle_precedes_resolver_and_literal_name(
+    session_and_world: tuple[AsyncSession, _World], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, world = session_and_world
+    handles = EvidenceHandles()
+    handle = handles.document(world.alice_doc)
+    await _doc(session, world.tenant_a, world.alice, handle, "Wrong literal document.")
+    await session.commit()
+    resolver = Mock(return_value=world.bob_doc)
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=handles,
+        document_id_resolver=resolver,
+    )
+    read = AsyncMock(wraps=ctx.retrieval.get_document)
+    fallback = AsyncMock(wraps=ctx.retrieval.resolve_document_text)
+    monkeypatch.setattr(ctx.retrieval, "get_document", read)
+    monkeypatch.setattr(ctx.retrieval, "resolve_document_text", fallback)
+
+    result = await get_tool("get_document").handler({"document_id": f"  {handle}  "}, ctx)
+
+    assert result.ok and result.document_ids == (world.alice_doc,)
+    assert "Alice tax notes" in result.content
+    resolver.assert_not_called()
+    fallback.assert_not_awaited()
+    read.assert_awaited_once_with(principal=ctx.principal, document_id=world.alice_doc)
+
+
+@pytest.mark.parametrize("handle", ["D999", "S1", "W2", "S999", "W999", "D3", "D4"])
+async def test_get_document_conversation_rejection_does_no_retrieval_io(
+    session_and_world: tuple[AsyncSession, _World], monkeypatch: pytest.MonkeyPatch, handle: str
+) -> None:
+    session, world = session_and_world
+    principal = _principal(world.alice, world.tenant_a)
+    ctx = replace(_ctx(session, principal), handles=EvidenceHandles())
+    unknown = await get_tool("get_document").handler({"document_id": "unknown.txt"}, ctx)
+    # A literal filename and a permissive legacy resolver must both lose to a
+    # handle-shaped input, including known passage/web and malformed entries.
+    await _doc(session, world.tenant_a, world.alice, handle, "Must not be read.")
+    await session.commit()
+    handles = EvidenceHandles(
+        existing={
+            "S1": {"kind": "passage", "document_id": str(world.alice_doc)},
+            "W2": {"kind": "web", "url": "https://example.test"},
+            "D3": {"kind": "passage", "document_id": str(world.alice_doc)},
+            "D4": {"kind": "document", "document_id": "not-a-uuid"},
+        }
+    )
+    resolver = Mock(return_value=world.alice_doc)
+    ctx = replace(ctx, handles=handles, document_id_resolver=resolver)
+    read = AsyncMock(wraps=ctx.retrieval.get_document)
+    fallback = AsyncMock(wraps=ctx.retrieval.resolve_document_text)
+    monkeypatch.setattr(ctx.retrieval, "get_document", read)
+    monkeypatch.setattr(ctx.retrieval, "resolve_document_text", fallback)
+
+    result = await get_tool("get_document").handler({"document_id": f" {handle} "}, ctx)
+
+    resolver.assert_not_called()
+    read.assert_not_awaited()
+    fallback.assert_not_awaited()
+    assert _outcome(result) == _outcome(unknown)
+
+
+@pytest.mark.parametrize("shape", ["document", "chunk", "filename"])
+async def test_get_document_resolver_precedes_uuid_chunk_and_name(
+    session_and_world: tuple[AsyncSession, _World], monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    session, world = session_and_world
+    raw = {
+        "document": str(world.bob_doc),
+        "chunk": str(await _chunk_id(session, world.bob_doc)),
+        "filename": "bob-secret.txt",
+    }[shape]
+    resolver = Mock(return_value=world.alice_doc)
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles(),
+        document_id_resolver=resolver,
+    )
+    read = AsyncMock(wraps=ctx.retrieval.get_document)
+    fallback = AsyncMock(wraps=ctx.retrieval.resolve_document_text)
+    monkeypatch.setattr(ctx.retrieval, "get_document", read)
+    monkeypatch.setattr(ctx.retrieval, "resolve_document_text", fallback)
+
+    result = await get_tool("get_document").handler({"document_id": f" {raw} "}, ctx)
+
+    assert result.ok and result.document_ids == (world.alice_doc,)
+    resolver.assert_called_once_with(raw)
+    read.assert_awaited_once_with(principal=ctx.principal, document_id=world.alice_doc)
+    fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize("raw", ["D0", "S01", "W-1", "d1", "Document Control Plan.pdf"])
+async def test_get_document_non_handle_filename_with_active_handles(
+    session_and_world: tuple[AsyncSession, _World], raw: str
+) -> None:
+    session, world = session_and_world
+    did = await _doc(session, world.tenant_a, world.alice, raw, "Literal filename body.")
+    await session.commit()
+    resolver = Mock(return_value=None)
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles(),
+        document_id_resolver=resolver,
+    )
+    result = await get_tool("get_document").handler({"document_id": raw}, ctx)
+    assert result.ok and result.document_ids == (did,)
+    resolver.assert_called_once_with(raw)
+
+
+@pytest.mark.parametrize("with_handles", [False, True], ids=["uuid", "handle"])
+async def test_get_document_canonical_discovery_recovery_is_usable(
+    session_and_world: tuple[AsyncSession, _World], with_handles: bool
+) -> None:
+    session, world = session_and_world
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles() if with_handles else None,
+        allowed_tools=frozenset({"get_document", "find_documents", "search_passages"}),
+    )
+    missing = await get_tool("get_document").handler({"document_id": "missing.txt"}, ctx)
+    assert not missing.ok and missing.error == ERROR_BAD_ARGS
+    assert "find_documents" in missing.content
+    for unavailable in ("search_text", "search_documents", "list_documents", "search_passages"):
+        assert unavailable not in missing.content
+    assert "a chunk id shown in search results" not in missing.content
+    assert ("D handle" in missing.content) is with_handles
+
+    found = await get_tool("find_documents").handler({"query": "alice-taxes"}, ctx)
+    label = found.content.split("]", 1)[0].removeprefix("[")
+    assert label.startswith("D") if with_handles else label == str(world.alice_doc)
+    read = await get_tool("get_document").handler({"document_id": label}, ctx)
+    assert read.ok and read.document_ids == (world.alice_doc,)
+
+
+async def test_get_document_passage_only_catalog_does_not_offer_s_handles(
+    session_and_world: tuple[AsyncSession, _World],
+) -> None:
+    session, world = session_and_world
+    ctx = replace(
+        _ctx(session, _principal(world.alice, world.tenant_a)),
+        handles=EvidenceHandles(),
+        allowed_tools=frozenset({"get_document", "search_passages"}),
+    )
+    result = await get_tool("get_document").handler({"document_id": "missing.txt"}, ctx)
+    assert not result.ok and result.error == ERROR_BAD_ARGS
+    for unavailable in (
+        "find_documents",
+        "search_passages",
+        "search_text",
+        "search_documents",
+        "list_documents",
+    ):
+        assert unavailable not in result.content
+    assert "a chunk id shown in search results" not in result.content

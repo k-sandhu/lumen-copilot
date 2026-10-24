@@ -90,6 +90,7 @@ def _to_indexed(
             embedding=chunk.embedding,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
+            source_locations=chunk.source_locations,
             time_start_ms=chunk.time_start_ms,
             time_end_ms=chunk.time_end_ms,
             transcript_segment_id=chunk.transcript_segment_id,
@@ -125,8 +126,10 @@ async def sync_document_index_async(
 
     ``store`` is injectable for tests/backfill; when omitted the store is built
     from settings and closed here. ``refresh=True`` makes the result immediately
-    searchable — for tests only; production paths leave the engine's refresh
-    cadence alone.
+    searchable, including generation cleanup. Ingestion uses refreshed cleanup
+    and ``require_search_visibility=True``: all bounded bulks are accepted, then
+    one validated index-wide refresh completes publication before Ready. Generic
+    repair and backfill callers retain their caller-selected refresh cadence.
 
     Raises:
         DependencyError: the engine is unreachable or rejected the write. The

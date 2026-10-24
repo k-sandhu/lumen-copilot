@@ -23,11 +23,11 @@ materializes upload bytes.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.deps import (
     AuditSinkFactory,
@@ -41,6 +41,7 @@ from app.api.deps import (
 )
 from app.core.errors import GoneError, NotFoundError
 from app.domain.entities import DocumentKind, DocumentStatus
+from app.domain.ingestion import ExtractionOutcome
 from app.services.document_service import (
     DocumentPage,
     DocumentService,
@@ -51,6 +52,50 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 # --- Wire models (mirror contracts/openapi.yaml) ---------------------------
+
+
+class SourceLocationResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["page", "slide", "sheet"]
+    name: str
+    number: int = Field(ge=1)
+    char_start: int = Field(ge=0)
+    char_end: int = Field(ge=0)
+
+
+class IngestionFingerprintResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    schema_version: Literal[1]
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mime_type: str
+    parser_version: str
+    parser_code_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parser_dependencies: dict[str, str]
+    chunker_version: str
+    chunker_code_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chunk_size: int = Field(ge=1)
+    chunk_overlap: int = Field(ge=0)
+    embedding_model: str | None = None
+    embedding_dimension: int | None = Field(default=None, ge=1)
+
+
+class ExtractionDiagnosticsResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    character_count: int = Field(ge=0)
+    replacement_characters: int = Field(ge=0)
+    suspicious_controls: int = Field(ge=0)
+    source_part_kind: Literal["page", "slide", "sheet"] | None = None
+    total_parts: int | None = Field(default=None, ge=0)
+    parts_with_text: int | None = Field(default=None, ge=0)
+    blank_parts: list[int]
+    table_probe: Literal["native_tables", "sheet_cells", "unavailable"]
+    table_regions: int | None = Field(default=None, ge=0)
+    table_cells: int | None = Field(default=None, ge=0)
+    missing_table_cells: int | None = Field(default=None, ge=0)
+    warnings: list[str]
 
 
 class DocumentResponse(BaseModel):
@@ -71,6 +116,11 @@ class DocumentResponse(BaseModel):
     chunk_count: int
     created_at: datetime
     updated_at: datetime
+    source_locations: list[SourceLocationResponse] = Field(default_factory=list)
+    ingestion_outcome: ExtractionOutcome | None = None
+    searchable: bool = False
+    ingestion_fingerprint: IngestionFingerprintResponse | None = None
+    extraction_diagnostics: ExtractionDiagnosticsResponse | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -107,10 +157,32 @@ def _to_response(view: DocumentView) -> DocumentResponse:
         kind=d.kind,
         duration_ms=d.duration_ms,
         status=d.status,
+        ingestion_outcome=d.ingestion_outcome,
+        searchable=view.searchable,
         error=d.error,
         chunk_count=view.chunk_count,
         created_at=d.created_at,
         updated_at=d.updated_at,
+        source_locations=[
+            SourceLocationResponse(
+                kind=location.kind,
+                name=location.name,
+                number=location.number,
+                char_start=location.char_start,
+                char_end=location.char_end,
+            )
+            for location in d.source_locations
+        ],
+        ingestion_fingerprint=(
+            IngestionFingerprintResponse.model_validate(d.ingestion_fingerprint)
+            if d.ingestion_fingerprint is not None
+            else None
+        ),
+        extraction_diagnostics=(
+            ExtractionDiagnosticsResponse.model_validate(view.extraction_diagnostics.to_dict())
+            if view.extraction_diagnostics is not None
+            else None
+        ),
     )
 
 
@@ -141,6 +213,7 @@ def _build_service(
         session,
         tenant_id=tenant_id,
         owner_id=principal.user_id,
+        roles=principal.roles,
         object_store=object_store,
         audit=make_audit_sink(tenant_id),
         denials=authenticated_denial_context(
@@ -194,6 +267,7 @@ async def list_documents(
         status=status_filter,
         filename_query=q,
     )
+    await session.commit()
     return _to_list_response(page)
 
 
@@ -228,6 +302,7 @@ async def get_document(
     view = await service.get(document_id)
     if view is None:
         raise NotFoundError("Document not found.")
+    await session.commit()
     return _to_response(view)
 
 

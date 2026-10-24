@@ -3566,8 +3566,63 @@ components:
     # --- Documents ----------------------------------------------------------
     DocumentStatus:
       type: string
-      description: Ingestion lifecycle.
+      description: Ingestion lifecycle. Ready means nonempty chunks synchronized with retrieval refresh visibility; empty native extraction is failed.
       enum: [pending, processing, ready, failed]
+
+    IngestionOutcome:
+      type: string
+      description: Native extraction result; partial means some PDF pages have no native text, which may be intentional. Indexed does not imply complete visual content coverage.
+      enum: [empty, failed, partial, unsupported, indexed]
+
+    SourceLocation:
+      type: object
+      additionalProperties: false
+      required: [kind, name, number, char_start, char_end]
+      description: Exact half-open source-part span into retained extracted text. Backend guarantees 0 <= char_start <= char_end <= source length. An empty span denotes a blank part. The existing document text endpoint may return a truncated prefix of that source.
+      properties:
+        kind: { type: string, enum: [page, slide, sheet] }
+        name: { type: string }
+        number: { type: integer, minimum: 1 }
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 0 }
+
+    IngestionFingerprint:
+      type: object
+      additionalProperties: false
+      required: [schema_version, source_sha256, mime_type, parser_version, parser_code_sha256, parser_dependencies, chunker_version, chunker_code_sha256, chunk_size, chunk_overlap]
+      description: Provenance of the retained extraction/chunk generation, not a readiness assertion. Legacy documents have no fingerprint.
+      properties:
+        schema_version: { type: integer, const: 1 }
+        source_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        mime_type: { type: string }
+        parser_version: { type: string }
+        parser_code_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        parser_dependencies: { type: object, additionalProperties: { type: string } }
+        chunker_version: { type: string }
+        chunker_code_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        chunk_size: { type: integer, minimum: 1 }
+        chunk_overlap: { type: integer, minimum: 0 }
+        embedding_model: { type: [string, "null"] }
+        embedding_dimension: { type: [integer, "null"], minimum: 1 }
+
+    ExtractionDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [character_count, replacement_characters, suspicious_controls, blank_parts, table_probe, warnings]
+      description: Most recent native extraction attempt measurements and qualified text-presence heuristics; not proof of activated chunks or complete visual/table fidelity. Unknown coverage fields may be absent or null. Administrator-only within existing document visibility.
+      properties:
+        character_count: { type: integer, minimum: 0 }
+        replacement_characters: { type: integer, minimum: 0 }
+        suspicious_controls: { type: integer, minimum: 0 }
+        source_part_kind: { type: [string, "null"], enum: [page, slide, sheet, null] }
+        total_parts: { type: [integer, "null"], minimum: 0 }
+        parts_with_text: { type: [integer, "null"], minimum: 0 }
+        blank_parts: { type: array, items: { type: integer, minimum: 1 } }
+        table_probe: { type: string, enum: [native_tables, sheet_cells, unavailable] }
+        table_regions: { type: [integer, "null"], minimum: 0 }
+        table_cells: { type: [integer, "null"], minimum: 0 }
+        missing_table_cells: { type: [integer, "null"], minimum: 0 }
+        warnings: { type: array, items: { type: string } }
 
     DocumentKind:
       type: string
@@ -3593,6 +3648,28 @@ components:
           minimum: 0
           description: Player-relative media duration; null for ordinary documents.
         status: { $ref: "#/components/schemas/DocumentStatus" }
+        ingestion_outcome:
+          oneOf:
+            - { $ref: "#/components/schemas/IngestionOutcome" }
+            - { type: "null" }
+          description: Unknown for legacy or unfinished ingestion attempts.
+        searchable:
+          type: boolean
+          description: True only for ready documents with at least one chunk; false for empty native extraction.
+        ingestion_fingerprint:
+          anyOf:
+            - { $ref: "#/components/schemas/IngestionFingerprint" }
+            - { type: "null" }
+          description: Optional provenance of the retained extraction generation, including actual embedding results when nonempty.
+        source_locations:
+          type: array
+          description: Permissioned source-part map. Empty or absent means unknown until re-ingestion; never inferred for legacy documents.
+          items: { $ref: "#/components/schemas/SourceLocation" }
+        extraction_diagnostics:
+          oneOf:
+            - { $ref: "#/components/schemas/ExtractionDiagnostics" }
+            - { type: "null" }
+          description: Null for members or unknown legacy metadata; only visible administrators receive diagnostics. Administrator role does not widen document permissions.
         error:
           type: [string, "null"]
           description: Failure reason when status is failed.
@@ -3621,7 +3698,7 @@ components:
       properties:
         text:
           type: string
-          description: The extracted plain text (parser output, chunk-reassembled).
+          description: The retained extracted plain text; legacy documents fall back to chunk reconstruction.
         chunk_count:
           type: integer
           minimum: 0
@@ -3876,6 +3953,10 @@ components:
                 - { required: [speaker_name] }
       properties:
         id: { type: string, format: uuid }
+        handle:
+          type: [string, "null"]
+          pattern: '^S[1-9][0-9]*$'
+          description: Conversation-scoped inline evidence handle; absent on legacy citations.
         document_id: { type: string, format: uuid }
         document_name: { type: string }
         chunk_id: { type: string, format: uuid }
@@ -3942,6 +4023,18 @@ components:
         duration_ms: { type: integer, minimum: 0 }
         created_at: { type: string, format: date-time }
 
+    WebCitation:
+      type: object
+      additionalProperties: false
+      description: Public web evidence actually shown to the model and cited inline. Never a corpus document.
+      required: [id, handle, url, title, snippet]
+      properties:
+        id: { type: string, format: uuid }
+        handle: { type: string, pattern: '^W[1-9][0-9]*$' }
+        url: { type: string, format: uri, pattern: '^https?://' }
+        title: { type: string }
+        snippet: { type: string, description: Exact visible evidence, not a generated summary. }
+
     Message:
       type: object
       additionalProperties: false
@@ -3958,6 +4051,10 @@ components:
           type: array
           description: Passage-level citations (assistant messages only).
           items: { $ref: "#/components/schemas/Citation" }
+        web_citations:
+          type: array
+          description: Only inline cited public web evidence; empty or absent for legacy messages and refusals.
+          items: { $ref: "#/components/schemas/WebCitation" }
         tool_invocations:
           type: array
           description: >

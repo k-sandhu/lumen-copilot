@@ -128,6 +128,7 @@ from app.domain.entities import (
     UserPreferences,
 )
 from app.domain.entities import ChatSession as ChatSessionEntity
+from app.domain.ingestion import ExtractionOutcome, SourceLocation
 from app.domain.recall import MAX_RECALL_TURN_CHARS, clip_recall_text
 from app.domain.scheduling import Cadence, StructuredCadence
 
@@ -238,6 +239,9 @@ def to_document(row: models.Document) -> Document:
     one permitted-document point read and must return the same domain type this
     repository does — a second mapper would be a second source of truth.
     """
+    locations = (row.ingestion_metadata or {}).get("source_locations", [])
+    if not isinstance(locations, list):
+        raise ValueError("invalid persisted source locations")
     return Document(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -256,6 +260,15 @@ def to_document(row: models.Document) -> Document:
         acl_synced_at=row.acl_synced_at,
         acl_scope_ids=tuple(row.acl_scope_ids) if row.acl_scope_ids is not None else None,
         external_id=row.external_id,
+        source_text=row.source_text,
+        source_locations=tuple(SourceLocation.from_dict(value) for value in locations),
+        ingestion_metadata=row.ingestion_metadata,
+        title=row.title,
+        source_path=row.source_path,
+        source_modified_at=row.source_modified_at,
+        discovery_metadata=(
+            dict(row.discovery_metadata) if row.discovery_metadata is not None else None
+        ),
         ingestion_attempts=row.ingestion_attempts,
         ingestion_failure=dict(row.ingestion_failure)
         if row.ingestion_failure is not None
@@ -320,6 +333,9 @@ def _to_chunk(row: models.Chunk) -> Chunk:
         char_start=row.char_start,
         char_end=row.char_end,
         created_at=row.created_at,
+        source_locations=tuple(
+            SourceLocation.from_dict(value) for value in row.source_locations or []
+        ),
         embedding_fingerprint=row.embedding_fingerprint,
         time_start_ms=row.time_start_ms,
         time_end_ms=row.time_end_ms,
@@ -1792,6 +1808,10 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None = None,
         acl_synced_at: datetime | None = None,
         acl_scope_ids: Sequence[str] | None = None,
+        title: str | None = None,
+        source_path: str | None = None,
+        source_modified_at: datetime | None = None,
+        discovery_metadata: dict[str, object] | None = None,
         kind: DocumentKind = DocumentKind.DOCUMENT,
     ) -> Document:
         """Create a document row — the ACL-mode write seam (ADR-0019 §2).
@@ -1819,6 +1839,10 @@ class DocumentRepository(_TenantScopedRepository):
             acl_synced_at=acl_synced_at,
             acl_scope_ids=list(acl_scope_ids) if acl_scope_ids is not None else None,
             external_id=external_id,
+            title=title,
+            source_path=source_path,
+            source_modified_at=source_modified_at,
+            discovery_metadata=discovery_metadata,
             kind=kind.value,
         )
         self._session.add(row)
@@ -1891,6 +1915,10 @@ class DocumentRepository(_TenantScopedRepository):
         acl_principals: Sequence[str] | None,
         acl_synced_at: datetime | None,
         acl_scope_ids: Sequence[str] | None,
+        title: str | None = None,
+        source_path: str | None = None,
+        source_modified_at: datetime | None = None,
+        discovery_metadata: dict[str, object] | None = None,
     ) -> Document | None:
         """Refresh an existing connector document in place (incremental upsert).
 
@@ -1916,6 +1944,10 @@ class DocumentRepository(_TenantScopedRepository):
         row.acl_principals = list(acl_principals) if acl_principals is not None else None
         row.acl_synced_at = acl_synced_at
         row.acl_scope_ids = list(acl_scope_ids) if acl_scope_ids is not None else None
+        row.title = title
+        row.source_path = source_path
+        row.source_modified_at = source_modified_at
+        row.discovery_metadata = discovery_metadata
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
@@ -2310,6 +2342,73 @@ class DocumentRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return to_document(row)
 
+    async def set_extraction(
+        self,
+        document_id: UUID,
+        *,
+        text: str,
+        locations: Sequence[SourceLocation],
+        fingerprint: dict[str, object] | None = None,
+    ) -> Document | None:
+        """Set exact retained source/map, preserving this attempt's other metadata."""
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+            )
+            .values(
+                source_text=text,
+                ingestion_metadata=self._merged_ingestion_metadata(
+                    {
+                        "source_locations": [location.to_dict() for location in locations],
+                        "ingestion_fingerprint": fingerprint,
+                    }
+                ),
+            )
+            .returning(models.Document)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        await self._session.flush()
+        return to_document(row) if row is not None else None
+
+    def _merged_ingestion_metadata(
+        self, values: dict[str, object]
+    ) -> ColumnElement[dict[str, object]]:
+        """Merge against the database's current JSON, never an ORM snapshot."""
+        if self._session.get_bind().dialect.name == "postgresql":
+            expression: ColumnElement[dict[str, object]] = func.coalesce(
+                models.Document.ingestion_metadata, cast({}, JSONB)
+            ).op("||")(cast(values, JSONB))
+            return expression
+        # SQLite's json_patch deletes null-valued keys. json_set preserves the
+        # explicit null that marks unknown diagnostics after a new attempt.
+        expression = func.coalesce(models.Document.ingestion_metadata, "{}")
+        for key, value in values.items():
+            expression = func.json_set(
+                expression, f"$.{json.dumps(key)}", func.json(json.dumps(value))
+            )
+        return expression
+
+    async def update_ingestion_metadata(
+        self, document_id: UUID, values: dict[str, object]
+    ) -> Document | None:
+        """Merge one attempt's metadata without losing its retained source map."""
+        stmt = (
+            update(models.Document)
+            .where(
+                models.Document.tenant_id == self._tenant_id,
+                models.Document.id == document_id,
+            )
+            .values(ingestion_metadata=self._merged_ingestion_metadata(values))
+            .returning(models.Document)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        await self._session.flush()
+        return to_document(row) if row is not None else None
+
     async def claim_ingestion(
         self,
         document_id: UUID,
@@ -2353,7 +2452,11 @@ class DocumentRepository(_TenantScopedRepository):
             .returning(models.Document)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            row.ingestion_metadata = {**(row.ingestion_metadata or {}), "ingestion_outcome": None}
         await self._session.flush()
+        if row is not None:
+            await self._session.refresh(row)
         return to_document(row) if row is not None else None
 
     async def touch_processing(self, document_id: UUID, ingestion_run_id: UUID) -> bool:
@@ -2460,6 +2563,7 @@ class DocumentRepository(_TenantScopedRepository):
         row.status = DocumentStatus.PROCESSING.value
         row.error = None
         row.ingestion_failure = None
+        row.ingestion_metadata = {**(row.ingestion_metadata or {}), "ingestion_outcome": None}
         row.ingestion_attempts += 1
         await self._session.flush()
         await self._session.refresh(row)
@@ -2473,6 +2577,7 @@ class DocumentRepository(_TenantScopedRepository):
         code: str,
         message: str,
         correlation_id: str | None = None,
+        outcome: ExtractionOutcome | None = None,
     ) -> Document | None:
         """Persist a content-safe terminal failure for the owning attempt.
 
@@ -2507,6 +2612,11 @@ class DocumentRepository(_TenantScopedRepository):
         row.error = message
         row.ingestion_failure = failure
         row.ingestion_run_id = None
+        if outcome is not None:
+            row.ingestion_metadata = {
+                **(row.ingestion_metadata or {}),
+                "ingestion_outcome": outcome.value,
+            }
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
@@ -2516,6 +2626,7 @@ class DocumentRepository(_TenantScopedRepository):
         document_id: UUID,
         *,
         expected_attempt: int,
+        outcome: ExtractionOutcome | None = None,
     ) -> Document | None:
         """Publish ``ready`` only for the still-owning processing attempt."""
 
@@ -2536,6 +2647,11 @@ class DocumentRepository(_TenantScopedRepository):
         row.error = None
         row.ingestion_failure = None
         row.ingestion_run_id = None
+        if outcome is not None:
+            row.ingestion_metadata = {
+                **(row.ingestion_metadata or {}),
+                "ingestion_outcome": outcome.value,
+            }
         await self._session.flush()
         await self._session.refresh(row)
         return to_document(row)
@@ -2914,6 +3030,7 @@ class ChunkInput:
     char_start: int
     char_end: int
     embedding: Sequence[float] | None = None
+    source_locations: tuple[SourceLocation, ...] = ()
     time_start_ms: int | None = None
     time_end_ms: int | None = None
     transcript_segment_id: UUID | None = None
@@ -2977,6 +3094,7 @@ class ChunkRepository(_TenantScopedRepository):
         char_start: int,
         char_end: int,
         embedding: Sequence[float] | None = None,
+        source_locations: Sequence[SourceLocation] = (),
         time_start_ms: int | None = None,
         time_end_ms: int | None = None,
         transcript_segment_id: UUID | None = None,
@@ -2991,6 +3109,7 @@ class ChunkRepository(_TenantScopedRepository):
             char_start=char_start,
             char_end=char_end,
             embedding=list(embedding) if embedding is not None else None,
+            source_locations=[location.to_dict() for location in source_locations],
             time_start_ms=time_start_ms,
             time_end_ms=time_end_ms,
             transcript_segment_id=transcript_segment_id,
@@ -3112,6 +3231,9 @@ class ChunkRepository(_TenantScopedRepository):
                 for row, chunk in zip(existing, chunks, strict=True):
                     row.embedding = list(chunk.embedding) if chunk.embedding is not None else None
                     row.embedding_fingerprint = chunk.embedding_fingerprint
+                    row.source_locations = [
+                        location.to_dict() for location in chunk.source_locations
+                    ]
                     row.time_start_ms = chunk.time_start_ms
                     row.time_end_ms = chunk.time_end_ms
                     row.transcript_segment_id = chunk.transcript_segment_id
@@ -3139,6 +3261,7 @@ class ChunkRepository(_TenantScopedRepository):
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 embedding=list(chunk.embedding) if chunk.embedding is not None else None,
+                source_locations=[location.to_dict() for location in chunk.source_locations],
                 time_start_ms=chunk.time_start_ms,
                 time_end_ms=chunk.time_end_ms,
                 transcript_segment_id=chunk.transcript_segment_id,
@@ -4299,6 +4422,7 @@ class CitationView:
     #: case ``snippet`` and ``document_name`` have been emptied. The row itself is
     #: kept so a claim's provenance stays visible rather than silently vanishing.
     redacted: bool = False
+    handle: str | None = None
 
     def redact(self) -> CitationView:
         """This citation with everything disclosing removed, shell intact."""
@@ -4331,6 +4455,7 @@ class CitationRepository(_TenantScopedRepository):
         transcript_segment_id: UUID | None = None,
         speaker_id: str | None = None,
         speaker_name: str | None = None,
+        handle: str | None = None,
     ) -> Citation:
         if (time_start_ms is None) != (time_end_ms is None):
             raise ValueError("citation timestamp fields must be supplied as a pair")
@@ -4416,6 +4541,7 @@ class CitationRepository(_TenantScopedRepository):
             transcript_segment_id=transcript_segment_id,
             speaker_id=speaker_id,
             speaker_name=speaker_name,
+            handle=handle,
         )
         self._session.add(row)
         await self._session.flush()
@@ -4458,6 +4584,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Citation.handle,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -4486,6 +4613,7 @@ class CitationRepository(_TenantScopedRepository):
                 snippet=row[11],
                 document_id=row[12],
                 document_name=row[13],
+                handle=row[14],
             )
             for row in rows
         ]
@@ -4540,6 +4668,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Citation.handle,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -4568,6 +4697,7 @@ class CitationRepository(_TenantScopedRepository):
                 snippet=row[11],
                 document_id=row[12],
                 document_name=row[13],
+                handle=row[14],
             )
             for row in rows
         ]
@@ -4599,6 +4729,7 @@ class CitationRepository(_TenantScopedRepository):
                 models.Chunk.text,
                 models.Document.id,
                 models.Document.filename,
+                models.Citation.handle,
             )
             .join(models.Chunk, models.Chunk.id == models.Citation.chunk_id)
             .join(models.Document, models.Document.id == models.Chunk.document_id)
@@ -4629,6 +4760,7 @@ class CitationRepository(_TenantScopedRepository):
                     snippet=row[11],
                     document_id=row[12],
                     document_name=row[13],
+                    handle=row[14],
                 )
             )
         return grouped
@@ -5884,6 +6016,29 @@ class AuditEventRepository(_TenantScopedRepository):
     gated in ``services/`` (INV-5), not here.
     """
 
+    async def restore_context_rejected(self, events: Sequence[AuditEvent]) -> None:
+        """Append trusted records from a rolled-back context-rejected transaction."""
+        if any(event.tenant_id != self._tenant_id for event in events):
+            raise ValueError("Audit record tenant does not match the repository.")
+        for event in events:
+            self._session.add(
+                models.AuditEvent(
+                    id=event.id,
+                    tenant_id=self._tenant_id,
+                    actor_id=event.actor_id,
+                    action=event.action,
+                    resource_type=event.resource_type,
+                    resource_id=event.resource_id,
+                    outcome=event.outcome.value,
+                    request_id=event.request_id,
+                    source_origin=event.source_origin,
+                    source_ip=event.source_ip,
+                    event_metadata=event.metadata,
+                    ts=event.ts,
+                )
+            )
+        await self._session.flush()
+
     async def record(
         self,
         *,
@@ -6082,6 +6237,50 @@ class ToolInvocationRepository(_TenantScopedRepository):
     so the invocation row lands atomically with the answer turn it belongs to.
     """
 
+    async def restore_context_rejected(self, records: Sequence[ToolInvocation]) -> None:
+        """Retain completed traces without a reference to the absent assistant row."""
+        if any(record.tenant_id != self._tenant_id for record in records):
+            raise ValueError("Invocation tenant does not match the repository.")
+        session_ids = {record.session_id for record in records if record.session_id is not None}
+        surviving_sessions: set[UUID] = set()
+        if session_ids:
+            # The owner may delete a chat after the failed answer rolls back.
+            # Resolve parents in this tenant and hold key-share locks through
+            # the recovery commit: DELETE must not slip between this read and
+            # the invocation INSERT. A later DELETE uses ON DELETE SET NULL.
+            surviving_sessions.update(
+                await self._session.scalars(
+                    select(models.ChatSession.id)
+                    .where(
+                        models.ChatSession.tenant_id == self._tenant_id,
+                        models.ChatSession.id.in_(session_ids),
+                    )
+                    .order_by(models.ChatSession.id)
+                    .with_for_update(read=True, key_share=True)
+                )
+            )
+        for record in records:
+            self._session.add(
+                models.ToolInvocation(
+                    id=record.id,
+                    tenant_id=self._tenant_id,
+                    session_id=(
+                        record.session_id if record.session_id in surviving_sessions else None
+                    ),
+                    message_id=None,
+                    run_id=record.run_id,
+                    tool_name=record.tool_name,
+                    args_hash=record.args_hash,
+                    ok=record.ok,
+                    error=record.error,
+                    result_summary=record.result_summary,
+                    ordinal=record.ordinal,
+                    duration_ms=record.duration_ms,
+                    created_at=record.created_at,
+                )
+            )
+        await self._session.flush()
+
     async def record(
         self,
         *,
@@ -6192,8 +6391,10 @@ def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
 class LlmUsageRepository(_TenantScopedRepository):
     """Per-answer LLM token/cache accounting within one tenant (#409, ADR-0016 §2.6).
 
-    One ``record`` per produced answer (chat and headless runs alike — both ride
-    the shared runtime), summing the answer loop's turns. Tenant-scoped (INV-1):
+    One message-bearing ``record`` per produced answer (chat and headless runs
+    alike — both ride the shared runtime), summing the answer loop's turns,
+    plus one message-less row per additional spend scope (a #413 failover or
+    salvage scope, the post-terminal suggestions nicety). Tenant-scoped (INV-1):
     tenant A's spend is invisible to a tenant-B repository. A trace/analytics
     table like ``tool_invocations`` (ordinary access, no UPDATE/DELETE revoke);
     writes are flushed not committed — the runtime owns the transaction so the
@@ -6323,9 +6524,9 @@ class LlmUsageRepository(_TenantScopedRepository):
         """
         stmt = select(
             # COUNT(message_id) skips NULLs: answers = PRODUCED answers (the
-            # contract's wording) — message-less route scopes (#413 failovers,
-            # error-path salvage) contribute to the token sums but are not
-            # extra "answers".
+            # contract's wording) — message-less scopes (#413 failovers,
+            # error-path salvage, the suggestions nicety) contribute to the
+            # token sums but are not extra "answers".
             func.count(models.LlmUsage.message_id),
             func.coalesce(func.sum(models.LlmUsage.prompt_tokens), 0),
             func.coalesce(func.sum(models.LlmUsage.completion_tokens), 0),
@@ -6347,9 +6548,13 @@ class LlmUsageRepository(_TenantScopedRepository):
         )
 
     async def last_for_session(self, session_id: UUID) -> LlmUsageRecord | None:
-        """The most recent usage record for one session, or ``None`` (spec 0007).
+        """The most recent MESSAGE-BEARING usage record, or ``None`` (spec 0007).
 
-        The "how full was the window last turn" input of the context meter.
+        The "how full was the window last turn" input of the context meter:
+        only the winning answer scope qualifies — message-less scopes (a #413
+        failover/salvage row, the suggestions row) never win this read, so it
+        is NOT the answer's full spend (that is the SUM over its ``answer_id``
+        scopes; ADR-0016 §2.6 #759 amendment).
         """
         stmt = (
             select(models.LlmUsage)

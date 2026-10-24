@@ -2,7 +2,7 @@
 
 We cannot spend real provider tokens here, so this does the next best *real*
 thing: it assembles the EXACT prompts a scripted 3-tool grounded answer sends —
-the real ``GROUNDED_SYSTEM_PROMPT``, the real default tool schemas, and
+the real ``GROUNDED_SYSTEM_PROMPT``, an explicit compatibility tool catalog, and
 realistically sized rendered search results — and COUNTS the cumulative input
 tokens with the SAME tokeniser the context engine uses
 (``litellm_token_counter`` via ``estimate_message_tokens``). It reports the
@@ -26,22 +26,25 @@ from app.llm.context import (
 )
 from app.services.prompts.grounded_answer import GROUNDED_SYSTEM_PROMPT
 from app.services.tools.impls.retrieval import rendered_snippet
-from app.services.tools.registry import default_allowlist, tool_specs
+from app.services.tools.registry import tool_specs
 
 # A FRONTIER model, pinned deliberately to exercise its tokeniser for the
 # token-budget arithmetic below. NOT the registry default — since #490 the default
 # is a FAST-tier model (claude-haiku-4.5); this constant is independent of it.
 _MODEL = "openrouter/anthropic/claude-opus-4.8"
 
-# A 3-tool answer's tools block: the real default read-only allow-list schemas
-# (search_text / search_documents / list_documents / get_document …) — the same
-# ~950-token stable prefix element the runtime advertises.
-_TOOLS = tool_specs(default_allowlist())
+# An immutable compatibility catalog for this historical #491 measurement.
+# Keep the four legacy retrieval tools and ask_user schemas stable as the runtime's
+# canonical default catalog evolves; web search was never part of this benchmark.
+_LEGACY_BENCHMARK_TOOLS = frozenset(
+    {"search_text", "search_documents", "list_documents", "get_document", "ask_user"}
+)
+_TOOLS = tool_specs(_LEGACY_BENCHMARK_TOOLS)
 
 
 def _rendered_search_result(doc: str, *, k: int = 6) -> str:
-    """A realistic ``search_text`` reply: k passages, each an id-labelled snippet
-    trimmed to the 600-char budget — mirrors ``retrieval._render_passages``."""
+    """A realistic ``search_text`` reply: k complete rendered passages, each
+    labeled with its document, chunk ID, and character range."""
     body = (
         "In fiscal year 2024 the company reported material changes across every "
         "operating segment, and management discussed the drivers at length. "
@@ -69,9 +72,9 @@ def _result(call_id: str, content: str) -> ChatMessage:
 
 
 # The three tool exchanges of the scripted answer (search → search → search →
-# synthesize). Every retrieved passage becomes a citation at retrieval time (the
-# runtime records them all, INV-3), so all three calls are "represented in
-# citations" — exactly the proactive-compaction precondition.
+# synthesize). This benchmark explicitly marks each exchange as represented in
+# cited evidence for the proactive-compaction precondition; the runtime selects
+# final inline citations separately.
 _EXCHANGES = [
     ("call_1", "annual revenue by segment", _rendered_search_result("annual-report")),
     ("call_2", "operating margin drivers", _rendered_search_result("mdna")),

@@ -22,8 +22,10 @@ Headlines:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -56,6 +58,7 @@ from app.services.assistant_runtime import AssistantRunConfig
 from app.services.chat_runtime import ChatRuntime
 from app.services.tools.types import ToolContext, ToolDefinition
 from tests._db_helpers import copy_sqlite_schema
+from tests._retrieval_helpers import UUIDDocumentResolver
 
 import app.db.models  # noqa: F401  isort: skip
 
@@ -134,8 +137,24 @@ class _ScriptedGateway:
         else:
             turn = self._turns[min(self.auto_calls, len(self._turns) - 1)]
             self.auto_calls += 1
+        # Tests can mark a grounded answer with the S1 placeholder. Resolve it
+        # from the actual preceding tool result so this fake never invents a
+        # citation handle or cites evidence when retrieval returned none.
+        messages_seq = cast(Sequence[ChatMessage], messages)
+        passage_handles = [
+            handle
+            for message in messages_seq
+            if message.role is LlmRole.TOOL
+            for handle in re.findall(r"\[(S\d+)\]", message.content)
+        ]
+        cite_handle = passage_handles[0] if passage_handles else ""
         for ev in turn:
-            yield ev
+            if ev.text is not None and "[S1]" in ev.text:
+                marker = f"[{cite_handle}]" if cite_handle else ""
+                rewritten = ev.text.replace("[S1]", marker)
+                yield replace(ev, text=rewritten)
+            else:
+                yield ev
 
 
 class _BoomGateway:
@@ -154,12 +173,13 @@ class _BoomGateway:
         yield  # pragma: no cover — unreachable, makes this an async generator
 
 
-class _FakeRetrieval:
+class _FakeRetrieval(UUIDDocumentResolver):
     """A retrieval stand-in returning fixed permitted passages for search_text."""
 
     def __init__(self, passages: list[RetrievedPassage]) -> None:
         self._passages = passages
         self.queries: list[str] = []
+        self._search_principal: object | None = None
 
     async def search_text(
         self,
@@ -171,7 +191,28 @@ class _FakeRetrieval:
         document_ids: object = None,
     ) -> list[RetrievedPassage]:
         self.queries.append(query)
+        if self._search_principal is None:
+            self._search_principal = principal
         return list(self._passages)
+
+    async def read_passages(
+        self,
+        *,
+        principal: object,
+        chunk_ids: list[uuid.UUID],
+        collection_ids: object = None,
+        document_ids: object = None,
+    ) -> list[RetrievedPassage]:
+        """Treat configured passages as the explicit currently-permitted set."""
+        del collection_ids, document_ids
+        searched = self._search_principal
+        if searched is None or any(
+            getattr(searched, field, None) != getattr(principal, field, None)
+            for field in ("user_id", "tenant_id")
+        ):
+            return []
+        wanted = set(chunk_ids)
+        return [passage for passage in self._passages if passage.chunk_id in wanted]
 
     async def search_documents(
         self, *, principal: object, name_or_query: str, k: int = 10
@@ -399,7 +440,7 @@ async def test_grounded_answer_full_lifecycle(ctx: _Ctx) -> None:
             # Turn 2: the model answers using the retrieved passage.
             [
                 StreamEvent(text="The 2024 standard deduction "),
-                StreamEvent(text="is $14,600."),
+                StreamEvent(text="is $14,600 [S1]."),
                 StreamEvent(finish_reason="stop"),
             ],
         ]
@@ -453,7 +494,7 @@ async def test_citation_persisted_and_reloadable(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="Grounded answer."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="Grounded answer. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()
@@ -473,7 +514,7 @@ async def test_citation_persisted_and_reloadable(ctx: _Ctx) -> None:
         messages = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
         assistant = [m for m in messages if m.role.value == "assistant"]
         assert len(assistant) == 1
-        assert assistant[0].content == "Grounded answer."
+        assert assistant[0].content == "Grounded answer. [S1]"
         assert assistant[0].model == "anthropic/claude-opus-4.8"
         citations = await CitationRepository(session, ctx.tenant_id).list_for_message_hydrated(
             assistant[0].id
@@ -793,7 +834,7 @@ async def test_retrieval_and_answer_audit_events_emitted(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="A."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="A. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()
@@ -1094,7 +1135,9 @@ async def test_no_custom_instructions_leaves_bare_grounded_prompt(ctx: _Ctx) -> 
     assert gateway.system_prompt == GROUNDED_SYSTEM_PROMPT
 
 
-async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
+async def test_context_assembler_trims_history_end_to_end(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#410: the runtime assembles under a budget — a tiny window trims old history.
 
     Proves the assembler is actually wired into the runtime (not just unit-tested):
@@ -1104,22 +1147,37 @@ async def test_context_assembler_trims_history_end_to_end(ctx: _Ctx) -> None:
     """
     from app.domain.llm import ChatMessage
     from app.domain.llm import Role as LlmRole
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     gateway = _CapturingGateway()
     backplane = InMemoryBackplane()
-    # A moderate window (fallback 6000 − 1024 margin ⇒ ~4976 budget) that easily
-    # holds the fixed segments (grounded prompt + tool schemas + question) but is
-    # dwarfed by the two ENORMOUS ancient turns below — so the assembler trims
-    # them and keeps the tiny recent turn, rather than refusing. The unknown model
-    # id (not in the litellm map) exercises the fallback resolver (AC-3) too.
+
+    # The current fixed catalog plus slack fits recent turns, while the
+    # enormous ancient turns still require history trimming.
+    def bytecounter(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="the new question"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=bytecounter,
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=6000, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0
+        ),
     )
+    monkeypatch.setattr(runtime, "_token_counter_for", lambda _model: bytecounter)
     long_history = [
         ChatMessage(role=LlmRole.USER, content="ancient question " * 3000),
         ChatMessage(role=LlmRole.ASSISTANT, content="ancient answer " * 3000),
@@ -1197,7 +1255,9 @@ async def test_oversized_tool_results_never_exceed_budget(
     import sys
     import types as _types
 
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     # Force the assembler's counting/resolver onto their deterministic fallbacks
     # (conservative UTF-8 bytes; the configured fallback window) by making litellm
@@ -1223,16 +1283,28 @@ async def test_oversized_tool_results_never_exceed_budget(
     gateway = _RecordingSearchGateway()
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
-    # fallback 9072 − 0 headroom − 1024 margin ⇒ budget 8048 bytes. The initial
-    # [system, question] + tool schemas (incl. ask_user since spec 0006/#429)
-    # fits, but the accumulating tool results push a later turn over budget —
-    # where the guard must refuse, not send.
+    # Derive the budget from the current projected fixed cost (system prompt,
+    # question and every default tool schema) instead of baking in catalog bytes:
+    # tool descriptions legitimately grow (#623, #610). The 2000-byte allowance
+    # fits the initial [system, question] + schemas, but one 8000-byte passage
+    # pushes a later turn over budget — where the guard must refuse, not send.
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="summarize the big doc"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=lambda text: len(text.encode("utf-8")),
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([huge]),
         backplane=backplane,
-        context_config=ContextConfig(fallback_max_input_tokens=9072, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0
+        ),
     )
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
@@ -1246,7 +1318,6 @@ async def test_oversized_tool_results_never_exceed_budget(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
-    budget = 9072 - 1024
     # Every payload the gateway received — measured by the SAME full-wire estimate
     # the guard uses — was within budget. Without the guard, the accumulating tool
     # results would push a later estimate over budget and this would FAIL.
@@ -1271,7 +1342,7 @@ async def test_forced_synthesis_payload_is_budget_guarded(
     import sys
     import types as _types
 
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
 
     def _raise(**_kw: object) -> int:
         raise RuntimeError("no tokenizer in test")
@@ -1289,20 +1360,40 @@ async def test_forced_synthesis_payload_is_budget_guarded(
         char_end=8000,
         score=0.9,
     )
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
+
     gateway = _RecordingSearchGateway()
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
+
     # max_tool_turns=1: one tool turn, then the loop is exhausted and the runtime
-    # makes the forced-synthesis call. Budget 4000 (5024 − 1024); the one huge
+    # makes the forced-synthesis call. The measured fixed cost plus slack fits
+    # the first request; the one huge
     # result makes the synthesis payload oversized ⇒ must be refused, not sent.
+    def bytecounter(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="summarize the big doc"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=bytecounter,
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=_FakeRetrieval([huge]),
         backplane=backplane,
         default_max_tool_turns=1,
-        context_config=ContextConfig(fallback_max_input_tokens=5024, output_headroom_tokens=0),
+        context_config=ContextConfig(
+            fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0
+        ),
     )
+    monkeypatch.setattr(runtime, "_token_counter_for", lambda _model: bytecounter)
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
     await runtime.run(
@@ -1313,10 +1404,13 @@ async def test_forced_synthesis_payload_is_budget_guarded(
         history=[],
         collection_ids=None,
     )
-    await asyncio.wait_for(consumer, timeout=2.0)
-    budget = 5024 - 1024
+    events = await asyncio.wait_for(consumer, timeout=2.0)
     # No payload (ordinary or forced-synthesis) exceeded budget.
     assert all(e <= budget for e in gateway.estimates), gateway.estimates
+
+    assert len(gateway.estimates) == 1
+    assert events[-1]["type"] == "error"
+    assert events[-1]["problem"]["code"] == "context_too_large"
 
 
 class _BigDocRetrieval(_FakeRetrieval):
@@ -1396,7 +1490,9 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     import sys
     import types as _types
 
-    from app.llm.context import ContextConfig
+    from app.llm.context import ContextConfig, estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     def _raise(**_kw: object) -> int:
         raise RuntimeError("no tokenizer in test")
@@ -1407,12 +1503,20 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     gateway = _RecordingGetDocGateway(ctx.document_id)
     backplane = InMemoryBackplane()
     stream_id = uuid.uuid4().hex
-    # Measured wire costs (byte counter): base (grounded prompt + question + the
-    # 4 tool schemas) ≈ 3709; each get_document turn adds ≈ 2708 full / ≈ 573
-    # digested (digest_chars=150). Budget 9000 (fallback 10024 − 1024 margin)
-    # sits BETWEEN the 4-turn full requirement (~14541) and the digested floor
-    # with the newest result whole (~8136): the loop MUST compact to proceed,
-    # and compaction is sufficient — the pre-#415 code refused here.
+    # Count the current projected fixed schemas instead of baking in native
+    # schema bytes. A full document turn (now including get_document's #610
+    # range/truncation disclosure) is several times its digest. The 5500-byte
+    # live allowance fits three digests plus the newest full result, but cannot
+    # fit four full results: compaction is necessary (asserted below) and sufficient.
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="read the big doc"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=lambda text: len(text.encode("utf-8")),
+    )
+    budget = fixed_cost + 5500
     runtime = _runtime(
         ctx,
         gateway=gateway,
@@ -1420,7 +1524,7 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
         backplane=backplane,
         default_max_tool_turns=4,
         context_config=ContextConfig(
-            fallback_max_input_tokens=10024,
+            fallback_max_input_tokens=budget + 1024,
             output_headroom_tokens=0,
             compaction_digest_chars=150,
             compaction_chunk_size=2,
@@ -1438,11 +1542,11 @@ async def test_loop_compacts_old_results_and_answers_instead_of_refusing(
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
 
-    budget = 10024 - 1024
     # Every payload stayed within budget, compaction actually happened, and the
     # run completed with a normal answer — no context_too_large refusal.
     assert all(e <= budget for e in gateway.estimates), gateway.estimates
     assert gateway.saw_compaction  # old results were digested in-flight
+    assert gateway.calls_made == 4
     terminal = envs[-1]
     assert terminal["type"] == "done", terminal
     # The compacted transcript still produced answer deltas.
@@ -2108,6 +2212,126 @@ async def test_suggestions_usage_attributed_to_the_dedicated_model(ctx: _Ctx) ->
     assert answer_row.total_tokens == 15
     assert sugg_row.model == suggestions_model  # actual-model attribution (#490)
     assert sugg_row.total_tokens == 10
+
+
+async def test_suggestions_row_ledger_linkage_and_read_semantics(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#759 pin (ADR-0016 §2.6): the suggestions spend is a SECOND, message-less
+    ledger row linked to the answer by ``answer_id`` and tagged
+    ``run_id == answer_id`` — never folded onto the answer's row. The reads
+    split accordingly: ``totals_for_session`` is the session-wide sum over ALL
+    scopes (``answers`` still 1), while ``last_for_session`` is only the
+    message-bearing winning scope (context-meter semantics). ``done.usage``
+    and the ``llm.cache_kpi`` line stay ANSWER-only. Distinct non-zero
+    cache-write values on both calls prove the column flows through both rows
+    and sums."""
+    log_rec = _patch_runtime_log(monkeypatch)
+    answer_model = "openrouter/anthropic/claude-opus-4.8"
+    suggestions_model = "openrouter/anthropic/claude-haiku-4.5"
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(text="The answer."),
+                StreamEvent(
+                    finish_reason="stop",
+                    usage=TokenUsage(
+                        prompt_tokens=100,
+                        completion_tokens=20,
+                        total_tokens=120,
+                        cached_prompt_tokens=30,
+                        cache_write_tokens=40,
+                    ),
+                ),
+            ]
+        ],
+        chat_completion=Completion(
+            content='["What changed?", "Who owns this?"]',
+            model=suggestions_model,
+            usage=TokenUsage(
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                cached_prompt_tokens=2,
+                cache_write_tokens=7,
+            ),
+        ),
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([]),
+        backplane=backplane,
+        suggestions_enabled=True,
+        suggestions_model=suggestions_model,
+    )
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=answer_model,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+
+    # done.usage + the cache-KPI line are ANSWER-only (no nicety tokens).
+    done = next(e for e in envs if e["type"] == "done")
+    assert done["data"]["usage"] == {  # type: ignore[index]
+        "promptTokens": 100,
+        "completionTokens": 20,
+        "totalTokens": 120,
+        "cachedPromptTokens": 30,
+        "cacheWriteTokens": 40,
+    }
+    kpis = log_rec.kpis()
+    assert len(kpis) == 1
+    assert kpis[0]["prompt_tokens"] == 100
+    assert kpis[0]["cached_prompt_tokens"] == 30
+    assert kpis[0]["cache_write_tokens"] == 40
+
+    from app.db.repositories import LlmUsageRepository
+
+    async with ctx.sessionmaker() as session:
+        repo = LlmUsageRepository(session, ctx.tenant_id)
+        rows = await repo.list_for_session(ctx.session_id)
+        totals = await repo.totals_for_session(ctx.session_id)
+        last = await repo.last_for_session(ctx.session_id)
+
+    # Exactly one message-bearing row (the answer) + one suggestions row.
+    assert len(rows) == 2
+    answer_rows = [r for r in rows if r.message_id is not None]
+    sugg_rows = [r for r in rows if r.message_id is None]
+    assert len(answer_rows) == 1
+    assert len(sugg_rows) == 1
+    answer_row, sugg_row = answer_rows[0], sugg_rows[0]
+    assert sugg_row.answer_id == answer_row.message_id
+    assert sugg_row.run_id == sugg_row.answer_id
+    assert sugg_row.model == suggestions_model
+    assert sugg_row.cache_write_tokens == 7
+    assert answer_row.cache_write_tokens == 40
+
+    # totals = answer + suggestions across every column; answers counts only
+    # the message-bearing row.
+    assert totals.answers == 1
+    assert totals.prompt_tokens == 110
+    assert totals.completion_tokens == 25
+    assert totals.total_tokens == 135
+    assert totals.cached_prompt_tokens == 32
+    assert totals.cache_write_tokens == 47
+
+    # last = the ANSWER row with answer-only tokens (never the nicety row).
+    assert last is not None
+    assert last.message_id == answer_row.message_id
+    assert last.prompt_tokens == 100
+    assert last.completion_tokens == 20
+    assert last.total_tokens == 120
+    assert last.cached_prompt_tokens == 30
+    assert last.cache_write_tokens == 40
 
 
 async def test_suggestions_spend_recorded_on_parse_miss(ctx: _Ctx) -> None:
@@ -3440,6 +3664,103 @@ async def test_denial_only_batch_opens_no_call_scopes(ctx: _Ctx) -> None:
     assert len(rows) == 2
     by_hash = {r.args_hash: r for r in rows}
     assert [by_hash[hash_args({"a": n})].ordinal for n in (1, 2)] == [0, 1]
+
+
+async def test_scope_failure_reaps_cancelled_peer_without_waiting_on_failed_ordinal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-001: the actual dispatcher must finish cleanup after bind_tenant fails."""
+    from sqlalchemy import select
+
+    from app.db import models
+    from app.services import chat_runtime as runtime_module
+    from app.services.tools.runner import ToolRunner
+
+    entered = asyncio.Event()
+    reaped = asyncio.Event()
+    stalled: asyncio.Future[asyncio.Task[Any]] = asyncio.get_running_loop().create_future()
+
+    class ObservedCondition(asyncio.Condition):
+        async def wait(self) -> bool:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() and not stalled.done():
+                stalled.set_result(task)
+            return await super().wait()
+
+    class ObservedRunner(ToolRunner):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._persist_gate = ObservedCondition()
+
+    class BlockedRetrieval(_FakeRetrieval):
+        async def search_text(self, **kwargs: Any) -> list[RetrievedPassage]:
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                reaped.set()
+            return []  # pragma: no cover
+
+    original_bind = runtime_module.bind_tenant
+    binds = 0
+
+    async def fail_first_call_scope(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+        nonlocal binds
+        binds += 1
+        if binds == 3:  # runtime bind + reservation rebind precede ordinal 0
+            await entered.wait()  # ordinal 1 is executing before ordinal 0 fails
+            raise RuntimeError("scope binding failed")
+        await original_bind(session, tenant_id)
+
+    monkeypatch.setattr(runtime_module, "bind_tenant", fail_first_call_scope)
+    monkeypatch.setattr(runtime_module, "ToolRunner", ObservedRunner)
+    gateway = _ScriptedGateway(
+        [
+            [
+                StreamEvent(
+                    tool_calls=tuple(
+                        ToolCall(id=f"c{i}", name="search_text", arguments={"query": f"q{i}"})
+                        for i in (1, 2)
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            _answer_turn(),
+        ]
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=BlockedRetrieval([]), backplane=backplane)
+    answer_task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="anthropic/claude-opus-4.8",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    try:
+        # Completion races a structural deadlock signal, never an elapsed-time limit.
+        done, _ = await asyncio.wait((answer_task, stalled), return_when=asyncio.FIRST_COMPLETED)
+        assert answer_task in done, "cancelled peer waited on ordinal 0 after its scope failed"
+        assert await answer_task is False
+    finally:
+        if stalled.done():
+            stalled.result().cancel()  # reap the intentionally broken path on red/revert runs
+        else:
+            stalled.cancel()
+        await asyncio.gather(answer_task, return_exceptions=True)
+
+    assert entered.is_set() and reaped.is_set()
+    envs = await _drain(backplane, stream_id)
+    assert [env["type"] for env in envs if env["type"] in {"done", "error"}] == ["error"]
+    assert "scope binding failed" not in str(envs)
+    async with ctx.sessionmaker() as session:
+        for model in (models.ToolInvocation, models.Message, models.AuditEvent):
+            rows = list((await session.execute(select(model))).scalars())
+            assert rows == [], f"aborted answer left {model.__name__} records"
 
 
 async def test_mid_batch_cancellation_aborts_atomically_with_one_terminal(ctx: _Ctx) -> None:
@@ -5016,7 +5337,7 @@ async def test_cited_answer_writes_the_evidence_digest(ctx: _Ctx) -> None:
                     finish_reason="tool_calls",
                 )
             ],
-            [StreamEvent(text="Cited answer."), StreamEvent(finish_reason="stop")],
+            [StreamEvent(text="Cited answer. [S1]"), StreamEvent(finish_reason="stop")],
         ]
     )
     backplane = InMemoryBackplane()
@@ -5043,11 +5364,16 @@ async def test_cited_answer_writes_the_evidence_digest(ctx: _Ctx) -> None:
     assert row.summary is None  # the TEXT summary is the async task's job
 
 
-async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
+async def test_summary_segment_is_shed_before_refusal(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#446 finding 4 (degrade order): an oversize summary must SHED, not turn
     a fitting question into context_too_large — the answer degrades to the
     verbatim window."""
     from app.llm.context import ContextConfig as _CC
+    from app.llm.context import estimate_message_tokens
+    from app.services.prompts import GROUNDED_SYSTEM_PROMPT
+    from app.services.tools.registry import default_allowlist, tool_specs
 
     retrieval = _FakeRetrieval([])
     gateway = _RecordingScriptedGateway(
@@ -5057,13 +5383,27 @@ async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
     stream_id = uuid.uuid4().hex
     consumer = asyncio.create_task(_drain(backplane, stream_id))
     await asyncio.sleep(0)
+
+    def bytecounter(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    fixed_cost = estimate_message_tokens(
+        [
+            ChatMessage(role=LlmRole.SYSTEM, content=GROUNDED_SYSTEM_PROMPT),
+            ChatMessage(role=LlmRole.USER, content="q"),
+        ],
+        tool_specs(default_allowlist()),
+        counter=bytecounter,
+    )
+    budget = fixed_cost + 2000
     runtime = _runtime(
         ctx,
         gateway=gateway,
         retrieval=retrieval,
         backplane=backplane,
-        context_config=_CC(fallback_max_input_tokens=3_000, output_headroom_tokens=0),
+        context_config=_CC(fallback_max_input_tokens=budget + 1024, output_headroom_tokens=0),
     )
+    monkeypatch.setattr(runtime, "_token_counter_for", lambda _model: bytecounter)
     await runtime.run(
         stream_id=stream_id,
         session_id=ctx.session_id,
@@ -5071,7 +5411,7 @@ async def test_summary_segment_is_shed_before_refusal(ctx: _Ctx) -> None:
         model="fake/unknown-model",
         history=[],
         collection_ids=None,
-        summary="H" * 40_000,  # far beyond the 3k-token window
+        summary="H" * 40_000,  # far beyond the measured fixed cost plus slack
     )
     envs = await asyncio.wait_for(consumer, timeout=2.0)
     assert envs[-1]["type"] == "done"  # no context_too_large terminal

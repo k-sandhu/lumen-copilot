@@ -30,7 +30,7 @@ import hashlib
 import math
 import re
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -39,7 +39,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.principal import Principal
 from app.db import models
 from app.domain.llm import Embedding
-from app.domain.retrieval import DocumentMatch, DocumentText, RetrievedPassage
+from app.domain.retrieval import DocumentMatch, DocumentResolution, DocumentText, RetrievedPassage
+from app.llm import LLMGateway
+from app.retrieval import RetrievalService
 from app.retrieval.permissions import AllowSet
 
 _EMBED_DIM = 256
@@ -146,6 +148,10 @@ class RetrievalLike(Protocol):
         self, *, principal: Principal, document_id: UUID
     ) -> DocumentText | None: ...
 
+    async def resolve_document_text(
+        self, *, principal: Principal, handle: str
+    ) -> DocumentResolution: ...
+
 
 class DeterministicEmbedder:
     """A reproducible, no-network embedding gateway (bag-of-tokens hashing).
@@ -210,6 +216,22 @@ class OfflineRetrieval:
         self._session = session
         self._embedder = embedder
 
+    async def read_passages(
+        self,
+        *,
+        principal: Principal,
+        chunk_ids: list[UUID],
+        collection_ids: list[UUID] | None = None,
+        document_ids: list[UUID] | None = None,
+    ) -> list[RetrievedPassage]:
+        # Read-back is a real permissioned SQL read; only ranking remains faked.
+        return await RetrievalService(self._session, gateway=cast(LLMGateway, None)).read_passages(
+            principal=principal,
+            chunk_ids=chunk_ids,
+            collection_ids=collection_ids,
+            document_ids=document_ids,
+        )
+
     async def search_text(
         self,
         *,
@@ -270,6 +292,14 @@ class OfflineRetrieval:
         )
         rows = (await self._session.execute(stmt)).all()
         return [DocumentMatch(document_id=did, document_name=name, score=1.0) for did, name in rows]
+
+    async def resolve_document_text(
+        self, *, principal: Principal, handle: str
+    ) -> DocumentResolution:
+        # Handle resolution is relational: exercise the production path in the
+        # offline eval too, including chunk/name resolution and permission checks.
+        service = RetrievalService(self._session, gateway=self._embedder)  # type: ignore[arg-type]
+        return await service.resolve_document_text(principal=principal, handle=handle)
 
     async def get_document(self, *, principal: Principal, document_id: UUID) -> DocumentText | None:
         allow = AllowSet.for_principal(principal)

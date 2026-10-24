@@ -96,6 +96,9 @@ _ALL_TABLES = _MVP_TABLES | {
     "transcription_checkpoints",
     # 0044 lossless connector-revision rollback archive.
     "embedding_legacy_archive_0044",
+    # 0048, #436 — durable conversation evidence identities + web citations.
+    "source_handles",
+    "web_citations",
 }
 
 
@@ -105,6 +108,26 @@ def _alembic_config(url: str | None = None) -> Config:
     if url is not None:
         cfg.set_main_option("sqlalchemy.url", url)
     return cfg
+
+
+def test_offline_ingestion_locations_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The renumbered provenance revision still adds nullable fields and reverses."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0046_message_source_provenance:0047_ingestion_locations", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "alter table documents add column source_text text;" in up
+    assert "alter table documents add column ingestion_metadata jsonb;" in up
+    assert "alter table chunks add column source_locations jsonb;" in up
+
+    command.downgrade(cfg, "0047_ingestion_locations:0046_message_source_provenance", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "alter table chunks drop column source_locations;" in down
+    assert "alter table documents drop column ingestion_metadata;" in down
+    assert "alter table documents drop column source_text;" in down
 
 
 def test_metadata_covers_every_mvp_table() -> None:
@@ -129,14 +152,17 @@ def test_every_revision_id_fits_alembic_version_column() -> None:
 
 
 def test_migration_chain_is_linear_single_head() -> None:
-    """The chain is linear 0001 → … → 0013 with a SINGLE head (ADR-0008 §4).
+    """The migration chain has a SINGLE head (ADR-0008 §4).
 
     The single-head invariant is the whole point of the one-migration-owner-per-wave
     rule: two new migrations would fork into two heads. ``get_heads()`` returning a
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0046_message_source_provenance"]
+    assert list(script.get_heads()) == ["0049_discovery_metadata"]
+    locations = script.get_revision("0047_ingestion_locations")
+    assert locations is not None
+    assert locations.down_revision == "0046_message_source_provenance"
     provenance = script.get_revision("0046_message_source_provenance")
     assert provenance is not None
     assert provenance.down_revision == "0045_embedding_contract"
@@ -245,6 +271,44 @@ def test_migration_chain_is_linear_single_head() -> None:
     direct_media = script.get_revision("0044_direct_media_uploads")
     assert direct_media is not None
     assert direct_media.down_revision == "0043_code_run_resolved_packages"
+    evidence_handles = script.get_revision("0048_evidence_handles")
+    assert evidence_handles is not None
+    assert evidence_handles.down_revision == "0047_ingestion_locations"
+    discovery_metadata = script.get_revision("0049_discovery_metadata")
+    assert discovery_metadata is not None
+    assert discovery_metadata.down_revision == "0048_evidence_handles"
+
+
+def test_offline_evidence_handles_migration_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """0048 adds durable identity and selected citation storage with RLS."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0047_ingestion_locations:0048_evidence_handles", sql=True)
+    up = capsys.readouterr().out.lower()
+
+    assert "alter table chat_sessions add column handle_next integer default '1' not null" in up
+    assert "alter table citations add column handle varchar(32)" in up
+    assert "create table source_handles" in up
+    assert "create table web_citations" in up
+    assert "uq_source_handles_identity" in up
+    assert "references chat_sessions (id) on delete cascade" in up
+    assert "references messages (id) on delete cascade" in up
+    assert "current_setting('app.tenant_id', true) = 'bypass'" in up
+    assert "tenant_id = current_setting('app.tenant_id', true)::uuid" in up
+    for table in ("source_handles", "web_citations"):
+        assert f"alter table {table} enable row level security" in up
+        assert f"alter table {table} force row level security" in up
+        assert f"create policy rls_{table}" in up
+
+    command.downgrade(cfg, "0048_evidence_handles:0047_ingestion_locations", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop table web_citations" in down
+    assert "drop table source_handles" in down
+    assert "drop column handle" in down
+    assert "drop column handle_next" in down
 
 
 def test_offline_reusable_sandbox_session_migration_round_trips(

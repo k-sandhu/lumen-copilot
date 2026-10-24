@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from numbers import Real
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 from urllib.parse import urlparse
 
 from app.core.config import Settings
@@ -46,6 +46,7 @@ from app.domain.llm import (
     Completion,
     CompletionChunk,
     Embedding,
+    StreamClosure,
     StreamEvent,
     TokenUsage,
     ToolCall,
@@ -53,6 +54,7 @@ from app.domain.llm import (
     Transcription,
 )
 from app.llm.tool_names import ToolNameMap
+from app.llm.tool_wire import wire_tools
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -528,17 +530,7 @@ class LLMGateway:
     @staticmethod
     def _to_wire_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
         """Render domain tool specs into the OpenAI/LiteLLM ``tools`` array."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
-            }
-            for t in tools
-        ]
+        return wire_tools(tools)
 
     async def chat(
         self,
@@ -633,6 +625,35 @@ class LLMGateway:
             # the upstream HTTP connection is released and no task lingers.
             await _aclose(response)
 
+    @overload
+    def stream_tools(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        model: str | None = None,
+        tool_choice: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        cache_key: str | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamEvent]: ...
+
+    @overload
+    def stream_tools(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        model: str | None = None,
+        tool_choice: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        cache_key: str | None = None,
+        max_tokens: int | None = None,
+        closure: StreamClosure | None = None,
+    ) -> AsyncIterator[StreamEvent]: ...
+
     async def stream_tools(
         self,
         messages: Sequence[ChatMessage],
@@ -644,6 +665,7 @@ class LLMGateway:
         api_base: str | None = None,
         cache_key: str | None = None,
         max_tokens: int | None = None,
+        closure: StreamClosure | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one tool-aware completion turn, yielding :class:`StreamEvent`s.
 
@@ -673,6 +695,10 @@ class LLMGateway:
         ``api_key`` / ``api_base`` OVERRIDE the process defaults when given (a
         per-tenant provider route, PR 2a); ``None`` ⇒ the default credentials,
         unchanged.
+
+        ``closure`` optionally records successful upstream cleanup for protocol
+        qualification. A missing/failed hook stays false; ordinary callers keep
+        the existing best-effort cleanup and error behaviour.
         """
         self._require_enabled()
         import litellm  # lazy
@@ -765,7 +791,9 @@ class LLMGateway:
                 raise
             raise _map_vendor_error(exc) from None
         finally:
-            await _aclose(response)
+            closed = await _aclose(response)
+            if closure is not None:
+                closure.closed = closed
 
         built_calls = (acc.build() for _, acc in sorted(tool_acc.items()))
         tool_calls = tuple(
@@ -961,6 +989,21 @@ def _as_count(value: Any) -> int:
     return max(0, count)
 
 
+def _details_count(details: Any, key: str) -> int:
+    """Read one count off ``prompt_tokens_details``, object- or dict-shaped.
+
+    LiteLLM normally surfaces a ``PromptTokensDetailsWrapper``, but some paths
+    hand back the raw mapping; ``getattr`` alone would silently miss the dict
+    shape. Absent details and malformed values degrade to ``0`` via
+    :func:`_as_count`, like every other usage field.
+    """
+    if details is None:
+        return 0
+    if isinstance(details, dict):
+        return _as_count(details.get(key, 0))
+    return _as_count(getattr(details, key, 0))
+
+
 def _extract_usage(response: Any) -> TokenUsage:
     """Pull token usage off a LiteLLM response, defensively.
 
@@ -971,11 +1014,15 @@ def _extract_usage(response: Any) -> TokenUsage:
     breaking the envelope's non-negative contract.
 
     Cache accounting (#409, ADR-0016 §2.6) is read from BOTH normalized shapes —
-    OpenAI-style ``prompt_tokens_details.cached_tokens`` and Anthropic-style
-    ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` — whichever the
-    provider populated (LiteLLM passes each through as-is). A zero/absent
-    ``cached_tokens`` falls back to the Anthropic-style read field; absent/None
-    fields stay ``0``: a provider with no cache detail never breaks extraction.
+    OpenAI-style ``prompt_tokens_details.cached_tokens`` /
+    ``prompt_tokens_details.cache_write_tokens`` (the shape OpenRouter's
+    Anthropic route reports, #759) and Anthropic-native
+    ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` — whichever
+    the provider populated (LiteLLM passes each through as-is). A zero/absent
+    details field falls back to the Anthropic-native counterpart; the two
+    shapes are never summed, so a provider populating both cannot
+    double-count. Absent/None fields stay ``0``: a provider with no cache
+    detail never breaks extraction.
     """
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -984,10 +1031,12 @@ def _extract_usage(response: Any) -> TokenUsage:
     completion = _as_count(getattr(usage, "completion_tokens", 0))
     total = _as_count(getattr(usage, "total_tokens", 0)) or (prompt + completion)
     details = getattr(usage, "prompt_tokens_details", None)
-    cached = _as_count(getattr(details, "cached_tokens", 0)) if details is not None else 0
+    cached = _details_count(details, "cached_tokens")
     if not cached:
         cached = _as_count(getattr(usage, "cache_read_input_tokens", 0))
-    cache_write = _as_count(getattr(usage, "cache_creation_input_tokens", 0))
+    cache_write = _details_count(details, "cache_write_tokens")
+    if not cache_write:
+        cache_write = _as_count(getattr(usage, "cache_creation_input_tokens", 0))
     return TokenUsage(
         prompt_tokens=prompt,
         completion_tokens=completion,
@@ -997,12 +1046,13 @@ def _extract_usage(response: Any) -> TokenUsage:
     )
 
 
-async def _aclose(stream: Any) -> None:
+async def _aclose(stream: Any) -> bool:
     """Close a LiteLLM async stream if it exposes a close hook.
 
     LiteLLM's streaming wrapper may expose ``aclose`` (async) or ``close``
     (sync); either releases the upstream connection. Best-effort: a missing or
-    failing close must not mask the original control flow.
+    failing close must not mask the original control flow. Return true only
+    after a supported hook succeeds, for callers requesting closure evidence.
     """
     aclose: Any = getattr(stream, "aclose", None)
     if callable(aclose):
@@ -1011,14 +1061,16 @@ async def _aclose(stream: Any) -> None:
             if result is not None:
                 await result
         except Exception:  # noqa: BLE001 — teardown is best-effort
-            return
-        return
+            return False
+        return True
     close: Any = getattr(stream, "close", None)
     if callable(close):
         try:
             close()
         except Exception:  # noqa: BLE001 — teardown is best-effort
-            return
+            return False
+        return True
+    return False
 
 
 async def aclose_litellm_clients() -> None:

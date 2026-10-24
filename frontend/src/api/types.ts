@@ -120,10 +120,51 @@ export interface CollectionList {
 /** Ingestion lifecycle (parse → chunk → embed). */
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
+/** Native-text extraction result (spec 0014). */
+export type IngestionOutcome = 'empty' | 'failed' | 'partial' | 'unsupported' | 'indexed';
+
+export interface SourceLocation {
+  kind: 'page' | 'slide' | 'sheet';
+  name: string;
+  number: number;
+  char_start: number;
+  char_end: number;
+}
+
 /** Processing/viewer family derived from the validated MIME type (spec 0008). */
 export type DocumentKind = 'document' | 'audio' | 'video';
 
 /** A document's metadata, including its ingestion status. */
+export interface IngestionFingerprint {
+  schema_version: 1;
+  source_sha256: string;
+  mime_type: string;
+  parser_version: string;
+  parser_code_sha256: string;
+  parser_dependencies: Record<string, string>;
+  chunker_version: string;
+  chunker_code_sha256: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  embedding_model?: string | null;
+  embedding_dimension?: number | null;
+}
+
+export interface ExtractionDiagnostics {
+  character_count: number;
+  replacement_characters: number;
+  suspicious_controls: number;
+  source_part_kind?: 'page' | 'slide' | 'sheet' | null;
+  total_parts?: number | null;
+  parts_with_text?: number | null;
+  blank_parts: number[];
+  table_probe: 'native_tables' | 'sheet_cells' | 'unavailable';
+  table_regions?: number | null;
+  table_cells?: number | null;
+  missing_table_cells?: number | null;
+  warnings: string[];
+}
+
 export interface Document {
   id: string;
   filename: string;
@@ -136,12 +177,20 @@ export interface Document {
   /** Zero-based player duration for media; null for ordinary documents. */
   duration_ms: number | null;
   status: DocumentStatus;
+  /** Unknown for legacy documents or unfinished ingestion attempts. */
+  ingestion_outcome?: IngestionOutcome | null;
+  /** True only when this ready document has at least one searchable chunk. */
+  searchable?: boolean;
   /** Failure reason when status is failed. */
   error?: string | null;
   /** Number of indexed chunks (0 until ingestion completes). */
   chunk_count: number;
   created_at: string;
   updated_at: string;
+  /** Exact source-part map; absent/empty means unknown for legacy documents. */
+  source_locations?: SourceLocation[];
+  ingestion_fingerprint?: IngestionFingerprint | null;
+  extraction_diagnostics?: ExtractionDiagnostics | null;
 }
 
 /** 200 from GET /documents — a cursor page of documents. */
@@ -379,6 +428,8 @@ export type MessageRole = 'user' | 'assistant' | 'system';
  */
 export interface Citation {
   id: string;
+  /** Conversation-scoped inline evidence handle; absent on legacy messages. */
+  handle?: string | null;
   document_id: string;
   document_name: string;
   chunk_id: string;
@@ -400,6 +451,15 @@ export interface Citation {
    * claim's provenance stays visible instead of silently disappearing.
    */
   redacted?: boolean;
+}
+
+/** Public web evidence actually shown to the model and cited inline. */
+export interface WebCitation {
+  id: string;
+  handle: string;
+  url: string;
+  title: string;
+  snippet: string;
 }
 
 /**
@@ -451,6 +511,8 @@ export interface Message {
   model?: string;
   /** Passage-level citations (assistant messages only). */
   citations?: Citation[];
+  /** Public web citations remain separate from permissioned corpus passages. */
+  web_citations?: WebCitation[];
   /** Governed tool calls behind an assistant message, oldest first (#377). */
   tool_invocations?: MessageToolInvocation[];
   /** The clarifying question this turn ended with, if any (spec 0006 #429). */
@@ -1988,6 +2050,8 @@ export interface ChatTokenDelta {
  */
 export interface ChatCitation {
   id: string;
+  /** Conversation-scoped inline evidence handle; absent on legacy streams. */
+  handle?: string | null;
   documentId: string;
   documentName: string;
   chunkId: string;
@@ -2002,6 +2066,15 @@ export interface ChatCitation {
   score?: number;
 }
 
+/** `event.data` for name=web_citation. Public web evidence has no corpus ids. */
+export interface ChatWebCitation {
+  id: string;
+  handle: string;
+  url: string;
+  title: string;
+  snippet: string;
+}
+
 /**
  * A governed tool the chat agent can invoke (surfaced for "searching…" UX). The
  * wire tool set is open-ended (contract `ChatToolCall.tool` is a free string,
@@ -2011,6 +2084,9 @@ export interface ChatCitation {
  * falls back to a generic label (see ToolActivity).
  */
 export type ChatTool =
+  | 'search_passages'
+  | 'find_documents'
+  | 'read_document'
   | 'search_text'
   | 'search_documents'
   | 'list_documents'

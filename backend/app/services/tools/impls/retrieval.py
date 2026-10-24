@@ -25,10 +25,11 @@ records the ``tool_invocations`` row for each.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
 
-from app.domain.retrieval import RetrievedPassage
+from app.domain.retrieval import DocumentResolution, RetrievedPassage
 from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
 from app.services.tools.types import ToolContext, ToolDefinition
 
@@ -81,6 +82,22 @@ def rendered_snippet(text: str, budget: int = _SNIPPET_BUDGET) -> str:
     return text.strip()
 
 
+def rendered_evidence(
+    passage: RetrievedPassage, handle: str, *, document: str | None = None
+) -> str:
+    """Handle-labelled complete evidence with the source's player provenance.
+
+    ``document`` adds the passage's D handle and character range, so a search
+    hit shows exactly the tokens ``read_document`` accepts (#772).
+    """
+    location = _media_provenance(passage)
+    if document is not None:
+        location = (
+            f" (document {document}, chars {passage.char_start}-{passage.char_end}{location})"
+        )
+    return f"[{handle}] {passage.document_name}{location}\n{rendered_snippet(passage.text)}"
+
+
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
     # An omitted/invalid ``k`` falls back to ``default`` — but still clamped to the
     # ceiling (#424 re-review): under a tight budget ``maximum`` can be lower than
@@ -107,11 +124,44 @@ def _render_passages(
     for i, p in enumerate(passages, start=1):
         snippet = rendered_snippet(p.text, snippet_budget)
         blocks.append(
-            f"[{i}] {p.document_name} (chunk {p.chunk_id}, chars {p.char_start}-{p.char_end}"
+            f"[{i}] {p.document_name} (document id: {p.document_id}, chunk {p.chunk_id}, "
+            f"chars {p.char_start}-{p.char_end}"
             f"{_media_provenance(p)}):\n"
             f"{snippet}"
         )
     return "\n\n".join(blocks)
+
+
+def _document_not_found_content(ctx: ToolContext) -> str:
+    """The one non-disclosing reply for a handle that resolves to nothing (#758).
+
+    Missing, malformed, another owner's and another tenant's handles all get
+    this identical corrective message (INV-2) — it says what ``document_id``
+    accepts and where to get an id, naming only tools in ``ctx.allowed_tools``
+    (as the truncation-recovery text does), and discloses no length or range.
+    """
+    allowed = ctx.allowed_tools
+    accepted = ["a document UUID"]
+    if ctx.handles is not None or ctx.document_id_resolver is not None:
+        accepted.append("a current conversation D handle")
+    if "search_text" in allowed:
+        accepted.append("the 'document id:' value or chunk id from search_text results")
+    id_tools = [name for name in ("search_documents", "list_documents") if name in allowed]
+    if id_tools:
+        accepted.append("an id from " + " or ".join(id_tools))
+    if "find_documents" in allowed:
+        value = "a D handle" if ctx.handles is not None else "a document id"
+        accepted.append(value + " from find_documents")
+    accepted.extend(("a chunk UUID", "an exact filename as displayed"))
+    content = (
+        "Document not found. No accessible document matches that document_id. "
+        "document_id takes " + ", ".join(accepted[:-1]) + ", or " + accepted[-1] + "."
+    )
+    if "find_documents" in allowed:
+        content += " To find a document by filename, call find_documents."
+    elif "search_documents" in allowed:
+        content += " To find a document by filename, call search_documents."
+    return content
 
 
 async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
@@ -224,23 +274,50 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
 
 async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
     raw_id = str(args.get("document_id") or "").strip()
-    try:
-        document_id = UUID(raw_id)
-    except ValueError:
-        # A malformed id is a tool-specific rejection, not a crash — the runner
-        # passes the ``ok=False`` through and the run continues (issue #207 §7).
+    # Use the conversation handle grammar (EvidenceHandles), never a prefix
+    # test: e.g. "Document Control Plan.pdf" is still a literal filename.
+    # An active registry is authoritative for S/D/W identities, including misses.
+    handle_only = ctx.handles is not None and re.fullmatch(r"[SDW][1-9][0-9]*", raw_id) is not None
+    resolved = None
+    if handle_only and ctx.handles is not None:
+        resolved = ctx.handles.document_id(raw_id)
+    elif ctx.document_id_resolver is not None:
+        resolved = ctx.document_id_resolver(raw_id)
+    if isinstance(resolved, UUID):
+        resolution = DocumentResolution(
+            document=await ctx.retrieval.get_document(principal=ctx.principal, document_id=resolved)
+        )
+    elif handle_only:
+        resolution = DocumentResolution()  # No retrieval I/O for rejected handles.
+    else:
+        # UUID → chunk UUID → literal name → stripped name stays inside retrieval/,
+        # under its shared tenant + owner-or-grant predicate (#758).
+        resolution = await ctx.retrieval.resolve_document_text(
+            principal=ctx.principal, handle=raw_id
+        )
+    if resolution.candidates:
+        lines = [f"- {c.document_name} (id: {c.document_id})" for c in resolution.candidates]
         return ToolHandlerResult(
             source_document_ids=(),
-            content="Invalid document id.",
+            content=(
+                "Several accessible documents have that exact name. "
+                "Retry with one document id:\n" + "\n".join(lines)
+            ),
             ok=False,
             error=ERROR_BAD_ARGS,
-            summary="invalid id",
+            summary="ambiguous name",
+            payload={"document_ids": [str(c.document_id) for c in resolution.candidates]},
         )
-    doc = await ctx.retrieval.get_document(principal=ctx.principal, document_id=document_id)
+    doc = resolution.document
     if doc is None:
-        # Existence non-disclosure (INV-2): a foreign/missing doc is "not found".
+        # Existence non-disclosure (INV-2): missing, malformed, foreign and
+        # cross-tenant handles share this one corrective outcome (#758).
         return ToolHandlerResult(
-            source_document_ids=(), content="Document not found.", summary="not found"
+            source_document_ids=(),
+            content=_document_not_found_content(ctx),
+            ok=False,
+            error=ERROR_BAD_ARGS,
+            summary="not found",
         )
     # Bound the returned body to the budget-derived snippet allowance (#424 third
     # re-review): a document read is ~4× a passage snippet, and a tight context
@@ -248,42 +325,78 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
     # remaining budget either. Capped at the tool's own ceiling; roomy = unchanged.
     body_budget = max(1, min(ctx.snippet_budget, _SNIPPET_BUDGET)) * 4
     body = doc.text[:body_budget]
+    total_length = len(doc.text)
+    truncated = len(body) < total_length
+    content = (
+        f"Document: {doc.document_name}\n"
+        f"Returned range: 0-{len(body)} of {total_length} characters (end-exclusive).\n\n"
+        f"{body}"
+    )
+    if truncated:
+        recovery = (
+            "use search_text with a targeted query to retrieve evidence from the remaining text."
+            if "search_text" in ctx.allowed_tools
+            else (
+                "This assistant cannot inspect the omitted text with its available tools. "
+                "Ask the user to supply the relevant excerpt or switch to an authorized "
+                "search-capable assistant."
+            )
+        )
+        content += (
+            f"\n\n[Truncated: characters {len(body)}-{total_length} are not shown. "
+            f"This legacy tool reads only a prefix; {recovery}]"
+        )
     return ToolHandlerResult(
         source_document_ids=(),
-        content=f"Document: {doc.document_name}\n\n{body}",
+        content=content,
         summary=doc.document_name,
         hit_count=1,
         document_ids=(doc.document_id,),
-        payload={"document_id": str(doc.document_id)},
+        payload={
+            "document_id": str(doc.document_id),
+            "returned_range": [0, len(body)],
+            "total_length": total_length,
+            "truncated": truncated,
+        },
     )
 
 
 TOOLS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="search_text",
+        default_offered=False,
         description=(
             "Hybrid semantic + keyword search over the documents the user can "
             "access (their own and any shared with them). Use this to find "
             "evidence for the question. Returns ranked passages with their source "
-            "document and complete passage text. Count limits and the context "
-            "engine bound evidence cost. Search again with a refined query if results "
-            "are thin."
+            "document and complete passage text; each passage header shows its "
+            "document id (as 'document id: ...'), usable with get_document. "
+            "Count limits and the context "
+            "engine bound evidence cost. If no "
+            "passages match, broaden the query, use search_documents to locate a "
+            "document by filename, or list_documents to see available documents."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The natural-language search query.",
                 },
                 "k": {
                     "type": "integer",
-                    "description": "How many passages to return (1-20).",
+                    "description": (
+                        "How many passages to return (1-20; defaults to 6, lowered "
+                        "when context is tight)."
+                    ),
                     "minimum": 1,
                     "maximum": _MAX_K,
+                    "default": 6,
                 },
             },
             "required": ["query"],
+            "additionalProperties": False,
         },
         handler=_search_text,
         risk_tier=RiskTier.T0,
@@ -291,21 +404,31 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="search_documents",
+        default_offered=False,
         description=(
-            "Find documents the user can access (their own or shared with them) "
-            "by filename or metadata. Use this to locate a specific document "
-            "before reading it with get_document."
+            "Find accessible documents by filename substring. This search matches "
+            "filenames only, not document body text or other metadata. Use the "
+            "returned id with get_document to read a capped text prefix. If there "
+            "are no matches, try a shorter filename term or list_documents."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "name_or_query": {
                     "type": "string",
-                    "description": "Filename or keyword to match documents by.",
+                    "minLength": 1,
+                    "description": "Non-empty filename text to match (substring search).",
                 },
-                "k": {"type": "integer", "minimum": 1, "maximum": _MAX_K},
+                "k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_K,
+                    "description": "Maximum documents to return (1-20; defaults to 10).",
+                    "default": 10,
+                },
             },
             "required": ["name_or_query"],
+            "additionalProperties": False,
         },
         handler=_search_documents,
         risk_tier=RiskTier.T0,
@@ -313,25 +436,30 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="list_documents",
+        default_offered=False,
         description=(
             "List the documents the user can access — their own uploads and any "
             "shared with them — without needing a search term. Use this to answer "
             "questions like 'what documents do I have access to' or to show the "
             "user what is available. Returns document names with their ids (each "
             "usable with get_document). The list is capped; to find one specific "
-            "document by name, use search_documents instead."
+            "document by filename, use search_documents instead. An empty result "
+            "means no accessible documents are available; narrow a full list with "
+            "search_documents or use search_text to look for evidence."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "k": {
                     "type": "integer",
-                    "description": "Maximum number of documents to list (1-50).",
+                    "description": "Maximum number of documents to list (1-50; defaults to 50).",
                     "minimum": 1,
                     "maximum": _LIST_MAX,
+                    "default": _LIST_MAX,
                 },
             },
             # No required args — enumeration needs no query.
+            "additionalProperties": False,
         },
         handler=_list_documents,
         risk_tier=RiskTier.T0,
@@ -339,20 +467,37 @@ TOOLS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="get_document",
+        default_offered=False,
         description=(
-            "Fetch the full text of a document the user can access by id (from "
-            "search_documents). Returns nothing if the document is not one the "
-            "user can access."
+            "Read a prefix of an accessible document. document_id accepts the "
+            "current conversation D handle, a document UUID, the "
+            "'document id:' value from search_text results, an id returned by "
+            "search_documents or list_documents, a chunk id shown by search_text, "
+            "or an exact filename as displayed. Use this for an overview, not to "
+            "conclude that unseen text contains no answer. Returns up to 2,400 "
+            "characters, less under a tight context budget, with the returned range "
+            "and total length. A truncated read explicitly marks omitted text; use "
+            "search_text when available with a targeted query for evidence beyond "
+            "the prefix. Otherwise ask the user to supply the relevant excerpt "
+            "or switch to an authorized search-capable assistant. "
+            "Missing and inaccessible documents both return not found."
         ),
         json_schema={
             "type": "object",
             "properties": {
                 "document_id": {
                     "type": "string",
-                    "description": "The document id to fetch.",
+                    "description": (
+                        "The document to fetch: a current conversation D handle, "
+                        "a document UUID, a 'document id:' value from "
+                        "search_text, an id from search_documents or "
+                        "list_documents, a chunk id shown by search_text, or an "
+                        "exact filename as displayed."
+                    ),
                 }
             },
             "required": ["document_id"],
+            "additionalProperties": False,
         },
         handler=_get_document,
         risk_tier=RiskTier.T0,

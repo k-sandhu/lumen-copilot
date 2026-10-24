@@ -163,10 +163,23 @@ class CitationResponse(BaseModel):
     speaker_id: str | None = None
     speaker_name: str | None = None
     score: float | None = None
+    handle: str | None = None
     #: True when the caller may no longer retrieve the cited document (#536), in
     #: which case `snippet` and `document_name` are empty. The row is kept so a
     #: settled claim's provenance stays visible instead of silently disappearing.
     redacted: bool = False
+
+
+class WebCitationResponse(BaseModel):
+    """A model-visible web excerpt, without invented corpus identifiers."""
+
+    model_config = {"extra": "forbid"}
+
+    id: UUID
+    handle: str
+    url: str
+    title: str
+    snippet: str
 
 
 class MessageToolInvocationResponse(BaseModel):
@@ -222,6 +235,7 @@ class MessageResponse(BaseModel):
     content: str
     model: str | None = None
     citations: list[CitationResponse]
+    web_citations: list[WebCitationResponse] = Field(default_factory=list)
     tool_invocations: list[MessageToolInvocationResponse]
     question: AskUserQuestionResponse | None = None
     created_at: datetime
@@ -342,6 +356,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         speaker_id=view.speaker_id if disclose_media else None,
         speaker_name=view.speaker_name if disclose_media else None,
         score=view.score,
+        handle=view.handle,
         redacted=view.redacted,
     )
 
@@ -382,6 +397,12 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         content=m.content,
         model=m.model,
         citations=[_citation_to_response(c) for c in view.citations],
+        web_citations=[
+            WebCitationResponse(
+                id=c.id, handle=c.handle, url=c.url, title=c.title, snippet=c.snippet
+            )
+            for c in view.web_citations
+        ],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         question=_question_to_response(m.question),
         created_at=m.created_at,
@@ -614,10 +635,13 @@ async def get_session_usage(
 ) -> SessionUsageResponse:
     """The session's token/context accounting (spec 0007 #429); not visible → 404.
 
-    Powers the conversation context meter: summed llm_usage (#409) + the last
-    answer's record + the input-token budget the assembler grants the session's
-    model (the same formula answers are assembled under — never a parallel
-    approximation).
+    Powers the conversation context meter: ``totals`` is the session-wide SUM
+    over every llm_usage scope (#409 — answer scopes plus message-less
+    failover/salvage and suggestions rows), while ``last`` is only the most
+    recent MESSAGE-BEARING answer scope (context-meter semantics, not that
+    answer's full spend; ADR-0016 §2.6). Plus the input-token budget the
+    assembler grants the session's model (the same formula answers are
+    assembled under — never a parallel approximation).
     """
     service = _build_service(
         session=session,

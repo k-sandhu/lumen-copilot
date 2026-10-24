@@ -18,9 +18,11 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from app.domain.chat import AskUserQuestion
+from app.domain.ingestion import ExtractionOutcome, SourceLocation
 from app.domain.scheduling import Cadence
 
 
@@ -753,12 +755,29 @@ class Document:
     acl_synced_at: datetime | None = None
     acl_scope_ids: tuple[str, ...] | None = None
     external_id: str | None = None
+    source_text: str | None = None
+    source_locations: tuple[SourceLocation, ...] = ()
+    ingestion_metadata: dict[str, object] | None = None
+    title: str | None = None
+    source_path: str | None = None
+    source_modified_at: datetime | None = None
+    discovery_metadata: dict[str, object] | None = None
     ingestion_attempts: int = 0
     ingestion_failure: dict[str, object] | None = None
     kind: DocumentKind = DocumentKind.DOCUMENT
     duration_ms: int | None = None
     transcript_language: str | None = None
     transcription_model: str | None = None
+
+    @property
+    def ingestion_outcome(self) -> ExtractionOutcome | None:
+        value = (self.ingestion_metadata or {}).get("ingestion_outcome")
+        return ExtractionOutcome(str(value)) if value is not None else None
+
+    @property
+    def ingestion_fingerprint(self) -> dict[str, object] | None:
+        value = (self.ingestion_metadata or {}).get("ingestion_fingerprint")
+        return cast(dict[str, object], value) if isinstance(value, dict) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1056,6 +1075,7 @@ class Chunk:
     char_start: int
     char_end: int
     created_at: datetime
+    source_locations: tuple[SourceLocation, ...] = ()
     time_start_ms: int | None = None
     time_end_ms: int | None = None
     transcript_segment_id: UUID | None = None

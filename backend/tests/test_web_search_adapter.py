@@ -115,8 +115,10 @@ def test_map_non_object_body_is_unavailable() -> None:
         map_searxng_results(["not", "an", "object"], k=5)
 
 
-def test_map_missing_results_is_empty_not_error() -> None:
-    assert map_searxng_results({"query": "x"}, k=5) == ()
+def test_map_missing_results_is_parse_error() -> None:
+    with pytest.raises(WebSearchUnavailable) as error:
+        map_searxng_results({"query": "x"}, k=5)
+    assert error.value.reason == "parse_error"
 
 
 async def _searx_client(handler: object, **kw: object) -> SearxngClient:

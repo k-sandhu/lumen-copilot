@@ -15,6 +15,7 @@ contract the chat runtime depends on:
 
 from __future__ import annotations
 
+import json
 from contextlib import aclosing
 from typing import Any
 
@@ -159,6 +160,60 @@ async def test_stream_tools_yields_text_then_terminal(monkeypatch: pytest.Monkey
     assert terminal.tool_calls == ()
     assert terminal.usage is not None
     assert terminal.usage.total_tokens == 14
+
+
+@pytest.mark.parametrize("close_mode", ["success", "failed", "missing"])
+async def test_qualification_observes_upstream_closure_not_just_wrapper_close(
+    monkeypatch: pytest.MonkeyPatch, close_mode: str
+) -> None:
+    from app.services.tools.conformance import qualify
+
+    streams: list[_FakeStream] = []
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeStream:
+        messages = kwargs["messages"]
+        is_cancel = "Probe cancellation:" in messages[1]["content"]
+        results = [message["content"] for message in messages if message["role"] == "tool"]
+        if is_cancel:
+            parts = [_Part(content="stream-open")]
+        elif results:
+            parts = [_Part(content="\n".join(results)), _Part(finish_reason="stop")]
+        else:
+            labels = ["alpha", "beta"] if "Probe parallel:" in messages[1]["content"] else ["alpha"]
+            parts = [
+                _Part(
+                    tool_calls=[
+                        _ToolCallFrag(
+                            index=index,
+                            id=f"call-{label}",
+                            name=kwargs["tools"][0]["function"]["name"],
+                            arguments=json.dumps({"label": label, "comment": None}),
+                        )
+                        for index, label in enumerate(labels)
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+        stream = _FakeStream(parts)
+        if is_cancel and close_mode == "failed":
+
+            async def fail_close() -> None:
+                raise RuntimeError("provider-secret-must-stay-private")
+
+            monkeypatch.setattr(stream, "aclose", fail_close)
+        elif is_cancel and close_mode == "missing":
+            monkeypatch.setattr(stream, "aclose", None)
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    report = await qualify(LLMGateway(_settings()), model="vendor/probe", route_revision="r17")
+
+    cancellation = next(case for case in report.cases if case.name == "cancellation")
+    assert cancellation.passed is (close_mode == "success")
+    assert report.qualified is (close_mode == "success")
+    assert sum(not stream.closed for stream in streams) == (0 if close_mode == "success" else 1)
+    assert all("provider-secret" not in case.reason for case in report.cases)
 
 
 async def test_stream_tools_accumulates_fragmented_tool_call(
@@ -311,6 +366,51 @@ def _capture_acompletion(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     return captured
+
+
+async def test_context_counts_captured_projected_tool_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from app.llm.context import ContextConfig, _tools_wire_text, assemble_context
+
+    tools = (
+        ToolSpec(
+            name="mcp:server:probe",
+            description="Projected schema probe",
+            parameters={
+                "type": "object",
+                "properties": {f"optional_{i}": {"type": "string"} for i in range(30)},
+            },
+        ),
+    )
+    captured = _capture_acompletion(monkeypatch)
+    budget = assemble_context(
+        model="fake/model",
+        system_prompt="SYS",
+        history=[],
+        question="Q",
+        tools=tools,
+        config=ContextConfig(output_headroom_tokens=0),
+        counter=lambda value: len(value.encode("utf-8")),
+        max_input_resolver=lambda _: 50_000,
+    )
+    gateway = LLMGateway(_settings())
+    _ = [event async for event in gateway.stream_tools(budget.messages, tools=tools)]
+    wire = captured["tools"]
+    assert wire[0]["function"]["name"] != tools[0].name
+    assert wire[0]["function"]["parameters"]["required"] == list(tools[0].parameters["properties"])
+    assert _tools_wire_text(tools) == json.dumps(wire, sort_keys=True, ensure_ascii=False)
+    expected = (
+        len(json.dumps(wire, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        + sum(
+            len(json.dumps(msg, sort_keys=True, ensure_ascii=False).encode("utf-8")) + 4
+            for msg in captured["messages"]
+        )
+        + 2
+    )
+    assert budget.estimated_tokens == expected
 
 
 def _has_cache_control(wire_message: dict[str, Any]) -> bool:

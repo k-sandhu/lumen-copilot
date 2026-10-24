@@ -296,12 +296,17 @@ TOOLS: tuple[ToolDefinition, ...] = (
                 },
                 "k": {
                     "type": "integer",
-                    "description": f"How many turns to return (1-{_MAX_TURNS}).",
+                    "description": (
+                        f"How many turns to return (1-{_MAX_TURNS}); "
+                        f"omit or pass null for the default {_DEFAULT_TURNS}."
+                    ),
                     "minimum": 1,
                     "maximum": _MAX_TURNS,
+                    "default": _DEFAULT_TURNS,
                 },
             },
             # No required args — the no-query read is the common case.
+            "additionalProperties": False,
         },
         handler=_read_conversation,
         risk_tier=RiskTier.T0,

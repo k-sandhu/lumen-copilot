@@ -48,7 +48,8 @@ from app.db.repositories import (
     GroupRepository,
 )
 from app.domain.audit import AuditAction, AuditActor
-from app.domain.entities import AuditOutcome, Document, DocumentStatus
+from app.domain.entities import AuditOutcome, Document, DocumentStatus, Role
+from app.domain.ingestion import ExtractionDiagnostics
 from app.retrieval.permissions import AllowSet
 from app.retrieval.queries import get_permitted_document, permitted_document_ids
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
@@ -74,6 +75,15 @@ class DocumentView:
 
     document: Document
     chunk_count: int
+    extraction_diagnostics: ExtractionDiagnostics | None = None
+
+    @property
+    def searchable(self) -> bool:
+        return (
+            self.document.status is DocumentStatus.READY
+            and self.chunk_count > 0
+            and self.document.ingestion_outcome not in ("empty", "failed", "unsupported")
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +204,7 @@ class DocumentService:
         denials: PermissionDeniedContext,
         request_id: str,
         source_ip: str,
+        roles: tuple[Role, ...] = (),
     ) -> None:
         self._session = session
         self._documents = DocumentRepository(session, tenant_id)
@@ -201,6 +212,7 @@ class DocumentService:
         self._chunks = ChunkRepository(session, tenant_id)
         self._tenant_id = tenant_id
         self._owner_id = owner_id
+        self._roles = roles
         self._groups = GroupRepository(session, tenant_id)
         # The requester's read allow-set — the SAME object retrieval keys its
         # permission predicate off (ADR-0019 §2 mode split, spec 0004 §2.2).
@@ -236,7 +248,32 @@ class DocumentService:
 
     async def _view(self, document: Document) -> DocumentView:
         count = await self._documents.count_chunks(document.id)
-        return DocumentView(document=document, chunk_count=count)
+        view = DocumentView(
+            document=document,
+            chunk_count=count,
+            extraction_diagnostics=self._diagnostics(document),
+        )
+        await self._audit_diagnostics(view)
+        return view
+
+    def _diagnostics(self, document: Document) -> ExtractionDiagnostics | None:
+        if Role.ADMIN not in self._roles:
+            return None
+        value = (document.ingestion_metadata or {}).get("extraction_diagnostics")
+        return ExtractionDiagnostics.from_dict(value) if isinstance(value, dict) else None
+
+    async def _audit_diagnostics(self, view: DocumentView) -> None:
+        if view.extraction_diagnostics is not None:
+            await self._audit.emit(
+                action=AuditAction.DOCUMENT_VIEWED,
+                actor=AuditActor.user(self._owner_id),
+                resource_type="document",
+                resource_id=str(view.document.id),
+                outcome=AuditOutcome.ALLOWED,
+                request_id=self._request_id,
+                source_ip=self._source_ip,
+                metadata={"form": "extraction_diagnostics"},
+            )
 
     async def _visible(self, document_id: UUID, *, attempted_action: str) -> Document | None:
         """Fetch a document the caller may **read**, or ``None`` (→ 404).
@@ -362,7 +399,16 @@ class DocumentService:
         # no chunks is absent from the mapping and defaults to 0, exactly as the
         # single-id count returns for a document ingestion has not populated yet.
         chunk_counts = await self._documents.count_chunks_for([d.id for d in visible])
-        items = [DocumentView(document=d, chunk_count=chunk_counts.get(d.id, 0)) for d in visible]
+        items = [
+            DocumentView(
+                document=d,
+                chunk_count=chunk_counts.get(d.id, 0),
+                extraction_diagnostics=self._diagnostics(d),
+            )
+            for d in visible
+        ]
+        for item in items:
+            await self._audit_diagnostics(item)
         return DocumentPage(items=items, next_cursor=next_cursor)
 
     @audited_resource("document.read", "document", "document_id", missing_result=True)
@@ -381,8 +427,8 @@ class DocumentService:
         the router, indistinguishable from missing. A **visible** document that
         is not ``ready`` has no text yet → :class:`ConflictError`
         (``document_not_ready`` → 409, INV-8's illegal-state arm). The text is
-        the ingestion parser output reassembled exactly from the stored chunks
-        (:func:`reassemble_chunk_texts` — overlap-aware), capped at
+        the retained ingestion parser output, with overlap-aware reconstruction
+        from stored chunks for legacy documents, capped at
         ``max_bytes`` UTF-8 bytes on a character boundary with ``truncated``
         set. Audited ``document.viewed`` (INV-6).
         """
@@ -395,7 +441,11 @@ class DocumentService:
                 code="document_not_ready",
             )
         chunks = await self._chunks.list_for_document(document_id)
-        text = reassemble_chunk_texts(chunks)
+        text = (
+            document.source_text
+            if document.source_text is not None
+            else reassemble_chunk_texts(chunks)
+        )
         truncated = False
         encoded = text.encode("utf-8")
         if len(encoded) > max_bytes:

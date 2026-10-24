@@ -144,7 +144,10 @@ async def test_tight_fixed_context_budget_rejects_mapped_mcp_tool_schema(
 
     # Independently compute the pre-fix internal-name cost so the window is
     # deliberately between the costs, regardless of incidental schema bytes.
-    internal_wire_tools = LLMGateway._to_wire_tools(tools)
+    internal_wire_tools = [
+        {**wire, "function": {**wire["function"], "name": spec.name}}
+        for wire, spec in zip(captured["tools"], tools, strict=True)
+    ]
     internal_cost = _wire_cost(actual_wire_messages, internal_wire_tools)
     assert actual_wire_cost > internal_cost
     budget = (actual_wire_cost + internal_cost) // 2

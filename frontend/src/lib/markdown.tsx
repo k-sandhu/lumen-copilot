@@ -45,6 +45,7 @@ const schema: SanitizeSchema = {
   tagNames: [...(defaultSchema.tagNames ?? []), 'input'],
   attributes: {
     ...defaultSchema.attributes,
+    a: [...(defaultSchema.attributes?.a ?? []), 'dataEvidenceHandle'],
     code: [...(defaultSchema.attributes?.code ?? []), ['className']],
     span: [...(defaultSchema.attributes?.span ?? []), ['className']],
     input: [...(defaultSchema.attributes?.input ?? []), 'type', 'checked', 'disabled'],
@@ -62,6 +63,8 @@ export interface MarkdownProps {
    * new tab — the chat behavior, unchanged.
    */
   resolveInternalLink?: (href: string) => string | null;
+  /** Resolve a visible `[S#]` / `[W#]` evidence marker to its citation action. */
+  resolveCitationHandle?: (handle: string) => { title: string; onClick: () => void } | undefined;
   /**
    * #494: while an answer is actively streaming, parse INCREMENTALLY — split the
    * source into settled blocks (each parsed once, memoised on content) plus one
@@ -73,6 +76,72 @@ export interface MarkdownProps {
    * whole-document path.
    */
   streaming?: boolean;
+}
+
+const NON_TEXT_MARKUP = new Set([
+  'code',
+  'inlineCode',
+  'link',
+  'linkReference',
+  'image',
+  'imageReference',
+  'html',
+]);
+
+/** The narrow structural mdast fields this transform reads and writes. */
+interface MarkdownAstNode {
+  type: string;
+  value?: string;
+  url?: string;
+  data?: { hProperties: { dataEvidenceHandle: string } };
+  children?: MarkdownAstNode[];
+}
+
+interface MarkdownAstRoot extends MarkdownAstNode {
+  type: 'root';
+  children: MarkdownAstNode[];
+}
+
+/** Convert plain evidence tokens in mdast text nodes into safe synthetic links. */
+function remarkEvidenceHandles() {
+  return (tree: MarkdownAstRoot) => {
+    const visit = (parent: MarkdownAstNode & { children: MarkdownAstNode[] }): void => {
+      const rewritten: MarkdownAstNode[] = [];
+      for (const child of parent.children) {
+        if (child.type === 'text' && typeof child.value === 'string') {
+          const matcher = /\[(S[1-9][0-9]*|W[1-9][0-9]*)\]/g;
+          let cursor = 0;
+          let match: RegExpExecArray | null;
+          while ((match = matcher.exec(child.value)) !== null) {
+            const start = match.index;
+            const token = match[0];
+            const handle = match[1];
+            if (start > cursor)
+              rewritten.push({ type: 'text', value: child.value.slice(cursor, start) });
+            if (handle) {
+              rewritten.push({
+                type: 'link',
+                url: `#lc-evidence:${handle}`,
+                data: { hProperties: { dataEvidenceHandle: handle } },
+                children: [{ type: 'text', value: token }],
+              });
+            }
+            cursor = start + token.length;
+          }
+          if (cursor === 0) rewritten.push(child);
+          else if (cursor < child.value.length) {
+            rewritten.push({ type: 'text', value: child.value.slice(cursor) });
+          }
+          continue;
+        }
+        if (!NON_TEXT_MARKUP.has(child.type) && child.children)
+          visit(child as MarkdownAstNode & { children: MarkdownAstNode[] });
+        rewritten.push(child);
+      }
+      parent.children = rewritten;
+    };
+    visit(tree);
+  };
 }
 
 /**
@@ -162,17 +231,34 @@ function CodeBlock({ children, ...rest }: ComponentPropsWithoutRef<'pre'>) {
 const MarkdownPipeline = memo(function MarkdownPipeline({
   source,
   resolveInternalLink,
+  resolveCitationHandle,
 }: {
   source: string;
   resolveInternalLink?: (href: string) => string | null;
+  resolveCitationHandle?: MarkdownProps['resolveCitationHandle'];
 }) {
   return (
     <Markdown
       // Order matters: sanitize AFTER gfm/highlight so their output is also cleaned.
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkEvidenceHandles]}
       rehypePlugins={[rehypeHighlight, [rehypeSanitize, schema]]}
       components={{
-        a: ({ children: linkChildren, href }) => {
+        a: ({ children: linkChildren, href, node }) => {
+          const marker = href?.match(/^#lc-evidence:(S[1-9][0-9]*|W[1-9][0-9]*)$/);
+          if (marker?.[1] && node?.properties.dataEvidenceHandle === marker[1]) {
+            const resolution = resolveCitationHandle?.(marker[1]);
+            if (!resolution) return <>{linkChildren}</>;
+            return (
+              <button
+                type="button"
+                className="lc-cite"
+                aria-label={`Citation ${marker[1]}: ${resolution.title}`}
+                onClick={resolution.onClick}
+              >
+                {linkChildren}
+              </button>
+            );
+          }
           const to = href ? (resolveInternalLink?.(href) ?? null) : null;
           // Internal doc link → client-side navigation inside the viewer.
           if (to !== null) return <Link to={to}>{linkChildren}</Link>;
@@ -215,9 +301,11 @@ const MarkdownPipeline = memo(function MarkdownPipeline({
 function StreamingMarkdownBody({
   source,
   resolveInternalLink,
+  resolveCitationHandle,
 }: {
   source: string;
   resolveInternalLink?: (href: string) => string | null;
+  resolveCitationHandle?: MarkdownProps['resolveCitationHandle'];
 }) {
   const { settled, trailing } = splitStreamingBlocks(source);
   // Disambiguate identical settled blocks (e.g. two `---`) so keys stay unique.
@@ -234,7 +322,11 @@ function StreamingMarkdownBody({
       {blocks.map((block, i) => (
         <Fragment key={block.key}>
           {i > 0 && '\n'}
-          <MarkdownPipeline source={block.source} resolveInternalLink={resolveInternalLink} />
+          <MarkdownPipeline
+            source={block.source}
+            resolveInternalLink={resolveInternalLink}
+            resolveCitationHandle={resolveCitationHandle}
+          />
         </Fragment>
       ))}
     </>
@@ -245,6 +337,7 @@ function MarkdownViewComponent({
   children,
   className,
   resolveInternalLink,
+  resolveCitationHandle,
   streaming,
 }: MarkdownProps) {
   // #166: while an answer streams, `children` grows by one delta per token and the
@@ -263,9 +356,17 @@ function MarkdownViewComponent({
         // #494: incremental per-block parse for the live bubble. Settle flips this
         // component out for the whole-document path below, whose DOM is identical
         // to a one-shot render (AC-3), so the hand-off is seamless.
-        <StreamingMarkdownBody source={children} resolveInternalLink={resolveInternalLink} />
+        <StreamingMarkdownBody
+          source={children}
+          resolveInternalLink={resolveInternalLink}
+          resolveCitationHandle={resolveCitationHandle}
+        />
       ) : (
-        <MarkdownPipeline source={source} resolveInternalLink={resolveInternalLink} />
+        <MarkdownPipeline
+          source={source}
+          resolveInternalLink={resolveInternalLink}
+          resolveCitationHandle={resolveCitationHandle}
+        />
       )}
     </div>
   );

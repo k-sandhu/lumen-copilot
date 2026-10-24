@@ -96,6 +96,7 @@ class CitationResponse(BaseModel):
     #: Mirrors the chat transcript's field — both project the SAME contract
     #: schema (`#/components/schemas/Citation`), and a parity test pins them.
     redacted: bool = False
+    handle: str | None = None
 
 
 class RunResponse(BaseModel):
@@ -167,6 +168,7 @@ def _citation_to_response(view: CitationView) -> CitationResponse:
         speaker_name=view.speaker_name if disclose_media else None,
         score=view.score,
         redacted=view.redacted,
+        handle=view.handle,
     )
 
 

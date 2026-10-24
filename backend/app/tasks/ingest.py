@@ -19,14 +19,14 @@ Pipeline (all slow/burst work — never the request path, backend/AGENTS.md):
 5. **Persist** the chunks (text + embedding vector + offsets + tenant + document
    + ordinal) via the #44 ``ChunkRepository``, tenant-scoped, **idempotently**
    (a re-run *replaces* the document's chunks — AC-5).
-6. **Advance status** ``pending → processing → ready`` and set ``chunk_count``;
-   any parse/embed/persist failure marks the document ``failed`` with the reason
-   (AC-6) and **does not crash silently**.
-7. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
+6. **Sync the search index** (ADR-0010 §5, dual-write): replace the document's
    chunk docs in OpenSearch via :func:`app.tasks.index_sync.sync_document_index_async`
    — retrieval serves from the engine (single-store), so ``ready`` must imply
    retrievable. An engine fault is a *transient* fault like storage/model: the
    run fails and Celery retries the (idempotent) pipeline as a unit.
+7. **Activate ready** only after acknowledged publication, with the expected
+   attempt CAS. Empty native extraction clears chunks and refreshed generations,
+   then fails with an actionable message; it never publishes an empty Ready row.
 
 Idempotency, retry-with-backoff, and dead-lettering (backend/AGENTS.md): the
 task replaces (never duplicates) chunks; transient faults (storage/model/db
@@ -68,9 +68,12 @@ from app.db.repositories import (
 from app.db.session import tenant_session_scope
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import AuditOutcome, DocumentKind, DocumentStatus, TranscriptionCheckpoint
+from app.domain.ingestion import ExtractionOutcome, native_outcome
 from app.domain.llm import Embedding, Transcription, TranscriptionWord
-from app.ingestion import DocumentParseError, chunk_text, parse_document
+from app.ingestion import DocumentParseError, chunk_text, parse_document_with_locations
 from app.ingestion.contract import ensure_embedding_contract, ingestion_enqueue_allowed
+from app.ingestion.diagnostics import build_extraction_diagnostics
+from app.ingestion.fingerprint import FingerprintError, build_ingestion_fingerprint
 from app.ingestion.media import (
     AUDIO_MIME_TYPES,
     VIDEO_MIME_TYPES,
@@ -87,6 +90,7 @@ from app.ingestion.media import (
     probe_media,
     stitch_chunk_transcriptions,
 )
+from app.ingestion.parsers import UnsupportedMimeTypeError
 from app.llm import InvalidTranscriptionResponse, LLMGateway
 from app.search import OpenSearchStore
 from app.services.audit import AuditSink
@@ -231,6 +235,7 @@ async def ingest_document_async(
             storage_key = document.storage_key
             mime_type = document.mime_type
             attempt = document.ingestion_attempts
+            await documents.update_ingestion_metadata(document_id, {"extraction_diagnostics": None})
     except SQLAlchemyError as exc:
         raise IngestionError(
             "Document ingestion could not claim the database row.",
@@ -373,7 +378,9 @@ async def _ingest_claimed_document(
         ) from exc
 
     try:
-        text = parse_document(data, mime_type=mime_type)
+        parsed = parse_document_with_locations(data, mime_type=mime_type)
+        text = parsed.text
+        diagnostics = build_extraction_diagnostics(data, mime_type=mime_type, parsed=parsed)
     except DocumentParseError as exc:
         return await _finalize_failure(
             tenant_id,
@@ -381,7 +388,19 @@ async def _ingest_claimed_document(
             str(exc),
             expected_attempt=attempt,
             code="document_parse_error",
+            outcome=(
+                ExtractionOutcome.UNSUPPORTED
+                if isinstance(exc, UnsupportedMimeTypeError)
+                else ExtractionOutcome.FAILED
+            ),
             correlation_id=correlation_id,
+        )
+
+    # Inspection survives a later model/index fault; retain text/maps only with
+    # replacement chunks, so historical exact slices cannot be retargeted here.
+    async with tenant_session_scope(tenant_id) as session:
+        await DocumentRepository(session, tenant_id).update_ingestion_metadata(
+            document_id, {"extraction_diagnostics": diagnostics.to_dict()}
         )
 
     chunks = chunk_text(
@@ -390,6 +409,16 @@ async def _ingest_claimed_document(
         overlap=settings.ingestion_chunk_overlap,
     )
     if not chunks:
+        try:
+            fingerprint = build_ingestion_fingerprint(
+                data,
+                mime_type=mime_type,
+                chunk_size=settings.ingestion_chunk_size,
+                overlap=settings.ingestion_chunk_overlap,
+                embeddings=[],
+            )
+        except FingerprintError as exc:
+            raise IngestionError(f"could not fingerprint extraction: {exc}") from exc
         async with tenant_session_scope(tenant_id) as session:
             persisted = await ChunkRepository(session, tenant_id).replace_for_ingestion(
                 document_id,
@@ -397,6 +426,10 @@ async def _ingest_claimed_document(
                 expected_attempt=attempt,
                 embedding_fingerprint=settings.embedding_space_fingerprint,
             )
+            if persisted is not None:
+                await DocumentRepository(session, tenant_id).set_extraction(
+                    document_id, text=text, locations=parsed.locations, fingerprint=fingerprint
+                )
         if persisted is None:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
         published = await _sync_index(
@@ -408,20 +441,18 @@ async def _ingest_claimed_document(
         )
         if not published:
             return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        async with tenant_session_scope(tenant_id) as session:
-            ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-                document_id, expected_attempt=attempt
-            )
-        if ready is None:
-            await _discard_generation(
-                tenant_id,
-                document_id,
-                attempt=attempt,
-                settings=settings,
-                store=search_store,
-            )
-            return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
-        return IngestionResult(document_id, DocumentStatus.READY, 0)
+        # Cleanup must acknowledge completion before this permanent failure is
+        # finalized. A cleanup fault remains retryable; the attempt fence keeps
+        # an old empty delivery from overwriting a newer successful ingestion.
+        return await _finalize_failure(
+            tenant_id,
+            document_id,
+            "No native text was extracted. Use a text-bearing file or an OCR-enabled workflow.",
+            expected_attempt=attempt,
+            code="document_empty",
+            outcome=ExtractionOutcome.EMPTY,
+            correlation_id=correlation_id,
+        )
 
     try:
         embeddings = await _embed_in_batches(
@@ -446,12 +477,24 @@ async def _ingest_claimed_document(
             code="embedding_count_mismatch",
         )
 
+    try:
+        fingerprint = build_ingestion_fingerprint(
+            data,
+            mime_type=mime_type,
+            chunk_size=settings.ingestion_chunk_size,
+            overlap=settings.ingestion_chunk_overlap,
+            embeddings=embeddings,
+        )
+    except FingerprintError as exc:
+        raise IngestionError(f"could not fingerprint extraction: {exc}") from exc
+
     chunk_inputs = [
         ChunkInput(
             text=chunk.text,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
             embedding=embedding.vector,
+            source_locations=parsed.locations_for_span(chunk.char_start, chunk.char_end),
             embedding_fingerprint=settings.embedding_space_fingerprint,
         )
         for chunk, embedding in zip(chunks, embeddings, strict=True)
@@ -464,6 +507,10 @@ async def _ingest_claimed_document(
                 expected_attempt=attempt,
                 embedding_fingerprint=settings.embedding_space_fingerprint,
             )
+            if persisted is not None:
+                await DocumentRepository(session, tenant_id).set_extraction(
+                    document_id, text=text, locations=parsed.locations, fingerprint=fingerprint
+                )
     except ValueError as exc:
         raise IngestionError(
             "Document re-embedding would change legacy chunk boundaries.",
@@ -483,7 +530,7 @@ async def _ingest_claimed_document(
         return IngestionResult(document_id, DocumentStatus.FAILED, 0, "attempt superseded")
     async with tenant_session_scope(tenant_id) as session:
         ready = await DocumentRepository(session, tenant_id).mark_ingestion_ready(
-            document_id, expected_attempt=attempt
+            document_id, expected_attempt=attempt, outcome=native_outcome(parsed)
         )
     if ready is None:
         await _discard_generation(
@@ -935,6 +982,7 @@ async def _sync_index(
             expected_attempt=expected_attempt,
             settings=settings,
             store=store,
+            refresh=True,
             require_search_visibility=True,
         )
         return not result.superseded
@@ -957,6 +1005,7 @@ async def _fail(
     *,
     expected_attempt: int | None = None,
     code: str = "ingestion_retries_exhausted",
+    outcome: ExtractionOutcome = ExtractionOutcome.FAILED,
     correlation_id: str | None = None,
     ingestion_run_id: UUID | None = None,
 ) -> IngestionResult:
@@ -976,6 +1025,7 @@ async def _fail(
             document_id,
             expected_attempt=expected_attempt,
             code=code,
+            outcome=outcome,
             message=reason,
             correlation_id=correlation_id,
         )
@@ -1010,6 +1060,7 @@ async def _finalize_failure(
     expected_attempt: int,
     code: str,
     correlation_id: str | None = None,
+    outcome: ExtractionOutcome = ExtractionOutcome.FAILED,
 ) -> IngestionResult:
     """Boundedly recover a transient finalizer transaction failure (R1-003)."""
 
@@ -1022,6 +1073,7 @@ async def _finalize_failure(
                 expected_attempt=expected_attempt,
                 code=code,
                 correlation_id=correlation_id,
+                outcome=outcome,
             )
         except SQLAlchemyError as exc:
             if finalizer_attempt == 1:

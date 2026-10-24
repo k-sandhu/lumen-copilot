@@ -150,6 +150,34 @@ def test_tool_schemas_spend_the_budget() -> None:
     assert with_tools.dropped_history_messages == 1
 
 
+@pytest.mark.parametrize("later_turn", [False, True], ids=["assembly", "transcript"])
+def test_projected_fixed_tool_schemas_refuse_before_provider(later_turn: bool) -> None:
+    tools = tuple(
+        ToolSpec(
+            name=f"mcp:server:tool_{index}",
+            description="probe",
+            parameters={
+                "type": "object",
+                "properties": {f"optional_{i}": {"type": "string"} for i in range(30)},
+            },
+        )
+        for index in range(10)
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        if later_turn:
+            fit_transcript(
+                [_msg(Role.SYSTEM, "SYS"), _msg(Role.USER, "Q")],
+                model="fake/model",
+                tools=tools,
+                config=ContextConfig(output_headroom_tokens=0),
+                counter=_CHAR_COUNTER,
+                max_input_resolver=lambda _: 15_000,
+            )
+        else:
+            _assemble(history=[], max_input=15_000, tools=tools)
+    assert excinfo.value.code == "context_too_large"
+
+
 def test_tight_budget_shrinks_retrieval_k_and_max_k() -> None:
     """Degrade order step 3: a nearly-full window shrinks BOTH the default k and
     the enforceable ceiling (#424 review, finding 3), so even an explicit large k

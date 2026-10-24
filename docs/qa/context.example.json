@@ -1,0 +1,24 @@
+{
+  "application": {
+    "source_state": "unknown",
+    "images": []
+  },
+  "environment": {
+    "label": "local Chrome QA",
+    "kind": "live_local",
+    "browser": "Chrome (record exact version)",
+    "models": [
+      "record actual model route"
+    ],
+    "database_schema": "record Alembic revision",
+    "data": {
+      "fixture_sha256": "6115fb0af49f02b86f81a3564b4cb1cb08d84343640dedcd0e42a0d844c96ab2"
+    },
+    "configuration": {
+      "compose_files": [
+        "docker-compose.yml",
+        "docker-compose.fast.yml"
+      ]
+    }
+  }
+}

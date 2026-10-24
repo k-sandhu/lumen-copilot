@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.domain.ingestion import SourceLocation
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievedPassage:
@@ -45,6 +47,7 @@ class RetrievedPassage:
     char_start: int
     char_end: int
     score: float
+    source_locations: tuple[SourceLocation, ...] = ()
     # Media provenance (spec 0008 / #571). The pair is null for ordinary
     # documents; citation policy validates paired, ordered, in-duration values
     # before an answer may expose them.
@@ -68,6 +71,21 @@ class DocumentMatch:
     document_id: UUID
     document_name: str
     score: float
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentResolution:
+    """The outcome of resolving a ``get_document`` handle inside ``retrieval/`` (#758).
+
+    Exactly one shape is populated: ``document`` for a unique permitted match,
+    ``candidates`` for an ambiguous exact-name match (permitted documents only,
+    so listing them discloses nothing), or neither for nothing resolved — the
+    INV-2 case where missing, malformed, foreign and cross-tenant handles are
+    indistinguishable by construction.
+    """
+
+    document: DocumentText | None = None
+    candidates: tuple[DocumentMatch, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

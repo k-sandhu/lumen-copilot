@@ -17,7 +17,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useModels } from '@/features/models';
-import { useChatStore, type SessionScope } from '../model/chatStore';
+import { useChatStore, type SessionScope, type ViewerTarget } from '../model/chatStore';
 import { initialModes, modeAvailability } from '../model/presentation';
 import { fromRestCitation, type UiCitation } from '../model/citation';
 import '../chat.css';
@@ -196,11 +196,13 @@ export function ChatView() {
               onOpenCitation={(c) => {
                 const citation = fromRestCitation(c);
                 openViewer({
+                  kind: 'document',
+                  id: citation.id,
+                  ...(citation.handle !== undefined ? { handle: citation.handle } : {}),
                   documentId: citation.documentId,
                   documentName: citation.documentName,
                   charStart: citation.charStart,
                   charEnd: citation.charEnd,
-                  snippet: citation.snippet,
                   ...(citation.timeStartMs !== undefined
                     ? { timeStartMs: citation.timeStartMs }
                     : {}),
@@ -212,6 +214,7 @@ export function ChatView() {
                   ...(citation.speakerName !== undefined
                     ? { speakerName: citation.speakerName }
                     : {}),
+                  snippet: citation.snippet,
                 });
               }}
               onOpenArtifact={(id) => {
@@ -256,32 +259,20 @@ export function ChatView() {
 
       {viewer && (
         <aside className="lc-chat__inspector">
-          {viewer.url ? (
+          {viewer.kind === 'web' ? (
             // A web citation (#221): render the web-source pane (host + snippet +
             // safe external link), NOT the document-bytes viewer — a web result
             // has no corpus document to fetch (INV-3).
             <ErrorBoundary label="Web source">
-              <WebSourceView
-                citation={{
-                  id: `${viewer.url}:${viewer.charStart}`,
-                  documentId: viewer.documentId,
-                  documentName: viewer.documentName,
-                  chunkId: '',
-                  snippet: viewer.snippet,
-                  charStart: viewer.charStart,
-                  charEnd: viewer.charEnd,
-                  url: viewer.url,
-                  ...(viewer.timeStartMs !== undefined ? { timeStartMs: viewer.timeStartMs } : {}),
-                  ...(viewer.timeEndMs !== undefined ? { timeEndMs: viewer.timeEndMs } : {}),
-                }}
-                onClose={closeViewer}
-              />
+              <WebSourceView citation={viewer} onClose={closeViewer} />
             </ErrorBoundary>
           ) : (
             <ErrorBoundary label="Document viewer">
               <DocumentViewer
                 citation={{
-                  id: `${viewer.documentId}:${viewer.charStart}`,
+                  id: viewer.id,
+                  kind: 'document',
+                  ...(viewer.handle ? { handle: viewer.handle } : {}),
                   documentId: viewer.documentId,
                   documentName: viewer.documentName,
                   chunkId: '',
@@ -319,19 +310,7 @@ interface ActiveSessionProps {
   activeStreamId: string | null;
   startStream: (streamId: string) => void;
   endStream: () => void;
-  openViewer: (target: {
-    documentId: string;
-    documentName: string;
-    charStart: number;
-    charEnd: number;
-    snippet: string;
-    timeStartMs?: number;
-    timeEndMs?: number;
-    transcriptSegmentId?: string;
-    speakerId?: string;
-    speakerName?: string;
-    url?: string;
-  }) => void;
+  openViewer: (target: ViewerTarget) => void;
   onDoneReload: () => void;
   /** Called once the post-terminal suggestions window settles (BE2-7). */
   onSuggestionsSettled: () => void;
@@ -504,6 +483,7 @@ function ActiveSession({
             phase: stream.phase,
             text: stream.text,
             citations: stream.citations,
+            webCitations: stream.webCitations,
             tools: stream.tools,
             codeRuns: stream.codeRuns,
             steps: stream.steps,
@@ -519,6 +499,7 @@ function ActiveSession({
       stream.phase,
       stream.text,
       stream.citations,
+      stream.webCitations,
       stream.tools,
       stream.codeRuns,
       stream.steps,
@@ -570,27 +551,40 @@ function ActiveSession({
 
   // Opening a citation forwards only what the citation wire provides about the
   // source; the answer-time `meta` is NOT source provenance and is intentionally
-  // not forwarded as freshness/last-indexed (#120). A web citation (#221)
-  // forwards its `url` so the inspector opens the web-source pane. Stable
+  // not forwarded as freshness/last-indexed (#120). The discriminated citation
+  // variant selects the document or web source pane. Stable
   // identity (useCallback) so it does not defeat every MessageBubble's memo (the
   // single highest-leverage prop on the render path, #495).
   const onOpenCitation = useCallback(
-    (c: UiCitation) =>
-      openViewer({
-        documentId: c.documentId,
-        documentName: c.documentName,
-        charStart: c.charStart,
-        charEnd: c.charEnd,
-        snippet: c.snippet,
-        ...(c.timeStartMs !== undefined ? { timeStartMs: c.timeStartMs } : {}),
-        ...(c.timeEndMs !== undefined ? { timeEndMs: c.timeEndMs } : {}),
-        ...(c.transcriptSegmentId !== undefined
-          ? { transcriptSegmentId: c.transcriptSegmentId }
-          : {}),
-        ...(c.speakerId !== undefined ? { speakerId: c.speakerId } : {}),
-        ...(c.speakerName !== undefined ? { speakerName: c.speakerName } : {}),
-        ...(c.url ? { url: c.url } : {}),
-      }),
+    (c: UiCitation) => {
+      if (c.kind === 'web')
+        openViewer({
+          kind: 'web',
+          id: c.id,
+          handle: c.handle,
+          url: c.url,
+          webTitle: c.webTitle,
+          snippet: c.snippet,
+        });
+      else
+        openViewer({
+          kind: 'document',
+          id: c.id,
+          ...(c.handle ? { handle: c.handle } : {}),
+          documentId: c.documentId,
+          documentName: c.documentName,
+          charStart: c.charStart,
+          charEnd: c.charEnd,
+          snippet: c.snippet,
+          ...(c.timeStartMs !== undefined ? { timeStartMs: c.timeStartMs } : {}),
+          ...(c.timeEndMs !== undefined ? { timeEndMs: c.timeEndMs } : {}),
+          ...(c.transcriptSegmentId !== undefined
+            ? { transcriptSegmentId: c.transcriptSegmentId }
+            : {}),
+          ...(c.speakerId !== undefined ? { speakerId: c.speakerId } : {}),
+          ...(c.speakerName !== undefined ? { speakerName: c.speakerName } : {}),
+        });
+    },
     [openViewer],
   );
 

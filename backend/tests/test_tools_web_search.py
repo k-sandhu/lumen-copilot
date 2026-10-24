@@ -97,23 +97,10 @@ def test_web_search_is_off_by_default_allowlist() -> None:
     defn = get_tool("web_search")
     assert defn.default_offered is False
     assert "web_search" not in default_allowlist()
-    # The read-only tools remain the ad-hoc default (regression); this is the
-    # full set — four retrieval tools since list_documents joined (#371), plus
-    # ask_user (spec 0006 #429/#434: the clarifying-question tool is offered by
-    # default so interactive chat can intercept it) and read_conversation
-    # (#569: reading back THIS session's own compacted turns, which the caller
-    # already owns and can read through GET /chat/sessions/{id}/messages — the
-    # ADR-0014 §5 concern this test guards is reaching OUTSIDE the tenant's
-    # corpus, which recall does not do).
+    # Canonical corpus tools, clarification and own-conversation recall remain
+    # the default. External web access still requires an explicit allow-list.
     assert default_allowlist() == frozenset(
-        {
-            "search_text",
-            "search_documents",
-            "list_documents",
-            "get_document",
-            "ask_user",
-            "read_conversation",
-        }
+        {"search_passages", "find_documents", "read_document", "ask_user", "read_conversation"}
     )
 
 
@@ -200,7 +187,8 @@ async def test_enabled_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_service(monkeypatch, _StubService(results=()))
     result = await web_search_impl._web_search({"query": "python"}, _ctx())
     assert result.ok is True
-    assert result.summary == "0 results"
+    assert result.summary == "provider empty: 0 results"
+    assert result.payload is not None and result.payload["reason"] == "provider_empty"
 
 
 async def test_enabled_missing_query(monkeypatch: pytest.MonkeyPatch) -> None:

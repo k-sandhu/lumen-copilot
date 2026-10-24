@@ -1,0 +1,84 @@
+Source chat: List Existing QA Test Titles
+Chat ID: 01a10aaa-54d1-7382-8865-c0c412a3d86a
+Date: 2026-10-05
+
+Likely gaps or areas needing deeper live coverage:
+
+| Test | Steps | Pass condition |
+|---|---|---|
+| Authenticated Browser End-to-End | Login → upload → ingest → chat → open citation. | Complete flow works against real services. |
+| Cross-Browser Compatibility | Run core flows in Chrome, Firefox, Safari/WebKit. | Equivalent behavior; no browser-specific failures. |
+| Mobile and Touch Layout | Use narrow screens; open menus, dialogs, previews. | Controls remain usable; no clipping or overlap. |
+| Accessibility Audit | Run automated checks and keyboard/screen-reader walkthroughs. | No serious violations; core flows accessible. |
+| Visual Regression | Compare page screenshots across themes and densities. | No unintended layout or styling changes. |
+| Concurrent Load | Run many users uploading, searching, and chatting. | Agreed latency/error targets met; tenants remain isolated. |
+| Long-Running Stability | Repeat workloads for hours; monitor connections and memory. | Resource usage stabilizes; no accumulating failures. |
+| Service Restart Recovery | Restart workers, Redis, search, and storage during operations. | Failures surface clearly; recovery avoids corrupt/duplicate data. |
+| Backup and Restore | Back up data; restore into a clean environment. | Documents, permissions, artifacts, and audits remain consistent. |
+| Upgrade with Existing Data | Apply migrations to a populated previous-version database. | Upgrade preserves data and permissions; application starts correctly. |
+| Adversarial Prompt Injection | Place malicious instructions in documents and tool results. | No permission bypass, secret disclosure, or unauthorized action. |
+| Login Abuse Protection | Flood login with invalid credentials. | Agreed abuse controls hold; legitimate requests remain responsive. |
+| Cross-Origin Request Protection | Attempt cookie-backed requests and WebSocket connections from foreign origins. | Unauthorized origins cannot perform protected operations. |
+| Multi-Tab Session Refresh | Expire tokens; trigger requests simultaneously in several tabs. | Refresh races recover; no persistent login loop. |
+| Malicious Document Handling | Upload corrupt, mislabeled, and decompression-heavy files. | Safe rejection/failure; parser resources remain controlled. |
+| Secret Leakage in Telemetry | Trigger provider/OAuth failures; inspect logs, traces, errors. | No tokens, keys, or credentials appear. |
+| Permission Revocation During Execution | Revoke access while retrieval/tools are running. | Subsequent access follows revocation rules; no forbidden evidence disclosed. |
+| Browser Network Recovery | Disconnect during streaming; reconnect and reload. | No duplicated answer text; usable terminal or recovery state. |
+| Audit Failure Atomicity | Make audit persistence fail during a protected operation. | Operation cannot silently succeed without its required audit event. |
+
+These are expected passing conditions, not results from a new test run.
+
+| Test | Steps | Pass condition |
+|---|---|---|
+| Authentication, Tokens, and Sessions | Login, refresh, replay old token, logout. | Valid access works; invalid/revoked refresh tokens fail. |
+| Tenant Isolation and RLS | Access another tenant’s records through API and database. | API returns 404; database excludes foreign rows. |
+| Roles, Groups, and Grants | Change memberships/grants; retry restricted operations. | Authorized access succeeds; forbidden operations return 403. |
+| Retrieval Permissions and Ranking | Search with different users and ranking signals. | Only permitted results appear; fusion order matches expectations. |
+| Grounded Chat and Citations | Ask supported, unsupported, and restricted-source questions. | Valid citations appear; unsupported answers refuse; restricted sources stay hidden. |
+| Chat API and Runtime | Create, update, message, reload, delete a conversation. | Lifecycle works; answers and citations persist correctly. |
+| WebSocket Streaming and Backplane | Subscribe before/after publishing; send terminal events. | Ordered delivery and replay work; terminal events end streaming. |
+| Context and Session Summaries | Exceed context budget; summarize; ask follow-up questions. | Context fits budget; required cited evidence survives. |
+| Document Upload, Management, Preview | Upload, list, preview, delete a document. | Content displays correctly; deletion removes stored data. |
+| Parsing, Chunking, and Ingestion | Ingest supported formats; repeat ingestion. | Correct text/chunks; ready status; no duplicate chunks. |
+| Collections Management | Create collections; add documents; inspect counts. | Ownership, contents, and counts match stored records. |
+| Search, Suggestions, Saved Searches | Search, filter, select suggestions, save/reload queries. | Relevant permitted results; saved filters round-trip correctly. |
+| Sources and Connector Sync | Add source, sync, inspect indexing, delete. | Documents index correctly; failures surface; deletion cascades. |
+| Google Drive, OAuth, ACL Mapping | Connect Drive; sync files; vary permissions. | Authorized files appear; mirrored ACL restrictions hold. |
+| Web Fetching and SSRF | Fetch public URLs and blocked/private destinations. | Public fetch works; unsafe destinations are rejected. |
+| LLM Gateway, Providers, Models | Configure provider; discover/select models; invoke gateway. | Correct model/provider used; credentials never returned. |
+| LLM Context, Tools, Prompt Economics | Exercise budgeting, fragmented tool calls, compaction. | Calls reconstruct correctly; compaction reduces input tokens. |
+| Assistant Creation, Versioning, Testing | Create/edit/publish assistant; run sample tests. | Configuration persists; versions display; tests avoid real side effects. |
+| Assistant Governance and Wiring | Certify/disable assistant; start chats; inspect instructions. | Governance applies; disabled assistants cannot start chats. |
+| Tool Registry, Execution, Policy | Invoke allowed, unknown, disabled, unapproved tools. | Allowed tools run; denied handlers never execute; outcomes recorded. |
+| Built-in Tools | Run retrieval, web search, Python, file-writing tools. | Correct results/artifacts; each tool’s policy is enforced. |
+| MCP Servers, Tools, Egress | Register server; discover/call tools; try blocked endpoints. | Allowed calls succeed; unsafe endpoints fail; secrets stay hidden. |
+| Sandbox Execution and Lifecycle | Execute, reuse session, reset, close, test isolation. | Expected output; correct generations; no host/network exposure. |
+| Sandbox Auth and Supply Chain | Use missing/wrong credentials; request denied packages. | Unauthorized calls return 401; denied dependencies never install. |
+| Code Runs and Messages | Execute code; inspect output, status, errors, artifacts. | Accurate run details and safe, actionable messages appear. |
+| Artifact Access and Retention | Create/read artifacts; attempt foreign access; purge expired items. | Content round-trips; unauthorized access denied; only expired items purge. |
+| Scheduling and Dispatch | Configure cadence/timezone; trigger due runs and overlaps. | Correct next-run times; configured overlap policy holds. |
+| Run History, Delivery, Inbox | Finish/fail runs; inspect inbox; repeat delivery; mark read. | Owner sees correct status; delivery is idempotent; read state updates. |
+| Autonomy and Escalation | Apply autonomy cap; trigger escalation; resume/cancel. | Caps never raise autonomy; transitions match defined rules. |
+| Audit Events, Filters, Export | Perform audited actions; filter events; export CSV. | Required tenant-scoped events exist; export matches displayed events. |
+| Administration and Governance | Open panels as admin/member; change supported policies. | Correct tenant data; restricted operations denied; changes persist. |
+| Encryption and Secrets | Encrypt/decrypt; tamper; use wrong key; inspect APIs. | Round-trip succeeds; tampering fails; plaintext never exposed. |
+| Database Migrations and Repositories | Check migration chain; create/read/update scoped records. | Single valid migration head; repository results match stored data. |
+| Object Storage | Store/read/delete content; test filenames and keys. | Bytes round-trip; keys are tenant-scoped; traversal stripped. |
+| Configuration and API Errors | Supply invalid settings/input; trigger unknown exceptions. | Invalid values rejected; errors follow contract without internal leaks. |
+| Preferences and Avatars | Save/clear preferences; upload/delete avatar; reload profile. | Values round-trip; invalid models rejected; avatar state matches. |
+| Frontend API and Refresh | Send requests; simulate 401; retry after refresh. | Correct headers/payloads; refresh and retry follow expected behavior. |
+| Navigation, Guards, Not Found | Visit known, protected, and unknown routes. | Correct screens; login when required; actionable 404 page. |
+| Shell and Command Palette | Navigate; open palette; filter/select commands. | Correct routes/actions; input focus and shortcuts work. |
+| Themes and Design Tokens | Change theme/mode/density; reload; change OS mode. | Preferences persist; system mode follows OS; tokens remain valid. |
+| Markdown and Sanitization | Render formatting/code; inject unsafe markup; copy code. | Formatting/copy work; unsafe markup cannot execute. |
+| Accessibility and Focus | Open dialogs; press Tab, Shift+Tab, Escape. | Correct initial focus; focus stays trapped; dismiss works. |
+| Chat Rendering and Autoscroll | Stream tokens; scroll upward; reconnect; finish stream. | No duplicate text; scrolling respects user; stable messages avoid rerenders. |
+| UI Trust Indicators | Render citations, permissions, freshness, risk, provenance. | Labels/states match actual data; source inspection works. |
+| Documentation and Feature Catalog | Open documents/cards; follow internal links. | Content renders; links resolve; unknown documents show helpful errors. |
+| Production Build Guards | Build with development pages disabled; inspect bundles/layout. | Development content excluded; heavy chat code split; grid can shrink. |
+| Unauthenticated Login Browser Smoke | Open app root without a valid session. | Accessible email/password login form appears. |
+| Docs/Catalog Browser Smoke | Open `/docs` and `/features` in test setup. | Expected document navigation and catalog headings appear. |
+| Grounded End-to-End | Upload → ingest → retrieve → ask → inspect citations. | Answer cites uploaded evidence; unauthorized users cannot retrieve it. |
+| Retrieval/Citation/Groundedness Evaluations | Run golden questions against fake/live models. | Configured quality thresholds pass; ungrounded answers are detected. |
+| Benchmark Data and Summaries | Validate manifests, checksums, questions, selection, reports. | Dataset checks pass; selection deterministic; evidence-preserving summaries pass. |
+| Latency and Compression Evaluations | Measure first answer token; simulate failure; compact context. | Latency meets configured budget; failures terminate; grounding survives compression. |

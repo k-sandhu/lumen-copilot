@@ -319,12 +319,22 @@ class Document(TenantScopedMixin, TimestampMixin, Base):
     )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Public discovery metadata from the connector, never connector config or
+    # credentials. Uploads may leave these NULL and fall back to filename.
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_modified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    discovery_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     # Tenant-prefixed object key; direct uploads use random quarantine keys,
     # while connector/legacy small objects may be content-addressed.
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ingestion_metadata: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
     # Durable fencing token for one active ingestion claimant. Every heartbeat,
     # checkpoint, and terminal write compares this value so a stale/redelivered
     # worker cannot overwrite a newer run after lease takeover.
@@ -477,6 +487,7 @@ class Chunk(TenantScopedMixin, TimestampMixin, Base):
     embedding_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_locations: Mapped[list[dict[str, object]] | None] = mapped_column(_JSON, nullable=True)
     time_start_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     time_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     transcript_segment_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -639,6 +650,7 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     model: Mapped[str] = mapped_column(String(255), nullable=False)
+    handle_next: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     # Optional assistant pin (ADR-0011 §1): a session started from an assistant
     # records both which assistant and the exact pinned version it ran, so the
     # transcript is reproducible after the assistant is edited/rolled back. Both
@@ -658,6 +670,21 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
     messages: Mapped[list[Message]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+
+
+class SourceHandle(TenantScopedMixin, Base):
+    """Durable conversation evidence identities; no corpus source text."""
+
+    __tablename__ = "source_handles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "session_id", "handle", name="uq_source_handles_identity"),
+    )
+    id: Mapped[uuid.UUID] = _pk()
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    handle: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence: Mapped[dict[str, object]] = mapped_column(_JSON, nullable=False)
 
 
 class UserPreference(TenantScopedMixin, TimestampMixin, Base):
@@ -834,8 +861,24 @@ class Citation(TenantScopedMixin, TimestampMixin, Base):
     )
     speaker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     speaker_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    handle: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     message: Mapped[Message] = relationship(back_populates="citations")
+
+
+class WebCitation(TenantScopedMixin, Base):
+    __tablename__ = "web_citations"
+    id: Mapped[uuid.UUID] = _pk()
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    handle: Mapped[str] = mapped_column(String(32), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    snippet: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class AuditEvent(TenantScopedMixin, Base):

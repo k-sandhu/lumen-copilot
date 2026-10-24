@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import models
 from app.db.repositories import to_document
 from app.domain.entities import Document, DocumentStatus
+from app.domain.ingestion import SourceLocation
 from app.retrieval.permissions import AllowSet
 from app.search.filters import acl_freshness_floor
 
@@ -82,6 +83,7 @@ class PassageRow:
     speaker_name: str | None
     ingestion_attempt: int
     embedding_fingerprint: str | None
+    source_locations: tuple[SourceLocation, ...] = ()
 
 
 def _valid_passage_provenance(row: PassageRow) -> bool:
@@ -436,6 +438,7 @@ def _base_chunk_select() -> (
             str | None,
             int,
             str | None,
+            list[dict[str, object]] | None,
         ]
     ]
 ):
@@ -463,6 +466,7 @@ def _base_chunk_select() -> (
             models.Chunk.speaker_name,
             models.Document.ingestion_attempts,
             models.Chunk.embedding_fingerprint,
+            models.Chunk.source_locations,
         )
         .join(models.Document, models.Chunk.document_id == models.Document.id)
         .outerjoin(
@@ -542,6 +546,8 @@ async def load_passages(
     *,
     allow_set: AllowSet,
     chunk_ids: Sequence[UUID],
+    collection_ids: Sequence[UUID] | None = None,
+    document_ids: Sequence[UUID] | None = None,
 ) -> dict[UUID, PassageRow]:
     """Hydrate fused chunk ids into citation-bearing rows (permission re-checked).
 
@@ -555,6 +561,10 @@ async def load_passages(
     if not chunk_ids:
         return {}
     stmt = _base_chunk_select().where(models.Chunk.id.in_(chunk_ids))
+    if collection_ids is not None:
+        stmt = stmt.where(models.Document.collection_id.in_(collection_ids))
+    if document_ids is not None:
+        stmt = stmt.where(models.Document.id.in_(document_ids))
     stmt = _permission_filter(stmt, allow_set)
     result = await session.execute(stmt)
     rows: dict[UUID, PassageRow] = {}
@@ -576,6 +586,7 @@ async def load_passages(
         speaker_name,
         ingestion_attempt,
         embedding_fingerprint,
+        locations,
     ) in result.all():
         row = PassageRow(
             chunk_id=cid,
@@ -595,6 +606,7 @@ async def load_passages(
             speaker_name=speaker_name,
             ingestion_attempt=ingestion_attempt,
             embedding_fingerprint=embedding_fingerprint,
+            source_locations=tuple(SourceLocation.from_dict(value) for value in locations or []),
         )
         if _valid_passage_provenance(row):
             rows[cid] = row
@@ -706,3 +718,57 @@ async def load_document_text(
         document_name=filename,
         text="".join(texts),
     )
+
+
+async def document_id_for_permitted_chunk(
+    session: AsyncSession,
+    *,
+    allow_set: AllowSet,
+    chunk_id: UUID,
+) -> UUID | None:
+    """The containing document of a chunk the caller may see, or ``None`` (#758).
+
+    Resolves a chunk id shown by ``search_text`` to its document under the
+    identical tenant + owner-or-grant predicate as :func:`load_document_text`
+    (``_permission_filter`` over the chunk↔document join). A chunk of a
+    document the caller may not see — another owner's, another tenant's, or a
+    missing chunk — yields ``None``, exactly like an unknown id (INV-2).
+    """
+    stmt = (
+        select(models.Chunk.document_id)
+        .join(models.Document, models.Chunk.document_id == models.Document.id)
+        .where(models.Chunk.id == chunk_id)
+    )
+    stmt = _permission_filter(stmt, allow_set)
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return row
+
+
+async def documents_by_exact_name(
+    session: AsyncSession,
+    *,
+    allow_set: AllowSet,
+    name: str,
+    k: int,
+) -> list[DocumentRow]:
+    """Permitted documents whose filename equals ``name`` exactly (#758).
+
+    Case-insensitive exact match (the caller trims whitespace) under the
+    identical tenant + owner-or-grant predicate as :func:`load_document_text`.
+    Only permitted documents can appear, so an ambiguous-name reply listing
+    these candidates never discloses a foreign document (INV-2). Ordered by
+    filename then id for a deterministic candidate list; ``k`` caps the count.
+    """
+    stmt = (
+        select(models.Document.id, models.Document.filename)
+        .where(
+            models.Document.tenant_id == allow_set.tenant_id,
+            _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
+            func.lower(models.Document.filename) == func.lower(name.strip()),
+        )
+        .order_by(models.Document.filename.asc(), models.Document.id.asc())
+        .limit(k)
+    )
+    result = await session.execute(stmt)
+    return [DocumentRow(document_id=did, document_name=fname) for did, fname in result.all()]
