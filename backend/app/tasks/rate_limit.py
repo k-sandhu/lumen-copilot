@@ -9,8 +9,8 @@ layer — so the frozen ``/sources`` contract needs no new status code (no 429):
 sync that would exceed the window is **deferred** (re-enqueued with backoff),
 never returned as an undefined HTTP error.
 
-The counter is a **fixed window** keyed per tenant: ``INCR`` a per-tenant,
-per-window Redis key and ``EXPIRE`` it for the window length on first hit. The
+The counter is a **fixed window** keyed per tenant: one Redis Lua evaluation
+increments the counter and sets its expiry for the window length on first hit. The
 first ``max_per_window`` syncs in a window are admitted; the rest are throttled.
 Redis is the stack's existing shared store (the Celery broker / cache backplane),
 so this adds no new infrastructure — the counter must be shared across worker +
@@ -49,6 +49,17 @@ _log = structlog.get_logger(__name__)
 _SOCKET_TIMEOUT_SECONDS = 2.0
 
 _KEY_PREFIX = "lumen:ratelimit:source_sync"
+
+# One server-side operation: client cancellation/disconnection cannot interrupt
+# the first increment before EXPIRE, and later hits do not extend the window.
+# Use EVAL directly so even the first admission needs no script-cache round trip.
+_ACQUIRE_SCRIPT = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
 
 # Process-wide async clients, keyed by ``(redis_url, owning event loop)``.
 #
@@ -116,9 +127,9 @@ class AsyncRateLimiter(Protocol):
 class RedisFixedWindowRateLimiter:
     """Redis-backed fixed-window per-tenant fetch rate limiter (ADR-0009 §3).
 
-    One counter key per ``(tenant, window)``; ``INCR`` is atomic so concurrent
-    workers share one true count. The key is created with ``EXPIRE`` on its first
-    increment so windows roll forward without a sweeper. Constructed from the
+    One counter key per tenant and configured namespace; a Lua script atomically
+    increments and sets first-hit expiry so concurrent workers share one true
+    count without a cancellation gap. Windows roll forward without a sweeper. Constructed from the
     Redis URL (the stack's existing store) and the window/limit from settings.
     """
 
@@ -189,10 +200,7 @@ class RedisFixedWindowRateLimiter:
         client: Any | None = None
         try:
             client = self._async_client()
-            count = int(await client.incr(key))
-            if count == 1:
-                # First hit in this window — arm the expiry so the window rolls.
-                await client.expire(key, self._window_seconds)
+            count = int(await client.eval(_ACQUIRE_SCRIPT, 1, key, str(self._window_seconds)))
         except redis.RedisError as exc:
             # Same fail-open as the sync path: a transient counter-store outage
             # must not strand callers; the SSRF guard stays authoritative.
@@ -255,10 +263,9 @@ class RedisFixedWindowRateLimiter:
                 # The sync client's stubs share the async surface (return type is a
                 # union including Awaitable); on the sync client these are concrete
                 # values, so narrow the count explicitly.
-                count = int(cast(int, client.incr(key)))
-                if count == 1:
-                    # First hit in this window — arm the expiry so the window rolls.
-                    client.expire(key, self._window_seconds)
+                count = int(
+                    cast(int, client.eval(_ACQUIRE_SCRIPT, 1, key, str(self._window_seconds)))
+                )
             finally:
                 client.close()  # type: ignore[no-untyped-call]  # redis sync close is untyped
         except redis.RedisError as exc:
