@@ -1,4 +1,4 @@
-# 28. Adopt SaaS Backbone as the platform layer, with Rust in the backbone's data plane
+# 30. Adopt SaaS Backbone as the platform layer, with Rust in the backbone's data plane
 
 - **Status:** Proposed *(direction and the five owner decisions below approved in session 2026-10-09; acceptance waits on the verification pass in §10 and owner approval of the proposed `AGENTS.md` diff)*
 - **Date:** 2026-10-09
@@ -247,7 +247,7 @@ Behavioural requirements in the earlier ADRs survive; only the mechanisms named 
 
 ADRs 0006–0009, 0011–0014, 0016–0021 and 0023–0025 remain binding, as does 0026 outside the migration branch, except where §§2–5 move a mechanism behind a backbone port.
 
-**`AGENTS.md`.** §3, §6, §11 and §12 change. Under §5 that needs owner approval, so this ADR ships a review-only diff: [`0028-proposed-agents-md.diff`](0028-proposed-agents-md.diff).
+**`AGENTS.md`.** §3, §6, §11 and §12 change. Under §5 that needs owner approval, so this ADR ships a review-only diff: [`0030-proposed-agents-md.diff`](0030-proposed-agents-md.diff).
 
 - **When it applies.** Once approved, the diff is applied on `backbone-migration` in package F and reaches `main` with the cutover. Applying it to `main` earlier would describe a stack `main` does not run.
 - **Nested contracts.** `backend/AGENTS.md` and `contracts/AGENTS.md` are proposed in package F.

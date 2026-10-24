@@ -1,5 +1,5 @@
-Review-only proposal for AGENTS.md (ADR-0028, #716). AGENTS.md section 5 requires owner approval.
-Once approved, apply on the backbone-migration branch in package F with: git apply docs/architecture/0028-proposed-agents-md.diff
+Review-only proposal for AGENTS.md (ADR-0030, #716). AGENTS.md section 5 requires owner approval.
+Once approved, apply on the backbone-migration branch in package F with: git apply docs/architecture/0030-proposed-agents-md.diff
 It reaches main with the cutover PR; applying it to main earlier would describe a stack main does not run.
 
 --- a/AGENTS.md
@@ -10,14 +10,14 @@ It reaches main with the cutover PR; applying it to main earlier would describe 
  ## 3. Stack / architecture context
 -Decided in [ADR-0003](docs/architecture/0003-application-stack.md) (closes OD-2). **Monorepo, cleanly split, OSS-only, LLM-agnostic:**
 -- **`backend/`** — FastAPI (Python 3.12, async), SQLAlchemy 2.0 async + Alembic, Celery workers. *The only backend.*
-+Decided in [ADR-0003](docs/architecture/0003-application-stack.md) (closes OD-2); the platform layer is SaaS Backbone per [ADR-0028](docs/architecture/0028-adopt-saas-backbone-as-the-platform-layer.md). **Monorepo, cleanly split, OSS-only, LLM-agnostic:**
++Decided in [ADR-0003](docs/architecture/0003-application-stack.md) (closes OD-2); the platform layer is SaaS Backbone per [ADR-0030](docs/architecture/0030-adopt-saas-backbone-as-the-platform-layer.md). **Monorepo, cleanly split, OSS-only, LLM-agnostic:**
 +- **`backend/`** — a SaaS Backbone product: `backbone.kernel.Backbone` composes the backbone's platform modules with Copilot's product modules in `backend/app/main.py` (`BACKBONE_APP=app.main:bb`); FastAPI via `backbone.web`; SQLAlchemy 2.0 async under the backbone unit of work, with per-module Alembic branches. One product image, built `FROM` the pinned backbone runtime, runs the API, the worker (with outbox relay), the scheduler and migrations. *The only backend.*
  - **`frontend/`** — React + Vite SPA (TypeScript, static). *No second server.*
  - **`contracts/`** — OpenAPI + WebSocket envelopes; the source of truth for the FE/BE wire.
 -- **Data:** PostgreSQL 16 + `pgvector` (relational **and** vectors), Redis (cache + Celery broker + WebSocket pub/sub backplane), MinIO (S3-compatible object storage).
 -- **LLM:** every model call goes through the LiteLLM gateway (`backend/app/llm/`), OpenRouter first, swappable. Streaming over **WebSocket**; request/response stays REST.
-+- **Data:** PostgreSQL (tenant RLS under a non-owner app role), OpenFGA (authorization), OpenSearch (the single retrieval store, as a backbone search engine — [ADR-0010](docs/architecture/0010-dedicated-text-search-engine.md), ADR-0028 §4), Valkey (cache and rate limits only), S3-compatible object storage through backbone `files`.
-+- **Rust:** the backbone's data plane — `bb-gateway` (realtime WebSocket/SSE), `bb-worker` (native jobs), `backbone_native` (extraction, the document core, chunking, redaction). Copilot ships no Cargo workspace and no PyO3 module (ADR-0028 §5).
++- **Data:** PostgreSQL (tenant RLS under a non-owner app role), OpenFGA (authorization), OpenSearch (the single retrieval store, as a backbone search engine — [ADR-0010](docs/architecture/0010-dedicated-text-search-engine.md), ADR-0030 §4), Valkey (cache and rate limits only), S3-compatible object storage through backbone `files`.
++- **Rust:** the backbone's data plane — `bb-gateway` (realtime WebSocket/SSE), `bb-worker` (native jobs), `backbone_native` (extraction, the document core, chunking, redaction). Copilot ships no Cargo workspace and no PyO3 module (ADR-0030 §5).
 +- **LLM:** every model call goes through the backbone `llm` port, OpenRouter first, swappable. Streaming over **WebSocket/SSE** through `bb-gateway`; request/response stays REST.
  
  Per-tier coding contracts live next to the code: [`backend/AGENTS.md`](backend/AGENTS.md), [`frontend/AGENTS.md`](frontend/AGENTS.md), [`contracts/AGENTS.md`](contracts/AGENTS.md) — they elaborate this contract for their area but never contradict it. Cross-tier features follow [ADR-0006](docs/architecture/0006-contract-first-parallel-implementation.md) (contract-first, then parallel build). Local run: one `docker compose up` ([ADR-0005](docs/architecture/0005-local-run-and-developer-workflow.md)).
@@ -26,7 +26,7 @@ It reaches main with the cutover PR; applying it to main earlier would describe 
  
  **The one module that owns each concern** (nobody else may talk to it):
  
-+Platform concerns are owned by SaaS Backbone modules ([ADR-0028](docs/architecture/0028-adopt-saas-backbone-as-the-platform-layer.md)). Product modules call backbone **ports** and never import backbone models, services or adapters, or a peer module's internals. Copilot keeps no copy of a backbone capability as a fallback; a missing capability is built upstream or its surface stays disabled.
++Platform concerns are owned by SaaS Backbone modules ([ADR-0030](docs/architecture/0030-adopt-saas-backbone-as-the-platform-layer.md)). Product modules call backbone **ports** and never import backbone models, services or adapters, or a peer module's internals. Copilot keeps no copy of a backbone capability as a fallback; a missing capability is built upstream or its surface stays disabled.
 +
  | Concern | Single owning module |
  |---|---|
@@ -56,7 +56,7 @@ It reaches main with the cutover PR; applying it to main earlier would describe 
  | Backend access from the UI | `frontend/src/api/` (generated client) |
  
 -A new external system ⇒ a new module **and** a new row here, in the *same* change (§7.6). Mission filters get one chokepoint each (permission filter in `retrieval/`, citations through the chat runtime, audit through one sink) — see [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapters.md).
-+A new external system ⇒ a new module **and** a new row here, in the *same* change (§7.6). Mission filters get one chokepoint each: permissions in the OpenFGA model plus `retrieval/`, citations through the product `AnswerValidator`, audit through backbone `audit` — see [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapters.md) and ADR-0028 §7.
++A new external system ⇒ a new module **and** a new row here, in the *same* change (§7.6). Mission filters get one chokepoint each: permissions in the OpenFGA model plus `retrieval/`, citations through the product `AnswerValidator`, audit through backbone `audit` — see [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapters.md) and ADR-0030 §7.
  
  ## 7. Hard rules (process — in force now)
  Stack-independent; binding from the first commit:
@@ -64,7 +64,7 @@ It reaches main with the cutover PR; applying it to main earlier would describe 
  
  ## 11. Git & scope
  - Short-lived branch (or worktree) **per issue**; merge fast via PR.
-+- *Exception ([ADR-0028](docs/architecture/0028-adopt-saas-backbone-as-the-platform-layer.md) §9):* the backbone migration uses one integration branch, `backbone-migration`. Package PRs target it with `Closes #<N>`, and one cutover PR merges it into `main`.
++- *Exception ([ADR-0030](docs/architecture/0030-adopt-saas-backbone-as-the-platform-layer.md) §9):* the backbone migration uses one integration branch, `backbone-migration`. Package PRs target it with `Closes #<N>`, and one cutover PR merges it into `main`.
  - Conventional Commits; one logical change per commit. (Auto-push-on-commit arrives with the `.claude/` harness so nothing is stranded.)
  - Keep each PR scoped to one issue; body carries `Closes #<N>`.
  
