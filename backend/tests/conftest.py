@@ -62,6 +62,7 @@ _TEST_ENV = {
     # Existing non-local credential/OAuth guards still apply in test. These are
     # synthetic values, not secrets, and do not relax any production validator.
     "JWT_SECRET": "suite-only-jwt-key",
+    "CHAT_PROMPT_CACHE_SCOPE_SECRET": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     "SECRETS_ENCRYPTION_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
     "GDRIVE_OAUTH_CLIENT_ID": "suite-only-google-client",
     "GDRIVE_OAUTH_CLIENT_SECRET": "suite-only-google-secret",

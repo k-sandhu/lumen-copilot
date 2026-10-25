@@ -185,7 +185,9 @@ class _GroundedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         # The question is the last user message; the tool results (if any) are the

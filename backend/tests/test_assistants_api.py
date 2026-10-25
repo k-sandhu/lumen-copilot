@@ -459,7 +459,9 @@ class _TestHarnessGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ):  # noqa: ANN201 — async generator
         from app.domain.llm import StreamEvent
 

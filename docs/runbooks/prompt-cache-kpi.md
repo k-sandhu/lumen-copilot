@@ -99,34 +99,53 @@ live-validated against — ADR-0016 §2.4). The kill-switch
 
 | Route family (OpenRouter upstream prefix) | Directive emitted | Expected KPI |
 |---|---|---|
-| `openrouter/anthropic/…` (e.g. Claude Opus/Haiku — the **default chat route**) | `cache_control` breakpoints on message 0 + a moving mark on the last cacheable block | **> 0 from turn 2 on**; ratio climbs as the transcript grows |
-| `openrouter/openai/…` (e.g. GPT-5.5) | `extra_body.prompt_cache_key = session_id` (implicit caching, messages untouched) | **> 0 once the stable prefix ≥ the provider minimum** (OpenAI auto-caches ≥1024-token prefixes); provider-dependent |
-| `openrouter/google/…` (Gemini) | **none** | provider-implicit: Gemini 2.5+ caches automatically, so **> 0 is normal** |
-| `openrouter/deepseek/…`, `openrouter/z-ai/…` (DeepSeek, GLM) | **none** | provider-implicit: **> 0 is normal**, but erratic. These upstreams are served by 30+ OpenRouter providers, each with its own cache. Measured on 2026-10-14/15: 47% / 41% answer hit, with 12% / 28% of calls 2+ at zero cache ([#760 spike](../audits/prompt-cache-scope-spike-2026-10-15.md)) |
-| `openrouter/qwen/…` (Qwen) | **none** | provider-dependent: Alibaba-served Qwen caches only with explicit `cache_control`; other providers may cache implicitly |
+| `openrouter/anthropic/…` (e.g. Claude Opus/Haiku — the **default chat route**) | unchanged `cache_control` breakpoints on message 0 + the last cacheable block; opaque per-conversation `extra_body.session_id` | **> 0 from turn 2 on**; ratio climbs as the transcript grows |
+| `openrouter/openai/…` (e.g. GPT-5.5) | opaque per-user `extra_body.prompt_cache_key` plus per-conversation `extra_body.session_id` (messages untouched) | **> 0 once the stable prefix ≥ the provider minimum** (OpenAI auto-caches ≥1024-token prefixes); provider-dependent |
+| `openrouter/google/…` (Gemini) | opaque per-conversation `extra_body.session_id` only | provider-implicit: Gemini 2.5+ caches automatically, so **> 0 is normal** |
+| `openrouter/deepseek/…`, `openrouter/z-ai/…` (DeepSeek, GLM) | opaque per-conversation `extra_body.session_id` only | provider-implicit: **> 0 is normal**, but erratic. These upstreams are served by 30+ OpenRouter providers, each with its own cache. Measured on 2026-10-14/15: 47% / 41% answer hit, with 12% / 28% of calls 2+ at zero cache ([#760 spike](../audits/prompt-cache-scope-spike-2026-10-15.md)) |
+| `openrouter/qwen/…` (Qwen) | opaque per-conversation `extra_body.session_id` only | provider-dependent: Alibaba-served Qwen caches only with explicit `cache_control`; other providers may cache implicitly |
 | any **non-OpenRouter** `api_base` (a tenant's own OpenAI-compatible endpoint) | **none — fail-safe**, even when the model is *named* `claude`/`gpt` | whatever the endpoint caches implicitly (often 0) |
 | any id **without** the `openrouter/` adapter prefix and no OpenRouter `api_base` | **none — fail-safe** | whatever the native provider caches implicitly (often 0) |
 | kill-switch `CHAT_PROMPT_CACHE_ENABLED=false` | **none** | no Lumen directives anywhere; implicit hits may still appear on upstreams whose providers cache automatically (DeepSeek, GLM, Gemini; OpenAI with no key) |
 
-**No-directive routes (do not page on a low or zero KPI here):** every `google/`,
-`deepseek/`, `z-ai/` and `qwen/` upstream; every non-OpenRouter transport; and the
-kill-switch-off case. The gateway emits nothing for them. On non-OpenRouter
-transports and with the kill switch off, that is because the pass-through was
-never validated: a route's model *name* never earns directives its *transport*
-wasn't proven to accept. Any of these routes may still show hits from the provider's own implicit
-caching. How many depends on which provider served each call, and for a
-tenant's own `api_base`, on whether that endpoint caches. Treat a zero as
-expected and a nonzero as normal. Neither is a Lumen regression.
+**Transport affinity is not a cache partition.** Every approved OpenRouter
+transport receives the per-conversation opaque `session_id` when all domain ids
+are present. Google, DeepSeek, Z.AI, Qwen and other upstreams receive no upstream
+cache directives: hits remain provider-dependent. Non-OpenRouter transports,
+missing tenant/user/session identity and the kill-switch-off case receive neither
+routing hints nor breakpoints. Implicit provider hits may still occur; zero is
+not by itself a regression on these routes.
 
-**Decided, not yet built ([ADR-0016](../architecture/0016-context-engine-and-cache-first-prompting.md) §2 amendment, #760).**
-- The `openai/` key becomes an opaque, keyed **per-user** scope instead of the
-  session id. Today a new chat on `openai/…` reads 0 on call 1 by construction,
-  because the key partitions the provider cache per session.
-- Every OpenRouter route gains an opaque, per-**conversation** sticky
-  `session_id`, so a conversation stays on one provider from its first call.
-- Proactive compaction now defaults off (#764, §3.1 amendment); see above.
+**Implemented two-level scope (#763, accepted ADR-0016 amendment).** The runtime
+passes only canonical tenant/user/session UUIDs. Inside `llm/`,
+`CHAT_PROMPT_CACHE_SCOPE_SECRET` derives purpose-separated HMAC-SHA256 values:
+`lc1u-` plus 24 hex digits for `(tenant,user)` and `lc1s-` plus 24 hex digits for
+`(tenant,session)`, using the `v1:user:` / `v1:session:` UTF-8 messages. Only the
+OpenAI family receives the per-user partition, so new sessions can reuse that
+user's stable head without sharing the partition with colleagues. Every approved
+OpenRouter family receives session affinity from call one. Provider failover or
+security changes can still invalidate a prefix; affinity is not a guarantee of
+cache quality or provider availability. The unpartitioned-upstream probing
+residual remains tracked by #769. Proactive compaction remains off by default
+(#764); neither model/provider selection nor retry/latency budgets change here.
 
-Update the table above when that lands.
+Live proof is explicit and key-gated. Run the dedicated suite **alone in a fresh
+process** (its isolated SDK cleanup must not affect another active loop):
+
+```powershell
+$env:RUN_LIVE = '1'
+uv run --extra dev pytest tests/test_prompt_cache_scope_live.py -n 0 -o addopts= -q -s
+```
+
+The first proof sends three synthetic GPT-6 Luna calls: one user's first session,
+their second session with a different question (requires cached tokens >0), then
+a different user's identical opening (requires zero). The second forces two
+synthetic DeepSeek lookup turns plus synthesis with one conversation identity;
+OpenRouter generation records must attribute all three calls to one serving
+provider. These bounded fixture route choices do not edit application settings.
+Missing model support or failed live evidence is a failure, never a waived gate.
+Keep generation identifiers and raw provider diagnostics private; report token
+counts, call counts and provider-equality aggregates only.
 
 **Beyond the answer loop.** Only `stream_tools` (the answer loop) emits
 directives. The follow-up-suggestions completion, the `/search` direct answer,

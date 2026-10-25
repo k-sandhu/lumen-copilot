@@ -124,7 +124,9 @@ class _ScriptedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         if tool_choice == "none":
@@ -167,7 +169,9 @@ class _BoomGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — unreachable, makes this an async generator
@@ -1078,7 +1082,9 @@ class _CapturingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if self.system_prompt is None and isinstance(messages, list) and messages:
             # The runtime places the composed system prompt as the first ChatMessage.
@@ -1225,7 +1231,9 @@ class _RecordingSearchGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -1449,7 +1457,9 @@ class _RecordingGetDocGateway(_RecordingSearchGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -2087,7 +2097,9 @@ class _ModelCapturingGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.answer_models.append(model)
         async for ev in super().stream_tools(
@@ -2097,7 +2109,9 @@ class _ModelCapturingGateway(_ScriptedGateway):
             tool_choice=tool_choice,
             api_key=api_key,
             api_base=api_base,
-            cache_key=cache_key,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
         ):
             yield ev
 
@@ -2677,7 +2691,9 @@ async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ):
             if self.first_prompt is None:
                 self.first_prompt = list(messages)  # type: ignore[call-overload]
@@ -3130,7 +3146,9 @@ class _RecordingScriptedGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.seen.append(list(cast("Sequence[ChatMessage]", messages)))
         async for ev in super().stream_tools(
@@ -3878,7 +3896,9 @@ class _ModelRoutedGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.models_called.append(str(model))
         pending = self._failures.get(str(model))
@@ -4261,7 +4281,9 @@ class _MidStreamFaultGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if not self._faulted:
             self._faulted = True
@@ -5597,7 +5619,9 @@ class _HangingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         await asyncio.Event().wait()  # never returns
@@ -5982,7 +6006,9 @@ async def test_narration_closes_the_retry_window(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating… ")
@@ -6068,7 +6094,9 @@ async def test_signal_then_fault_closes_the_window_without_assembled_calls(ctx: 
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating before the fragment… ")
@@ -6113,7 +6141,9 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(tool_call_started=True)  # NO text at all
@@ -6259,7 +6289,9 @@ async def test_cache_kpi_not_emitted_on_error_terminal(
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ) -> AsyncIterator[StreamEvent]:
             raise DependencyError("provider down")
             yield StreamEvent(text="unreachable")  # pragma: no cover
@@ -6327,10 +6359,9 @@ async def test_cache_kpi_not_emitted_when_commit_fails(
     assert log_rec.kpis() == []
 
 
-async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
-    """#411: the runtime steers provider-side caching with a per-SESSION key —
-    the gateway must receive ``cache_key == str(session_id)`` on every turn
-    (consecutive answers of one conversation land on one cache shard)."""
+async def test_gateway_receives_only_domain_cache_identifiers(ctx: _Ctx) -> None:
+    """#763: the runtime passes canonical domain identity on every turn;
+    only the gateway may derive provider fields."""
 
     class _CacheKeyCapturingGateway:
         def __init__(self) -> None:
@@ -6345,9 +6376,11 @@ async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ) -> AsyncIterator[StreamEvent]:
-            self.cache_keys.append(cache_key)
+            self.cache_keys.append((tenant_id, user_id, session_id))
             msgs = list(messages)  # type: ignore[arg-type]
             has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
             if has_tool_result:
@@ -6365,7 +6398,9 @@ async def test_cache_key_is_the_session_id(ctx: _Ctx) -> None:
     envs = await _run_answer(ctx, gateway, _FakeRetrieval([passage]), retry_sleep=recorder)
     assert envs[-1]["type"] == "done"
     # Both loop turns carried the SAME session-scoped key.
-    assert gateway.cache_keys == [str(ctx.session_id)] * 2
+    assert (
+        gateway.cache_keys == [(ctx.principal.tenant_id, ctx.principal.user_id, ctx.session_id)] * 2
+    )
 
 
 # --- #487: text coalescing at the envelope-construction seam ---------------
@@ -6544,7 +6579,9 @@ async def test_pending_narration_is_flushed_before_a_terminal_error(ctx: _Ctx) -
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
         ) -> AsyncIterator[StreamEvent]:
             yield StreamEvent(text="Looking that up... ")
             yield StreamEvent(
@@ -6627,7 +6664,9 @@ async def test_lone_chunk_flushes_on_its_deadline_across_a_provider_stall(ctx: _
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
             max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             yield StreamEvent(text="chunk1")
@@ -6929,7 +6968,9 @@ async def test_retraction_keeps_the_retry_window_open_across_live_streaming(ctx:
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
             max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
@@ -7039,7 +7080,9 @@ async def test_speculative_answer_retracted_on_terminal_fault(ctx: _Ctx) -> None
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
             max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             yield StreamEvent(text="Partial unpersisted answer. ")  # speculative, flushed live
@@ -7087,7 +7130,9 @@ async def test_speculative_answer_retracted_on_interactive_timeout(ctx: _Ctx) ->
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
             max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls += 1
@@ -7133,7 +7178,9 @@ class _MaxTokensCapturingGateway(_ScriptedGateway):
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
         max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.max_tokens_seen.append(max_tokens)
@@ -7536,3 +7583,74 @@ async def test_default_keeps_superseded_cited_result_and_prefix_verbatim(
     assert all(stable)
     logged = capsys.readouterr().out
     assert "context.tool_results_proactively_compacted" not in logged
+
+
+@pytest.mark.parametrize("failover", [False, True])
+async def test_cache_domain_ids_survive_forced_synthesis_and_failover(
+    ctx: _Ctx, failover: bool
+) -> None:
+    """#763: provider selection never changes the answer's identity scope."""
+    fallback = "openrouter/openai/gpt-6-luna"
+    if failover:
+        await _set_fallbacks(ctx, [fallback])
+
+    class ScopeGateway(_ModelRoutedGateway):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    [
+                        StreamEvent(
+                            tool_calls=(
+                                ToolCall(id="c1", name="search_text", arguments={"query": "q"}),
+                            ),
+                            finish_reason="tool_calls",
+                        )
+                    ]
+                ],
+                failures={_PRIMARY: [_retryable(), _retryable(), _retryable()]} if failover else {},
+                synthesis=[StreamEvent(text="Answer [S1]."), StreamEvent(finish_reason="stop")],
+            )
+            self.scopes: list[tuple[object, object, object]] = []
+            self.choices: list[object] = []
+
+        async def stream_tools(
+            self, messages: object, **kwargs: object
+        ) -> AsyncIterator[StreamEvent]:
+            self.scopes.append(
+                (kwargs.get("tenant_id"), kwargs.get("user_id"), kwargs.get("session_id"))
+            )
+            self.choices.append(kwargs.get("tool_choice"))
+            async for event in super().stream_tools(messages, **kwargs):
+                yield event
+
+    gateway = ScopeGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await asyncio.sleep(0)
+    _sleeps, recorder = _sleep_recorder()
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([_passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")]),
+        backplane=backplane,
+        default_max_tool_turns=1,
+        retry_sleep=recorder,
+    )
+    ok = await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model=_PRIMARY,
+        history=[],
+        collection_ids=None,
+    )
+    envs = await asyncio.wait_for(consumer, timeout=2.0)
+    assert ok is True and envs[-1]["type"] == "done"
+    assert gateway.choices[-1] == "none"
+    assert len(gateway.scopes) >= 2
+    assert gateway.scopes == [
+        (ctx.principal.tenant_id, ctx.principal.user_id, ctx.session_id)
+    ] * len(gateway.scopes)
+    if failover:
+        assert fallback in gateway.models_called

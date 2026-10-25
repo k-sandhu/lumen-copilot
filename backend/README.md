@@ -123,3 +123,20 @@ not a measured latency or throughput claim. `tests/test_source_sync_rate_limit.p
 covers offline regressions; the opt-in `tests/test_rate_limit_live.py` verifies
 concurrent sync/async admission, TTL, cancellation/process exit and cleanup against
 real Redis (`RUN_LIVE=1`, `REDIS_URL` pointing to an isolated instance).
+
+
+## Deploying prompt-cache scopes
+
+Outside `ENVIRONMENT=local`, provision `CHAT_PROMPT_CACHE_SCOPE_SECRET` separately
+from `SECRETS_ENCRYPTION_KEY`: standard padded base64 of at least32 random bytes.
+The public dev default, malformed base64 and shorter material fail startup.
+Generate deployment material with `secrets.token_bytes(32)` encoded by
+`base64.b64encode`; distribute the same value to serving replicas through your
+secret manager. Never print it or include it in request/audit logs.
+
+Rotating this dedicated secret re-partitions cache scopes: each user pays one
+cold prefix, and conversation affinity restarts. It never touches vault encryption
+or decrypts. A derivation change must bump both the message label (`v1:`) and wire
+version (`lc1u-`/`lc1s-`) together; rotating material alone does not bump them.
+See [the cache KPI runbook](../docs/runbooks/prompt-cache-kpi.md) for per-family
+behavior, kill-switch/fail-safe rules and explicit live proofs.
