@@ -43,7 +43,7 @@ Run it with the sandbox profile up and the execution image built
     docker compose --profile sandbox up -d sandbox-runner
     docker compose exec backend sh -lc \\
       "UV_PROJECT_ENVIRONMENT=/tmp/lumen-dev-venv RUN_LIVE=1 \\
-       uv run --frozen --extra dev pytest -q -p no:cacheprovider \\
+       uv run --frozen --extra dev pytest -n 0 -q -s -m live -p no:cacheprovider \\
        tests/test_sandbox_execution_live.py"
 
 It runs from *inside* the backend container because ADR-0020 §2 gives the runner **no
@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import textwrap
 import uuid
 from collections.abc import AsyncIterator
@@ -69,7 +70,14 @@ import pytest
 from app.core.config import Settings
 from app.core.errors import DependencyError
 from app.domain.entities import CodeRunStatus
-from app.sandbox.runner import HttpSandboxRunner
+from app.sandbox.runner import (
+    RUNNER_TOKEN_HEADER,
+    HttpSandboxRunner,
+    SandboxRunnerFailed,
+    SandboxRunnerRejected,
+    SandboxRunnerUnauthorized,
+    SandboxRunnerUnavailable,
+)
 from app.sandbox.service import SandboxSessionService
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
 
@@ -118,80 +126,145 @@ async def _probe(url: str) -> None:
         response.raise_for_status()
 
 
+async def _live_settings() -> Settings:
+    try:
+        settings = Settings()
+    except Exception as exc:
+        pytest.skip(f"Settings unavailable for live sandbox: {type(exc).__name__}")
+    try:
+        await _probe(settings.sandbox_runner_url)
+    except httpx.HTTPStatusError as exc:
+        pytest.fail(
+            f"sandbox public health failed (HTTP {exc.response.status_code}); inspect runner logs.",
+            pytrace=False,
+        )
+    except (httpx.HTTPError, OSError) as exc:
+        pytest.skip(
+            f"sandbox-runner unreachable ({type(exc).__name__}); check SANDBOX_RUNNER_URL "
+            "and `docker compose --profile sandbox up -d sandbox-runner`. "
+            "Run inside the backend container or use an isolated forwarded endpoint."
+        )
+    return settings
+
+
+def _setup_failure(exc: DependencyError) -> str:
+    # Never echo exception/cause/URL text: these can contain a header or credential.
+    if isinstance(exc, SandboxRunnerUnauthorized):
+        return (
+            "sandbox authentication failed (401): configure matching SANDBOX_RUNNER_TOKEN values."
+        )
+    if isinstance(exc, SandboxRunnerUnavailable):
+        return "sandbox transport unavailable: check runner reachability and SANDBOX_RUNNER_URL."
+    if isinstance(exc, SandboxRunnerRejected):
+        return (
+            "sandbox authenticated request rejected (4xx): "
+            "inspect runtime/generation and runner logs."
+        )
+    if isinstance(exc, SandboxRunnerFailed):
+        return (
+            "sandbox runner/image/daemon failure (5xx): inspect runner and daemon logs; "
+            f"verify the execution image exists on that daemon ({_BUILD_COMMAND}). "
+            "The runner does not distinguish image lookup failure from daemon failure."
+        )
+    return "sandbox dependency failed: inspect runner logs without exposing credentials."
+
+
+async def _inspect_session(runner: HttpSandboxRunner, spec: SandboxSessionSpec) -> int:
+    """Authenticated exact-UUID existence/readiness check; never list other sessions."""
+    try:
+        async with runner._client() as client:
+            response = await client.get(f"/sessions/{spec.sandbox_session_id}")
+    except UnicodeError:
+        raise SandboxRunnerUnauthorized("configured token is not a valid HTTP header") from None
+    except httpx.HTTPError:
+        raise SandboxRunnerUnavailable("inspection unavailable") from None
+    if response.status_code in {200, 404}:
+        return response.status_code
+    if response.status_code == 401:
+        raise SandboxRunnerUnauthorized("inspection unauthorized")
+    if response.is_client_error:
+        raise SandboxRunnerRejected("inspection rejected")
+    raise SandboxRunnerFailed("inspection failed")
+
+
 @pytest.fixture
 async def sandbox() -> AsyncIterator[_LiveSandbox]:
-    """Ensure a real sandbox container for one test and destroy it afterwards.
-
-    Function-scoped on purpose: each test gets a pristine generation, so no test can
-    pass on state another one left behind, and a failure cannot leak a container into
-    the next. The identity is a fresh ``uuid4``, so a live run never collides with a
-    real chat's sandbox.
-
-    Skips when opted in but the stack is not usable (unreadable ``Settings``, or a
-    ``sandbox-runner`` that does not answer). **Fails** — never skips — when the
-    runner is up but cannot start the image: that is the #503 defect, and a skip
-    there would hide the very thing this file exists to catch.
-    """
-    try:
-        settings = Settings()  # validates the whole stack config (DB/Redis/S3/…)
-    except Exception as exc:  # noqa: BLE001 — incomplete env → skip, not error
-        pytest.skip(f"Settings unavailable for the live sandbox test: {type(exc).__name__}")
-
-    url = settings.sandbox_runner_url
-    try:
-        await _probe(url)
-    except Exception as exc:  # noqa: BLE001 — any transport failure → skip, not error
-        pytest.skip(
-            f"sandbox-runner unreachable at {url!r} ({type(exc).__name__}) — opted in via "
-            "RUN_LIVE=1 but the service is not up. Start it with "
-            "`docker compose --profile sandbox up -d sandbox-runner`, and run this file "
-            "from inside the backend container (ADR-0020 §2: the runner publishes no host "
-            "port) or point SANDBOX_RUNNER_URL at a forwarded one."
-        )
-
-    runner = HttpSandboxRunner(url)
+    """Production authentication, fresh identity, and only confirmed-created cleanup."""
+    settings = await _live_settings()
+    runner = HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token)
     spec = SandboxSessionSpec(
         sandbox_session_id=uuid.uuid4(),
         generation=1,
         image=settings.sandbox_image,
         runtime=settings.sandbox_runtime,
-        # The deploy's real output budget, so a live run exercises the number the
-        # lifecycle actually sends rather than the runner's fallback ceiling.
         output_bytes_cap=settings.sandbox_output_bytes_cap,
-        # The SAME curated env the production lifecycle hands a session, so this run
-        # inherits MPLBACKEND/HOME exactly as a chat's sandbox does — if that env
-        # changes, this test follows it instead of drifting from it.
         env=SandboxSessionService._session_env(),
     )
+    created = False
+    print(f"sandbox-live session={spec.sandbox_session_id} generation=1 state=reserved")
     try:
         try:
+            assert await _inspect_session(runner, spec) == 404, "fresh UUID already exists"
             await runner.ensure_session(spec)
+            created = True
+            assert await _inspect_session(runner, spec) == 200, "ensured UUID not inspectable"
         except DependencyError as exc:
-            # ``__cause__`` carries the runner's actual HTTP status; the wrapper text
-            # alone ("sandbox runner unavailable") cannot distinguish a missing image
-            # from a dead daemon, and that distinction is the whole point here.
-            pytest.fail(
-                f"sandbox-runner at {url!r} answered /health but could not start image "
-                f"{settings.sandbox_image!r} ({exc}; cause: {exc.__cause__!r}). The runner "
-                "drives the HOST Docker daemon, so the image must exist THERE — build it "
-                f"with: {_BUILD_COMMAND}"
-            )
+            # A lost ensure response can follow creation. Discover only this UUID;
+            # a 401 cannot have created a resource and must never trigger DELETE.
+            if not created and not isinstance(exc, SandboxRunnerUnauthorized):
+                try:
+                    created = await _inspect_session(runner, spec) == 200
+                except DependencyError:
+                    pass  # creation unconfirmed; retain the primary setup failure
+            pytest.fail(_setup_failure(exc), pytrace=False)
+        print(f"sandbox-live session={spec.sandbox_session_id} generation=1 state=created")
         yield _LiveSandbox(runner=runner, spec=spec)
     finally:
-        # A cleanup failure MUST fail the run (#506 review). The container runs as uid 0
-        # on the host daemon, so silently leaking one is a worse outcome than a red
-        # suite. Raising here does NOT hide the test's own verdict — pytest reports a
-        # teardown error IN ADDITION to the test result, not instead of it (the earlier
-        # "printed, not raised" rationale was mistaken on that point).
-        container = f"lumen-sandbox-{spec.sandbox_session_id}-{spec.generation}"
-        try:
-            await runner.close_session(spec)
-        except Exception as exc:
-            raise AssertionError(
-                f"could not destroy sandbox container {container} "
-                f"({type(exc).__name__}: {exc}). It runs as root on the HOST daemon — "
-                f"remove it with: docker rm -f {container}"
-            ) from exc
+        primary = sys.exception()
+        if isinstance(primary, GeneratorExit):
+            primary = None  # explicit generator close is normal teardown, not a failed test
+        if created:
+            try:
+                await runner.close_session(spec)
+                assert await _inspect_session(runner, spec) == 404
+            except Exception:
+                message = (
+                    f"sandbox cleanup failed for exact test UUID {spec.sandbox_session_id}, "
+                    "generation 1; inspect that UUID only. No wildcard removal."
+                )
+                if primary is not None:
+                    primary.add_note(message)  # retain the primary setup/test failure
+                else:
+                    pytest.fail(message, pytrace=False)
+            else:
+                print(f"sandbox-live session={spec.sandbox_session_id} generation=1 state=removed")
+
+
+@_live
+@pytest.mark.live
+@pytest.mark.parametrize(
+    "token", [None, b"deliberately-wrong-token", b"\xc3\xa9"], ids=["missing", "wrong", "non-ascii"]
+)
+async def test_runner_rejects_invalid_auth_without_creating_a_session(token: bytes | None) -> None:
+    # Deliberately independent of the positive session fixture. An invalid request
+    # must be rejected before engine work and therefore needs no DELETE cleanup.
+    settings = await _live_settings()
+    session_id = uuid.uuid4()
+    headers = {} if token is None else {RUNNER_TOKEN_HEADER.encode(): token}
+    async with httpx.AsyncClient(
+        base_url=settings.sandbox_runner_url, timeout=_PROBE_TIMEOUT_SECONDS
+    ) as client:
+        response = await client.put(f"/sessions/{session_id}", headers=headers, json={})
+    assert response.status_code == 401
+    runner = HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token)
+    spec = SandboxSessionSpec(
+        sandbox_session_id=session_id,
+        generation=1,
+        image=settings.sandbox_image,
+        runtime=settings.sandbox_runtime,
+    )
+    assert await _inspect_session(runner, spec) == 404
+    print(f"sandbox-live session={session_id} generation=1 state=auth-rejected-absent")
 
 
 async def _run(sandbox: _LiveSandbox, code: str) -> RunResult:

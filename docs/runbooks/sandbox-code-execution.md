@@ -401,12 +401,16 @@ container** through the real `HttpSandboxRunner` seam and asserts the real stdou
 > exactly how the defects behind #501–#505 all shipped under a green suite.
 
 It needs the `sandbox` compose profile up (§2) **and** the execution image built
-(§1). One command, from the repo root:
+(§1), with matching `SANDBOX_RUNNER_TOKEN` in backend and runner. The fixture uses
+that configured token exactly as production does. `/health` is public liveness;
+authenticated exact-UUID inspection and ensure establish actual capability readiness.
+Run twice, serially, from the repo root:
 
 ```bash
 docker compose exec backend sh -lc \
   "UV_PROJECT_ENVIRONMENT=/tmp/lumen-dev-venv RUN_LIVE=1 \
-   uv run --frozen --extra dev pytest -q -p no:cacheprovider tests/test_sandbox_execution_live.py"
+   uv run --frozen --extra dev pytest -n 0 -q -s -m live -p no:cacheprovider tests/test_sandbox_execution_live.py"
+# Repeat the same command a second time; each invocation must pass independently.
 ```
 
 It runs from **inside the backend container** because ADR-0020 §2 gives the runner
@@ -431,14 +435,39 @@ What it covers, all against the live runner:
 | **negative** — egress | a raw IP, a DNS name and the metadata IP all fail closed (`--network none`, ADR-0013 §5 G2–G4) |
 | **negative** — crash | a raising script is reported `failed` with exit 1 and its traceback |
 | session reuse | a second execution in one generation sees the first one's files (ADR-0020 §4) |
+| mount/secret boundary | no engine socket, host mounts or application credentials inside the execution container |
+| authentication negatives | missing, wrong and non-ASCII token return 401 before creation; independent of the positive session fixture |
 
 **It is off by default and never passes silently.** The opt-in is a strict
 `RUN_LIVE=1` (only that exact string), and reachability is probed inside a fixture,
 so a default `uv run --extra dev pytest` opens no socket and starts no container. If
-you opt in and the runner is not there, it **skips with a reason naming the URL and
-the command to start it** — it never reports green. If the runner answers but cannot
-launch the image, that is a hard **failure** pointing at §1, because a missing
-execution image is the #503 defect itself.
+you opt in and the runner is not there, it **skips with the configuration key and
+start command** — it never reports green. HTTP health errors fail instead of being
+misreported as a transport outage. A reachable runner that rejects authentication
+fails with token-matching guidance, never image-build advice. Authenticated 4xx,
+transport faults, runner/image/daemon 5xx, and failed tenant Python have separate
+outcomes. The runner currently maps missing-image lookup and daemon lookup failures
+to the same response, so the harness honestly recommends checking both image and
+daemon logs; it cannot distinguish those two from this API seam.
+
+The fixture reserves a fresh UUID, verifies it is absent, ensures it, then verifies
+its authenticated inspection. It deletes only a confirmed-created session and verifies
+404 afterwards. Setup authentication failure never triggers DELETE. A failed ensure
+with a lost response probes only its own UUID for possible partial creation. If that
+probe is also unavailable, creation remains unconfirmed and the primary setup failure
+is retained; the host residue audit must resolve that uncertainty. Cleanup failures
+remain hard failures without echoing exception/cause text or credentials. If setup
+already failed and cleanup fails too, the primary failure is retained with a safe
+exact-UUID cleanup note rather than being replaced by the cleanup error.
+
+With `-s`, safe `sandbox-live session=<uuid> generation=1 state=...` lines identify
+all test-owned sessions. Before each invocation, snapshot host container IDs and
+states (including any existing `com.lumen.sandbox.managed=true` containers). After it,
+verify each exact `lumen-sandbox-<test-uuid>-1` is absent and every pre-existing ID/state
+is unchanged. Inspect by exact UUID/name; never wildcard-delete `lumen-sandbox-*` or
+reset another chat's container. Keep the runner's own logs and test output for a
+credential-leak scan, without printing the configured token. Stop any isolated test
+runner after both passes. Do not count opt-out skips as live evidence.
 
 `backend/tests/test_sandbox_execution_gating.py` guards that gate offline (strict
 opt-in parse, no import-time socket, every live test marked, and a named skip when
