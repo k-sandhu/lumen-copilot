@@ -43,7 +43,7 @@ flowchart LR
 
 ## Quickstart
 
-Requires Docker (with compose). Cold start to a running UI:
+Requires Docker (with Compose and BuildKit, Docker 25+). MinIO is built locally from checksum-pinned official release binaries; see [image provenance and cold-build verification](docs/runbooks/local-minio-image.md). Cold start to a running UI:
 
 ```bash
 git clone https://github.com/k-sandhu/lumen-copilot.git && cd lumen-copilot

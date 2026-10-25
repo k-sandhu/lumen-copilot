@@ -32,7 +32,7 @@ Container-to-container traffic uses service names on the compose network and is 
 Datastores (Postgres, Redis, MinIO) declare healthchecks; backend and worker `depends_on` them `service_healthy`; frontend depends on backend. So `up` converges deterministically instead of racing. The backend `/health` endpoint reports liveness; `/health/ready` checks each dependency, which is what makes "demonstrably alive" verifiable rather than assumed.
 
 ### Images, volumes, secrets
-All images version-pinned (no `:latest`). Named volumes persist Postgres/MinIO across restarts; `docker compose down -v` is the clean reset. **No secrets in the compose file or the repo** — config comes from `.env` (git-ignored), with `.env.example` holding safe local-dev defaults only.
+All images version-pinned (no `:latest`). The local MinIO server and multipart reaper use the same repository-built image with checksum-pinned official release binaries and a digest-pinned base; see [local MinIO image supply](../runbooks/local-minio-image.md) (#795). Named volumes persist Postgres/MinIO across restarts; `docker compose down -v` is the clean reset. **No secrets in the compose file or the repo** — config comes from `.env` (git-ignored), with `.env.example` holding safe local-dev defaults only.
 
 ### Dev inner loop
 For fast iteration without full containerization: backend runs under `uv run uvicorn ... --reload` against the compose-provided datastores; frontend runs `pnpm dev` (Vite HMR) against the backend. The datastores are *always* the compose ones, so "works on my machine" and "works in compose" cannot diverge. Compose mounts source for hot-reload in dev.
