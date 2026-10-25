@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from contextlib import aclosing
 from typing import Any
+from uuid import UUID
 
 import litellm
 import pytest
@@ -49,6 +50,8 @@ def _settings(**overrides: str) -> Settings:
     }
     return Settings(**values)  # type: ignore[arg-type]
 
+
+_CACHE_IDS = {"tenant_id": UUID(int=11), "user_id": UUID(int=22), "session_id": UUID(int=33)}
 
 _TOOLS = (
     ToolSpec(
@@ -148,7 +151,13 @@ async def test_stream_tools_yields_text_then_terminal(monkeypatch: pytest.Monkey
 
     events: list[StreamEvent] = []
     async with aclosing(
-        gw.stream_tools([ChatMessage(role=Role.USER, content="hi")], tools=_TOOLS)
+        gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="hi")],
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
     ) as stream:
         async for ev in stream:
             events.append(ev)
@@ -236,7 +245,14 @@ async def test_stream_tools_accumulates_fragmented_tool_call(
     gw = LLMGateway(_settings())
 
     events = [
-        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="q")],
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
     ]
     terminal = events[-1]
     assert terminal.finish_reason == "tool_calls"
@@ -267,7 +283,16 @@ async def test_stream_tools_renders_tools_and_messages_to_wire(
         ),
         ChatMessage(role=Role.TOOL, content="result", tool_call_id="c1", name="search_text"),
     ]
-    _ = [ev async for ev in gw.stream_tools(messages, tools=_TOOLS)]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            messages,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
 
     assert captured["model"] == "openrouter/openai/gpt-4o-mini"
     assert captured["timeout"] == 60.0
@@ -286,7 +311,13 @@ async def test_stream_tools_renders_tools_and_messages_to_wire(
 async def test_stream_tools_without_key_raises_dependency_error() -> None:
     gw = LLMGateway(_settings(OPENROUTER_API_KEY=""))
     with pytest.raises(DependencyError):
-        async for _ in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS):
+        async for _ in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="q")],
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        ):
             pass
 
 
@@ -307,7 +338,14 @@ async def test_stream_tools_malformed_arguments_yield_empty_dict(
     gw = LLMGateway(_settings())
 
     events = [
-        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="q")],
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
     ]
     assert events[-1].tool_calls[0].arguments == {}
 
@@ -336,7 +374,14 @@ async def test_first_tool_fragment_emits_the_classification_signal(
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     gw = LLMGateway(_settings())
     events = [
-        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="q")],
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
     ]
     kinds = [
         "signal" if e.tool_call_started else ("text" if e.text else "terminal") for e in events
@@ -439,7 +484,16 @@ async def test_anthropic_family_marks_prefix_and_last_block_breakpoints(
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
 
-    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-1")]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
 
     wire = captured["messages"]
     assert [_has_cache_control(m) for m in wire] == [True, False, False, True]
@@ -454,7 +508,7 @@ async def test_anthropic_family_marks_prefix_and_last_block_breakpoints(
     # Undecorated entries keep the plain-string shape.
     assert wire[1]["content"] == "first question"
     assert wire[2]["content"] == "first answer"
-    assert "extra_body" not in captured
+    assert set(captured["extra_body"]) == {"session_id"}
 
 
 async def test_anthropic_single_message_gets_one_breakpoint(
@@ -465,7 +519,14 @@ async def test_anthropic_single_message_gets_one_breakpoint(
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
     _ = [
-        ev async for ev in gw.stream_tools([ChatMessage(role=Role.USER, content="q")], tools=_TOOLS)
+        ev
+        async for ev in gw.stream_tools(
+            [ChatMessage(role=Role.USER, content="q")],
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
     ]
     wire = captured["messages"]
     assert len(wire) == 1 and _has_cache_control(wire[0])
@@ -494,7 +555,16 @@ async def test_anthropic_moving_mark_lands_on_latest_tool_result(
         ),
         ChatMessage(role=Role.TOOL, content="result", tool_call_id="c1", name="search_text"),
     ]
-    _ = [ev async for ev in gw.stream_tools(messages, tools=_TOOLS)]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            messages,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     wire = captured["messages"]
     assert [_has_cache_control(m) for m in wire] == [True, False, False, True]
     assert wire[3]["content"][0]["text"] == "result"
@@ -516,7 +586,16 @@ async def test_anthropic_moving_mark_lands_on_latest_tool_result(
         ChatMessage(role=Role.TOOL, content="r1", tool_call_id="c1", name="search_text"),
         ChatMessage(role=Role.TOOL, content="r2", tool_call_id="c2", name="search_text"),
     ]
-    _ = [ev async for ev in gw.stream_tools(batch, tools=_TOOLS)]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            batch,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     wire = captured["messages"]
     assert [_has_cache_control(m) for m in wire] == [True, False, False, False, True]
     assert wire[4]["content"][0]["text"] == "r2"
@@ -524,7 +603,16 @@ async def test_anthropic_moving_mark_lands_on_latest_tool_result(
     # An unwrappable TAIL (empty assistant last) walks back to the newest
     # wrappable block instead of dropping the mark.
     tail_empty = [*messages[:2], ChatMessage(role=Role.ASSISTANT, content="")]
-    _ = [ev async for ev in gw.stream_tools(tail_empty, tools=_TOOLS)]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            tail_empty,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     wire = captured["messages"]
     assert [_has_cache_control(m) for m in wire] == [True, True, False]
 
@@ -546,6 +634,9 @@ async def test_anthropic_two_message_wire_marks_both(
                 ChatMessage(role=Role.USER, content="q"),
             ],
             tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
         )
     ]
     wire = captured["messages"]
@@ -564,12 +655,21 @@ async def test_openai_family_sends_prompt_cache_key_untouched_messages(
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings())  # default: openrouter/openai/gpt-4o-mini
 
-    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-42")]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
 
-    assert captured["extra_body"] == {"prompt_cache_key": "sess-42"}
+    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id"}
     assert all(not _has_cache_control(m) for m in captured["messages"])
 
-    # Without a cache key there is nothing to steer — no extra_body at all.
+    # Without domain identity there is nothing to steer.
     _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS)]
     assert "extra_body" not in captured
 
@@ -584,8 +684,17 @@ async def test_unknown_family_and_kill_switch_send_bare_wire(
 
     # Unknown family (cache_key given, still nothing sent).
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/mistralai/mistral-large"))
-    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-9")]
-    assert "extra_body" not in captured
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
+    assert set(captured["extra_body"]) == {"session_id"}
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
 
     # Kill-switch, Anthropic family: no breakpoints.
@@ -595,12 +704,30 @@ async def test_unknown_family_and_kill_switch_send_bare_wire(
             CHAT_PROMPT_CACHE_ENABLED="false",
         )
     )
-    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-9")]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
 
     # Kill-switch, OpenAI family: no prompt_cache_key either.
     gw = LLMGateway(_settings(CHAT_PROMPT_CACHE_ENABLED="false"))
-    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="sess-9")]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     assert "extra_body" not in captured
 
 
@@ -619,7 +746,16 @@ async def test_anthropic_prefix_breakpoint_is_stable_across_turns(
     captured = _capture_acompletion(monkeypatch)
     gw = LLMGateway(_settings(LLM_MODEL="openrouter/anthropic/claude-opus-4.8"))
 
-    _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, cache_key="s")]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     wire1 = captured["messages"]
 
     grown = [
@@ -627,7 +763,16 @@ async def test_anthropic_prefix_breakpoint_is_stable_across_turns(
         ChatMessage(role=Role.ASSISTANT, content="second answer"),
         ChatMessage(role=Role.USER, content="third question"),
     ]
-    _ = [ev async for ev in gw.stream_tools(grown, tools=_TOOLS, cache_key="s")]
+    _ = [
+        ev
+        async for ev in gw.stream_tools(
+            grown,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+        )
+    ]
     wire2 = captured["messages"]
 
     # The stable anchor is identical; turn 1's moving mark (index 3) reverted
@@ -658,10 +803,12 @@ async def test_custom_api_base_gets_no_directives_fail_safe(
         async for ev in gw.stream_tools(
             _CONVO,
             tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
             model="openai/my-claude-reranker",
             api_base="https://strict.example/v1",
             api_key="tenant-key",
-            cache_key="sess-7",
         )
     ]
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
@@ -674,10 +821,12 @@ async def test_custom_api_base_gets_no_directives_fail_safe(
         async for ev in gw.stream_tools(
             _CONVO,
             tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
             model="azure/gpt-4o",
             api_base="https://myazure.example/openai",
             api_key="tenant-key",
-            cache_key="sess-7",
         )
     ]
     assert "extra_body" not in captured
@@ -689,6 +838,9 @@ async def test_custom_api_base_gets_no_directives_fail_safe(
         async for ev in gw.stream_tools(
             _CONVO,
             tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
             model="anthropic/claude-opus-4.8",
             api_base="https://strict.example/v1",
             api_key="tenant-key",
@@ -703,6 +855,9 @@ async def test_custom_api_base_gets_no_directives_fail_safe(
         async for ev in gw.stream_tools(
             _CONVO,
             tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
             model="anthropic/claude-opus-4.8",
             api_base="https://openrouter.ai/api/v1",
             api_key="tenant-key",
@@ -733,7 +888,14 @@ async def test_no_base_route_needs_openrouter_prefix(
     ):
         _ = [
             ev
-            async for ev in gw.stream_tools(_CONVO, tools=_TOOLS, model=model, cache_key="sess-3")
+            async for ev in gw.stream_tools(
+                _CONVO,
+                tools=_TOOLS,
+                tenant_id=_CACHE_IDS["tenant_id"],
+                user_id=_CACHE_IDS["user_id"],
+                session_id=_CACHE_IDS["session_id"],
+                model=model,
+            )
         ]
         assert all(isinstance(m.get("content"), str) for m in captured["messages"]), model
         assert "extra_body" not in captured, model
@@ -742,7 +904,12 @@ async def test_no_base_route_needs_openrouter_prefix(
     _ = [
         ev
         async for ev in gw.stream_tools(
-            _CONVO, tools=_TOOLS, model="openrouter/anthropic/claude-opus-4.8"
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+            model="openrouter/anthropic/claude-opus-4.8",
         )
     ]
     assert [_has_cache_control(m) for m in captured["messages"]] == [
@@ -754,10 +921,15 @@ async def test_no_base_route_needs_openrouter_prefix(
     _ = [
         ev
         async for ev in gw.stream_tools(
-            _CONVO, tools=_TOOLS, model="openrouter/openai/gpt-5.5", cache_key="sess-3"
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+            model="openrouter/openai/gpt-5.5",
         )
     ]
-    assert captured["extra_body"] == {"prompt_cache_key": "sess-3"}
+    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id"}
     # The reranker name under the openrouter/openai/ namespace steers by
     # PREFIX (openai), not by the "claude" substring: prompt_cache_key, no marks.
     _ = [
@@ -765,11 +937,13 @@ async def test_no_base_route_needs_openrouter_prefix(
         async for ev in gw.stream_tools(
             _CONVO,
             tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
             model="openrouter/openai/my-claude-reranker",
-            cache_key="sess-3",
         )
     ]
-    assert captured["extra_body"] == {"prompt_cache_key": "sess-3"}
+    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id"}
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
 
 
@@ -785,7 +959,12 @@ async def test_family_re_resolves_per_call_across_failover(
     _ = [
         ev
         async for ev in gw.stream_tools(
-            _CONVO, tools=_TOOLS, model="openrouter/anthropic/claude-opus-4.8"
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+            model="openrouter/anthropic/claude-opus-4.8",
         )
     ]
     assert any(_has_cache_control(m) for m in captured["messages"])
@@ -793,8 +972,13 @@ async def test_family_re_resolves_per_call_across_failover(
     _ = [
         ev
         async for ev in gw.stream_tools(
-            _CONVO, tools=_TOOLS, model="openrouter/mistralai/mistral-large", cache_key="s"
+            _CONVO,
+            tools=_TOOLS,
+            tenant_id=_CACHE_IDS["tenant_id"],
+            user_id=_CACHE_IDS["user_id"],
+            session_id=_CACHE_IDS["session_id"],
+            model="openrouter/mistralai/mistral-large",
         )
     ]
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
-    assert "extra_body" not in captured
+    assert set(captured["extra_body"]) == {"session_id"}

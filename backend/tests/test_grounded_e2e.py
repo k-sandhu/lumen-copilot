@@ -185,7 +185,9 @@ class _GroundedAnswerGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
         max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]

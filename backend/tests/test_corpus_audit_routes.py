@@ -99,10 +99,22 @@ async def test_canonical_corpus_tools_emit_committed_retrieval_audit(
             tool_choice: object = None,
             api_key: object = None,
             api_base: object = None,
-            cache_key: object = None,
+            tenant_id: object = None,
+            user_id: object = None,
+            session_id: object = None,
             max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
-            del tools, model, tool_choice, api_key, api_base, cache_key, max_tokens
+            del (
+                tools,
+                model,
+                tool_choice,
+                api_key,
+                api_base,
+                tenant_id,
+                user_id,
+                session_id,
+                max_tokens,
+            )
             transcript = list(messages)  # type: ignore[arg-type]
             has_tool_result = any(
                 getattr(getattr(message, "role", None), "value", None) == "tool"

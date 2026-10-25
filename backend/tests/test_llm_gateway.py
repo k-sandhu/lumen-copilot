@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import litellm
 import litellm.exceptions as le
@@ -1623,7 +1624,9 @@ async def test_live_prompt_cache_tool_loop_reads_cache(_live_gateway: LLMGateway
             tools=tools,
             model="openrouter/anthropic/claude-haiku-4.5",
             tool_choice="none",
-            cache_key="lumen-cache-smoke",
+            tenant_id=UUID(int=71),
+            user_id=UUID(int=72),
+            session_id=UUID(int=73),
         ):
             usage = ev.usage or usage
         assert usage is not None, "live route reported no usage"
@@ -1687,7 +1690,9 @@ async def test_live_prompt_cache_session_shaped_reads_on_turn_two(
             tools=tools,
             model="openrouter/anthropic/claude-haiku-4.5",
             tool_choice="none",
-            cache_key="lumen-session-cache-smoke",
+            tenant_id=UUID(int=71),
+            user_id=UUID(int=72),
+            session_id=UUID(int=73),
         ):
             usage = ev.usage or usage
         assert usage is not None, "live route reported no usage"

@@ -620,7 +620,7 @@ class ChatRuntime:
         self._salvage: tuple[_RouteState, _Usage] | None = None
         # The prompt-cache steering key (#411): the answer's session id, set
         # per answer in _answer (the runtime is constructed per answer).
-        self._cache_key: UUID | None = None
+        self._cache_session_id: UUID | None = None
         # The #413 fallback revalidator: the SAME allow-list check the send path
         # applies (config registry / the tenant's enabled providers), re-run at
         # answer start so stored config that went stale is dropped fail-closed.
@@ -983,8 +983,8 @@ class ChatRuntime:
         # per-turn thrashing back). ``route_state.model`` is therefore the
         # model that ACTUALLY produced the answer — what ``done``, the message
         # row, the usage row, and the audit record.
-        # The per-session prompt-cache key (#411) the turn streamer forwards.
-        self._cache_key = session_id
+        # Domain session identity only; the gateway derives opaque cache scopes (#763).
+        self._cache_session_id = session_id
         route_state = _RouteState(
             model=model, route=await self._resolve_model_route(session, model)
         )
@@ -2638,7 +2638,9 @@ class ChatRuntime:
             # The prompt-cache steering key (#411): stable per session so
             # OpenAI-style implicit caching lands consecutive answers of one
             # conversation on the same cache shard.
-            cache_key=str(self._cache_key) if self._cache_key else None,
+            tenant_id=self._principal.tenant_id,
+            user_id=self._principal.user_id,
+            session_id=self._cache_session_id,
             # Output ceiling (#488): only forwarded when set, so an unbounded
             # (offline/headless) turn keeps its exact pre-#488 wire.
             **({"max_tokens": max_tokens} if max_tokens is not None else {}),

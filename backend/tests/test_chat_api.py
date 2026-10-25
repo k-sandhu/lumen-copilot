@@ -109,7 +109,9 @@ class _ScriptedGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
         max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         # Turn shape is decided by whether the transcript already has a tool turn:
@@ -159,7 +161,9 @@ class _CapturingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
         max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append({"model": model, "api_key": api_key, "api_base": api_base})
@@ -1027,7 +1031,9 @@ class _BlockingGateway:
         tool_choice: object = None,
         api_key: object = None,
         api_base: object = None,
-        cache_key: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
         max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.entered.set()

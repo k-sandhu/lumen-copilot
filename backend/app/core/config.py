@@ -12,6 +12,8 @@ process refuses to boot misconfigured rather than failing deep in a request.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -876,6 +878,37 @@ class Settings(PasswordHashingSettings):
     # OpenAI prompt_cache_key). A kill-switch, not a tuning knob — off means
     # the exact pre-#411 wire shape everywhere.
     chat_prompt_cache_enabled: bool = Field(default=True, alias="CHAT_PROMPT_CACHE_ENABLED")
+    # Dedicated HMAC material; independent of the vault master key (ADR-0016/#763).
+    chat_prompt_cache_scope_secret: str = Field(
+        default="bHVtZW4tbG9jYWwtZGV2LWNhY2hlLXNjb3BlLTAwMDA=",
+        alias="CHAT_PROMPT_CACHE_SCOPE_SECRET",
+        repr=False,
+    )
+
+    @field_validator("chat_prompt_cache_scope_secret")
+    @classmethod
+    def _cache_scope_key_is_valid(cls, value: str) -> str:
+        try:
+            material = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(
+                "CHAT_PROMPT_CACHE_SCOPE_SECRET must be standard padded base64"
+            ) from None
+        # validate=True permits alternate pad bits. Enforce one spelling so
+        # public dev material cannot evade the outside-local equality guard.
+        if base64.b64encode(material).decode("ascii") != value:
+            raise ValueError("CHAT_PROMPT_CACHE_SCOPE_SECRET must be canonical padded base64")
+        if len(material) < 32:
+            raise ValueError("CHAT_PROMPT_CACHE_SCOPE_SECRET must decode to at least 32 bytes")
+        return value
+
+    @model_validator(mode="after")
+    def _cache_scope_dev_key_is_local(self) -> Settings:
+        if self.environment != "local" and self.chat_prompt_cache_scope_secret == (
+            "bHVtZW4tbG9jYWwtZGV2LWNhY2hlLXNjb3BlLTAwMDA="
+        ):
+            raise ValueError("CHAT_PROMPT_CACHE_SCOPE_SECRET must be overridden outside local")
+        return self
 
     # Context-assembler budget knobs (ADR-0016 §1, issue #410). The conservative
     # input-window used when the model is unknown to the local model map, and the

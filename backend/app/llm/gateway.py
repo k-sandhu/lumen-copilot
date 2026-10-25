@@ -37,6 +37,7 @@ from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, overload
 from urllib.parse import urlparse
+from uuid import UUID
 
 from app.core.config import Settings
 from app.core.errors import AppError, DependencyError, ValidationError
@@ -53,6 +54,7 @@ from app.domain.llm import (
     ToolSpec,
     Transcription,
 )
+from app.llm.cache_scope import cache_scopes
 from app.llm.tool_names import ToolNameMap
 from app.llm.tool_wire import wire_tools
 
@@ -146,6 +148,19 @@ def _cache_family(model: str | None, api_base: str | None) -> str | None:
     ``openai/…`` ⇒ implicit caching steered by ``prompt_cache_key``; every
     other upstream ⇒ ``None``.
     """
+    raw = _openrouter_model(model, api_base)
+    if raw is None:
+        return None
+    upstream = raw.split("/", 1)[0]
+    if upstream == "anthropic":
+        return "anthropic"
+    if upstream == "openai":
+        return "openai"
+    return None
+
+
+def _openrouter_model(model: str | None, api_base: str | None) -> str | None:
+    """Apply the existing transport predicate, including unknown upstream families."""
     if not model:
         return None
     lowered = model.lower()
@@ -161,12 +176,7 @@ def _cache_family(model: str | None, api_base: str | None) -> str | None:
         raw = lowered[len("openrouter/") :]
     else:
         return None
-    upstream = raw.split("/", 1)[0]
-    if upstream == "anthropic":
-        return "anthropic"
-    if upstream == "openai":
-        return "openai"
-    return None
+    return raw
 
 
 def _apply_cache_directives(wire: list[dict[str, Any]], family: str | None) -> list[dict[str, Any]]:
@@ -635,7 +645,9 @@ class LLMGateway:
         tool_choice: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
-        cache_key: str | None = None,
+        tenant_id: UUID | None = None,
+        user_id: UUID | None = None,
+        session_id: UUID | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]: ...
 
@@ -649,7 +661,9 @@ class LLMGateway:
         tool_choice: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
-        cache_key: str | None = None,
+        tenant_id: UUID | None = None,
+        user_id: UUID | None = None,
+        session_id: UUID | None = None,
         max_tokens: int | None = None,
         closure: StreamClosure | None = None,
     ) -> AsyncIterator[StreamEvent]: ...
@@ -663,7 +677,9 @@ class LLMGateway:
         tool_choice: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
-        cache_key: str | None = None,
+        tenant_id: UUID | None = None,
+        user_id: UUID | None = None,
+        session_id: UUID | None = None,
         max_tokens: int | None = None,
         closure: StreamClosure | None = None,
     ) -> AsyncIterator[StreamEvent]:
@@ -714,17 +730,27 @@ class LLMGateway:
         # so it never collides with the spreads below.
         if max_tokens is not None:
             extra["max_tokens"] = max_tokens
-        # Prompt-cache directives (ADR-0016 §2, #411), keyed by the provider
-        # family resolved HERE (no provider categories leak above llm/):
-        # Anthropic-style breakpoints decorate the serialized messages below;
-        # OpenAI-style implicit caching is steered by prompt_cache_key (the
-        # session id) via extra_body passthrough. Unknown families — and a
-        # disabled kill-switch — send the exact pre-#411 wire (AC-3).
-        family = (
-            _cache_family(model_id, api_base) if self._settings.chat_prompt_cache_enabled else None
+        # Cache payloads are gateway-owned (ADR-0016/#763): per-user partition
+        # on OpenAI, per-conversation transport affinity on every OpenRouter
+        # family, and unchanged Anthropic breakpoints. Never send raw domain ids.
+        # Missing domain identity fails closed for BOTH hints and breakpoints.
+        scoped = (
+            self._settings.chat_prompt_cache_enabled
+            and isinstance(tenant_id, UUID)
+            and isinstance(user_id, UUID)
+            and isinstance(session_id, UUID)
+            and _openrouter_model(model_id, api_base) is not None
         )
-        if family == "openai" and cache_key:
-            extra["extra_body"] = {"prompt_cache_key": cache_key}
+        family = _cache_family(model_id, api_base) if scoped else None
+        if scoped:
+            assert tenant_id is not None and user_id is not None and session_id is not None
+            partition, sticky = cache_scopes(
+                self._settings.chat_prompt_cache_scope_secret, tenant_id, user_id, session_id
+            )
+            hints = {"session_id": sticky}
+            if family == "openai":
+                hints["prompt_cache_key"] = partition
+            extra["extra_body"] = hints
         name_map = ToolNameMap(
             [t.name for t in tools]
             + [call.name for message in messages for call in message.tool_calls]
