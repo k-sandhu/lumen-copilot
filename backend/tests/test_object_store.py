@@ -1032,11 +1032,69 @@ def _integration_settings() -> Settings:
         S3_SECRET_KEY=os.environ.get("S3_SECRET_KEY", "lumen_local_dev_secret"),
         S3_BUCKET=os.environ.get("S3_BUCKET", "lumen-uploads"),
         S3_PUBLIC_ENDPOINT_URL=os.environ.get("S3_PUBLIC_ENDPOINT_URL", _INTEGRATION_ENDPOINT),
-        S3_CORS_ALLOWED_ORIGINS="http://localhost:47180",
+        # This fixture targets Community MinIO, not generic S3. Match ADR-0023
+        # and Compose ownership; explicit shell values still win for diagnosis.
+        S3_CORS_ALLOWED_ORIGINS=os.environ.get("S3_CORS_ALLOWED_ORIGINS", "http://localhost:47180"),
+        S3_CORS_MANAGED_EXTERNALLY=os.environ.get("S3_CORS_MANAGED_EXTERNALLY", "true"),
         S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY=os.environ.get(
-            "S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY", "false"
+            "S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY", "true"
         ),
     )  # type: ignore[call-arg]
+
+
+def test_minio_fixture_defaults_match_compose_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "S3_CORS_MANAGED_EXTERNALLY",
+        "S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    settings = _integration_settings()
+    assert settings.s3_cors_managed_externally is True
+    assert settings.s3_incomplete_multipart_cleanup_managed_externally is True
+    # General S3 defaults must continue installing both bucket controls.
+    ordinary_s3 = _unit_settings()
+    assert ordinary_s3.s3_cors_managed_externally is False
+    assert ordinary_s3.s3_incomplete_multipart_cleanup_managed_externally is False
+
+
+def test_minio_fixture_preserves_explicit_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S3_CORS_MANAGED_EXTERNALLY", "false")
+    monkeypatch.setenv("S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY", "false")
+    monkeypatch.setenv("S3_CORS_ALLOWED_ORIGINS", "http://localhost:47195")
+    settings = _integration_settings()
+    assert settings.s3_cors_managed_externally is False
+    assert settings.s3_incomplete_multipart_cleanup_managed_externally is False
+    assert settings.s3_cors_allowed_origins == frozenset({"http://localhost:47195"})
+
+
+@pytest.mark.parametrize("operation", ["head_bucket", "create_bucket"])
+async def test_minio_external_controls_do_not_hide_bucket_failure(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    monkeypatch.delenv("S3_CORS_MANAGED_EXTERNALLY", raising=False)
+    monkeypatch.delenv("S3_INCOMPLETE_MULTIPART_CLEANUP_MANAGED_EXTERNALLY", raising=False)
+    store = ObjectStore(_integration_settings())
+    client = MagicMock()
+    client.head_bucket = AsyncMock(
+        side_effect=ClientError({"Error": {"Code": "404"}}, "HeadBucket")
+        if operation == "create_bucket"
+        else None
+    )
+    failure = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "private provider detail"}}, operation
+    )
+    setattr(client, operation, AsyncMock(side_effect=failure))
+    client.list_buckets = AsyncMock()
+    _install_mock_client(store, client)
+
+    with pytest.raises(DependencyError) as failed:
+        await store.ensure_bucket()
+    assert failed.value.code == "storage_bootstrap_failed"
+    assert "private provider detail" not in str(failed.value)
+    with pytest.raises(DependencyError) as not_ready:
+        await store.ping()
+    assert not_ready.value.code == "storage_bootstrap_incomplete"
+    client.list_buckets.assert_not_awaited()
 
 
 @pytest.fixture
@@ -1100,7 +1158,7 @@ async def test_minio_direct_multipart_cors_etag_and_range_round_trip(
     tenant = f"itest-{uuid.uuid4().hex[:12]}"
     document_id = uuid.uuid4().hex
     upload_id = uuid.uuid4().hex
-    origin = "http://localhost:47180"
+    origin = sorted(store._settings.s3_cors_allowed_origins)[0]
     first_part = b"a" * (5 * 1024 * 1024)
     second_part = b"range-proof-571"
     multipart = await store.create_multipart_upload(

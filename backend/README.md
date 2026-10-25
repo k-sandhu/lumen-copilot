@@ -80,6 +80,11 @@ and service failures during client setup, request, or body consumption raise
 propagates, and body/client context managers retain responsibility for cleanup.
 Regression coverage lives in `tests/test_object_store.py` (#783).
 
+The standalone MinIO live fixture follows Compose ownership: process-level CORS
+and external incomplete-multipart cleanup (ADR-0023). General S3 defaults still
+install bucket controls. See [MinIO bootstrap and browser verification](../docs/runbooks/minio-bootstrap.md)
+for matching process settings, live configuration and allowed/denied-origin checks (#797).
+
 ## Beat startup
 
 The composed `celery -A app.tasks.celery_app beat --scheduler redbeat.RedBeatScheduler`
