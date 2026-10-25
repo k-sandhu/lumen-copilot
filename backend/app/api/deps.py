@@ -192,6 +192,7 @@ def get_backplane() -> Backplane:
     return RedisBackplane(
         settings.redis_url,
         post_terminal_grace_seconds=settings.chat_suggestions_grace_seconds,
+        cleanup_grace_seconds=settings.chat_shutdown_grace_seconds,
     )
 
 

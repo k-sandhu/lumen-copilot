@@ -176,3 +176,27 @@ own correctness is proven, not assumed. The **opt-in gate** (no import-time sock
 offline in `backend/tests/eval/test_chat_latency_gating.py`, so a regression that
 spends tokens on an ordinary `pytest` run — or that loosens the gate to a truthy
 parse — would fail there.
+
+## Strict warnings and resource ownership
+
+The harness keeps Python resource warnings fatal. Console exception logging uses
+plain tracebacks without local variables; JSON logging retains its structured
+exception field. Request correlation runs as pure ASGI middleware so an endpoint
+failure does not leave a middleware-owned AnyIO receive stream open.
+
+Each Redis subscriber owns its pub/sub connection and replay client. Disconnect
+cancellation cannot interrupt their cleanup: unsubscribe and both closes receive
+independent shielded portions of the existing `CHAT_SHUTDOWN_GRACE_SECONDS` total
+budget. Every close is attempted even when an earlier step fails or times out;
+the original request cancellation/error is preserved. Cleanup failures log only
+the operation and exception type. Publisher-pool shutdown remains a separate
+application lifecycle responsibility.
+
+For resource diagnostics, verify subscriber writers are closing and force garbage
+collection while their event loop is still running. A passing terminal assertion
+alone does not prove teardown. Keep allocation traces and provider diagnostics
+private; report only resource types, counts, and timing aggregates. Do not silence
+warnings, flush global SDK caches, or change the provider or 30-second AC-7 budget
+to obtain a pass. Offline regressions cover logging, correlation failure/isolation,
+and bounded cancellation-safe subscriber cleanup in `test_logging_config.py`,
+`test_correlation_middleware.py`, and `test_realtime_subscriber_cleanup.py`.

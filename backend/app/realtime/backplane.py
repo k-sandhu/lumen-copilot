@@ -43,13 +43,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+import anyio
 import redis.asyncio as aioredis
+
+from app.core.config import Settings
+from app.core.logging import get_logger
+
+_log = get_logger(__name__)
+# Reuse the existing app teardown grace, including for standalone callers.
+_DEFAULT_CLEANUP_GRACE: float = Settings.model_fields["chat_shutdown_grace_seconds"].default
 
 # Terminal envelope kinds: a subscriber stops after relaying one of these
 # (exactly-one-terminal lifecycle, contracts/websocket-envelopes.schema.json).
@@ -225,6 +234,7 @@ class RedisBackplane:
         *,
         client_factory: RedisClientFactory | None = None,
         post_terminal_grace_seconds: float = _DEFAULT_POST_TERMINAL_GRACE_SECONDS,
+        cleanup_grace_seconds: float = _DEFAULT_CLEANUP_GRACE,
     ) -> None:
         self._redis_url = redis_url
         self._client_factory: RedisClientFactory = client_factory or self._connect
@@ -236,6 +246,9 @@ class RedisBackplane:
         # How long ``subscribe`` holds open after a ``done`` that declared
         # ``pendingSuggestions`` (#489), waiting for one trailing suggestions event.
         self._post_terminal_grace_seconds = post_terminal_grace_seconds
+        if cleanup_grace_seconds <= 0:
+            raise ValueError("cleanup_grace_seconds must be positive")
+        self._cleanup_grace_seconds = cleanup_grace_seconds
 
     def _connect(self) -> Any:
         """Open a new client for this backplane's URL (the default factory)."""
@@ -416,9 +429,41 @@ class RedisBackplane:
                     if _is_suggestions(envelope):
                         return
         finally:
-            await pubsub.unsubscribe(channel)
-            await pubsub.aclose()
-            await client.aclose()
+            await self._close_subscriber(client, pubsub, channel, active_error=sys.exception())
+
+    async def _close_subscriber(
+        self, client: Any, pubsub: Any, channel: str, *, active_error: BaseException | None
+    ) -> None:
+        """Close only this subscriber's handles under the existing shutdown grace.
+
+        AnyIO cancels at every checkpoint, including during generator close after
+        the WS terminal. Shield each operation independently so an unsubscribe
+        failure/timeout cannot skip either close; the three shares sum to the
+        configured app shutdown grace. Keep an original error/cancellation intact.
+        """
+        failures: list[BaseException] = []
+        for operation, hook, args in (
+            ("unsubscribe", pubsub.unsubscribe, (channel,)),
+            ("pubsub_close", pubsub.aclose, ()),
+            ("client_close", client.aclose, ()),
+        ):
+            try:
+                with anyio.fail_after(self._cleanup_grace_seconds / 3, shield=True):
+                    await hook(*args)
+            except BaseException as exc:
+                failures.append(exc)
+                _log.warning(
+                    "realtime.subscriber_cleanup_failed",
+                    operation=operation,
+                    error_type=type(exc).__name__,
+                )
+        if failures:
+            original = active_error if active_error is not None else failures[0]
+            for failure in failures:
+                if failure is not original:
+                    original.add_note(f"Redis subscriber cleanup failed: {type(failure).__name__}")
+            if active_error is None:
+                raise original
 
     async def _grace_relay(
         self, pubsub: Any, replayed_seq: int
