@@ -186,3 +186,187 @@ def test_opted_in_run_skips_loudly_when_the_runner_is_unreachable(
     finally:
         monkeypatch.delenv("RUN_LIVE", raising=False)
         importlib.reload(module)
+
+
+async def test_live_fixture_uses_configured_token_and_closes_only_created_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    module = importlib.import_module(_LIVE_MODULE)
+    settings = module.Settings(SANDBOX_RUNNER_TOKEN="fixture-secret-" * 4)
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    inspect_session = AsyncMock(side_effect=[404, 200, 404])
+    monkeypatch.setattr(module, "_inspect_session", inspect_session, raising=False)
+    runner = AsyncMock()
+    compositions = []
+
+    def construct(url: str, *, token: str = "") -> Any:
+        compositions.append((url, token))
+        return runner
+
+    monkeypatch.setattr(module, "HttpSandboxRunner", construct)
+    generator = _fixture_body(module.sandbox)()
+    yielded = await generator.__anext__()
+    await generator.aclose()
+    assert compositions == [(settings.sandbox_runner_url, settings.sandbox_runner_token)]
+    runner.ensure_session.assert_awaited_once_with(yielded.spec)
+    runner.close_session.assert_awaited_once_with(yielded.spec)
+    assert inspect_session.await_count == 3
+
+
+async def test_live_fixture_auth_failure_is_safe_and_never_cleans_nonexistent_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.sandbox.runner import SandboxRunnerUnauthorized
+
+    module = importlib.import_module(_LIVE_MODULE)
+    secret = "fixture-secret-" * 4
+    from app.core.config import Settings
+
+    settings = Settings(SANDBOX_RUNNER_TOKEN=secret)
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    monkeypatch.setattr(module, "_inspect_session", AsyncMock(return_value=404), raising=False)
+    runner = AsyncMock()
+    runner.ensure_session.side_effect = SandboxRunnerUnauthorized(secret)
+    monkeypatch.setattr(module, "HttpSandboxRunner", lambda *args, **kwargs: runner)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        await _fixture_body(module.sandbox)().__anext__()
+    runner.close_session.assert_not_awaited()
+    assert secret not in str(failure.value)
+    assert "authentication" in str(failure.value)
+    assert "build sandbox-exec-image" not in str(failure.value)
+
+
+@pytest.mark.parametrize("kind", ["unavailable", "unauthorized", "rejected", "failed"])
+def test_fixture_diagnostics_never_echo_exception_secrets(kind: str) -> None:
+    from app.sandbox.runner import (
+        SandboxRunnerFailed,
+        SandboxRunnerRejected,
+        SandboxRunnerUnauthorized,
+        SandboxRunnerUnavailable,
+    )
+
+    module = importlib.import_module(_LIVE_MODULE)
+    error_type = {
+        "unavailable": SandboxRunnerUnavailable,
+        "unauthorized": SandboxRunnerUnauthorized,
+        "rejected": SandboxRunnerRejected,
+        "failed": SandboxRunnerFailed,
+    }[kind]
+    detail = module._setup_failure(error_type("synthetic-sensitive-exception"))
+    assert "synthetic-sensitive-exception" not in detail
+    if kind == "unauthorized":
+        assert "401" in detail and "build sandbox-exec-image" not in detail
+    if kind == "failed":
+        assert "image" in detail and "daemon" in detail
+
+
+async def test_confirmed_session_cleanup_failure_is_loud_but_token_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    module = importlib.import_module(_LIVE_MODULE)
+    settings = module.Settings(SANDBOX_RUNNER_TOKEN="fixture-secret-" * 4)
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    monkeypatch.setattr(module, "_inspect_session", AsyncMock(side_effect=[404, 200]))
+    runner = AsyncMock()
+    runner.close_session.side_effect = RuntimeError(settings.sandbox_runner_token)
+    monkeypatch.setattr(module, "HttpSandboxRunner", lambda *args, **kwargs: runner)
+    generator = _fixture_body(module.sandbox)()
+    value = await generator.__anext__()
+    with pytest.raises(pytest.fail.Exception) as failed:
+        await generator.aclose()
+    assert str(value.spec.sandbox_session_id) in str(failed.value)
+    assert settings.sandbox_runner_token not in str(failed.value)
+    runner.close_session.assert_awaited_once_with(value.spec)
+
+
+async def test_existing_uuid_is_never_taken_over_or_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    module = importlib.import_module(_LIVE_MODULE)
+    settings = module.Settings()
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    monkeypatch.setattr(module, "_inspect_session", AsyncMock(return_value=200))
+    runner = AsyncMock()
+    monkeypatch.setattr(module, "HttpSandboxRunner", lambda *args, **kwargs: runner)
+    with pytest.raises(AssertionError, match="fresh UUID already exists"):
+        await _fixture_body(module.sandbox)().__anext__()
+    runner.ensure_session.assert_not_awaited()
+    runner.close_session.assert_not_awaited()
+
+
+async def test_lost_ensure_response_cleans_only_confirmed_partial_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.sandbox.runner import SandboxRunnerUnavailable
+
+    module = importlib.import_module(_LIVE_MODULE)
+    settings = module.Settings()
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    monkeypatch.setattr(module, "_inspect_session", AsyncMock(side_effect=[404, 200, 404]))
+    runner = AsyncMock()
+    runner.ensure_session.side_effect = SandboxRunnerUnavailable("synthetic-sensitive-exception")
+    monkeypatch.setattr(module, "HttpSandboxRunner", lambda *args, **kwargs: runner)
+    with pytest.raises(pytest.fail.Exception) as failed:
+        await _fixture_body(module.sandbox)().__anext__()
+    assert "transport unavailable" in str(failed.value)
+    assert "synthetic-sensitive-exception" not in str(failed.value)
+    runner.close_session.assert_awaited_once()
+
+
+async def test_fixture_cleanup_preserves_primary_test_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    module = importlib.import_module(_LIVE_MODULE)
+    settings = module.Settings()
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    monkeypatch.setattr(module, "_inspect_session", AsyncMock(side_effect=[404, 200, 404]))
+    runner = AsyncMock()
+    monkeypatch.setattr(module, "HttpSandboxRunner", lambda *args, **kwargs: runner)
+    generator = _fixture_body(module.sandbox)()
+    await generator.__anext__()
+    with pytest.raises(ValueError, match="primary test failure"):
+        await generator.athrow(ValueError("primary test failure"))
+    runner.close_session.assert_awaited_once()
+
+
+async def test_public_health_http_error_is_failure_not_unreachable_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    module = importlib.import_module(_LIVE_MODULE)
+    request = httpx.Request("GET", "http://runner/health")
+    response = httpx.Response(500, request=request)
+    monkeypatch.setattr(
+        module,
+        "_probe",
+        AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "synthetic-sensitive-exception", request=request, response=response
+            )
+        ),
+    )
+    with pytest.raises(pytest.fail.Exception) as failed:
+        await module._live_settings()
+    assert "HTTP 500" in str(failed.value)
+    assert "synthetic-sensitive-exception" not in str(failed.value)
