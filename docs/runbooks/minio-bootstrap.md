@@ -29,8 +29,10 @@ explicit origin allow-list supplied to the MinIO process. Explicitly select both
 external-management flags when the calling shell has other S3 settings.
 
 A standalone short test can explicitly abort its incomplete uploads; persistent
-deployments require the external reaper. Its existing Compose shell invocation
-defect is tracked separately in #804. Do not use wildcard CORS to fix a test.
+deployments require the external reaper. Its repaired Compose shell invocation
+keeps all cleanup flags and the bucket in one command; see the
+[multipart reaper runbook](multipart-reaper.md) for verification (#804).
+Do not use wildcard CORS to fix a test.
 
 ## Browser verification and teardown
 
