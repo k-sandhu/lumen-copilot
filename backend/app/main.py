@@ -18,8 +18,8 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api.deps import aclose_backplane, get_object_store
 from app.api.health import router as health_router
@@ -48,7 +48,7 @@ _REQUEST_ID_HEADER = "x-request-id"
 _TENANT_ID_HEADER = "x-tenant-id"
 
 
-class CorrelationMiddleware(BaseHTTPMiddleware):
+class CorrelationMiddleware:
     """Bind request/tenant correlation ids into the structlog context.
 
     Every log line emitted while handling the request inherits these ids via
@@ -57,7 +57,16 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
     here we only propagate an inbound header if present.
     """
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # HTTP correlation must not wrap WebSocket/lifespan traffic or allocate
+        # BaseHTTPMiddleware's response streams, which leak on pre-response errors.
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive=receive)
         structlog.contextvars.clear_contextvars()
         request_id = request.headers.get(_REQUEST_ID_HEADER) or uuid.uuid4().hex
         tenant_id = request.headers.get(_TENANT_ID_HEADER)
@@ -72,12 +81,16 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         # falling back to an unrelated "unknown" id when the client omitted the
         # header; actor/tenant attribution is still resolved later by auth/.
         request.state.request_id = request_id
+
+        async def send_with_correlation(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)[_REQUEST_ID_HEADER] = request_id
+            await send(message)
+
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_correlation)
         finally:
             structlog.contextvars.clear_contextvars()
-        response.headers[_REQUEST_ID_HEADER] = request_id
-        return response
 
 
 @asynccontextmanager

@@ -34,7 +34,9 @@ def configure_logging(*, log_level: str = "info", json_logs: bool = True) -> Non
     renderer: structlog.types.Processor = (
         structlog.processors.JSONRenderer()
         if json_logs
-        else structlog.dev.ConsoleRenderer(colors=False)
+        else structlog.dev.ConsoleRenderer(
+            colors=False, exception_formatter=structlog.dev.plain_traceback
+        )
     )
 
     shared_processors: list[structlog.types.Processor] = [
@@ -42,8 +44,12 @@ def configure_logging(*, log_level: str = "info", json_logs: bool = True) -> Non
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
     ]
+
+    # JSON needs an exception string; the console renderer consumes exc_info
+    # itself. Pre-formatting it also triggers its pretty-formatter UserWarning.
+    if json_logs:
+        shared_processors.append(structlog.processors.format_exc_info)
 
     structlog.configure(
         processors=[*shared_processors, renderer],
