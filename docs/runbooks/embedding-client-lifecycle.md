@@ -40,6 +40,12 @@ Named teardown boundaries:
   only its serving loop's clients. Active clients on another loop are untouched.
 - `tests/eval/test_chat_latency_live.py::_seed`: the fixture creates its own loop,
   so its `finally` retires embedding clients alongside its store and DB engine.
+- `tests/test_llm_gateway.py::_fresh_embed_cache`: its async `finally` awaits
+  this test loop's embedding-client cleanup before pytest closes that loop,
+  including mocked provider failures. Clearing the vector cache alone does not
+  close clients: the gateway allocates its transport before invoking the mocked
+  `litellm.aembedding` function. Never rely on SDK destruction or garbage
+  collection to schedule close after the loop has ended (#814).
 - Ad hoc async callers own their loop boundary: call
   `await app.llm.aclose_embedding_clients()` in `finally`, before closing it.
   `aclose_litellm_clients` is legacy isolated-test compatibility cleanup, including
@@ -53,7 +59,7 @@ and ingestion state transitions are unchanged.
 Run the deterministic gateway/worker-boundary regressions from `backend/`:
 
 ```powershell
-uv run --extra dev pytest tests/test_embedding_client_lifecycle.py tests/test_llm_gateway.py tests/test_tasks_event_loop.py -n 0 -o addopts= -q
+uv run --extra dev pytest tests/test_embedding_offline_cleanup.py tests/test_embedding_client_lifecycle.py tests/test_llm_gateway.py tests/test_tasks_event_loop.py -n 0 -o addopts= -q
 ```
 
 The opt-in real regression calls the configured provider twice through actual
@@ -76,3 +82,12 @@ lifecycle proof with real grounded answers. Keep its five samples and original
 relabeled with a relaxed budget. Worker ingestion additionally needs a real
 Celery worker, object store, database and retrieval index; use synthetic documents,
 check `ready`/chunk count and audit events, then delete and read back 404.
+
+The offline fixture regression runs a child pytest process with the repository's
+strict warning configuration and the actual gateway fixture. Tracked transports
+assert that close runs on their still-active owning loop; session-end checks
+require both success and typed dimension-drift clients to be closed after the
+loops finish. It does not call a provider or depend on garbage-collection timing.
+Historical CI observations remain in runs `40190274640` (PR #811, first attempt)
+and `40193150260` (PR #815, first attempt); passing unchanged-source reruns do not
+establish that ownership cleanup is fixed.
