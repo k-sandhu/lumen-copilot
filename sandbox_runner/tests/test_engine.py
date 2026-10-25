@@ -924,7 +924,9 @@ def test_a_huge_stdout_never_accumulates_beyond_the_cap() -> None:
         "the stream is being buffered, not discarded past the cap"
     )
     # …and the returned value is still correct, which is what the old test checked.
-    assert len(result["stdout"]) == _MAX_STREAM_CHARS
+    assert result["stdout"] == "x" * _MAX_STREAM_CHARS + (
+        f"\n[output truncated at {_MAX_STREAM_CHARS} characters]"
+    )
 
 
 def test_the_stream_is_drained_past_the_cap_rather_than_abandoned() -> None:
@@ -967,3 +969,50 @@ def test_the_stream_is_drained_past_the_cap_rather_than_abandoned() -> None:
     assert (
         consumed == total_chunks
     ), "the engine stopped reading at the cap, which would block the model's process"
+
+
+@pytest.mark.parametrize("text", ["é", "€", "😀"])
+def test_streaming_utf8_reconstructs_every_split_with_independent_streams(text: str) -> None:
+    raw = text.encode()
+    for split in range(1, len(raw)):
+        chunks = [
+            (b"out:" + raw[:split], b"err:" + raw[:-split]),
+            (None, raw[-split:] + b"!"),
+            (raw[split:] + b"!", None),
+        ]
+        assert _execute_chunks(chunks) == (7, f"out:{text}!", f"err:{text}!")
+
+
+def _execute_chunks(chunks: list[tuple[bytes | None, bytes | None]]) -> tuple[int, str, str]:
+    api = SimpleNamespace(
+        exec_create=lambda *args, **kwargs: {"Id": "test"},
+        exec_start=lambda *args, **kwargs: iter(chunks),
+        exec_inspect=lambda *args: {"ExitCode": 7},
+    )
+    return DockerSandboxEngine(SimpleNamespace(api=api))._exec_streaming(
+        SimpleNamespace(id="container"), ["python"], workdir="/tmp", environment={}
+    )
+
+
+def test_streaming_utf8_replaces_malformed_bytes_and_flushes_partial_sequences() -> None:
+    assert _execute_chunks([(b"a\xff\xe2", b"b\xf0"), (b"\x82\xacz\xe2", b"\x9f")]) == (
+        7,
+        "a�€z�",
+        "b�",
+    )
+
+
+@pytest.mark.parametrize("stream", [0, 1])
+@pytest.mark.parametrize("extra", [b"", b"x", b"\xe2", "€".encode()])
+def test_streaming_truncation_notice_only_when_decoded_output_exceeds_cap(
+    stream: int, extra: bytes
+) -> None:
+    chunks: list[tuple[bytes | None, bytes | None]] = []
+    for chunk in [b"x" * _MAX_STREAM_CHARS, extra]:
+        chunks.append((chunk, None) if stream == 0 else (None, chunk))
+    result = _execute_chunks(chunks)
+    expected = "x" * _MAX_STREAM_CHARS
+    if extra:
+        expected += f"\n[output truncated at {_MAX_STREAM_CHARS} characters]"
+    assert result[stream + 1] == expected
+    assert result[2 - stream] == ""

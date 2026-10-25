@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import hashlib
 import io
@@ -845,20 +846,25 @@ class DockerSandboxEngine:
         exec_id = handle["Id"] if isinstance(handle, dict) else handle
         out_parts: list[str] = []
         err_parts: list[str] = []
-        out_left = _MAX_STREAM_CHARS
-        err_left = _MAX_STREAM_CHARS
+        # One lookahead character distinguishes clipping from an exact-cap result.
+        out_left = _MAX_STREAM_CHARS + 1
+        err_left = _MAX_STREAM_CHARS + 1
+        out_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        err_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         stream = api.exec_start(exec_id, stream=True, demux=True)
         try:
             for chunk in stream:
                 out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
                 if out_chunk and out_left > 0:
-                    text = out_chunk.decode("utf-8", errors="replace")[:out_left]
+                    text = out_decoder.decode(out_chunk)[:out_left]
                     out_parts.append(text)
                     out_left -= len(text)
                 if err_chunk and err_left > 0:
-                    text = err_chunk.decode("utf-8", errors="replace")[:err_left]
+                    text = err_decoder.decode(err_chunk)[:err_left]
                     err_parts.append(text)
                     err_left -= len(text)
+            out_parts.append(out_decoder.decode(b"", final=True)[:out_left])
+            err_parts.append(err_decoder.decode(b"", final=True)[:err_left])
         finally:
             # docker-py's stream generator owns a socket; an abandoned one leaks the
             # connection and, with it, a daemon-side writer.
@@ -866,7 +872,7 @@ class DockerSandboxEngine:
             if callable(close):
                 close()
         exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
-        return exit_code, "".join(out_parts), "".join(err_parts)
+        return exit_code, self._clip("".join(out_parts)), self._clip("".join(err_parts))
 
     @staticmethod
     def _collect_outputs(
