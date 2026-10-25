@@ -142,7 +142,11 @@ their second session with a different question (requires cached tokens >0), then
 a different user's identical opening (requires zero). The second forces two
 synthetic DeepSeek lookup turns plus synthesis with one conversation identity;
 OpenRouter generation records must attribute all three calls to one serving
-provider. These bounded fixture route choices do not edit application settings.
+provider. Its synthetic turns have a bounded 1024-token output allowance: the
+initial 128-token fixture saturated (`finish_reason=length`, 128 completion tokens,
+zero tool calls). This correction does not change deployed model/output or retry/
+interactive budgets, and required-tool, nonempty-synthesis and provider-equality
+assertions remain mandatory. These bounded fixture route choices do not edit application settings.
 Missing model support or failed live evidence is a failure, never a waived gate.
 Keep generation identifiers and raw provider diagnostics private; report token
 counts, call counts and provider-equality aggregates only. The live spy retains

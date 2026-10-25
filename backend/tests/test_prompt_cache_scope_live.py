@@ -177,6 +177,9 @@ async def test_live_multicall_answer_keeps_serving_provider(
             parameters={"type": "object", "properties": {"key": {"type": "string"}}},
         ),
     )
+    # A 128-token probe saturated with finish_reason=length and no tool call.
+    # This synthetic-only allowance bounds reasoning plus output; production
+    # model settings, retry/time budgets and every proof assertion stay unchanged.
     try:
         for step in range(2):
             events, usage = await _turn(
@@ -185,7 +188,7 @@ async def test_live_multicall_answer_keeps_serving_provider(
                 tools=tools,
                 tool_choice="required",
                 model="openrouter/deepseek/deepseek-v4.1-flash",
-                max_tokens=128,
+                max_tokens=1024,
                 **ids,
             )
             calls = [call for event in events for call in event.tool_calls]
@@ -226,7 +229,7 @@ async def test_live_multicall_answer_keeps_serving_provider(
             tools=tools,
             tool_choice="none",
             model="openrouter/deepseek/deepseek-v4.1-flash",
-            max_tokens=128,
+            max_tokens=1024,
             **ids,
         )
         assert any(event.text for event in events), "forced synthesis returned no text"
