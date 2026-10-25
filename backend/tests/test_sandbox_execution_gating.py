@@ -370,3 +370,27 @@ async def test_public_health_http_error_is_failure_not_unreachable_skip(
         await module._live_settings()
     assert "HTTP 500" in str(failed.value)
     assert "synthetic-sensitive-exception" not in str(failed.value)
+
+
+async def test_partial_setup_cleanup_failure_preserves_primary_and_reports_residue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.sandbox.runner import SandboxRunnerUnavailable
+
+    module = importlib.import_module(_LIVE_MODULE)
+    settings = module.Settings()
+    monkeypatch.setattr(module, "Settings", lambda: settings)
+    monkeypatch.setattr(module, "_probe", AsyncMock())
+    monkeypatch.setattr(module, "_inspect_session", AsyncMock(side_effect=[404, 200]))
+    runner = AsyncMock()
+    runner.ensure_session.side_effect = SandboxRunnerUnavailable("sensitive setup detail")
+    runner.close_session.side_effect = RuntimeError("sensitive cleanup detail")
+    monkeypatch.setattr(module, "HttpSandboxRunner", lambda *args, **kwargs: runner)
+    with pytest.raises(pytest.fail.Exception) as failed:
+        await _fixture_body(module.sandbox)().__anext__()
+    assert "transport unavailable" in str(failed.value)
+    notes = " ".join(failed.value.__notes__)
+    assert "cleanup failed for exact test UUID" in notes
+    assert "sensitive" not in str(failed.value) + notes

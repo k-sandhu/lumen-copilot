@@ -456,7 +456,9 @@ its authenticated inspection. It deletes only a confirmed-created session and ve
 with a lost response probes only its own UUID for possible partial creation. If that
 probe is also unavailable, creation remains unconfirmed and the primary setup failure
 is retained; the host residue audit must resolve that uncertainty. Cleanup failures
-remain hard failures without echoing exception/cause text or credentials.
+remain hard failures without echoing exception/cause text or credentials. If setup
+already failed and cleanup fails too, the primary failure is retained with a safe
+exact-UUID cleanup note rather than being replaced by the cleanup error.
 
 With `-s`, safe `sandbox-live session=<uuid> generation=1 state=...` lines identify
 all test-owned sessions. Before each invocation, snapshot host container IDs and

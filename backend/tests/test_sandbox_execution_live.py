@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import textwrap
 import uuid
 from collections.abc import AsyncIterator
@@ -219,17 +220,24 @@ async def sandbox() -> AsyncIterator[_LiveSandbox]:
         print(f"sandbox-live session={spec.sandbox_session_id} generation=1 state=created")
         yield _LiveSandbox(runner=runner, spec=spec)
     finally:
+        primary = sys.exception()
+        if isinstance(primary, GeneratorExit):
+            primary = None  # explicit generator close is normal teardown, not a failed test
         if created:
             try:
                 await runner.close_session(spec)
                 assert await _inspect_session(runner, spec) == 404
             except Exception:
-                pytest.fail(
+                message = (
                     f"sandbox cleanup failed for exact test UUID {spec.sandbox_session_id}, "
-                    "generation 1; inspect that UUID only. No wildcard removal.",
-                    pytrace=False,
+                    "generation 1; inspect that UUID only. No wildcard removal."
                 )
-            print(f"sandbox-live session={spec.sandbox_session_id} generation=1 state=removed")
+                if primary is not None:
+                    primary.add_note(message)  # retain the primary setup/test failure
+                else:
+                    pytest.fail(message, pytrace=False)
+            else:
+                print(f"sandbox-live session={spec.sandbox_session_id} generation=1 state=removed")
 
 
 @_live
