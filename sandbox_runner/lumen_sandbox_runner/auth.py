@@ -83,7 +83,12 @@ async def require_token(
     expected = configured_token()
     # Constant-time: a naive `==` leaks the shared secret to anyone who can time the
     # response, and this caller is on the network by assumption.
-    if x_lumen_runner_token is None or not secrets.compare_digest(x_lumen_runner_token, expected):
+    # compare_digest(str, str) raises for non-ASCII header text. Comparing bytes
+    # preserves the configured-token validation while rejecting wrong credentials
+    # through the same 401 path, including arbitrary HTTP header bytes.
+    if x_lumen_runner_token is None or not secrets.compare_digest(
+        x_lumen_runner_token.encode("utf-8"), expected.encode("utf-8")
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="sandbox runner token missing or invalid",
