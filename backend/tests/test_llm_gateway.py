@@ -45,11 +45,16 @@ from app.llm.gateway import LLMGateway, aclose_litellm_clients, clear_embed_cach
 
 
 @pytest.fixture(autouse=True)
-def _fresh_embed_cache() -> Any:
-    """Isolate the module-level query-embedding cache (#395) between tests."""
+async def _fresh_embed_cache() -> AsyncIterator[None]:
+    """Retire this test loop's clients even when provider I/O is mocked (#814)."""
+    from app.llm.embedding_clients import aclose_embedding_clients
+
     clear_embed_cache()
-    yield
-    clear_embed_cache()
+    try:
+        yield
+    finally:
+        await aclose_embedding_clients()
+        clear_embed_cache()
 
 
 # --- Test settings ---------------------------------------------------------
