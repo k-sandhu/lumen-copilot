@@ -63,4 +63,7 @@ Never modify the committed hash for a successful build.
 
 Finally `docker compose --env-file .env.example -p lumen-qa-795 down -v` removes
 only that verification project's containers/network/volume. Do not reset another
-running stack. This change does not change bucket CORS bootstrap (#797). The existing reaper shell command folding defect is tracked separately in #804; a running companion alone does not prove cleanup succeeded.
+running stack. This change does not change bucket CORS bootstrap (#797). The reaper's
+shell invocation repair and provider cleanup checks are documented in the
+[multipart reaper runbook](multipart-reaper.md) (#804); a running companion alone
+does not prove cleanup succeeded.
