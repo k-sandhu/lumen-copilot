@@ -1673,6 +1673,11 @@ _OFFENDERS: dict[str, tuple[str, str]] = {
         "def go() -> str:\n    return get_settings().openrouter_api_key\n",
         "reads Lumen's `openrouter_api_key`",
     ),
+    "reads prompt-cache scope secret": (
+        "from app.core.config import get_settings\n\n"
+        "def go() -> str:\n    return get_settings().chat_prompt_cache_scope_secret\n",
+        "reads Lumen's `chat_prompt_cache_scope_secret`",
+    ),
     # --- the sealed settings seam (round 5) ---------------------------------
     # The infrastructure field, read through the one shape that IS allowed.
     "reads database_url through the legal shape": (
