@@ -109,7 +109,7 @@ from app.db.base import Base
 from app.db.repositories import TenantRepository, UserRepository
 from app.domain.entities import Role
 from app.domain.retrieval import RetrievedPassage
-from app.llm import LLMGateway
+from app.llm import LLMGateway, aclose_embedding_clients
 from app.main import create_app
 from app.realtime.backplane import is_terminal
 from app.retrieval import RetrievalService
@@ -315,6 +315,7 @@ async def _seed() -> _SeedInfo:
             email="latency@acme.test",
         )
     finally:
+        await aclose_embedding_clients()
         await store.aclose()
         await engine.dispose()
 

@@ -8,6 +8,7 @@ endpoint.** Callers receive domain types (``app.domain.llm``), never vendor
 objects, so swapping a provider remains confined to this module.
 """
 
+from app.llm.embedding_clients import aclose_embedding_clients
 from app.llm.gateway import LLMGateway, LlmProviderError, aclose_litellm_clients
 from app.llm.openrouter_stt import InvalidTranscriptionResponse, OpenRouterTranscriber
 
@@ -17,4 +18,5 @@ __all__ = [
     "LlmProviderError",
     "OpenRouterTranscriber",
     "aclose_litellm_clients",
+    "aclose_embedding_clients",
 ]
