@@ -106,3 +106,35 @@ def test_a_blank_or_weak_token_refuses_to_serve(
     monkeypatch.setenv(TOKEN_ENV, value)
     with pytest.raises(RunnerTokenNotConfigured):
         configured_token()
+
+
+@pytest.mark.parametrize("credential", [None, b"", b"wrong", b"\xc3\xa9", b"\xff"])
+async def test_malformed_credentials_are_401_without_disclosing_tokens(
+    credential: bytes | None,
+) -> None:
+    from fastapi import Depends, FastAPI
+
+    from lumen_sandbox_runner.auth import require_token
+
+    protected = FastAPI()
+    entered = False
+
+    @protected.get("/protected", dependencies=[Depends(require_token)])
+    async def endpoint() -> dict[str, str]:
+        nonlocal entered
+        entered = True
+        return {"status": "authenticated"}
+
+    headers = [] if credential is None else [(TOKEN_HEADER.encode(), credential)]
+    async with AsyncClient(
+        transport=ASGITransport(app=protected, raise_app_exceptions=False), base_url="http://test"
+    ) as client:
+        response = await client.get("/protected", headers=headers)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "sandbox runner token missing or invalid"}
+        assert not entered
+        assert _TOKEN not in response.text
+        valid = await client.get("/protected", headers={TOKEN_HEADER: _TOKEN})
+        assert valid.status_code == 200
+        assert valid.json() == {"status": "authenticated"}
+        assert entered
