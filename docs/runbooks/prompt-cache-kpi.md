@@ -145,7 +145,14 @@ OpenRouter generation records must attribute all three calls to one serving
 provider. These bounded fixture route choices do not edit application settings.
 Missing model support or failed live evidence is a failure, never a waived gate.
 Keep generation identifiers and raw provider diagnostics private; report token
-counts, call counts and provider-equality aggregates only.
+counts, call counts and provider-equality aggregates only. The live spy retains
+per-call identifiers privately before metadata lookup, preferring router `gen-`
+identifiers over upstream `chatcmpl-` identifiers. Attribution uses the
+[OpenRouter generation endpoint](https://openrouter.ai/docs/api/api-reference/generations/get-request-%26-usage-metadata-for-a-generation),
+whose `data.id` and `upstream_id` are distinct. A single bounded 60-second metadata
+visibility window uses short HTTP timeouts; missing records remain failed proof,
+not evidence of provider equality. Offline observer tests verify chunk identity,
+private per-call persistence and upstream-only rejection.
 
 **Beyond the answer loop.** Only `stream_tools` (the answer loop) emits
 directives. The follow-up-suggestions completion, the `/search` direct answer,

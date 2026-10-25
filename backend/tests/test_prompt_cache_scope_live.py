@@ -7,8 +7,10 @@ Generation identifiers and vendor diagnostics must remain private.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -96,40 +98,55 @@ async def test_live_new_session_cache_reuses_only_same_user() -> None:
 
 
 class _ObservedStream:
-    def __init__(self, inner: Any, generation_ids: list[str]) -> None:
-        self.inner, self.generation_ids = inner, generation_ids
+    def __init__(self, inner: Any, generation_ids: list[str], private_path: Path) -> None:
+        self.inner, self.generation_ids, self.private_path = inner, generation_ids, private_path
 
     async def __aiter__(self) -> AsyncIterator[Any]:
-        recorded = False
+        index = len(self.generation_ids)
+        self.generation_ids.append("")
         async for part in self.inner:
             identifier = getattr(part, "id", None)
-            if not recorded and isinstance(identifier, str) and identifier:
-                self.generation_ids.append(identifier)
-                recorded = True
+            if isinstance(identifier, str) and identifier:
+                # Prefer the router generation id over a temporary/upstream id.
+                current = self.generation_ids[index]
+                if identifier.startswith("gen-") or not current.startswith("gen-"):
+                    self.generation_ids[index] = identifier
+                    self.private_path.write_text(json.dumps(self.generation_ids), encoding="utf-8")
             yield part
 
     async def aclose(self) -> None:
         await _aclose(self.inner)
 
 
-async def _provider(client: httpx.AsyncClient, identifier: str) -> str:
-    # Completion records can become visible shortly after the stream finishes.
-    for attempt in range(10):
-        response = await client.get(
-            "https://openrouter.ai/api/v1/generation", params={"id": identifier}
-        )
-        if response.status_code == 200:
-            name = response.json().get("data", {}).get("provider_name")
-            assert isinstance(name, str) and name, "generation record lacks serving provider"
-            return name
-        assert response.status_code == 404, "generation lookup failed (status only)"
-        if attempt < 9:
-            await asyncio.sleep(0.5)
-    raise AssertionError("generation record not available within bounded lookup window")
+async def _provider(client: httpx.AsyncClient, identifier: str, deadline: float) -> str:
+    # One common 60s window for all metadata, not a generation retry or model budget.
+    loop = asyncio.get_running_loop()
+    statuses: list[int] = []
+    try:
+        while loop.time() < deadline:
+            remaining = deadline - loop.time()
+            try:
+                async with asyncio.timeout(min(5.0, remaining)):
+                    response = await client.get(
+                        "https://openrouter.ai/api/v1/generation", params={"id": identifier}
+                    )
+            except (TimeoutError, httpx.TimeoutException):
+                continue
+            statuses.append(response.status_code)
+            if response.status_code == 200:
+                name = response.json().get("data", {}).get("provider_name")
+                assert isinstance(name, str) and name, "generation record lacks serving provider"
+                return name
+            assert response.status_code == 404, "generation lookup failed (status only)"
+            await asyncio.sleep(min(2.0, max(0.0, deadline - loop.time())))
+        raise AssertionError("generation record not available within bounded lookup window")
+    finally:
+        print({"proof": "generation_lookup", "statuses": statuses})
 
 
 async def test_live_multicall_answer_keeps_serving_provider(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     settings = Settings()
     gateway = LLMGateway(settings)
@@ -137,7 +154,9 @@ async def test_live_multicall_answer_keeps_serving_provider(
     real_completion = litellm.acompletion
 
     async def observed(**kwargs: Any) -> _ObservedStream:
-        return _ObservedStream(await real_completion(**kwargs), generations)
+        return _ObservedStream(
+            await real_completion(**kwargs), generations, tmp_path / "generations.json"
+        )
 
     monkeypatch.setattr(litellm, "acompletion", observed)
     ids = {"tenant_id": uuid4(), "user_id": uuid4(), "session_id": uuid4()}
@@ -212,10 +231,34 @@ async def test_live_multicall_answer_keeps_serving_provider(
         )
         assert any(event.text for event in events), "forced synthesis returned no text"
         assert len(generations) == 3, "missing generation evidence for a model call"
+        print(
+            {
+                "proof": "generation_id_formats",
+                "router_ids": sum(identifier.startswith("gen-") for identifier in generations),
+                "upstream_ids": sum(
+                    identifier.startswith("chatcmpl-") for identifier in generations
+                ),
+            }
+        )
+        assert all(
+            identifier.startswith("gen-") for identifier in generations
+        ), "router generation id not captured"
+        deadline = asyncio.get_running_loop().time() + 60.0
         async with httpx.AsyncClient(
-            headers={"Authorization": "Bearer " + settings.openrouter_api_key}, timeout=10
+            headers={"Authorization": "Bearer " + settings.openrouter_api_key}, timeout=5
         ) as client:
-            providers = [await _provider(client, identifier) for identifier in generations]
+            providers = [
+                await _provider(client, identifier, deadline) for identifier in generations
+            ]
+        (tmp_path / "providers.json").write_text(
+            json.dumps(
+                [
+                    {"generation_id": identifier, "provider_name": provider}
+                    for identifier, provider in zip(generations, providers, strict=True)
+                ]
+            ),
+            encoding="utf-8",
+        )
         print(
             {
                 "proof": "conversation_affinity",

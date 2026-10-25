@@ -128,7 +128,7 @@ real Redis (`RUN_LIVE=1`, `REDIS_URL` pointing to an isolated instance).
 ## Deploying prompt-cache scopes
 
 Outside `ENVIRONMENT=local`, provision `CHAT_PROMPT_CACHE_SCOPE_SECRET` separately
-from `SECRETS_ENCRYPTION_KEY`: standard padded base64 of at least32 random bytes.
+from `SECRETS_ENCRYPTION_KEY`: canonical standard padded base64 of at least 32 random bytes.
 The public dev default, malformed base64 and shorter material fail startup.
 Generate deployment material with `secrets.token_bytes(32)` encoded by
 `base64.b64encode`; distribute the same value to serving replicas through your
