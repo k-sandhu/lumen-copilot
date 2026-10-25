@@ -294,3 +294,11 @@ async def test_pair_stable_across_failover_and_forced_synthesis(
             )
         ]
         assert captured["extra_body"] == _expected(_IDS)
+
+
+@pytest.mark.parametrize("environment", ["local", "production"])
+def test_noncanonical_spelling_cannot_bypass_public_key_guard(environment: str) -> None:
+    alternate = "bHVtZW4tbG9jYWwtZGV2LWNhY2hlLXNjb3BlLTAwMDB="
+    assert base64.b64decode(alternate, validate=True) == base64.b64decode(_DEV, validate=True)
+    with pytest.raises(ValidationError, match="CHAT_PROMPT_CACHE_SCOPE_SECRET"):
+        _settings(ENVIRONMENT=environment, CHAT_PROMPT_CACHE_SCOPE_SECRET=alternate)

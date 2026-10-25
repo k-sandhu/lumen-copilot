@@ -894,6 +894,10 @@ class Settings(PasswordHashingSettings):
             raise ValueError(
                 "CHAT_PROMPT_CACHE_SCOPE_SECRET must be standard padded base64"
             ) from None
+        # validate=True permits alternate pad bits. Enforce one spelling so
+        # public dev material cannot evade the outside-local equality guard.
+        if base64.b64encode(material).decode("ascii") != value:
+            raise ValueError("CHAT_PROMPT_CACHE_SCOPE_SECRET must be canonical padded base64")
         if len(material) < 32:
             raise ValueError("CHAT_PROMPT_CACHE_SCOPE_SECRET must decode to at least 32 bytes")
         return value

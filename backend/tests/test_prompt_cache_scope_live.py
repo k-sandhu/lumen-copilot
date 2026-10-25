@@ -160,7 +160,7 @@ async def test_live_multicall_answer_keeps_serving_provider(
     )
     try:
         for step in range(2):
-            events, _ = await _turn(
+            events, usage = await _turn(
                 gateway,
                 messages,
                 tools=tools,
@@ -170,6 +170,18 @@ async def test_live_multicall_answer_keeps_serving_provider(
                 **ids,
             )
             calls = [call for event in events for call in event.tool_calls]
+            print(
+                {
+                    "proof": "required_turn",
+                    "step": step,
+                    "finish_reasons": [
+                        event.finish_reason for event in events if event.finish_reason
+                    ],
+                    "completion_tokens": usage.completion_tokens,
+                    "tool_calls": len(calls),
+                    "text_chunks": sum(bool(event.text) for event in events),
+                }
+            )
             assert calls and all(
                 call.name == "lookup" for call in calls
             ), "required synthetic lookup not produced"
