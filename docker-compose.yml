@@ -6,6 +6,9 @@
 #   docker compose --profile sandbox up
 # — because code execution is explicitly enabled per deploy/tenant. The runner is
 # built from this repository; the default stack runs without it.
+# LLM observability + ops metrics (ADR-0027) — Arize Phoenix, Prometheus, Grafana —
+# are OPT-IN via the `observability` profile (with TELEMETRY_ENABLED=true in .env):
+#   docker compose --profile observability up -d
 # Host ports come from .env (471xx block); container-to-container traffic uses service names.
 # Images are version-pinned (no :latest) per AGENTS.md.
 
@@ -435,6 +438,95 @@ services:
       backend:
         condition: service_healthy
 
+  # --- LLM observability & ops metrics (ADR-0027, #817) -------------------------
+  # OPT-IN via the `observability` profile, plus TELEMETRY_ENABLED=true in .env so
+  # the backend and workers export to it:
+  #   docker compose --profile observability up -d
+  # Runbook: docs/runbooks/observability.md. None of these is a boot dependency of
+  # the app: a missing or slow collector drops telemetry, never a request.
+  #
+  # Arize Phoenix: per-turn traces (OpenInference spans over OTLP/HTTP on :6006).
+  # Elastic License 2.0 — an internal operator tool only (ADR-0027 §2). Traces hold
+  # tenant prompts and passages when content capture is on, so outside local dev it
+  # MUST run with authentication (PHOENIX_ENABLE_AUTH + PHOENIX_SECRET, set through
+  # a deploy override — Phoenix rejects even an EMPTY secret, so they are not
+  # interpolated here) and the backend must send TELEMETRY_TRACES_API_KEY.
+  phoenix:
+    image: arizephoenix/phoenix:version-20.21.4
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+      # Phoenix's own product analytics to Arize: off (least exposure).
+      PHOENIX_TELEMETRY_ENABLED: "false"
+    ports:
+      - "${PHOENIX_PORT:-47188}:6006"
+    volumes:
+      - phoenixdata:/mnt/data
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:6006/healthz').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Prometheus with its native OTLP receiver: every process PUSHES metrics, so
+  # prefork Celery children need no scrape endpoint of their own.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: ["observability"]
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}"
+      - "--web.enable-otlp-receiver"
+    ports:
+      - "${PROMETHEUS_PORT:-47190}:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Grafana, provisioned from the repo: the Prometheus datasource and the
+  # "Lumen — service & LLM" dashboard (docker/grafana/).
+  grafana:
+    image: grafana/grafana:12.4.12
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Local-dev placeholder only; a deployment sets a real one in its env.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-lumen-local-dev-grafana-not-a-secret}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/lumen-service-llm.json
+    ports:
+      - "${GRAFANA_PORT:-47189}:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # First boot runs Grafana's own schema migrations (~2 min on a busy host).
+      start_period: 120s
+
 networks:
   # The default bridge every service shares.
   default:
@@ -450,3 +542,6 @@ volumes:
   miniodata:
   osdata:
   frontend_node_modules:
+  phoenixdata:
+  prometheusdata:
+  grafanadata:

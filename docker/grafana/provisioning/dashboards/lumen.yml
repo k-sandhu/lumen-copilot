@@ -1,0 +1,11 @@
+# Loads the repo's dashboards (docker/grafana/dashboards) into a "Lumen" folder.
+# Edits in the UI are not persisted: change the JSON in the repo instead.
+apiVersion: 1
+providers:
+  - name: lumen
+    folder: Lumen
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
