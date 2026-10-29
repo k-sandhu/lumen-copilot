@@ -68,6 +68,7 @@ Decided in [ADR-0004](docs/architecture/0004-architecture-boundaries-and-adapter
 | Identity & tenant ("who is asking") | `backend/app/auth/` |
 | External source connectors | `backend/app/connectors/<name>/` |
 | Realtime transport (WS + Redis backplane) | `backend/app/realtime/` |
+| Telemetry export (OTLP traces → Arize Phoenix, metrics → Prometheus; [ADR-0027](docs/architecture/0027-llm-observability-phoenix-and-metrics.md)) | `backend/app/observability/` |
 | Config & secrets | `backend/app/core/config.py` (`pydantic-settings`) |
 | API/WS wire contract | `contracts/` |
 | Backend access from the UI | `frontend/src/api/` (generated client) |
