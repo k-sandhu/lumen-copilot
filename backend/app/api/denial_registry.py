@@ -135,6 +135,12 @@ DIRECT_RESOURCE_DENIAL_GUARDS = (
     ),
     DenialGuardRoute("POST", "/api/v1/chat/sessions", "ChatService", "chat.session.create"),
     DenialGuardRoute(
+        "POST",
+        "/api/v1/chat/streams/{stream_id}/cancel",
+        "StreamCancellationService",
+        "chat.stream.cancel",
+    ),
+    DenialGuardRoute(
         "GET", "/api/v1/chat/sessions/{session_id}", "ChatService", "chat.session.read"
     ),
     DenialGuardRoute(

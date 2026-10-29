@@ -846,6 +846,43 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /chat/streams/{streamId}/cancel:
+    parameters:
+      - name: streamId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1 }
+        description: The `stream_id` returned by `sendMessage` (202).
+    post:
+      operationId: cancelChatStream
+      summary: Cancel an in-flight chat answer stream (Stop).
+      description: >
+        Owner-checked, idempotent cancellation of the answer producer for
+        `streamId` (#574, spec 0028). The stream must belong to the caller
+        (same binding the WS consumer checks): an unknown id and a
+        foreign/cross-tenant id both return 404 (existence non-disclosure,
+        INV-1/INV-2). A 200 response waits for producer cleanup and the
+        terminal event. It cancels in-flight provider/tool awaits, persists only
+        the answer text already streamed
+        (marked `finish_reason=cancelled`), emits exactly one `cancelled`
+        WS terminal, and writes exactly one `answer.cancelled` audit event.
+        Repeated calls are safe: a second cancel, or a cancel after the
+        stream already completed, is a no-op returning
+        `status=already_completed`. A cancelled stream returns `status=cancelled`
+        on repeated calls. A cleanup timeout returns 503 without claiming Stop
+        succeeded; clients retain the partial and may retry.
+        A plain WebSocket disconnect never cancels; only this endpoint does.
+      tags: [chat]
+      responses:
+        "200":
+          description: Producer settled as cancelled, or the stream had already completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CancelStreamResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
   # --- Model picker ----------------------------------------------------------
   /models:
     get:
@@ -4061,6 +4098,12 @@ components:
             Governed tool calls behind an assistant message, oldest first
             (empty for user messages) (#377).
           items: { $ref: "#/components/schemas/MessageToolInvocation" }
+        finish_reason:
+          type: [string, "null"]
+          description: >
+            How an assistant turn ended (#574): `cancelled` for a partial
+            answer the user stopped (rendered with a stopped marker after
+            reload); absent/null for ordinary completed turns and legacy rows.
         question:
           $ref: "#/components/schemas/AskUserQuestion"
           description: >
@@ -4230,6 +4273,26 @@ components:
         stream_id:
           type: string
           description: Subscribe to this WebSocket stream id for the assistant answer.
+
+    CancelStreamResponse:
+      type: object
+      additionalProperties: false
+      required: [stream_id, status, terminal]
+      properties:
+        stream_id: { type: string }
+        terminal:
+          $ref: "./websocket-envelopes.schema.json"
+          description: >
+            The settled done, error or cancelled envelope from bounded replay.
+            Clients reconcile this acknowledgement if the socket dropped before
+            delivering the terminal. The WebSocket schema owns the exact shape.
+        status:
+          type: string
+          enum: [cancelled, already_completed]
+          description: >
+            `cancelled` - producer cleanup and the cancelled terminal completed;
+            `already_completed` - the stream had already settled, so the
+            cancel was a no-op.
 
     # --- Models -------------------------------------------------------------
     ModelTier:
@@ -4415,6 +4478,7 @@ components:
         - action.executed
         - action.requested
         - answer.generated
+        - answer.cancelled
         - artifact.created
         - artifact.deleted
         - artifact.downloaded

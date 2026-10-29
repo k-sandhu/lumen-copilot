@@ -210,3 +210,16 @@ describe('live narration (#414)', () => {
     expect(screen.queryByText(/Searching…/)).toBeNull();
   });
 });
+
+
+it('#574 reload renders the persisted partial as stopped', () => {
+  render(
+    thread({
+      messages: [
+        { ...message('m1', 'Kept partial'), role: 'assistant', finish_reason: 'cancelled' },
+      ],
+    }),
+  );
+  expect(screen.getByText('Kept partial')).toBeInTheDocument();
+  expect(screen.getByTestId('message-cancelled')).toHaveTextContent(/stopped by you/i);
+});

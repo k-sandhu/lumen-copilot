@@ -1172,6 +1172,8 @@ class Message:
     question: AskUserQuestion | None = None
     #: Immutable prompt dependencies, independent of deletable citations.
     source_document_ids: tuple[UUID, ...] | None = None
+    #: How the turn ended (#574): "cancelled" for a stopped partial, else None.
+    finish_reason: str | None = None
     #: Recall-only projection of stored name mentions, captured before text processing.
     mentioned_document_ids: tuple[UUID, ...] = ()
 

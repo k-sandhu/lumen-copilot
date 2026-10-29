@@ -72,6 +72,7 @@ from app.domain.escalation import classify_terminal, is_transient, normalize_rea
 from app.llm import LLMGateway
 from app.llm.context import ContextConfig
 from app.retrieval.permissions import AllowSet
+from app.services.answer_budgets import budgets_from_settings
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.services.chat_runtime import ChatRuntime
@@ -401,6 +402,8 @@ async def execute_run(
         # not intercepted (its handler tells the model to proceed with its best
         # interpretation) and no follow-up suggestions are generated.
         interactive=False,
+        # Shared per-answer budgets (#574): same bounds as live chat.
+        budgets=budgets_from_settings(settings),
     )
     try:
         await runtime.run(

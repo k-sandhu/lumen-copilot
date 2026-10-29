@@ -59,6 +59,17 @@ def done(stream_id: str, seq: int, data: dict[str, Any] | None = None) -> dict[s
     return env
 
 
+def cancelled(stream_id: str, seq: int, data: dict[str, Any]) -> dict[str, Any]:
+    """Build a ``cancelled`` terminal envelope (#574; ChatCancelledData in ``data``)."""
+    return {
+        "type": "cancelled",
+        "streamId": stream_id,
+        "seq": seq,
+        "ts": _now_iso(),
+        "data": data,
+    }
+
+
 def error(stream_id: str, seq: int, problem: dict[str, Any]) -> dict[str, Any]:
     """Build an ``error`` terminal envelope.
 

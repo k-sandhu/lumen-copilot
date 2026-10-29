@@ -797,6 +797,24 @@ class Settings(PasswordHashingSettings):
     # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
     chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
 
+    # Shared per-answer budgets (#574, spec 0028): applied identically to live
+    # chat, assistant Test, and headless runs via ``AnswerBudgets``. The wall
+    # clock cancels the entire answer, including an in-flight tool/provider;
+    # the external cap bounds web+MCP calls
+    # per answer (underneath it, the per-tenant rate limits still apply).
+    chat_answer_wall_clock_seconds: float = Field(
+        default=600.0, gt=0, le=3600, alias="CHAT_ANSWER_WALL_CLOCK_SECONDS"
+    )
+    chat_cancel_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=120, alias="CHAT_CANCEL_TIMEOUT_SECONDS"
+    )
+    chat_max_model_calls_per_answer: int = Field(
+        default=23, ge=1, le=200, alias="CHAT_MAX_MODEL_CALLS_PER_ANSWER"
+    )
+    chat_max_external_calls_per_answer: int = Field(
+        default=30, ge=1, le=200, alias="CHAT_MAX_EXTERNAL_CALLS_PER_ANSWER"
+    )
+
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.
     # A nicety, so it is config-gated and time-bounded; any failure is a silent
