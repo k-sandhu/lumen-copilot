@@ -1,0 +1,103 @@
+{
+  "issue": 802,
+  "source_head": "19dec232f944b8c4dacce1e60254cd5a1be56c77",
+  "instrumentation_sha256": "e33c39eaccd1371122ca0ec3e4506625e8ff5aaf660512860b439b729d3402bc",
+  "provider_model": "openrouter/anthropic/claude-haiku-4.5",
+  "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+  "embedding_dimensions": 2048,
+  "runtime": {
+    "python": "3.12.5",
+    "litellm": "1.55.9",
+    "openai": "2.43.0",
+    "httpx": "0.27.2",
+    "host": "Windows",
+    "stores": "isolated WSL PostgreSQL16/Redis7.4/OpenSearch2.19.1",
+    "transport": "in-process authenticated ASGI HTTP/WS, real Redis; QA loopback forwarding to OpenSearch"
+  },
+  "budget_seconds": 2.0,
+  "assertions_enabled": true,
+  "grounding": "all five returned through original per-sample exactly-one retrieval/nonempty passages/citation assertions; post-context validation NOT reached",
+  "result": "ERROR: strict teardown PytestUnraisableExceptionWarning/ResourceWarning before post-context no-retraction/terminal/timing validation",
+  "samples": [
+    {
+      "sample": 1,
+      "process_state": "cold",
+      "observed_first_delta_seconds": 2.001185400004033,
+      "model_turn_seconds": [
+        2.851486,
+        1.015994
+      ],
+      "retrieval_seconds": [
+        0.598621
+      ],
+      "embedding_seconds": [
+        0.355583
+      ]
+    },
+    {
+      "sample": 2,
+      "process_state": "warm",
+      "observed_first_delta_seconds": 3.022913699998753,
+      "model_turn_seconds": [
+        1.861896,
+        1.091519
+      ],
+      "retrieval_seconds": [
+        0.078405
+      ],
+      "embedding_seconds": [
+        0.000914
+      ]
+    },
+    {
+      "sample": 3,
+      "process_state": "warm",
+      "observed_first_delta_seconds": 3.159167600009823,
+      "model_turn_seconds": [
+        2.077566,
+        1.073229
+      ],
+      "retrieval_seconds": [
+        0.073856
+      ],
+      "embedding_seconds": [
+        0.001286
+      ]
+    },
+    {
+      "sample": 4,
+      "process_state": "warm",
+      "observed_first_delta_seconds": 3.225852700008545,
+      "model_turn_seconds": [
+        2.008074,
+        1.089345
+      ],
+      "retrieval_seconds": [
+        0.028294
+      ],
+      "embedding_seconds": [
+        0.001391
+      ]
+    },
+    {
+      "sample": 5,
+      "process_state": "warm",
+      "observed_first_delta_seconds": 1.241818799986504,
+      "model_turn_seconds": [
+        1.953425,
+        1.12385
+      ],
+      "retrieval_seconds": [
+        0.079823
+      ],
+      "embedding_seconds": [
+        0.001297
+      ]
+    }
+  ],
+  "instrumentation": "External timing-only HTTP trace plus stage wrappers, fresh process; no wire/payload/header overrides",
+  "comparison_only": true,
+  "configuration_change": "ephemeral child-process CHAT_MODEL_REGISTRY default only; no persistent/application settings changed",
+  "observed_first_delta_median_seconds": 3.022913699998753,
+  "limitation": "not a certified AC1 TTFT or full quality comparison; speculative retractions not established, so first-delta numbers cannot prove grounded answer latency"
+}
