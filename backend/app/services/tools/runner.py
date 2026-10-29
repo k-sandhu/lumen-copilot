@@ -74,6 +74,7 @@ from app.domain.tools import (
     ToolHandlerResult,
     ToolResult,
 )
+from app.observability import observe_tool
 from app.services.audit import AuditSink
 from app.services.tools.registry import UnknownToolError, get_tool
 from app.services.tools.types import (
@@ -300,6 +301,31 @@ class ToolRunner:
         ordinal: int | None = None,
         scope: CallScopeFactory | None = None,
     ) -> ToolResult:
+        """Invoke ``call`` through the governed path inside its TOOL span (ADR-0027).
+
+        Every outcome — denial, failure, success — closes the span with the
+        returned :class:`ToolResult`; see :meth:`_run_governed` for the path.
+        """
+        if ordinal is None:
+            ordinal = self.claim_ordinal()
+        with observe_tool(
+            name=call.name, call_id=call.id, arguments=call.arguments, ordinal=ordinal
+        ) as span:
+            result = await self._run_governed(
+                call=call, context=context, message_id=message_id, ordinal=ordinal, scope=scope
+            )
+            span.finished(result)
+            return result
+
+    async def _run_governed(
+        self,
+        *,
+        call: ToolCall,
+        context: ToolContext,
+        message_id: UUID | None,
+        ordinal: int,
+        scope: CallScopeFactory | None,
+    ) -> ToolResult:
         """Invoke ``call`` through the governed path; always return a :class:`ToolResult`.
 
         Never raises for a tool concern (an unknown/off-list/unapproved/failing
@@ -324,8 +350,6 @@ class ToolRunner:
         dispatcher's concurrency slot, which the factory may bound) while
         waiting its turn to persist.
         """
-        if ordinal is None:
-            ordinal = self.claim_ordinal()
         args_hash = hash_args(call.arguments)
         started = time.monotonic()
 

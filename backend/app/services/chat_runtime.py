@@ -87,6 +87,7 @@ from app.llm.context import (
     litellm_token_counter,
     memoizing_token_counter,
 )
+from app.observability import observe_turn
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
@@ -815,128 +816,150 @@ class ChatRuntime:
         typed ``ok=False`` rather than launching a container. A test run therefore
         performs NO real side effect (the load-bearing property of the harness).
         """
-        state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
-        self._context_audit = None
-        # Mint the absolute producer→terminal deadline for the interactive path
-        # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
-        # leaving the reserved margin; this anchors the WHOLE path so the terminal
-        # publish is later bounded by the time actually left — never an unbounded
-        # Redis pipeline. Off (``None``) for batch/headless/offline or when no margin
-        # is wired: the terminal publish stays unbounded, exactly as before.
-        self._producer_deadline = self._resolve_producer_deadline()
-        assistant_message_id = uuid.uuid4()
-        await self._publish(
-            state,
-            envelopes.start(
-                stream_id,
-                await self._next_seq(state),
-                data={
-                    "sessionId": str(session_id),
-                    "messageId": str(assistant_message_id),
-                    "model": model,
-                },
-            ),
-        )
-        try:
-            async with self._sessionmaker() as session:
-                # Bind the RLS GUC on the runtime's own session for this
-                # transaction (#17): the answer producer runs off the request
-                # path with a fresh session, so it arms the Postgres RLS backstop
-                # itself, keyed off the streaming principal's tenant. No-op off
-                # Postgres (offline tests).
-                await bind_tenant(session, self._principal.tenant_id)
-                # ``_answer`` COMMITS the assistant turn + its base usage row ITSELF,
-                # BEFORE it publishes the terminal ``done`` (#489/BE-1). A commit
-                # failure therefore raises out of ``_answer`` into the error arms
-                # below and becomes a typed ``error`` terminal — never a success
-                # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
-                # runs AFTER that commit in its own independent transaction (it cannot
-                # roll the answer back), so this block has no trailing commit.
-                try:
-                    result = await self._answer(
-                        session=session,
-                        state=state,
-                        session_id=session_id,
-                        assistant_message_id=assistant_message_id,
-                        question=question,
-                        model=model,
-                        history=history,
-                        collection_ids=collection_ids,
-                        document_ids=document_ids,
-                        assistant_config=assistant_config,
-                        custom_instructions=custom_instructions,
-                        simulate_writes=simulate_writes,
-                        summary=summary,
-                        evidence=evidence,
-                        mentioned_documents=mentioned_documents,
-                        compaction_cursor=compaction_cursor,
-                    )
-                except AppError as exc:
-                    if (
-                        exc.code == "context_too_large"
-                        and not simulate_writes
-                        and self._context_audit is not None
-                        and self._context_audit.events
-                    ):
-                        records = await ToolInvocationRepository(
-                            session, self._principal.tenant_id
-                        ).list_for_messages([assistant_message_id])
-                        # Release the failed transaction before acquiring the
-                        # restoration session. Never commit business writes or
-                        # forward references to an absent assistant message.
-                        await session.rollback()
-                        async with self._sessionmaker() as recovery:
-                            await bind_tenant(recovery, self._principal.tenant_id)
-                            await AuditSink(
-                                AuditEventRepository(recovery, self._principal.tenant_id)
-                            ).restore_context_rejected(self._context_audit.events)
-                            await ToolInvocationRepository(
-                                recovery, self._principal.tenant_id
-                            ).restore_context_rejected(records.get(assistant_message_id, []))
-                            await recovery.commit()
-                    raise
-        except asyncio.CancelledError:
-            # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
-            # cancels every in-flight producer on SIGTERM, issue #156). In Python
-            # 3.12 ``CancelledError`` is a ``BaseException``, so it bypasses the
-            # ``AppError``/``Exception`` arms below — without this arm the stream
-            # would end after ``start`` with NO terminal, and the Redis replay
-            # buffer would hand a reconnecting client an orphaned stream to wait
-            # on forever. Emit one RETRYABLE terminal (503; the contract has the
-            # client treat ``error`` as retryable) then RE-RAISE so the task still
-            # stops — never swallow cancellation.
-            await self._salvage_usage_after_failure(session_id, assistant_message_id)
-            await self._terminal_error(
+        # One AGENT trace per answer turn (ADR-0027): model calls, tools and
+        # retrieval made inside nest under it. A no-op while telemetry is off.
+        with observe_turn(
+            session_id=session_id,
+            user_id=self._principal.user_id,
+            tenant_id=self._principal.tenant_id,
+            model=model,
+            question=question,
+            interactive=self._interactive,
+            request_id=self._request_id,
+        ) as turn:
+            state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
+            self._context_audit = None
+            # Mint the absolute producer→terminal deadline for the interactive path
+            # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
+            # leaving the reserved margin; this anchors the WHOLE path so the terminal
+            # publish is later bounded by the time actually left — never an unbounded
+            # Redis pipeline. Off (``None``) for batch/headless/offline or when no margin
+            # is wired: the terminal publish stays unbounded, exactly as before.
+            self._producer_deadline = self._resolve_producer_deadline()
+            assistant_message_id = uuid.uuid4()
+            await self._publish(
                 state,
-                503,
-                "Service Unavailable",
-                "dependency_unavailable",
-                "Server is shutting down.",
+                envelopes.start(
+                    stream_id,
+                    await self._next_seq(state),
+                    data={
+                        "sessionId": str(session_id),
+                        "messageId": str(assistant_message_id),
+                        "model": model,
+                    },
+                ),
             )
-            raise
-        except AppError as exc:
-            await self._salvage_usage_after_failure(session_id, assistant_message_id)
-            await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
-            return False
-        except Exception as exc:  # noqa: BLE001 — never leak a vendor error to the client
-            # Log the error *type* only (never the message — it may carry vendor
-            # details / a key). The client gets an opaque 500 problem envelope.
-            log.error("chat_runtime.failed", stream_id=stream_id, error_type=type(exc).__name__)
-            await self._salvage_usage_after_failure(session_id, assistant_message_id)
-            await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
-            return False
+            try:
+                async with self._sessionmaker() as session:
+                    # Bind the RLS GUC on the runtime's own session for this
+                    # transaction (#17): the answer producer runs off the request
+                    # path with a fresh session, so it arms the Postgres RLS backstop
+                    # itself, keyed off the streaming principal's tenant. No-op off
+                    # Postgres (offline tests).
+                    await bind_tenant(session, self._principal.tenant_id)
+                    # ``_answer`` COMMITS the assistant turn + its base usage row ITSELF,
+                    # BEFORE it publishes the terminal ``done`` (#489/BE-1). A commit
+                    # failure therefore raises out of ``_answer`` into the error arms
+                    # below and becomes a typed ``error`` terminal — never a success
+                    # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
+                    # runs AFTER that commit in its own independent transaction (it cannot
+                    # roll the answer back), so this block has no trailing commit.
+                    try:
+                        result = await self._answer(
+                            session=session,
+                            state=state,
+                            session_id=session_id,
+                            assistant_message_id=assistant_message_id,
+                            question=question,
+                            model=model,
+                            history=history,
+                            collection_ids=collection_ids,
+                            document_ids=document_ids,
+                            assistant_config=assistant_config,
+                            custom_instructions=custom_instructions,
+                            simulate_writes=simulate_writes,
+                            summary=summary,
+                            evidence=evidence,
+                            mentioned_documents=mentioned_documents,
+                            compaction_cursor=compaction_cursor,
+                        )
+                    except AppError as exc:
+                        if (
+                            exc.code == "context_too_large"
+                            and not simulate_writes
+                            and self._context_audit is not None
+                            and self._context_audit.events
+                        ):
+                            records = await ToolInvocationRepository(
+                                session, self._principal.tenant_id
+                            ).list_for_messages([assistant_message_id])
+                            # Release the failed transaction before acquiring the
+                            # restoration session. Never commit business writes or
+                            # forward references to an absent assistant message.
+                            await session.rollback()
+                            async with self._sessionmaker() as recovery:
+                                await bind_tenant(recovery, self._principal.tenant_id)
+                                await AuditSink(
+                                    AuditEventRepository(recovery, self._principal.tenant_id)
+                                ).restore_context_rejected(self._context_audit.events)
+                                await ToolInvocationRepository(
+                                    recovery, self._principal.tenant_id
+                                ).restore_context_rejected(records.get(assistant_message_id, []))
+                                await recovery.commit()
+                        raise
+            except asyncio.CancelledError:
+                # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
+                # cancels every in-flight producer on SIGTERM, issue #156). In Python
+                # 3.12 ``CancelledError`` is a ``BaseException``, so it bypasses the
+                # ``AppError``/``Exception`` arms below — without this arm the stream
+                # would end after ``start`` with NO terminal, and the Redis replay
+                # buffer would hand a reconnecting client an orphaned stream to wait
+                # on forever. Emit one RETRYABLE terminal (503; the contract has the
+                # client treat ``error`` as retryable) then RE-RAISE so the task still
+                # stops — never swallow cancellation.
+                await self._salvage_usage_after_failure(session_id, assistant_message_id)
+                await self._terminal_error(
+                    state,
+                    503,
+                    "Service Unavailable",
+                    "dependency_unavailable",
+                    "Server is shutting down.",
+                )
+                raise
+            except AppError as exc:
+                await self._salvage_usage_after_failure(session_id, assistant_message_id)
+                await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
+                turn.failed(exc.code, exc.detail)
+                return False
+            except Exception as exc:  # noqa: BLE001 — never leak a vendor error to the client
+                # Log the error *type* only (never the message — it may carry vendor
+                # details / a key). The client gets an opaque 500 problem envelope.
+                log.error("chat_runtime.failed", stream_id=stream_id, error_type=type(exc).__name__)
+                await self._salvage_usage_after_failure(session_id, assistant_message_id)
+                await self._terminal_error(
+                    state, 500, "Internal Server Error", "internal_error", None
+                )
+                turn.failed("internal_error")
+                return False
 
-        # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
-        # usage row and only THEN published the terminal ``done`` (#489/BE-1): the
-        # answer is durably persisted and the client saw exactly one success
-        # terminal. A commit failure instead raises out of ``_answer`` (before any
-        # terminal) into the ``except`` arms above, which emit a typed ``error`` — so
-        # a rolled-back answer never reports success. The cache KPI emits ONLY here,
-        # strictly after that successful commit, so a failed answer never appears in
-        # the per-successful-answer series (round-2 review NEW-1; BE-1 hardens it by
-        # making the terminal itself follow the commit).
-        _log_cache_kpi(result)
-        return True
+            # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
+            # usage row and only THEN published the terminal ``done`` (#489/BE-1): the
+            # answer is durably persisted and the client saw exactly one success
+            # terminal. A commit failure instead raises out of ``_answer`` (before any
+            # terminal) into the ``except`` arms above, which emit a typed ``error`` — so
+            # a rolled-back answer never reports success. The cache KPI emits ONLY here,
+            # strictly after that successful commit, so a failed answer never appears in
+            # the per-successful-answer series (round-2 review NEW-1; BE-1 hardens it by
+            # making the terminal itself follow the commit).
+            turn.answered(
+                answer=result.answer_text,
+                model_used=result.model_used,
+                finish_reason=result.finish_reason,
+                citation_count=result.citation_count,
+                total_tokens=result.total_tokens,
+            )
+            _log_cache_kpi(result)
+            return True
 
     # --- the agentic loop ---------------------------------------------------
 
@@ -1632,6 +1655,7 @@ class ChatRuntime:
             )
             answer_usage = _answer_usage_totals(route_state, usage)
             ask_result = _RunResult(
+                answer_text=ask_question.question,
                 finish_reason="ask_user",
                 model_used=route_state.model,
                 citation_count=0,
@@ -1892,6 +1916,7 @@ class ChatRuntime:
         # (ADR-0016 §2.6 #490 amendment) — by the post-terminal transaction below.
         answer_usage = _answer_usage_totals(route_state, usage)
         run_result = _RunResult(
+            answer_text=answer_text,
             finish_reason=finish_reason,
             model_used=route_state.model,
             citation_count=len(stored_citations) + len(selected_web),
@@ -3488,6 +3513,9 @@ class _RunResult:
     total_tokens: int
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    # The text the turn ended with (the answer, or the clarifying question) —
+    # the turn span's output (ADR-0027).
+    answer_text: str = ""
 
 
 def _mcp_tool_specs(

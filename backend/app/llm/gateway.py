@@ -57,6 +57,7 @@ from app.domain.llm import (
 from app.llm.cache_scope import cache_scopes
 from app.llm.tool_names import ToolNameMap
 from app.llm.tool_wire import wire_tools
+from app.observability import EmbeddingSpan, LlmCall, observe_embedding
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -566,6 +567,14 @@ class LLMGateway:
         import litellm  # lazy: no network/import cost until first use
 
         model_id = model or self._settings.llm_model
+        # The LLM span (ADR-0027) is handed domain messages and non-secret
+        # parameters only — never ``_credentials``.
+        call = LlmCall(
+            method="chat",
+            model=model_id,
+            messages=messages,
+            invocation_parameters={"max_tokens": max_tokens, "stream": False},
+        )
         try:
             response = await litellm.acompletion(
                 model=model_id,
@@ -576,15 +585,26 @@ class LLMGateway:
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
-            raise _map_vendor_error(exc) from None
+            mapped = _map_vendor_error(exc)
+            call.fail(mapped)
+            raise mapped from None
+        except BaseException as exc:  # cancellation: recorded on the span, re-raised
+            call.fail(exc)
+            raise
 
         choice = response.choices[0]
-        return Completion(
+        completion = Completion(
             content=choice.message.content or "",
             model=model_id,
             finish_reason=getattr(choice, "finish_reason", None),
             usage=_extract_usage(response),
         )
+        call.succeed(
+            content=completion.content,
+            finish_reason=completion.finish_reason,
+            usage=completion.usage,
+        )
+        return completion
 
     async def stream(
         self,
@@ -607,6 +627,12 @@ class LLMGateway:
         import litellm  # lazy
 
         model_id = model or self._settings.llm_model
+        call = LlmCall(
+            method="stream",
+            model=model_id,
+            messages=messages,
+            invocation_parameters={"stream": True},
+        )
         try:
             response = await litellm.acompletion(
                 model=model_id,
@@ -616,24 +642,41 @@ class LLMGateway:
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
-            raise _map_vendor_error(exc) from None
+            mapped = _map_vendor_error(exc)
+            call.fail(mapped)
+            raise mapped from None
+        except BaseException as exc:  # cancellation: recorded on the span, re-raised
+            call.fail(exc)
+            raise
 
         index = 0
+        parts: list[str] = []
         try:
             async for part in response:
                 delta = part.choices[0].delta
                 content = getattr(delta, "content", None)
                 if content:
+                    call.first_chunk()
+                    parts.append(content)
                     yield CompletionChunk(delta=content, index=index)
                     index += 1
+        except GeneratorExit:
+            call.abandon()
+            raise
         except Exception as exc:  # noqa: BLE001 — mid-stream provider fault
-            if isinstance(exc, AppError):
+            mapped = exc if isinstance(exc, AppError) else _map_vendor_error(exc)
+            call.fail(mapped)
+            if mapped is exc:
                 raise
-            raise _map_vendor_error(exc) from None
+            raise mapped from None
+        except BaseException as exc:
+            call.fail(exc)
+            raise
         finally:
             # Cancellable: close the provider stream on break / cancel / error so
             # the upstream HTTP connection is released and no task lingers.
             await _aclose(response)
+        call.succeed(content="".join(parts))
 
     @overload
     def stream_tools(
@@ -767,6 +810,21 @@ class LLMGateway:
             for message in messages
         ]
         provider_tools = [replace(tool, name=name_map.to_wire(tool.name)) for tool in tools]
+        # Domain names and messages on the span (ADR-0027): what the runtime
+        # sent, not the wire aliases; the cache hints in ``extra_body`` are
+        # derived from domain ids and stay off the span with the credentials.
+        call = LlmCall(
+            method="stream_tools",
+            model=model_id,
+            messages=messages,
+            tools=tools,
+            invocation_parameters={
+                "stream": True,
+                "tool_choice": tool_choice,
+                "max_tokens": max_tokens,
+                "prompt_cache_scoped": scoped,
+            },
+        )
         try:
             response = await litellm.acompletion(
                 model=model_id,
@@ -779,7 +837,12 @@ class LLMGateway:
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
-            raise _map_vendor_error(exc) from None
+            mapped = _map_vendor_error(exc)
+            call.fail(mapped)
+            raise mapped from None
+        except BaseException as exc:  # cancellation: recorded on the span, re-raised
+            call.fail(exc)
+            raise
 
         # Tool-call fragments arrive across many chunks keyed by ``index``; we
         # accumulate name + the arguments string per index and parse once at end.
@@ -787,6 +850,7 @@ class LLMGateway:
         tool_call_signalled = False
         finish_reason: str | None = None
         usage: TokenUsage | None = None
+        text_parts: list[str] = []
         try:
             async for part in response:
                 usage = _extract_usage(part) if getattr(part, "usage", None) else usage
@@ -797,8 +861,12 @@ class LLMGateway:
                 delta = choice.delta
                 content = getattr(delta, "content", None)
                 if content:
+                    call.first_chunk()
+                    text_parts.append(content)
                     yield StreamEvent(text=content)
                 fragments = getattr(delta, "tool_calls", None) or []
+                if fragments:
+                    call.first_chunk()
                 if fragments and not tool_call_signalled:
                     # The ADR-0016 §6 classification point (#414): the FIRST
                     # tool-call fragment proves the turn tool-calling. One
@@ -812,24 +880,39 @@ class LLMGateway:
                 fr = getattr(choice, "finish_reason", None)
                 if fr:
                     finish_reason = fr
+        except GeneratorExit:
+            call.abandon()
+            raise
         except Exception as exc:  # noqa: BLE001 — mid-stream provider fault
-            if isinstance(exc, AppError):
+            mapped = exc if isinstance(exc, AppError) else _map_vendor_error(exc)
+            call.fail(mapped)
+            if mapped is exc:
                 raise
-            raise _map_vendor_error(exc) from None
+            raise mapped from None
+        except BaseException as exc:
+            call.fail(exc)
+            raise
         finally:
             closed = await _aclose(response)
             if closure is not None:
                 closure.closed = closed
 
-        built_calls = (acc.build() for _, acc in sorted(tool_acc.items()))
-        tool_calls = tuple(
-            replace(call, name=name_map.from_wire(call.name)) for call in built_calls
-        )
-        yield StreamEvent(
+        try:
+            built_calls = (acc.build() for _, acc in sorted(tool_acc.items()))
+            tool_calls = tuple(
+                replace(built, name=name_map.from_wire(built.name)) for built in built_calls
+            )
+        except BaseException as exc:
+            call.fail(exc)
+            raise
+        final_reason = finish_reason or ("tool_calls" if tool_calls else "stop")
+        call.succeed(
+            content="".join(text_parts),
             tool_calls=tool_calls,
-            finish_reason=finish_reason or ("tool_calls" if tool_calls else "stop"),
+            finish_reason=final_reason,
             usage=usage,
         )
+        yield StreamEvent(tool_calls=tool_calls, finish_reason=final_reason, usage=usage)
 
     async def embed(
         self,
@@ -848,6 +931,28 @@ class LLMGateway:
         symmetry with the chat methods so a future embedding-routing PR reuses this
         seam; ``None`` ⇒ the configured embedding endpoint, unchanged).
         """
+        with observe_embedding(
+            model=model or self._settings.llm_embedding_model, inputs=inputs
+        ) as span:
+            return await self._embed(
+                inputs,
+                model=model,
+                api_key=api_key,
+                api_base=api_base,
+                cache_namespace=cache_namespace,
+                span=span,
+            )
+
+    async def _embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        model: str | None,
+        api_key: str | None,
+        api_base: str | None,
+        cache_namespace: str | None,
+        span: EmbeddingSpan,
+    ) -> list[Embedding]:
         self._require_enabled()
         import litellm  # lazy
 
@@ -892,6 +997,7 @@ class LLMGateway:
                 )
                 # Copy on the way out so a caller mutating its vector cannot
                 # poison the cache.
+                span.cache_hit()
                 return [Embedding(vector=normalized, model=model_id)]
 
         try:
@@ -935,6 +1041,7 @@ class LLMGateway:
                 embeddings[0].vector,
                 max_entries=self._settings.llm_embed_cache_max_entries,
             )
+        span.succeed(_extract_usage(response))
         return embeddings
 
     async def transcribe(
