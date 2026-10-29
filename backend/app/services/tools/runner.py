@@ -82,6 +82,7 @@ from app.services.tools.types import (
     ApprovalRecord,
     ApprovalRequest,
     DenyAllApprovalGate,
+    ToolCancellationPending,
     ToolContext,
     ToolDefinition,
 )
@@ -638,6 +639,10 @@ class ToolRunner:
                     definition.handler(call.arguments, context),
                     timeout=definition.timeout_seconds,
                 )
+        except ToolCancellationPending:
+            # Unconfirmed remote cleanup is producer control flow. Converting it
+            # into a tool result would let the answer falsely acknowledge Stop.
+            raise
         except TimeoutError:
             return ToolResult.failure(
                 call_id=call.id,

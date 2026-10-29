@@ -76,6 +76,18 @@ bindings and replay expire after their existing 900-second retention; subsequent
 requests whose owner binding expired return 404. This is bounded replay and
 cooperative cancellation, not durable recovery of a killed producer.
 
+An unsuccessful or interrupted sandbox kill remains pending cleanup, never an
+ordinary failed tool result. The producer retains the same code-run id and sandbox
+generation, and retries only that execution's owner-scoped cleanup. Each attempt
+uses a fresh transaction, released before the one-second retry delay. The producer
+publishes no terminal or cancelled partial/audit until the kill and its durable
+state are confirmed. Repeated Stop waits on that same producer; each request can
+return 503 while cleanup is pending. Once cleanup succeeds, the producer commits
+one cancelled partial/audit and emits one cancelled terminal. Shutdown still
+drains the shielded cleanup within its
+existing grace; force shutdown can leave cleanup unconfirmed and must not emit
+successful cancellation. Producer death recovery remains outside this lifecycle.
+
 ## Disconnect and partial answers
 
 A plain WebSocket disconnect drops only its subscription. The producer continues;

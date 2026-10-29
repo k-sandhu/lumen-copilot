@@ -119,6 +119,7 @@ from app.services.tools.registry import default_allowlist, tool_specs
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import (
     SandboxToolRunner,
+    ToolCancellationPending,
     ToolContext,
     ToolDefinition,
     TranscriptReader,
@@ -932,7 +933,25 @@ class ChatRuntime:
         self._producer_deadline = self._resolve_producer_deadline()
         assistant_message_id = uuid.uuid4()
 
-        async def finish_user_cancel() -> bool:
+        async def retry_cleanup(cleanup: Callable[[], Awaitable[None]]) -> None:
+            # The original kill already failed. Retry only cleanup of that same
+            # execution, never tool/model dispatch. Endpoint deadlines still
+            # return 503 while this producer retains the unconfirmed execution.
+            while True:
+                await self._retry_sleep(1.0)
+                try:
+                    await cleanup()
+                    return
+                except Exception as exc:
+                    log.warning(
+                        "chat_runtime.cancellation_cleanup_pending",
+                        stream_id=stream_id,
+                        error_type=type(exc).__name__,
+                    )
+
+        async def finish_user_cancel(
+            cleanup: Callable[[], Awaitable[None]] | None = None,
+        ) -> bool:
             self._finalising_cancel = True
 
             # User Stop (#574, spec 0028): persist the partial already
@@ -941,6 +960,8 @@ class ChatRuntime:
             # not-answered so no summarisation is enqueued. Shielded: the
             # finalisation must land even though this task was cancelled.
             async def settle_cancelled() -> None:
+                if cleanup is not None:
+                    await retry_cleanup(cleanup)
                 await self._salvage_usage_after_failure(session_id, assistant_message_id)
                 await self._finalise_cancelled(
                     state,
@@ -960,10 +981,20 @@ class ChatRuntime:
                 raise
             return False
 
-        async def finish_error(status: int, title: str, code: str, detail: str | None) -> None:
+        async def finish_error(
+            status: int,
+            title: str,
+            code: str,
+            detail: str | None,
+            cleanup: Callable[[], Awaitable[None]] | None = None,
+        ) -> None:
             self._settling_error = True
 
             async def settle_error() -> None:
+                if cleanup is not None:
+                    await retry_cleanup(cleanup)
+                    # Cleanup may outlive the answer's original publish budget.
+                    self._producer_deadline = asyncio.get_running_loop().time() + 5
                 await self._salvage_usage_after_failure(session_id, assistant_message_id)
                 await self._terminal_error(state, status, title, code, detail)
 
@@ -1050,6 +1081,27 @@ class ChatRuntime:
                                 ).restore_context_rejected(records.get(assistant_message_id, []))
                                 await recovery.commit()
                         raise
+        except ToolCancellationPending as exc:
+            if self._cancel_requested:
+                return await finish_user_cancel(exc.cleanup)
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                self._budget_exhausted = True
+                await finish_error(
+                    503,
+                    "Service Unavailable",
+                    "answer_budget_exhausted",
+                    "The answer wall-clock budget was exhausted.",
+                    exc.cleanup,
+                )
+                return False
+            await finish_error(
+                503,
+                "Service Unavailable",
+                "dependency_unavailable",
+                "Server is shutting down.",
+                exc.cleanup,
+            )
+            raise asyncio.CancelledError from exc
         except asyncio.CancelledError:
             if self._cancel_requested and not state.answer_committed:
                 return await finish_user_cancel()

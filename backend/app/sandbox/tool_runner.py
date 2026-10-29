@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -56,7 +57,7 @@ from app.realtime.backplane import Backplane
 from app.sandbox.runner import SandboxRunner
 from app.sandbox.service import SandboxService, SandboxSessionService
 from app.services.audit import PermissionDeniedContext, PermissionDeniedRecorder
-from app.services.tools.types import SandboxRun
+from app.services.tools.types import SandboxRun, ToolCancellationPending
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -171,32 +172,16 @@ class ChatSandboxToolRunner:
                     # Closing the HTTP await alone cannot terminate code in the
                     # runner. Use the existing owner-scoped cancel operation and
                     # commit its killed state before the answer acknowledges Stop.
-                    await session.rollback()
-                    await bind_tenant(session, self._tenant_id)
-                    lifecycle = SandboxSessionService(
-                        session,
-                        tenant_id=self._tenant_id,
-                        owner_id=self._owner_id,
-                        runner=self._runner,
-                        settings=self._settings,
-                        denials=PermissionDeniedContext(
-                            PermissionDeniedRecorder(
-                                db_session.get_durable_audit_transactions(self._settings),
-                                tenant_id=self._tenant_id,
-                                request_session=session,
-                            ),
-                            actor=AuditActor.system(),
-                            request_id=self._request_id,
-                            source_ip=self._source_ip,
-                        ),
-                    )
-                    current = await code_runs.get(run_id)
-                    if current is not None and current.status in (
-                        CodeRunStatus.QUEUED,
-                        CodeRunStatus.RUNNING,
-                    ):
-                        await lifecycle.cancel(run_id)
-                        await session.commit()
+                    try:
+                        await session.rollback()
+                        await self._cancel_run(run_id)
+                    except (Exception, asyncio.CancelledError) as exc:
+                        # A failed kill must bypass the ordinary tool-error wrapper.
+                        # A second cancellation can interrupt the kill await too;
+                        # it still does not confirm that remote execution stopped.
+                        # Retain the exact execution for producer-owned cleanup;
+                        # only confirmed cleanup may acknowledge successful Stop.
+                        raise ToolCancellationPending(partial(self._cancel_run, run_id)) from exc
                     raise
                 terminal = await code_runs.get(run_id)
                 await session.commit()
@@ -224,6 +209,34 @@ class ChatSandboxToolRunner:
         summary = _to_summary(terminal, reason_code=outcome.reason_code)
         await self._emit_result(summary)
         return summary
+
+    async def _cancel_run(self, run_id: UUID) -> None:
+        """Confirm a kill and commit its state, with no transaction held on retry."""
+        async with self._sessionmaker() as session:
+            await bind_tenant(session, self._tenant_id)
+            lifecycle = SandboxSessionService(
+                session,
+                tenant_id=self._tenant_id,
+                owner_id=self._owner_id,
+                runner=self._runner,
+                settings=self._settings,
+                denials=PermissionDeniedContext(
+                    PermissionDeniedRecorder(
+                        db_session.get_durable_audit_transactions(self._settings),
+                        tenant_id=self._tenant_id,
+                        request_session=session,
+                    ),
+                    actor=AuditActor.system(),
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                ),
+            )
+            current = await CodeRunRepository(session, self._tenant_id).get(run_id)
+            if current is None:
+                raise RuntimeError("Sandbox cleanup execution disappeared.")
+            if current.status in (CodeRunStatus.QUEUED, CodeRunStatus.RUNNING):
+                await lifecycle.cancel(run_id)
+                await session.commit()
 
     async def _stream_output(self, run: CodeRun) -> None:
         """Emit the run's captured stdout/stderr as ``code_output`` chunks (ADR-0020).
