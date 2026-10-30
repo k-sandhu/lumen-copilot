@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
+import jsonschema
 import pytest
 import pytest_asyncio
+import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -27,7 +30,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.deps import get_backplane_dep, get_db_session
 from app.auth import hash_password
-from app.db.repositories import TenantRepository, UserRepository
+from app.db.repositories import (
+    CollectionRepository,
+    SourceRepository,
+    TenantRepository,
+    UserRepository,
+)
 from app.domain.entities import Role
 from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
@@ -141,6 +149,12 @@ async def _login(client: AsyncClient, email: str) -> str:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _assert_session_contract(payload: dict[str, object]) -> None:
+    path = Path(__file__).resolve().parents[2] / "contracts" / "openapi.yaml"
+    schemas = yaml.safe_load(path.read_text(encoding="utf-8"))["components"]["schemas"]
+    jsonschema.validate(payload, {**schemas["ChatSession"], "components": {"schemas": schemas}})
 
 
 # --- CRUD happy path + contract shape --------------------------------------
@@ -399,6 +413,160 @@ async def test_start_chat_from_published_assistant(client: AsyncClient, seeded: 
     assert resp.status_code == 201, resp.text
     # The session inherits the assistant's frozen model default.
     assert resp.json()["model"] == "openrouter/openai/gpt-5.5"
+
+
+async def test_session_carries_pinned_effective_scope(
+    client: AsyncClient,
+    seeded: _Seeded,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    durable_audit_ledger: RecordingDurableAuditTransactions,
+) -> None:
+    """#581: create/read/list show the PINNED version's scope, not the head."""
+    token = await _login(client, seeded.alice_email)
+    async with sessionmaker() as db:
+        collection = await CollectionRepository(db, seeded.tenant_a).create(
+            owner_id=seeded.alice, name="Scoped collection"
+        )
+        source = await SourceRepository(db, seeded.tenant_a).create(
+            owner_id=seeded.alice, type="web", config={"url": "https://example.test"}
+        )
+        await db.commit()
+    created = await client.post(
+        "/api/v1/assistants",
+        headers=_auth(token),
+        json={
+            "name": "Scoped",
+            "backupOwner": str(seeded.bob),
+            "knowledgeScope": {
+                "modes": ["company", "web", "model"],
+                "collectionIds": [str(collection.id)],
+                "sourceIds": [str(source.id)],
+            },
+            "toolAllowlist": ["web_search"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    aid = created.json()["id"]
+    published = await client.post(
+        f"/api/v1/assistants/{aid}/publish", headers=_auth(token), json={}
+    )
+    assert published.status_code == 200, published.text
+    v1_id = published.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"assistant_id": aid}
+    )
+    assert resp.status_code == 201, resp.text
+    session = resp.json()
+    _assert_session_contract(session)
+    scope = session["effective_scope"]
+    assert scope["assistant_id"] == aid
+    assert scope["assistant_version_id"] == v1_id
+    # Non-empty modes are authoritative; model is never honoured.
+    assert scope["modes"] == ["company", "web"]
+    assert scope["collection_ids"] == [str(collection.id)]
+    assert scope["source_ids"] == [str(source.id)]
+    assert scope["adjustable"] == {
+        "modes": False,
+        "collection_ids": False,
+        "source_ids": False,
+    }
+
+    # Mutating the head and publishing v2 must not change the pinned scope.
+    head_update = await client.patch(
+        f"/api/v1/assistants/{aid}",
+        headers=_auth(token),
+        json={"knowledgeScope": {"modes": ["uploaded"]}},
+    )
+    assert head_update.status_code == 200, head_update.text
+    republished = await client.post(
+        f"/api/v1/assistants/{aid}/publish", headers=_auth(token), json={}
+    )
+    assert republished.status_code == 200, republished.text
+    assert republished.json()["id"] != v1_id
+
+    got = await client.get(f"/api/v1/chat/sessions/{session['id']}", headers=_auth(token))
+    assert got.status_code == 200, got.text
+    assert got.json()["effective_scope"] == scope
+
+    listed = await client.get("/api/v1/chat/sessions", headers=_auth(token))
+    items = [i for i in listed.json()["items"] if i["id"] == session["id"]]
+    assert items[0]["effective_scope"] == scope
+
+    patched = await client.patch(
+        f"/api/v1/chat/sessions/{session['id']}",
+        headers=_auth(token),
+        json={"title": "Renamed"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["effective_scope"] == scope
+
+    # Both a different owner and a foreign tenant see the same missing-resource
+    # response, no scope in the list, and one durable denial per direct read.
+    for email, actor in [(seeded.bob_email, seeded.bob), (seeded.carol_email, seeded.carol)]:
+        other_token = await _login(client, email)
+        headers = {**_auth(other_token), "x-request-id": f"scope-denied-{actor}"}
+        denied = await client.get(f"/api/v1/chat/sessions/{session['id']}", headers=headers)
+        missing = await client.get(f"/api/v1/chat/sessions/{uuid.uuid4()}", headers=headers)
+        assert denied.status_code == missing.status_code == 404
+        assert denied.json()["detail"] == missing.json()["detail"]
+        assert "effective_scope" not in denied.text
+        other_list = await client.get("/api/v1/chat/sessions", headers=_auth(other_token))
+        assert other_list.status_code == 200
+        assert other_list.json()["items"] == []
+        denials = [
+            e
+            for e in durable_audit_ledger.events
+            if e.resource_id == session["id"] and e.action == "permission.denied"
+        ]
+        assert len([e for e in denials if e.actor_id == actor]) == 1
+
+
+async def test_adhoc_session_has_null_scope_and_foreign_session_is_404(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """#581: ad-hoc chat carries no scope; a foreign session leaks nothing."""
+    token = await _login(client, seeded.alice_email)
+    resp = await client.post("/api/v1/chat/sessions", headers=_auth(token), json={})
+    assert resp.status_code == 201, resp.text
+    _assert_session_contract(resp.json())
+    assert resp.json()["effective_scope"] is None
+    sid = resp.json()["id"]
+    got = await client.get(f"/api/v1/chat/sessions/{sid}", headers=_auth(token))
+    assert got.status_code == 200, got.text
+    assert got.json()["effective_scope"] is None
+    listed = await client.get("/api/v1/chat/sessions", headers=_auth(token))
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"][0]["effective_scope"] is None
+
+    carol_token = await _login(client, seeded.carol_email)
+    foreign = await client.get(f"/api/v1/chat/sessions/{sid}", headers=_auth(carol_token))
+    assert foreign.status_code == 404
+    assert "effective_scope" not in foreign.text
+
+
+async def test_legacy_empty_modes_scope_fallback_includes_web_from_allowlist(
+    client: AsyncClient, seeded: _Seeded
+) -> None:
+    """#581: empty modes (legacy) => company+uploaded, +web via allowlist."""
+    token = await _login(client, seeded.alice_email)
+    created = await client.post(
+        "/api/v1/assistants",
+        headers=_auth(token),
+        json={
+            "name": "Legacy",
+            "backupOwner": str(seeded.bob),
+            "knowledgeScope": {"modes": []},
+            "toolAllowlist": ["web_search"],
+        },
+    )
+    aid = created.json()["id"]
+    await client.post(f"/api/v1/assistants/{aid}/publish", headers=_auth(token), json={})
+    resp = await client.post(
+        "/api/v1/chat/sessions", headers=_auth(token), json={"assistant_id": aid}
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["effective_scope"]["modes"] == ["company", "uploaded", "web"]
 
 
 async def test_start_chat_from_draft_assistant_is_422(client: AsyncClient, seeded: _Seeded) -> None:

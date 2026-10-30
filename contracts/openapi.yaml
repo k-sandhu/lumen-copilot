@@ -3891,6 +3891,58 @@ components:
         title: { type: string, maxLength: 200 }
         model: { type: string }
 
+    EffectiveKnowledgeScopeAdjustable:
+      type: object
+      additionalProperties: false
+      description: >
+        Per-field user adjustability of an `EffectiveKnowledgeScope` (#581).
+        All false in this change: a chat user can neither narrow nor widen the
+        pinned assistant version's scope per session or per turn, and the UI
+        must not present controls implying otherwise. Reversing this decision
+        means flipping these flags (and adding the narrowing request surface).
+      required: [modes, collection_ids, source_ids]
+      properties:
+        modes: { type: boolean, enum: [false] }
+        collection_ids: { type: boolean, enum: [false] }
+        source_ids: { type: boolean, enum: [false] }
+
+    EffectiveKnowledgeScope:
+      type: object
+      additionalProperties: false
+      description: >
+        The server-authoritative knowledge scope governing an
+        assistant-bound chat session (#581), resolved from the session's
+        PINNED assistant version — never from the assistant's mutable head
+        and never from client state. Returned on create/read/list session
+        responses so the scope survives reload and reopening from history.
+        Effective-modes rule: if the version's `knowledgeScope.modes` is
+        EMPTY (legacy), the effective modes are `company` + `uploaded`,
+        plus `web` when `web_search` is in the version's tool allowlist; if
+        non-empty it is authoritative. The `model` mode is never honoured
+        (answers are always grounded) and never appears in `modes`. The
+        scope can only narrow what the requesting user may already retrieve
+        (INV-2 still applies inside retrieval). Absent/null on `ChatSession`
+        for an ad-hoc (non-assistant) chat. A foreign session yields the
+        same 404 as a missing one, so no scope ever leaks cross-tenant or
+        cross-user (INV-1/INV-2).
+      required: [assistant_id, assistant_version_id, modes, collection_ids, source_ids, adjustable]
+      properties:
+        assistant_id: { type: string, format: uuid }
+        assistant_version_id: { type: string, format: uuid }
+        modes:
+          type: array
+          items: { $ref: "#/components/schemas/KnowledgeMode" }
+          description: Effective source classes (canonical order; never contains `model`).
+        collection_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Collection narrowing from the pinned version (empty ⇒ no collection narrowing).
+        source_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Connected-source narrowing from the pinned version.
+        adjustable: { $ref: "#/components/schemas/EffectiveKnowledgeScopeAdjustable" }
+
     ChatSession:
       type: object
       additionalProperties: false
@@ -3903,6 +3955,13 @@ components:
         message_count: { type: integer, minimum: 0 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        effective_scope:
+          oneOf:
+            - { $ref: "#/components/schemas/EffectiveKnowledgeScope" }
+            - { type: "null" }
+          description: >
+            The pinned assistant version's effective knowledge scope for an
+            assistant-bound session (#581); null for an ad-hoc chat.
 
     ChatSessionList:
       type: object

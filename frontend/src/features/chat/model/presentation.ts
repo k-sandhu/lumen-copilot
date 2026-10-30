@@ -8,10 +8,16 @@
  */
 import type { TraceStep } from '@/ui';
 import type { SourcePassage } from '@/ui';
-import type { ChatSession, ChatTool, KnowledgeMode, MessageToolInvocation } from '@/api';
+import type {
+  ChatSession,
+  ChatTool,
+  EffectiveKnowledgeScope,
+  KnowledgeMode,
+  MessageToolInvocation,
+} from '@/api';
 import { kindOfCitation, type UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
-import type { ModeAvailability } from './knowledgeModes';
+import { MODEL_NOT_USED_REASON, type ModeAvailability } from './knowledgeModes';
 
 /** Compact thousands formatting, e.g. 1204 → "1,204". */
 function groupThousands(n: number): string {
@@ -389,22 +395,65 @@ export const DEFAULT_CHAT_MODES: readonly KnowledgeMode[] = ['company', 'uploade
 export const WEB_DISABLED_REASON =
   'Web search is off for this chat. To use it, start a chat from an assistant that allows web access (Assistants → Start chat).';
 
+/** Modes that can ever be active: `model` is never honoured (#581). */
+function withoutModel(modes: readonly KnowledgeMode[]): KnowledgeMode[] {
+  return modes.filter((m) => m !== 'model');
+}
+
 /**
  * The initial composer mode selection for a session. From an assistant we seed
  * the assistant's declared modes; an ad-hoc chat falls back to the corpus
  * default. WEB is only pre-selected if the assistant actually declared it.
+ * `model` is dropped even if listed — answers are always grounded (#581).
  */
 export function initialModes(scopeModes: readonly KnowledgeMode[] | undefined): KnowledgeMode[] {
-  if (scopeModes && scopeModes.length > 0) return [...scopeModes];
+  if (scopeModes && scopeModes.length > 0) return withoutModel(scopeModes);
   return [...DEFAULT_CHAT_MODES];
 }
 
 /**
+ * The modes to display for a session, from its server-authoritative effective
+ * scope (#581). A non-null scope is used as-is (minus `model`, defensively —
+ * the server never sends it); a CONFIRMED ad-hoc session (`null` scope from
+ * the server) falls back to the corpus default. Callers must not pass an
+ * unloaded query's `undefined` here as if it were ad-hoc — loading is its own
+ * state, which is exactly how web used to vanish on reload.
+ */
+export function modesFromEffectiveScope(scope: EffectiveKnowledgeScope | null): KnowledgeMode[] {
+  if (scope) return withoutModel(scope.modes);
+  return [...DEFAULT_CHAT_MODES];
+}
+
+/** Why a mode the pinned version excludes is disabled (#581). */
+export const MODE_EXCLUDED_REASON =
+  "Not included in this assistant's knowledge scope. The scope is set by the published assistant and can't be changed in chat.";
+
+/**
+ * Per-mode availability from the server effective scope (#581). For an
+ * assistant-bound session a mode is available only when the pinned version
+ * includes it; excluded modes are disabled WITH a reason. For an ad-hoc
+ * session (`null`) web fails closed as before. `model` is never available.
+ */
+export function availabilityFromEffectiveScope(
+  scope: EffectiveKnowledgeScope | null,
+): Partial<Record<KnowledgeMode, ModeAvailability>> {
+  if (!scope) return modeAvailability(undefined);
+  const included = new Set(withoutModel(scope.modes));
+  const entry = (mode: KnowledgeMode): ModeAvailability =>
+    included.has(mode) ? { available: true } : { available: false, reason: MODE_EXCLUDED_REASON };
+  return {
+    company: entry('company'),
+    uploaded: entry('uploaded'),
+    web: entry('web'),
+    model: { available: false, reason: MODEL_NOT_USED_REASON },
+  };
+}
+
+/**
  * Per-mode availability for the composer control. WEB is available only when the
- * session's scope includes it (the assistant declared web, or an ad-hoc chat
- * with web explicitly allowed); otherwise it is disabled WITH a reason (E3-12
- * negative / AC-3). Company/uploaded/model are always available for the caller to
- * toggle — the actual retrieval is still permission-gated server-side (INV-2).
+ * session's scope includes it; otherwise it is disabled WITH a reason (E3-12
+ * negative / AC-3). `model` is never available (#581). Retrieval is still
+ * permission-gated server-side (INV-2).
  */
 export function modeAvailability(
   scopeModes: readonly KnowledgeMode[] | undefined,
@@ -412,6 +461,7 @@ export function modeAvailability(
   const webAllowed = (scopeModes ?? []).includes('web');
   return {
     web: webAllowed ? { available: true } : { available: false, reason: WEB_DISABLED_REASON },
+    model: { available: false, reason: MODEL_NOT_USED_REASON },
   };
 }
 

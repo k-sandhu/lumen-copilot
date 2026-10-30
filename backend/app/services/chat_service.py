@@ -72,6 +72,10 @@ from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.services.citation_access import enforce_citation_permissions
+from app.services.knowledge_scope import (
+    EffectiveKnowledgeScope,
+    effective_scope_from_version,
+)
 from app.services.models_service import is_allowed_model
 from app.services.provider_models import (
     is_allowed_provider_model,
@@ -96,10 +100,15 @@ log = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class SessionView:
-    """A chat session projected for the wire (contract ``ChatSession``)."""
+    """A chat session projected for the wire (contract ``ChatSession``).
+
+    ``effective_scope`` is the PINNED assistant version's governing scope
+    (#581, contract ``EffectiveKnowledgeScope``); ``None`` for ad-hoc chat.
+    """
 
     session: ChatSession
     message_count: int
+    effective_scope: EffectiveKnowledgeScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,9 +354,28 @@ class ChatService:
         )
         return None
 
+    async def _resolve_scope(self, session: ChatSession) -> EffectiveKnowledgeScope | None:
+        """The pinned version's effective scope, or ``None`` for ad-hoc chat.
+
+        The version load is tenant-scoped (INV-1) and only runs for a session
+        already proven visible to the caller, so scope inherits the session's
+        own 404 rules. A pinned version that no longer resolves in this
+        tenant degrades to ``None`` rather than fabricating a scope.
+        """
+        if session.assistant_id is None or session.assistant_version_id is None:
+            return None
+        version = await self._versions.get(session.assistant_version_id)
+        if version is None or version.assistant_id != session.assistant_id:
+            return None
+        return effective_scope_from_version(assistant_id=session.assistant_id, version=version)
+
     async def _view(self, session: ChatSession) -> SessionView:
         count = await self._sessions.count_messages(session.id)
-        return SessionView(session=session, message_count=count)
+        return SessionView(
+            session=session,
+            message_count=count,
+            effective_scope=await self._resolve_scope(session),
+        )
 
     # --- session use-cases --------------------------------------------------
 
@@ -421,7 +449,11 @@ class ChatService:
             assistant_id=assistant.id,
             assistant_version_id=head.id,
         )
-        return SessionView(session=session, message_count=0)
+        return SessionView(
+            session=session,
+            message_count=0,
+            effective_scope=effective_scope_from_version(assistant_id=assistant.id, version=head),
+        )
 
     async def list_sessions(self, *, cursor: str | None, limit: int | None) -> SessionPage:
         """A keyset page of the caller's own sessions (newest-updated first)."""
@@ -438,7 +470,22 @@ class ChatService:
         # One grouped count for the whole page (no per-row COUNT — #396); the
         # single-session paths keep `_view`.
         counts = await self._sessions.count_for_sessions([s.id for s in page])
-        items = [SessionView(session=s, message_count=counts.get(s.id, 0)) for s in page]
+        # Pinned scopes for the whole page in one query (#581, no N+1).
+        versions = await self._versions.get_many(
+            [s.assistant_version_id for s in page if s.assistant_version_id is not None]
+        )
+        items = []
+        for s in page:
+            scope: EffectiveKnowledgeScope | None = None
+            if s.assistant_id is not None and s.assistant_version_id is not None:
+                version = versions.get(s.assistant_version_id)
+                if version is not None and version.assistant_id == s.assistant_id:
+                    scope = effective_scope_from_version(
+                        assistant_id=s.assistant_id, version=version
+                    )
+            items.append(
+                SessionView(session=s, message_count=counts.get(s.id, 0), effective_scope=scope)
+            )
         return SessionPage(items=items, next_cursor=next_cursor)
 
     @audited_resource("chat.session.read", "chat_session", "session_id", missing_result=True)

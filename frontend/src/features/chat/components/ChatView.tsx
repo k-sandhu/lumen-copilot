@@ -12,16 +12,16 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '@/api';
-import type { ChatModelInfo, KnowledgeMode, Message, SendMessageRequest } from '@/api';
+import type { ChatModelInfo, Message, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useModels } from '@/features/models';
-import { useChatStore, type SessionScope, type ViewerTarget } from '../model/chatStore';
-import { initialModes, modeAvailability } from '../model/presentation';
+import { useChatStore, type ViewerTarget } from '../model/chatStore';
+import { availabilityFromEffectiveScope, modesFromEffectiveScope } from '../model/presentation';
 import { fromRestCitation, type UiCitation } from '../model/citation';
 import '../chat.css';
-import { useMessages, useSendMessage, useUpdateSession } from '../model/queries';
+import { useChatSession, useMessages, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';
@@ -55,7 +55,6 @@ export function ChatView() {
   const viewer = useChatStore((s) => s.viewer);
   const openViewer = useChatStore((s) => s.openViewer);
   const closeViewer = useChatStore((s) => s.closeViewer);
-  const sessionScope = useChatStore((s) => s.sessionScope);
   const panel = useChatStore((s) => s.panel);
   const openPanel = useChatStore((s) => s.openPanel);
   const closePanel = useChatStore((s) => s.closePanel);
@@ -142,9 +141,6 @@ export function ChatView() {
             <ActiveSession
               key={activeSessionId}
               sessionId={activeSessionId}
-              scope={
-                sessionScope && sessionScope.sessionId === activeSessionId ? sessionScope : null
-              }
               models={models.data?.items}
               modelsLoading={models.isLoading}
               activeStreamId={activeStreamId}
@@ -303,8 +299,6 @@ export function ChatView() {
 
 interface ActiveSessionProps {
   sessionId: string;
-  /** The knowledge scope this session was launched with (#221), or null. */
-  scope: SessionScope | null;
   models: ChatModelInfo[] | undefined;
   modelsLoading: boolean;
   activeStreamId: string | null;
@@ -318,7 +312,6 @@ interface ActiveSessionProps {
 
 function ActiveSession({
   sessionId,
-  scope,
   models,
   modelsLoading,
   activeStreamId,
@@ -351,13 +344,25 @@ function ActiveSession({
   // model is persisted via PATCH when changed.
   const [model, setModel] = useState<string>('');
 
-  // The active knowledge modes for the next turn (#221). Seeded from the
-  // launching assistant's scope (or the ad-hoc default), then a per-chat
-  // override the user can toggle. WEB is available only when the scope allowed
-  // it — otherwise the composer renders it disabled with a reason (AC-3).
-  const scopeModes = scope?.modes;
-  const [modes, setModes] = useState<KnowledgeMode[]>(() => initialModes(scopeModes));
-  const availability = useMemo(() => modeAvailability(scopeModes), [scopeModes]);
+  // The knowledge modes on display are the session's server-authoritative
+  // effective scope (#581): hydrated from GET /chat/sessions/{id} (the pinned
+  // assistant version), never seeded from an assistant's mutable head or from
+  // launch-time client state — so WEB survives reload and reopening from
+  // history. It is not adjustable in chat (`adjustable: false`), so the
+  // composer renders it read-only; while the query loads (or fails) NO modes
+  // are claimed, rather than guessing an ad-hoc default.
+  const sessionQuery = useChatSession(sessionId);
+  const effectiveScope = sessionQuery.data ? (sessionQuery.data.effective_scope ?? null) : null;
+  const modes = useMemo(
+    () => (sessionQuery.isSuccess ? modesFromEffectiveScope(effectiveScope) : []),
+    [sessionQuery.isSuccess, effectiveScope],
+  );
+  const availability = useMemo(
+    () => availabilityFromEffectiveScope(effectiveScope),
+    [effectiveScope],
+  );
+  const refetchSession = sessionQuery.refetch;
+  const onRetryScope = useCallback(() => void refetchSession(), [refetchSession]);
   // Remember the last request so a stream error/disconnect can be retried (AC-5).
   const lastSendRef = useRef<SendMessageRequest | null>(null);
 
@@ -661,6 +666,27 @@ function ActiveSession({
       </div>
 
       <div className="lc-composer-wrap">
+        {/* Knowledge-scope state (#581): loading/error are surfaced, never
+            silently replaced with a guessed ad-hoc default. */}
+        {sessionQuery.isPending && (
+          <p role="status" className="lc-composer mb-2 text-center text-xs text-foreground-muted">
+            Loading knowledge scope…
+          </p>
+        )}
+        {sessionQuery.isError && (
+          <div role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
+            Could not load this chat&apos;s knowledge scope.{' '}
+            <button type="button" onClick={onRetryScope} className="underline">
+              Retry
+            </button>
+          </div>
+        )}
+        {sessionQuery.isSuccess && effectiveScope && (
+          <p className="lc-composer mb-2 text-center text-xs text-foreground-muted">
+            Knowledge scope is set by this assistant&apos;s published version and can&apos;t be
+            changed in chat.
+          </p>
+        )}
         {send.isError && (
           <p role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
             {send.error instanceof ApiError ? send.error.displayMessage : 'Could not send message.'}
@@ -679,8 +705,8 @@ function ActiveSession({
           onSetDefaultModel={onSetDefaultModel}
           settingDefault={setDefaultPref.isPending}
           modes={modes}
-          onModesChange={setModes}
           modeAvailability={availability}
+          modesReadOnly
           ghostSuggestion={!busy ? (followUps[0] ?? null) : null}
           historyEntries={historyEntries}
           pinnedDocuments={pinnedDocs}

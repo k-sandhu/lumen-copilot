@@ -45,7 +45,7 @@ from app.core.logging import get_logger
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
 from app.domain.chat import AskUserQuestion
-from app.domain.entities import Message, MessageRole, SandboxSession, ToolInvocation
+from app.domain.entities import KnowledgeMode, Message, MessageRole, SandboxSession, ToolInvocation
 from app.domain.llm import ChatMessage, Role
 from app.llm.context import ContextConfig
 from app.realtime.backplane import Backplane
@@ -122,6 +122,29 @@ class SandboxSessionResponse(BaseModel):
     closed_at: datetime | None = None
 
 
+class EffectiveKnowledgeScopeAdjustableResponse(BaseModel):
+    """``#/components/schemas/EffectiveKnowledgeScopeAdjustable`` (#581)."""
+
+    model_config = {"extra": "forbid"}
+
+    modes: Literal[False]
+    collection_ids: Literal[False]
+    source_ids: Literal[False]
+
+
+class EffectiveKnowledgeScopeResponse(BaseModel):
+    """``#/components/schemas/EffectiveKnowledgeScope`` (#581)."""
+
+    model_config = {"extra": "forbid"}
+
+    assistant_id: UUID
+    assistant_version_id: UUID
+    modes: list[KnowledgeMode]
+    collection_ids: list[UUID]
+    source_ids: list[UUID]
+    adjustable: EffectiveKnowledgeScopeAdjustableResponse
+
+
 class ChatSessionResponse(BaseModel):
     """``#/components/schemas/ChatSession``."""
 
@@ -134,6 +157,8 @@ class ChatSessionResponse(BaseModel):
     message_count: int
     created_at: datetime
     updated_at: datetime
+    # The pinned version's effective scope (#581); null for ad-hoc chat.
+    effective_scope: EffectiveKnowledgeScopeResponse | None = None
 
 
 class ChatSessionListResponse(BaseModel):
@@ -320,6 +345,7 @@ class SendMessageResponse(BaseModel):
 
 def _session_to_response(view: SessionView) -> ChatSessionResponse:
     s = view.session
+    scope = view.effective_scope
     return ChatSessionResponse(
         id=s.id,
         title=s.title,
@@ -328,6 +354,20 @@ def _session_to_response(view: SessionView) -> ChatSessionResponse:
         message_count=view.message_count,
         created_at=s.created_at,
         updated_at=s.updated_at,
+        effective_scope=(
+            EffectiveKnowledgeScopeResponse(
+                assistant_id=scope.assistant_id,
+                assistant_version_id=scope.assistant_version_id,
+                modes=list(scope.modes),
+                collection_ids=list(scope.collection_ids),
+                source_ids=list(scope.source_ids),
+                adjustable=EffectiveKnowledgeScopeAdjustableResponse(
+                    modes=False, collection_ids=False, source_ids=False
+                ),
+            )
+            if scope is not None
+            else None
+        ),
     )
 
 
@@ -535,7 +575,7 @@ def _sandbox_response(value: SandboxSession | None, *, enabled: bool) -> Sandbox
 # --- Session routes ---------------------------------------------------------
 
 
-@router.get("/sessions", response_model=ChatSessionListResponse, response_model_exclude_none=True)
+@router.get("/sessions", response_model=ChatSessionListResponse)
 async def list_sessions(
     request: Request,
     session: DbSession,
@@ -563,7 +603,6 @@ async def list_sessions(
     "/sessions",
     response_model=ChatSessionResponse,
     status_code=status.HTTP_201_CREATED,
-    response_model_exclude_none=True,
 )
 async def create_session(
     body: ChatSessionCreate,
@@ -593,7 +632,6 @@ async def create_session(
 @router.get(
     "/sessions/{session_id}",
     response_model=ChatSessionResponse,
-    response_model_exclude_none=True,
 )
 async def get_session(
     session_id: UUID,
@@ -684,7 +722,6 @@ async def get_session_usage(
 @router.patch(
     "/sessions/{session_id}",
     response_model=ChatSessionResponse,
-    response_model_exclude_none=True,
 )
 async def update_session(
     session_id: UUID,
