@@ -173,7 +173,7 @@ class AssistantTestService:
             )
             raise NotFoundError("Assistant not found.")
 
-        config = assemble_run_config(config_from_assistant(assistant))
+        config = assemble_run_config(config_from_assistant(assistant), assistant_id=assistant.id)
         model = _resolve_model(config.model, self._settings)
         question = (input_text or "").strip() or _DEFAULT_TEST_INPUT
 

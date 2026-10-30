@@ -715,7 +715,7 @@ class ChatService:
         # (ADR-0011 §2): instructions → system prompt, tool_allowlist → allowed set,
         # knowledge_scope → the narrowing retrieval filter. Load the exact pinned
         # version so the run is reproducible even after the assistant is edited.
-        assistant_config = await self._load_assistant_config(session.assistant_version_id)
+        assistant_config = await self._load_assistant_config(session)
         # The asking user's per-account custom instructions (spec: user settings). Read
         # from THEIR preferences row (tenant-scoped, keyed off the resolved owner — never
         # request input); threaded to the runtime, which prepends it to the system prompt
@@ -792,23 +792,48 @@ class ChatService:
             return None
         return prefs.custom_instructions
 
-    async def _load_assistant_config(
-        self, assistant_version_id: UUID | None
-    ) -> AssistantRunConfig | None:
+    async def _load_assistant_config(self, session: ChatSession) -> AssistantRunConfig | None:
         """Assemble the run config for a session's pinned assistant version (or None).
 
         Tenant-scoped (the repository); a version pinned in this tenant is loaded
-        and assembled into the three run inputs. A missing/foreign version id
-        (e.g. the assistant was deleted, nulling the FK) degrades to ``None`` — the
-        turn runs as ad-hoc rather than failing, fail-open on availability but never
-        on permission (the per-user retrieval filter still runs).
+        and assembled into the run inputs, stamped with its assistant/version ids
+        for the answer audit (INV-6).
+
+        **Fail closed (#581).** A session that was started from an assistant —
+        evidence: a live pin, or the durable ``assistant_bound`` marker that
+        survives ``ON DELETE SET NULL`` — whose pinned config can no longer be
+        loaded (assistant/version deleted, or the pin nulled) raises a typed
+        **422** ``assistant_config_unavailable`` here, using the send endpoint's
+        existing validation-problem response, before the user message
+        is persisted and before any retrieval or model call. It NEVER silently
+        falls back to unrestricted ad-hoc chat: the published knowledge scope
+        is a governance boundary, not an availability hint. A genuinely ad-hoc
+        session (never bound) returns ``None`` exactly as before.
         """
-        if assistant_version_id is None:
+        bound = (
+            session.assistant_bound
+            or session.assistant_id is not None
+            or session.assistant_version_id is not None
+        )
+        if not bound:
             return None
-        version = await self._versions.get(assistant_version_id)
+        version = (
+            await self._versions.get(session.assistant_version_id)
+            if session.assistant_version_id is not None
+            else None
+        )
         if version is None:
-            return None
-        return assemble_run_config(version.config)
+            raise ValidationError(
+                "This conversation was started from an assistant whose published "
+                "configuration is no longer available, so it cannot continue. "
+                "Start a new conversation to chat without that assistant.",
+                code="assistant_config_unavailable",
+            )
+        return assemble_run_config(
+            version.config,
+            assistant_id=version.assistant_id,
+            assistant_version_id=version.id,
+        )
 
 
 __all__ = [

@@ -201,6 +201,7 @@ class RetrievalService:
         k: int,
         collection_ids: list[UUID] | None = None,
         document_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         """Permission-filtered hybrid passage search (the chokepoint API, AC-1/AC-2).
 
@@ -224,6 +225,11 @@ class RetrievalService:
                 0007 #429) — same narrow-only semantics, ANDed with the
                 allow-set and any collection filter; an id the caller cannot
                 access contributes nothing and discloses nothing (INV-2).
+            source_ids: optional assistant-scope narrowing to documents from
+                specific connected sources (#581) — same narrow-only semantics.
+                The engine has no source field, so the scope is resolved to
+                permitted document ids in SQL first and handed to the engine
+                as its document narrowing (intersected with ``document_ids``).
 
         Returns:
             Up to ``k`` ranked passages the principal is permitted to see, best
@@ -248,6 +254,7 @@ class RetrievalService:
                 k=k,
                 collection_ids=collection_ids,
                 document_ids=document_ids,
+                source_ids=source_ids,
             )
             span.retrieved(passages, engine_hits=engine_hits)
             return passages
@@ -260,9 +267,26 @@ class RetrievalService:
         k: int,
         collection_ids: list[UUID] | None,
         document_ids: list[UUID] | None,
+        source_ids: list[UUID] | None,
     ) -> tuple[list[RetrievedPassage], int]:
         """:meth:`search`'s body: the permitted passages plus the engine's raw hit count."""
         allow_set = await self._resolve_allow_set(principal)
+        # Source scope (#581): resolve to permitted document ids in SQL before
+        # any model/engine call; an empty resolution (or empty intersection
+        # with pinned documents) is the strictest narrowing — no results,
+        # never a fall back to the unfiltered set.
+        effective_document_ids = document_ids
+        if source_ids is not None:
+            scoped = await queries.document_ids_for_sources(
+                self._session, allow_set=allow_set, source_ids=source_ids
+            )
+            if effective_document_ids is None:
+                effective_document_ids = scoped
+            else:
+                allowed_ids = set(scoped)
+                effective_document_ids = [d for d in effective_document_ids if d in allowed_ids]
+            if not effective_document_ids:
+                return [], 0
         allow = await self._allow_filter(allow_set)
 
         # Embed the query (the only model call; the gateway returns a domain
@@ -286,7 +310,7 @@ class RetrievalService:
             allow=allow,
             k=k,
             collection_ids=collection_ids,
-            document_ids=document_ids,
+            document_ids=effective_document_ids,
         )
         if not hits:
             return [], 0
@@ -300,7 +324,8 @@ class RetrievalService:
             allow_set=allow_set,
             chunk_ids=[h.chunk_id for h in hits],
             collection_ids=collection_ids,
-            document_ids=document_ids,
+            document_ids=effective_document_ids,
+            source_ids=source_ids,
         )
         passages: list[RetrievedPassage] = []
         for hit in hits:  # engine ranking order preserved
@@ -343,6 +368,7 @@ class RetrievalService:
         chunk_ids: list[UUID],
         collection_ids: list[UUID] | None = None,
         document_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         """Rehydrate exact evidence under current permissions and effective scope."""
         # A group can be revoked while the model composes this answer. Refresh
@@ -355,6 +381,7 @@ class RetrievalService:
             chunk_ids=chunk_ids,
             collection_ids=collection_ids,
             document_ids=document_ids,
+            source_ids=source_ids,
         )
         return [
             RetrievedPassage(
@@ -394,6 +421,7 @@ class RetrievalService:
         modified_before: datetime | None = None,
         collection_ids: list[UUID] | None = None,
         document_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> DocumentPage:
         self._allow_set_cache.pop(principal.user_id, None)
         return await discovery.find_documents(
@@ -411,6 +439,7 @@ class RetrievalService:
             modified_before=modified_before,
             collection_ids=collection_ids,
             document_ids=document_ids,
+            source_ids=source_ids,
         )
 
     async def read_document(
@@ -423,6 +452,7 @@ class RetrievalService:
         max_passages: int = 5,
         collection_ids: list[UUID] | None = None,
         document_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> DocumentRead | None:
         self._allow_set_cache.pop(principal.user_id, None)
         return await discovery.read_document(
@@ -434,6 +464,7 @@ class RetrievalService:
             max_passages=max_passages,
             collection_ids=collection_ids,
             document_ids=document_ids,
+            source_ids=source_ids,
         )
 
     async def search_text(
@@ -444,6 +475,7 @@ class RetrievalService:
         k: int,
         collection_ids: list[UUID] | None = None,
         document_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> list[RetrievedPassage]:
         """Agent tool ``search_text``: hybrid passage search (delegates to :meth:`search`).
 
@@ -460,6 +492,7 @@ class RetrievalService:
             k=k,
             collection_ids=collection_ids,
             document_ids=document_ids,
+            source_ids=source_ids,
         )
 
     async def search_documents(
@@ -468,6 +501,8 @@ class RetrievalService:
         principal: Principal,
         name_or_query: str,
         k: int = 10,
+        collection_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> list[DocumentMatch]:
         """Agent tool ``search_documents``: find permitted documents by filename/metadata.
 
@@ -489,6 +524,8 @@ class RetrievalService:
             allow_set=allow_set,
             name_or_query=name_or_query,
             k=min(_MAX_DOCUMENT_HITS, max(1, k)),
+            collection_ids=collection_ids,
+            source_ids=source_ids,
         )
         # Lexical filename match has no intrinsic relevance score; expose a
         # descending positional score so callers see a stable, ordered ranking.
@@ -506,6 +543,8 @@ class RetrievalService:
         *,
         principal: Principal,
         k: int = _MAX_DOCUMENT_HITS,
+        collection_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> list[DocumentMatch]:
         """Agent tool ``list_documents``: enumerate the documents the principal can access.
 
@@ -526,6 +565,8 @@ class RetrievalService:
             self._session,
             allow_set=allow_set,
             k=min(_MAX_DOCUMENT_HITS, max(1, k)),
+            collection_ids=collection_ids,
+            source_ids=source_ids,
         )
         # A plain listing has no intrinsic relevance score; expose a descending
         # positional score so callers see a stable, ordered ranking (as
@@ -580,21 +621,29 @@ class RetrievalService:
         return rows, permitted
 
     async def permitted_document_names(
-        self, *, principal: Principal, document_ids: list[UUID]
+        self,
+        *,
+        principal: Principal,
+        document_ids: list[UUID],
+        collection_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> dict[UUID, str]:
         """The subset of ``document_ids`` the principal may read, with names.
 
         ONE bounded metadata query (#446 finding 4) under the identical
         owner-or-grant predicate as every other retrieval chokepoint — the
         evidence-rehydration path needs names only, never document text. Ids
-        that are missing, foreign, or unpermitted are simply absent (INV-2
-        existence non-disclosure).
+        that are missing, foreign, unpermitted, or outside the supplied
+        collection/source scope are simply absent (INV-2 existence non-disclosure).
         """
         if not document_ids:
             return {}
         allow_set = await self._resolve_allow_set(principal)
         stmt = queries.permitted_document_names(
-            allow_set=allow_set, document_ids=list(document_ids)
+            allow_set=allow_set,
+            document_ids=list(document_ids),
+            collection_ids=collection_ids,
+            source_ids=source_ids,
         )
         rows = (await self._session.execute(stmt)).all()
         return {row[0]: row[1] for row in rows}
@@ -621,6 +670,8 @@ class RetrievalService:
         *,
         principal: Principal,
         document_id: UUID,
+        collection_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> DocumentText | None:
         """Agent tool ``get_document``: fetch a permitted document's text, or ``None``.
 
@@ -640,7 +691,11 @@ class RetrievalService:
         """
         allow_set = await self._resolve_allow_set(principal)
         row = await queries.load_document_text(
-            self._session, allow_set=allow_set, document_id=document_id
+            self._session,
+            allow_set=allow_set,
+            document_id=document_id,
+            collection_ids=collection_ids,
+            source_ids=source_ids,
         )
         if row is None:
             return None
@@ -655,6 +710,8 @@ class RetrievalService:
         *,
         principal: Principal,
         handle: str,
+        collection_ids: list[UUID] | None = None,
+        source_ids: list[UUID] | None = None,
     ) -> DocumentResolution:
         """Resolve a ``get_document`` handle to a permitted document (#758).
 
@@ -684,7 +741,11 @@ class RetrievalService:
                 as_uuid = None
             if as_uuid is not None:
                 row = await queries.load_document_text(
-                    self._session, allow_set=allow_set, document_id=as_uuid
+                    self._session,
+                    allow_set=allow_set,
+                    document_id=as_uuid,
+                    collection_ids=collection_ids,
+                    source_ids=source_ids,
                 )
                 if row is not None:
                     return DocumentResolution(
@@ -695,11 +756,19 @@ class RetrievalService:
                         )
                     )
                 containing = await queries.document_id_for_permitted_chunk(
-                    self._session, allow_set=allow_set, chunk_id=as_uuid
+                    self._session,
+                    allow_set=allow_set,
+                    chunk_id=as_uuid,
+                    collection_ids=collection_ids,
+                    source_ids=source_ids,
                 )
                 if containing is not None:
                     row = await queries.load_document_text(
-                        self._session, allow_set=allow_set, document_id=containing
+                        self._session,
+                        allow_set=allow_set,
+                        document_id=containing,
+                        collection_ids=collection_ids,
+                        source_ids=source_ids,
                     )
                     if row is not None:
                         return DocumentResolution(
@@ -715,10 +784,16 @@ class RetrievalService:
                 allow_set=allow_set,
                 name=normalized,
                 k=_MAX_NAME_CANDIDATES,
+                collection_ids=collection_ids,
+                source_ids=source_ids,
             )
             if len(rows) == 1:
                 row = await queries.load_document_text(
-                    self._session, allow_set=allow_set, document_id=rows[0].document_id
+                    self._session,
+                    allow_set=allow_set,
+                    document_id=rows[0].document_id,
+                    collection_ids=collection_ids,
+                    source_ids=source_ids,
                 )
                 if row is not None:
                     return DocumentResolution(

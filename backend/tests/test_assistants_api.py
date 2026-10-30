@@ -473,10 +473,11 @@ async def test_session_carries_pinned_effective_scope(
     }
 
     # Mutating the head and publishing v2 must not change the pinned scope.
+    # Keep v2 valid under server scope enforcement: removing Web also removes its tool.
     head_update = await client.patch(
         f"/api/v1/assistants/{aid}",
         headers=_auth(token),
-        json={"knowledgeScope": {"modes": ["uploaded"]}},
+        json={"knowledgeScope": {"modes": ["uploaded"]}, "toolAllowlist": []},
     )
     assert head_update.status_code == 200, head_update.text
     republished = await client.post(

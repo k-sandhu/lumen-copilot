@@ -667,7 +667,9 @@ async def _load_run_config(
     version = await AssistantVersionRepository(session, tenant_id).get(assistant_version_id)
     if version is None:
         return None
-    return assemble_run_config(version.config)
+    return assemble_run_config(
+        version.config, assistant_id=version.assistant_id, assistant_version_id=version.id
+    )
 
 
 def _question_from_inputs(config: AssistantRunConfig, inputs: dict[str, object]) -> str:

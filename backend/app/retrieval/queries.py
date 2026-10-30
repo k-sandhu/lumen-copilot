@@ -317,8 +317,62 @@ async def permitted_document_ids(
     return set((await session.execute(stmt)).scalars().all())
 
 
+def _document_scope(
+    stmt: Select[_RowT],
+    *,
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
+    document_ids: Sequence[UUID] | None = None,
+) -> Select[_RowT]:
+    """Fold the assistant knowledge-scope narrowing into a document ``SELECT`` (#581).
+
+    Each non-``None`` axis is an ADDITIONAL ``IN`` filter on ``documents`` layered
+    over the INV-2 permission predicate — scope may only narrow, never widen. An
+    empty list matches nothing (the strictest narrowing), never "no filter".
+    Assumes ``documents`` is in the query's scope.
+    """
+    if collection_ids is not None:
+        stmt = stmt.where(models.Document.collection_id.in_(collection_ids))
+    if source_ids is not None:
+        stmt = stmt.where(models.Document.source_id.in_(source_ids))
+    if document_ids is not None:
+        stmt = stmt.where(models.Document.id.in_(document_ids))
+    return stmt
+
+
+async def document_ids_for_sources(
+    session: AsyncSession,
+    *,
+    allow_set: AllowSet,
+    source_ids: Sequence[UUID],
+) -> list[UUID]:
+    """Permitted READY document ids whose ``source_id`` is in ``source_ids`` (#581).
+
+    The search index carries no ``source_id`` field, so the engine-backed
+    passage search resolves a source scope to document ids here — in SQL, under
+    the identical tenant + owner-or-grant predicate — and hands them to the
+    engine as its ``document_ids`` narrowing. Order is by document id for
+    determinism; ranking still comes from the engine.
+    """
+    stmt = (
+        select(models.Document.id)
+        .where(
+            models.Document.tenant_id == allow_set.tenant_id,
+            _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
+            models.Document.source_id.in_(source_ids),
+        )
+        .order_by(models.Document.id.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 def permitted_document_names(
-    *, allow_set: AllowSet, document_ids: list[UUID]
+    *,
+    allow_set: AllowSet,
+    document_ids: list[UUID],
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> Select[tuple[UUID, str]]:
     """A bounded batch of permitted ``(document_id, filename)`` pairs (#446 f.4).
 
@@ -332,7 +386,7 @@ def permitted_document_names(
         models.Document.id.in_(document_ids),
         _document_permitted(allow_set),
     )
-    return stmt
+    return _document_scope(stmt, collection_ids=collection_ids, source_ids=source_ids)
 
 
 def permitted_conversation_documents(
@@ -548,6 +602,7 @@ async def load_passages(
     chunk_ids: Sequence[UUID],
     collection_ids: Sequence[UUID] | None = None,
     document_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> dict[UUID, PassageRow]:
     """Hydrate fused chunk ids into citation-bearing rows (permission re-checked).
 
@@ -561,10 +616,9 @@ async def load_passages(
     if not chunk_ids:
         return {}
     stmt = _base_chunk_select().where(models.Chunk.id.in_(chunk_ids))
-    if collection_ids is not None:
-        stmt = stmt.where(models.Document.collection_id.in_(collection_ids))
-    if document_ids is not None:
-        stmt = stmt.where(models.Document.id.in_(document_ids))
+    stmt = _document_scope(
+        stmt, collection_ids=collection_ids, source_ids=source_ids, document_ids=document_ids
+    )
     stmt = _permission_filter(stmt, allow_set)
     result = await session.execute(stmt)
     rows: dict[UUID, PassageRow] = {}
@@ -619,6 +673,8 @@ async def document_search(
     allow_set: AllowSet,
     name_or_query: str,
     k: int,
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> list[DocumentRow]:
     """Return permitted documents matching ``name_or_query`` by filename (lexical).
 
@@ -641,6 +697,7 @@ async def document_search(
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
         .limit(k)
     )
+    stmt = _document_scope(stmt, collection_ids=collection_ids, source_ids=source_ids)
     result = await session.execute(stmt)
     return [DocumentRow(document_id=did, document_name=name) for did, name in result.all()]
 
@@ -650,6 +707,8 @@ async def list_documents(
     *,
     allow_set: AllowSet,
     k: int,
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> list[DocumentRow]:
     """Return the permitted documents for a principal, no query (the ``list_documents`` tool).
 
@@ -673,6 +732,7 @@ async def list_documents(
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
         .limit(k)
     )
+    stmt = _document_scope(stmt, collection_ids=collection_ids, source_ids=source_ids)
     result = await session.execute(stmt)
     return [DocumentRow(document_id=did, document_name=name) for did, name in result.all()]
 
@@ -682,41 +742,46 @@ async def load_document_text(
     *,
     allow_set: AllowSet,
     document_id: UUID,
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> DocumentTextRow | None:
     """Return a permitted document's reassembled text, or ``None`` (INV-2 → not found).
 
-    Establishes the document is within the allow-set (tenant + ownership-or-grant),
-    then concatenates its chunks in ``ord`` order into the document text. Returns
+    Checks the allow-set and assistant scope in the same query that reads text,
+    then concatenates chunks in ``ord`` order. Returns
     ``None`` when the document is missing, in another tenant, or owned by another
     user **without** an explicit grant to the requester (directly or via its
     collection) — the ``get_document`` tool maps that to "not found" (existence
     non-disclosure, never a 403). An explicitly-granted document is returned
     (citable), so a granted document is retrievable by the grantee (INV-2).
     """
-    doc_stmt = select(models.Document.id, models.Document.filename).where(
-        models.Document.id == document_id,
-        models.Document.tenant_id == allow_set.tenant_id,
-        _document_permitted(allow_set),
-        models.Document.status == DocumentStatus.READY.value,
-    )
-    doc = (await session.execute(doc_stmt)).first()
-    if doc is None:
-        return None
-    _, filename = doc
-
-    chunk_stmt = (
-        select(models.Chunk.text)
+    stmt = (
+        select(models.Document.id, models.Document.filename, models.Chunk.text)
+        .outerjoin(
+            models.Chunk,
+            and_(
+                models.Chunk.document_id == models.Document.id,
+                models.Chunk.tenant_id == allow_set.tenant_id,
+            ),
+        )
         .where(
-            models.Chunk.tenant_id == allow_set.tenant_id,
-            models.Chunk.document_id == document_id,
+            models.Document.id == document_id,
+            models.Document.tenant_id == allow_set.tenant_id,
+            _document_permitted(allow_set),
+            models.Document.status == DocumentStatus.READY.value,
         )
         .order_by(models.Chunk.ord.asc())
     )
-    texts = (await session.execute(chunk_stmt)).scalars().all()
+    # Out-of-scope ⇒ the same None as missing/foreign (INV-2 non-disclosure, #581).
+    stmt = _document_scope(stmt, collection_ids=collection_ids, source_ids=source_ids)
+    rows = (await session.execute(stmt)).all()
+    if not rows:
+        return None
     return DocumentTextRow(
         document_id=document_id,
-        document_name=filename,
-        text="".join(texts),
+        document_name=rows[0][1],
+        # The outer join preserves a permitted empty document's empty body.
+        text="".join(row[2] or "" for row in rows),
     )
 
 
@@ -725,6 +790,8 @@ async def document_id_for_permitted_chunk(
     *,
     allow_set: AllowSet,
     chunk_id: UUID,
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> UUID | None:
     """The containing document of a chunk the caller may see, or ``None`` (#758).
 
@@ -739,6 +806,7 @@ async def document_id_for_permitted_chunk(
         .join(models.Document, models.Chunk.document_id == models.Document.id)
         .where(models.Chunk.id == chunk_id)
     )
+    stmt = _document_scope(stmt, collection_ids=collection_ids, source_ids=source_ids)
     stmt = _permission_filter(stmt, allow_set)
     row = (await session.execute(stmt)).scalar_one_or_none()
     return row
@@ -750,6 +818,8 @@ async def documents_by_exact_name(
     allow_set: AllowSet,
     name: str,
     k: int,
+    collection_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> list[DocumentRow]:
     """Permitted documents whose filename equals ``name`` exactly (#758).
 
@@ -770,5 +840,6 @@ async def documents_by_exact_name(
         .order_by(models.Document.filename.asc(), models.Document.id.asc())
         .limit(k)
     )
+    stmt = _document_scope(stmt, collection_ids=collection_ids, source_ids=source_ids)
     result = await session.execute(stmt)
     return [DocumentRow(document_id=did, document_name=fname) for did, fname in result.all()]

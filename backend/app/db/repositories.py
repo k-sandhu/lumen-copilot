@@ -404,6 +404,13 @@ def _to_chat_session(row: models.ChatSession) -> ChatSessionEntity:
         updated_at=row.updated_at,
         assistant_id=row.assistant_id,
         assistant_version_id=row.assistant_version_id,
+        # The durable bound marker (#581); also derive it from a live pin so a row
+        # written before the marker existed still reads as bound.
+        assistant_bound=bool(
+            row.assistant_bound
+            or row.assistant_id is not None
+            or row.assistant_version_id is not None
+        ),
     )
 
 
@@ -3725,6 +3732,9 @@ class ChatSessionRepository(_TenantScopedRepository):
             title=title,
             assistant_id=assistant_id,
             assistant_version_id=assistant_version_id,
+            # Set once, never cleared (#581): survives ON DELETE SET NULL so a
+            # governed session can fail closed if its assistant is deleted.
+            assistant_bound=assistant_id is not None or assistant_version_id is not None,
         )
         self._session.add(row)
         await self._session.flush()
@@ -6614,11 +6624,15 @@ class AssistantRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_assistant(row)
 
-    async def get(self, assistant_id: UUID) -> Assistant | None:
+    async def get(self, assistant_id: UUID, *, lock: bool = False) -> Assistant | None:
         stmt = select(models.Assistant).where(
             models.Assistant.tenant_id == self._tenant_id,
             models.Assistant.id == assistant_id,
         )
+        if lock:
+            # Validate a partial patch against the latest head, with the lock
+            # retained until the caller's transaction commits or rolls back.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_assistant(row) if row is not None else None
 
