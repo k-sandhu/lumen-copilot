@@ -83,15 +83,16 @@ _CURSOR_PREFIX = "art:"
 class ArtifactLinks:
     """The producing-context back-links for a new artifact (issue #208).
 
-    At most the one matching ``produced_by`` is meaningful, but all three are
-    carried so a tool invocation inside a chat session can record both. The
-    service does not (yet) validate that a link id exists — the run/tool tables
-    (CC-A) are not built; the ``session_id`` FK is the only DB-enforced link.
+    A tool may link its chat, run and invocation together. ``message_id`` is
+    audit provenance; the invocation row carries the persisted message link.
+    The producer supplies these identities, never the model's arguments.
+    ``session_id`` is the only DB-enforced FK.
     """
 
     session_id: UUID | None = None
     run_id: UUID | None = None
     tool_invocation_id: UUID | None = None
+    message_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +236,7 @@ class ArtifactsService:
         content_type: str,
         produced_by: ArtifactProducedBy,
         links: ArtifactLinks | None = None,
+        object_id: str | None = None,
     ) -> Artifact:
         """Validate, store, and register a produced artifact (#208 AC-1/AC-2/AC-4).
 
@@ -269,6 +271,7 @@ class ArtifactsService:
             data=data,
             content_type=content_type,
             filename=filename,
+            **({"object_id": object_id} if object_id is not None else {}),
         )
 
         # 3. Register the immutable row, owned by the caller, with retention.
@@ -302,6 +305,11 @@ class ArtifactsService:
                 "mime_type": artifact.mime_type,
                 "size_bytes": artifact.size_bytes,
                 "produced_by": artifact.produced_by.value,
+                "session_id": str(link.session_id) if link.session_id else None,
+                "message_id": str(link.message_id) if link.message_id else None,
+                "tool_invocation_id": (
+                    str(link.tool_invocation_id) if link.tool_invocation_id else None
+                ),
             },
         )
         return artifact

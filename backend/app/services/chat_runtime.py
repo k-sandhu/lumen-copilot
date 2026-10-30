@@ -50,7 +50,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from uuid import UUID
@@ -106,6 +106,7 @@ from app.services.provider_models import (
     ModelRouteResolver,
     is_provider_model_id,
 )
+from app.services.tool_policy_service import effective_tool_decision
 from app.services.tools.compatibility import LEGACY, permitted_names
 from app.services.tools.context_audit import ContextAuditSink
 from app.services.tools.gate import PolicyApprovalGate
@@ -115,10 +116,12 @@ from app.services.tools.impls import retrieval as _retrieval_impl
 from app.services.tools.impls.ask_user import ASK_USER_TOOL_NAME
 from app.services.tools.impls.recall import READ_CONVERSATION_TOOL_NAME
 from app.services.tools.impls.run_python import RUN_PYTHON_TOOL_NAME
+from app.services.tools.impls.write_file import WRITE_FILE_TOOL_NAME
 from app.services.tools.mcp_bridge import is_mcp_tool_name
-from app.services.tools.registry import default_allowlist, tool_specs
+from app.services.tools.registry import UnknownToolError, default_allowlist, get_tool, tool_specs
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import (
+    ArtifactWriter,
     SandboxToolRunner,
     ToolContext,
     ToolDefinition,
@@ -210,6 +213,32 @@ SandboxFactory = Callable[["SandboxContext"], SandboxToolRunner | None]
 # table or opens a client). ``None`` (the default / offline case) ⇒ no MCP tools
 # are resolved, so a stray ``mcp:*`` call is an ordinary ``tool_not_found``.
 McpToolsFactory = Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactWriterContext:
+    """The per-answer inputs the artifact-writer factory needs (#576).
+
+    Threaded from the runtime into the injected
+    :data:`ArtifactWriterFactory` so the writer can bind the immutable
+    origin (the runtime's own session + chat ``session_id`` / assistant
+    ``message_id``) at construction — never from model/tool input. Tenant
+    and owner come from the principal the factory was built with.
+    """
+
+    session: AsyncSession
+    session_id: UUID
+    message_id: UUID
+    resources: AsyncExitStack = field(default_factory=AsyncExitStack)
+
+
+# The injected artifact-writer seam factory (#576): given the per-answer
+# :class:`ArtifactWriterContext`, build the :class:`ArtifactWriter` the
+# ``write_file`` tool persists through, or ``None`` when file writing is
+# unavailable. The runtime only calls it when the run's executable set
+# offers ``write_file`` and writes are not simulated (mirrors the sandbox
+# seam) — a run that cannot write carries no write plumbing.
+ArtifactWriterFactory = Callable[["ArtifactWriterContext"], ArtifactWriter | None]
 
 
 # How many tool-calling turns the agent may take before the runtime forces a
@@ -429,6 +458,8 @@ class _StreamState:
     # The #487 text-coalescing buffer. Per stream because it holds unpublished
     # wire content: whatever is in it MUST be flushed before the terminal.
     buffer: _TextCoalescer
+    # Runs after the answer session has closed, including rollback/cancellation.
+    resources: AsyncExitStack = field(default_factory=AsyncExitStack)
     seq: int = 0
     # Set once a terminal (``done``/``error``) has been CONFIRMED published, so the
     # exactly-one-terminal contract holds even when two terminal paths race —
@@ -581,6 +612,7 @@ class ChatRuntime:
         fallback_model_validator: Callable[[AsyncSession, str], Awaitable[bool]] | None = None,
         retrieval_factory: Callable[[AsyncSession], RetrievalService] | None = None,
         sandbox_factory: SandboxFactory | None = None,
+        artifact_writer_factory: ArtifactWriterFactory | None = None,
         mcp_tools_factory: McpToolsFactory | None = None,
         model_route_resolver: ModelRouteResolver | None = None,
         interactive: bool = True,
@@ -657,6 +689,13 @@ class ChatRuntime:
         # / no-code case) ⇒ ``run_python`` invocations report a typed ``ok=False``
         # rather than executing. The API wires the live factory (issue #231).
         self._sandbox_factory = sandbox_factory
+        # The #576 artifact-writer seam factory, mirroring the sandbox seam:
+        # invoked ONLY when the run's executable set offers ``write_file``
+        # and writes are not simulated. ``None`` (offline / Assistant Test)
+        # ⇒ ``ToolContext.artifacts`` stays ``None`` and a stray write call
+        # reports a typed ``ok=False``. The composition wires the live
+        # writer for interactive chat and headless runs.
+        self._artifact_writer_factory = artifact_writer_factory
         # The #227 MCP-tools resolver. Called ONLY when a run's allow-list names an
         # ``mcp:*`` tool (below) — an ad-hoc / native-only run never resolves MCP
         # tools (deny-by-default; no client/DB work on a path that cannot use them).
@@ -942,6 +981,10 @@ class ChatRuntime:
                 )
                 turn.failed("internal_error")
                 return False
+            finally:
+                # #576: per-answer resources (artifact writer compensation, sandbox
+                # handles) close after the answer session, on every exit path.
+                await asyncio.shield(state.resources.aclose())
 
             # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
             # usage row and only THEN published the terminal ``done`` (#489/BE-1): the
@@ -1021,12 +1064,33 @@ class ChatRuntime:
         # (CC-7 / INV-6). Off-list / failing tools become results, not crashes.
         allowed = assistant_config.allowed if assistant_config is not None else default_allowlist()
         policies = await TenantToolPolicyRepository(session, tenant_id).list_all()
+        # Share defaults and overrides with Admin and the approval gate (#576).
+        # Disabled tools are never offered. Preserve the stricter legacy read
+        # filter; other approval-required tools route through the policy gate.
+        overrides = {policy.tool_name: policy for policy in policies}
+        decisions = {}
+        for tool_name in allowed | LEGACY | overrides.keys():
+            try:
+                registry_requires_approval = get_tool(tool_name).requires_approval
+            except UnknownToolError:
+                registry_requires_approval = True
+            decisions[tool_name] = effective_tool_decision(
+                tool_name=tool_name,
+                override=overrides.get(tool_name),
+                registry_requires_approval=registry_requires_approval,
+            )
+        approval_blocked_reads = LEGACY | {"search_passages", "find_documents", "read_document"}
         blocked = {
-            policy.tool_name
-            for policy in policies
-            if not policy.enabled or policy.requires_approval
-            if policy.tool_name in LEGACY | {"search_passages", "find_documents", "read_document"}
+            name
+            for name, decision in decisions.items()
+            if not decision.enabled
+            or (decision.requires_approval and name in approval_blocked_reads)
         }
+        approval_required_tools = frozenset(
+            name
+            for name, decision in decisions.items()
+            if not decision.is_default and decision.requires_approval
+        )
         allowed = permitted_names(allowed, blocked)
         executable = (
             permitted_names(allowed | LEGACY, blocked) if assistant_config is None else allowed
@@ -1088,6 +1152,7 @@ class ChatRuntime:
             gate=PolicyApprovalGate(session, tenant_id=tenant_id),
             extra_tools=mcp_tools,
             autonomy=effective_autonomy,
+            approval_required_tools=approval_required_tools,
         )
         # The tool schemas advertised to the model — exactly the allow-list (native
         # + the resolved MCP tools it names), so the model is only *offered* tools it
@@ -1329,6 +1394,16 @@ class ChatRuntime:
             max_k=assembled.max_k,
             snippet_budget=assembled.snippet_budget,
             session_id=session_id,
+            # The #576 artifact writer, built ONLY when write_file is
+            # executable and writes are real (mirror of the sandbox seam).
+            artifacts=self._build_artifact_writer_seam(
+                session=session,
+                executable=executable,
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+                simulate_writes=simulate_writes,
+                resources=state.resources,
+            ),
             sandbox=sandbox,
             # The #569 own-conversation read seam, bound to THIS session so the
             # tool has no session argument to point elsewhere. Built only when
@@ -2081,6 +2156,40 @@ class ChatRuntime:
                 session_id=session_id,
                 message_id=assistant_message_id,
                 next_seq=state.next_seq,
+            )
+        )
+
+    def _build_artifact_writer_seam(
+        self,
+        *,
+        session: AsyncSession,
+        executable: frozenset[str],
+        session_id: UUID,
+        assistant_message_id: UUID,
+        simulate_writes: bool,
+        resources: AsyncExitStack | None = None,
+    ) -> ArtifactWriter | None:
+        """Build the ``write_file`` artifact writer, or ``None`` (#576).
+
+        Mirrors :meth:`_build_sandbox_seam`: the writer exists ONLY when a
+        live factory was injected, this run's executable set offers
+        ``write_file``, and writes are not simulated (Assistant Test keeps
+        simulating, so a preview never persists). Otherwise
+        ``ToolContext.artifacts`` stays ``None`` and a stray invocation
+        reports a typed ``ok=False`` instead of writing.
+        """
+        if (
+            self._artifact_writer_factory is None
+            or simulate_writes
+            or WRITE_FILE_TOOL_NAME not in executable
+        ):
+            return None
+        return self._artifact_writer_factory(
+            ArtifactWriterContext(
+                session=session,
+                session_id=session_id,
+                message_id=assistant_message_id,
+                resources=resources if resources is not None else AsyncExitStack(),
             )
         )
 
@@ -3762,6 +3871,8 @@ _RETRIEVAL_TOOL_NAMES: frozenset[str] = frozenset(
 
 
 __all__ = [
+    "ArtifactWriterContext",
+    "ArtifactWriterFactory",
     "ChatRuntime",
     "McpToolsFactory",
     "ModelRoute",

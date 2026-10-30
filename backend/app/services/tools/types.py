@@ -280,6 +280,8 @@ class ToolContext:
     #: own snippet cap (600) — inert unless a tighter budget lowers it.
     snippet_budget: int = 600
     artifacts: ArtifactWriter | None = None
+    # Allocated by the runner before dispatch, never supplied by model arguments.
+    tool_invocation_id: UUID | None = None
     session_id: UUID | None = None
     simulate_writes: bool = False
     sandbox: SandboxToolRunner | None = None

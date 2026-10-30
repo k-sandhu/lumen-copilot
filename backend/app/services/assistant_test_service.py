@@ -49,13 +49,12 @@ from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import Assistant, AuditOutcome, Role
 from app.llm import LLMGateway
-from app.llm.context import ContextConfig
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
+from app.services.chat_composition import ChatCompositionOptions, build_chat_runtime
 from app.services.chat_runtime import ChatRuntime
-from app.services.models_service import ChatModelService, is_allowed_model
-from app.services.provider_models import build_model_route_resolver
+from app.services.models_service import is_allowed_model
 from app.services.run_sink import DebugTraceSink
 
 log = get_logger(__name__)
@@ -250,52 +249,24 @@ class AssistantTestService:
                 model=model,
                 title="assistant-test-preview",
             )
-            runtime = ChatRuntime(
+            # The ONE composition in ``test`` mode (#576): same model route /
+            # fallback validation / context as a real run, but HARDCODED
+            # tool_concurrency=1 (every ``sessionmaker()`` open routes to the
+            # ONE shared rollback-only session above — fan-out would race it,
+            # #412/#433), no sandbox, no artifact writer, no MCP, and
+            # non-interactive (no live user to answer ask_user, spec 0006).
+            # The runtime runs **as the caller**, so retrieval can never
+            # preview a passage the caller could not already retrieve (INV-2).
+            runtime = build_chat_runtime(
+                mode="test",
+                principal=self._principal,
+                backplane=sink,
+                settings=self._settings,
                 sessionmaker=_factory,  # type: ignore[arg-type]
                 gateway=self._gateway,
-                backplane=sink,
-                # The runtime runs **as the caller** (exactly like an interactive
-                # chat): retrieval/ keys its permission filter off this principal, so
-                # a test run can never preview a passage the caller could not already
-                # retrieve (INV-2, the same property the real run has).
-                principal=self._principal,
                 request_id=self._request_id,
                 source_ip=self._source_ip,
-                default_max_tool_turns=self._settings.chat_max_tool_turns,
-                # HARDCODED 1 — never the configured cap (#412 / #433 review).
-                # This composition deliberately routes EVERY ``sessionmaker()``
-                # open to the ONE shared rollback-only session above, so the
-                # preview's writes and its uncommitted setup share a single
-                # transaction that rolls back atomically (AC-1). Fan-out would
-                # hand that same session to concurrent call scopes — racing
-                # one AsyncSession across workers — and per-call real sessions
-                # could not see the uncommitted setup anyway. Serial execution
-                # is a correctness requirement of the preview harness, not a
-                # tuning choice.
-                tool_concurrency=1,
-                fallback_model_validator=lambda vsession, mid: ChatModelService(
-                    self._settings, session=vsession, tenant_id=self._tenant_id
-                ).is_allowed_model_async(mid),
-                # Provider routing for #413 fallbacks in previews too (#440
-                # round-2 NEW-3) — same resolver the interactive path wires.
-                model_route_resolver=build_model_route_resolver(
-                    settings=self._settings,
-                    tenant_id=self._tenant_id,
-                    owner_id=self._principal.user_id,
-                    roles=self._principal.roles,
-                    request_id=self._request_id,
-                    source_ip=self._source_ip,
-                ),
-                context_config=ContextConfig(
-                    fallback_max_input_tokens=self._settings.context_fallback_max_input_tokens,
-                    output_headroom_tokens=self._settings.context_output_headroom_tokens,
-                    compaction_digest_chars=self._settings.context_compaction_digest_chars,
-                    compaction_chunk_size=self._settings.context_compaction_chunk_size,
-                ),
-                # A preview has no live user to answer a clarifying question
-                # (spec 0006 #429): ask_user is not intercepted (the handler
-                # tells the model to proceed) and no suggestions are generated.
-                interactive=False,
+                options=ChatCompositionOptions(runtime_factory=ChatRuntime),
             )
             await runtime.run(
                 stream_id=sink.stream_id,

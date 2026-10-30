@@ -106,8 +106,8 @@ The enum (E7-7, [#218](https://github.com/k-sandhu/lumen-copilot/issues/218)):
 |---|---|---|
 | `suggest` | Proposes; the user acts. | Read-only. May use **T0** tools (retrieval). Any **T1** side-effecting app-local tool (e.g. file-write, code-run) is **not** executed — it would surface as a suggestion/approval request, never an auto-action. Default for new assistants. |
 | `draft` | Produces a draft artifact; the user commits it. | As `suggest` — still may not *execute* a T1 side-effecting tool without stepping up; "draft" is about output shape, not autonomy to act. |
-| `act_with_approval` | May take app-local actions **after explicit approval**. | Routes **T1** side-effecting tools through the **CC-A approval seam** ([#207 §3](https://github.com/k-sandhu/lumen-copilot/issues/207)): the tool blocks on an approval-request event until approved/denied. Unapproved ⇒ not executed (INV-7-style). |
-| `act_auto` | May take app-local actions **without** per-action approval. | Executes **T1** app-local tools automatically, **still audited** (INV-6). No approval prompt for T1; the tier ceiling still applies. |
+| `act_with_approval` | Takes app-local actions subject to tenant tool policy. | Routes **T1** side-effecting tools through the **CC-A policy seam**. A T1 internal write with no override is enabled with no extra approval, matching Admin and spec 0004 §2.5 (#576). A disabled override refuses execution; an explicit approval requirement refuses until cleared. There is no per-invocation approval UI (#501). |
+| `act_auto` | May take app-local actions **without** per-action approval. | Executes **T1** app-local tools automatically after rechecking current tenant tool policy at each dispatch, **still audited** (INV-6). Disabled, approval-required or unreadable policy refuses the write; no override needs no extra approval. The tier ceiling still applies. |
 
 **Non-negotiable bounds** (both are negative-tested, [#218 AC-1/AC-N](https://github.com/k-sandhu/lumen-copilot/issues/218)):
 

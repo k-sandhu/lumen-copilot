@@ -40,7 +40,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import Artifact, ArtifactProducedBy, AuditEvent, Role
-from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
+from app.domain.tools import ERROR_BAD_ARGS, ERROR_TOOL_ERROR, RiskTier, ToolHandlerResult
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
 from app.services.audit import AuditSink
 from app.services.tools import registry
@@ -311,11 +311,17 @@ async def test_bad_encoding_is_ok_false(world: _World) -> None:
 
 
 async def test_no_writer_wired_is_ok_false_not_crash(world: _World) -> None:
+    # Defensive only: since #576 the composition always wires a writer for a
+    # run that can execute write_file (see test_chat_composition); a context
+    # built without one must still report a typed result, never crash.
     ctx = world.context(with_writer=False)
     result = await _write_file(
         {"filename": "x.txt", "content_type": "text/plain", "content": "hi"}, ctx
     )
-    assert result.ok is False  # a run with no write seam reports, never crashes
+    assert result.ok is False
+    assert result.error == ERROR_TOOL_ERROR
+    assert result.summary == "no artifact writer"
+    assert world.store.objects == {}
 
 
 # ---------------------------------------------------------------------------
