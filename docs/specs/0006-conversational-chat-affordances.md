@@ -95,6 +95,10 @@ its composer — that together turn a static Q&A into a guided conversation:
     #490/ADR-0016 §2.6; #409). A failure/timeout produces no event
     and cannot touch the already-published terminal; there is still exactly one
     terminal, and it is still `done`.
+  - **Billed spend (#832).** Optional `done.usage.costUsd` is a decimal USD
+    subtotal (null if no call was priced); `unpricedCalls` counts missing charges
+    and dispatched incomplete requests. Suggestions retain their own spend row;
+    see [ADR-0031](../architecture/0031-provider-billed-cost.md).
 - **Prefill is a ghost, never a write.** The top suggestion renders as ghost text
   in the *empty* composer with an explicit accept affordance (Tab or click);
   typing anything dismisses it. The composer's draft is never overwritten —

@@ -66,7 +66,11 @@ first-class and visible:
   last?, input_budget_tokens, window_known }` (schemas `SessionUsageTotals`,
   `SessionUsageLast`; 404 on a non-visible session — INV-1/INV-2).
 - `SendMessageRequest.document_ids?: uuid[] (maxItems 20)` — additive.
-- No WS change; no artifacts/suggest change (reused as-is).
+- `done.data.usage` optionally carries `costUsd` (decimal string or null) and
+  `unpricedCalls` (nonnegative integer), per [ADR-0031](../architecture/0031-provider-billed-cost.md).
+  These cover the answer across route scopes; suggestions have their own ledger
+  row. Null means no priced calls, while reported zero is measured. The token
+  meter remains unchanged; no artifacts/suggest change.
 
 ## 4. Security & domain invariants (spec 0004)
 

@@ -231,6 +231,16 @@
             "promptTokens": { "type": "integer", "minimum": 0 },
             "completionTokens": { "type": "integer", "minimum": 0 },
             "totalTokens": { "type": "integer", "minimum": 0 },
+            "costUsd": {
+              "type": ["string", "null"],
+              "pattern": "^[0-9]+(?:\\.[0-9]+)?$",
+              "description": "Provider-billed USD subtotal across answer calls (ADR-0031). Null when no call was priced; a measured zero stays zero. Suggestions are excluded."
+            },
+            "unpricedCalls": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Answer calls whose billed cost is unknown, including dispatched failed or abandoned attempts. A priced subtotal with unpriced calls is incomplete spend."
+            },
             "cachedPromptTokens": {
               "type": "integer",
               "minimum": 0,

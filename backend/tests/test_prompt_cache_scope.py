@@ -127,7 +127,7 @@ async def test_route_payload(
     expected = _expected(_IDS)
     if not partition:
         expected.pop("prompt_cache_key")
-    assert captured["extra_body"] == expected
+    assert captured["extra_body"] == {**expected, "usage": {"include": True}}
     assert [_has_cache_control(m) for m in captured["messages"]] == (
         [True, False, False, True] if breakpoints else [False] * 4
     )
@@ -166,7 +166,10 @@ async def test_unapproved_transport_and_kill_switch(
             session_id=_IDS["session_id"],
         )
     ]
-    assert "extra_body" not in captured
+    if enabled == "false":
+        assert captured["extra_body"] == {"usage": {"include": True}}
+    else:
+        assert "extra_body" not in captured
     assert not any(_has_cache_control(m) for m in captured["messages"])
 
 
@@ -182,7 +185,7 @@ async def test_missing_id_never_mints_shared_scope(
     for value in (None, ""):
         ids: dict[str, Any] = {**_IDS, missing: value}
         _ = [e async for e in gateway.stream_tools(_CONVO, tools=_TOOLS, model=model, **ids)]
-        assert "extra_body" not in captured
+        assert captured["extra_body"] == {"usage": {"include": True}}
         assert not any(_has_cache_control(m) for m in captured["messages"])
 
 
@@ -209,7 +212,8 @@ async def test_isolation_rotation_and_vault_independence(monkeypatch: pytest.Mon
                 session_id=ids["session_id"],
             )
         ]
-        return dict(captured["extra_body"])
+        # Scope comparisons exclude independent provider accounting.
+        return {k: v for k, v in captured["extra_body"].items() if k != "usage"}
 
     original = await payload(_IDS)
     assert original == _expected(_IDS) == await payload(_IDS)
@@ -293,7 +297,7 @@ async def test_pair_stable_across_failover_and_forced_synthesis(
                 session_id=_IDS["session_id"],
             )
         ]
-        assert captured["extra_body"] == _expected(_IDS)
+        assert captured["extra_body"] == {**_expected(_IDS), "usage": {"include": True}}
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
