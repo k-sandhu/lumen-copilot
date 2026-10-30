@@ -21,6 +21,7 @@ import ast
 import asyncio
 import uuid
 import weakref
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import aclosing
 from pathlib import Path
@@ -44,6 +45,7 @@ from app.observability import (
     HttpMetricsMiddleware,
     LlmCall,
     configure_telemetry,
+    observe_headless_run,
     observe_tool,
     observe_turn,
     shutdown_telemetry,
@@ -571,6 +573,183 @@ async def test_content_capture_off_keeps_structure_and_drops_content(
 
 
 # --- Turn tree through the chat runtime -----------------------------------------
+
+
+def _turn(ctx: _Ctx) -> Any:
+    return observe_turn(
+        session_id=ctx.session_id,
+        user_id=ctx.principal.user_id,
+        tenant_id=ctx.tenant_id,
+        model="m",
+        question="deduction",
+        interactive=True,
+    )
+
+
+def _assert_child(child: ReadableSpan, parent: ReadableSpan) -> None:
+    assert child.context.trace_id == parent.context.trace_id
+    assert child.parent is not None and child.parent.span_id == parent.context.span_id
+
+
+def _patch_embeddings(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    from types import SimpleNamespace
+
+    from app.llm import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "_embed_cache", OrderedDict())
+    seen: list[dict[str, Any]] = []
+
+    async def _embed(**kwargs: Any) -> object:
+        seen.append(kwargs)
+        return SimpleNamespace(data=[{"index": 0, "embedding": [0.6, 0.8]}], usage=_Usage())
+
+    monkeypatch.setattr(litellm, "aembedding", _embed)
+    return seen
+
+
+def _embedding_gateway() -> LLMGateway:
+    return LLMGateway(
+        _settings(
+            LLM_EMBEDDING_MODEL="cohere/embed-english-v3.0",
+            LLM_EMBEDDING_DIMENSIONS="2",
+            LLM_EMBEDDING_API_BASE="",
+        )
+    )
+
+
+async def test_retrieval_span_is_parented_under_turn_with_real_search(
+    telemetry: _Telemetry, ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db.repositories import ChunkInput, ChunkRepository, DocumentRepository
+    from app.domain.entities import DocumentStatus
+    from app.retrieval.service import RetrievalService
+    from app.search import SearchHit
+    from tests.test_retrieval_service import _FakeSearchStore
+
+    _patch_embeddings(monkeypatch)
+    fingerprint = "b" * 64
+    async with ctx.sessionmaker() as session:
+        await DocumentRepository(session, ctx.tenant_id).set_status(
+            ctx.document_id, DocumentStatus.READY
+        )
+        [chunk] = await ChunkRepository(session, ctx.tenant_id).replace_for_document(
+            ctx.document_id,
+            [
+                ChunkInput(
+                    text="permitted passage",
+                    char_start=0,
+                    char_end=17,
+                    embedding_fingerprint=fingerprint,
+                )
+            ],
+        )
+        store = _FakeSearchStore(
+            hits=[
+                SearchHit(
+                    chunk_id=chunk.id,
+                    document_id=ctx.document_id,
+                    score=0.91,
+                    ingestion_attempt=0,
+                    embedding_fingerprint=fingerprint,
+                )
+            ]
+        )
+        service = RetrievalService(session, gateway=_embedding_gateway(), store=store)  # type: ignore[arg-type]
+        with _turn(ctx):
+            passages = await service.search(
+                principal=ctx.principal, query="deduction", k=7, document_ids=[ctx.document_id]
+            )
+        assert len(passages) == 1 and passages[0].chunk_id == chunk.id
+
+    [turn] = telemetry.named("chat.turn")
+    [retrieval] = telemetry.named("retrieval.search")
+    [embedding] = telemetry.named("embedding")
+    _assert_child(retrieval, turn)
+    _assert_child(embedding, retrieval)
+    attrs = retrieval.attributes or {}
+    assert attrs["openinference.span.kind"] == "RETRIEVER"
+    assert attrs["input.value"] == "deduction"
+    assert attrs["lumen.retrieval.k"] == 7
+    assert attrs["lumen.retrieval.collection_filter"] == 0
+    assert attrs["lumen.retrieval.document_filter"] == 1
+    assert attrs["lumen.retrieval.engine_hits"] == attrs["lumen.retrieval.passages"] == 1
+    assert attrs["retrieval.documents.0.document.id"] == str(chunk.id)
+    assert attrs["retrieval.documents.0.document.score"] == 0.91
+    assert attrs["retrieval.documents.0.document.content"] == "permitted passage"
+    assert "taxes.pdf" in str(attrs["retrieval.documents.0.document.metadata"])
+    assert retrieval.status.status_code is StatusCode.OK
+
+
+async def test_real_embedding_span_records_cache_hits(
+    telemetry: _Telemetry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _patch_embeddings(monkeypatch)
+    gateway = _embedding_gateway()
+    first = await gateway.embed(["deduction"], cache_namespace="observability-test")
+    second = await gateway.embed(["deduction"], cache_namespace="observability-test")
+    assert first == second and len(seen) == 1
+    spans = telemetry.named("embedding")
+    assert len(spans) == 2
+    for index, span in enumerate(spans):
+        attrs = span.attributes or {}
+        assert attrs["openinference.span.kind"] == "EMBEDDING"
+        assert attrs["embedding.model_name"] == "cohere/embed-english-v3.0"
+        assert attrs["lumen.embedding.input_count"] == 1
+        assert attrs["embedding.embeddings.0.embedding.text"] == "deduction"
+        assert attrs.get("lumen.embedding.cache_hit", False) is bool(index)
+        assert not any("vector" in key for key in attrs)
+    assert (spans[0].attributes or {})["llm.token_count.prompt"] == 120
+
+
+async def test_real_stream_span_is_parented_under_turn(
+    telemetry: _Telemetry, ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stream = _Stream([_Chunk([_Choice(_Delta(content="answer"))])])
+    _patch_acompletion(monkeypatch, stream)
+    with _turn(ctx) as turn:
+        chunks = [chunk async for chunk in LLMGateway(_settings()).stream(_MESSAGES)]
+        turn.answered(
+            answer="answer", model_used="m", finish_reason="stop", citation_count=0, total_tokens=0
+        )
+    assert [chunk.delta for chunk in chunks] == ["answer"] and stream.closed
+    [root] = telemetry.named("chat.turn")
+    [llm] = telemetry.named("llm.stream")
+    _assert_child(llm, root)
+    attrs = llm.attributes or {}
+    assert attrs["openinference.span.kind"] == "LLM"
+    assert attrs["llm.model_name"] == "openrouter/openai/gpt-4o-mini"
+    assert attrs["llm.output_messages.0.message.content"] == attrs["output.value"] == "answer"
+    assert llm.status.status_code is StatusCode.OK
+
+
+async def test_headless_chain_parents_a_real_runtime_turn(telemetry: _Telemetry, ctx: _Ctx) -> None:
+    from app.services.run_sink import RunTranscriptSink
+
+    run_id = uuid.uuid4()
+    sink = RunTranscriptSink(stream_id=str(run_id))
+    runtime = _runtime(
+        ctx,
+        gateway=_ScriptedGateway([[StreamEvent(text="answer"), StreamEvent(finish_reason="stop")]]),
+        retrieval=_FakeRetrieval([]),
+        backplane=sink,
+        interactive=False,  # type: ignore[arg-type]
+    )
+    with observe_headless_run(run_id=run_id, assistant_id=None, trigger="manual"):
+        assert await runtime.run(
+            stream_id=str(run_id),
+            session_id=ctx.session_id,
+            question="q",
+            model="m",
+            history=[],
+            collection_ids=None,
+        )
+    [run] = telemetry.named("headless_run")
+    [turn] = telemetry.named("chat.turn")
+    assert run.parent is None
+    assert (run.attributes or {})["openinference.span.kind"] == "CHAIN"
+    assert (run.attributes or {})["lumen.run.id"] == str(run_id)
+    assert (turn.attributes or {})["openinference.span.kind"] == "AGENT"
+    _assert_child(turn, run)
 
 
 async def test_chat_turn_is_one_trace_with_tool_children(telemetry: _Telemetry, ctx: _Ctx) -> None:
