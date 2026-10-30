@@ -198,6 +198,62 @@ def test_configure_is_idempotent_and_shutdown_returns_to_no_op(telemetry: _Telem
     assert not tracer().start_span("probe").is_recording()
 
 
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("telemetry_enabled", False),
+        ("telemetry_traces_endpoint", "https://user:private@traces.invalid/path?token=private"),
+        ("telemetry_metrics_endpoint", "https://user:private@metrics.invalid/path?token=private"),
+        ("telemetry_traces_api_key", ""),
+        ("telemetry_capture_content", False),
+        ("telemetry_project_name", "another-project"),
+        ("telemetry_metrics_export_interval_seconds", 31.0),
+        ("telemetry_max_attribute_chars", 2048),
+        ("process", "worker"),
+        ("service_name", "another-service"),
+        ("version", "another-version"),
+        ("environment", "local"),
+    ],
+)
+def test_reconfiguration_warns_with_only_changed_setting_names(
+    telemetry: _Telemetry, monkeypatch: pytest.MonkeyPatch, setting: str, value: Any
+) -> None:
+    from unittest.mock import Mock
+
+    from app.observability import telemetry as telemetry_module
+
+    logger = Mock()
+    monkeypatch.setattr(telemetry_module, "log", logger)
+    settings = _enabled().model_copy(update={} if setting == "process" else {setting: value})
+    assert configure_telemetry(settings, process=value if setting == "process" else "test")
+    logger.warning.assert_called_once_with(
+        "telemetry.reconfigure_ignored", changed_settings=[setting]
+    )
+    assert telemetry_module.capture_content() is True  # effective settings remain unchanged
+    assert "private" not in str(logger.mock_calls)
+    assert "phoenix-test-key" not in str(telemetry_module._state.configuration)
+
+
+def test_identical_settings_and_key_rotation_do_not_warn_and_shutdown_resets_configuration(
+    telemetry: _Telemetry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from app.observability import telemetry as telemetry_module
+
+    logger = Mock()
+    monkeypatch.setattr(telemetry_module, "log", logger)
+    assert configure_telemetry(_enabled(), process="test")
+    rotated = _enabled().model_copy(update={"telemetry_traces_api_key": "replacement-secret"})
+    assert configure_telemetry(rotated, process="test")
+    logger.warning.assert_not_called()
+    assert "replacement-secret" not in str(telemetry_module._state.configuration)
+    shutdown_telemetry()
+    _configure(TELEMETRY_CAPTURE_CONTENT="false")
+    assert telemetry_module.capture_content() is False
+    logger.warning.assert_not_called()
+
+
 # --- Gateway LLM spans ----------------------------------------------------------
 
 

@@ -106,5 +106,8 @@ read-only in the UI. Change the JSON in the repo and restart Grafana.
   retry. Start the profile or blank the endpoint.
 - **Worker spans missing.** Workers configure export per pool child at
   `worker_process_init`. Recreate the worker after changing `.env`.
+- **`telemetry.reconfigure_ignored`.** A second setup in the same process
+  requested different settings. The warning lists names only; the first
+  configuration remains active. Restart the process to apply the changes.
 - **A long prompt looks cut off.** Attributes are truncated at
   `TELEMETRY_MAX_ATTRIBUTE_CHARS` (65 536) in the trace only.

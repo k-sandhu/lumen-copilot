@@ -124,6 +124,10 @@ slow collector drops data, after bounded retries, and never fails or delays a
 request. The API configures telemetry in its lifespan. Celery configures it per
 child process (`worker_process_init`), because exporter threads do not survive
 `fork`. Both flush on shutdown.
+Configuration is process-scoped: later calls keep the first effective settings
+and warn with `telemetry.reconfigure_ignored` listing changed setting names
+only. The comparison remembers key presence, never the key. Shutdown resets
+the configuration so the next startup can apply new settings.
 
 ## Consequences
 

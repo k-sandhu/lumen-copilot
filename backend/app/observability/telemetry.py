@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from opentelemetry import metrics as otel_metrics
@@ -143,6 +143,7 @@ class _State:
     tracer: Tracer = _NOOP_TRACER
     instruments: Instruments = _NOOP_INSTRUMENTS
     capture_content: bool = False
+    configuration: dict[str, str | bool | float] | None = field(default=None, repr=False)
 
 
 _state = _State()
@@ -188,6 +189,26 @@ def _resource(settings: Settings, process: str) -> Resource:
     )
 
 
+def _configuration(settings: Settings, process: str) -> dict[str, str | bool | float]:
+    """Effective settings for comparison only; retain key presence, never the key."""
+    return {
+        "telemetry_enabled": settings.telemetry_enabled,
+        "telemetry_traces_endpoint": settings.telemetry_traces_endpoint,
+        "telemetry_metrics_endpoint": settings.telemetry_metrics_endpoint,
+        "telemetry_traces_api_key": bool(settings.telemetry_traces_api_key),
+        "telemetry_capture_content": settings.telemetry_capture_content,
+        "telemetry_project_name": settings.telemetry_project_name,
+        "telemetry_metrics_export_interval_seconds": (
+            settings.telemetry_metrics_export_interval_seconds
+        ),
+        "telemetry_max_attribute_chars": settings.telemetry_max_attribute_chars,
+        "process": process,
+        "service_name": settings.service_name,
+        "version": settings.version,
+        "environment": settings.environment,
+    }
+
+
 def configure_telemetry(
     settings: Settings,
     *,
@@ -197,16 +218,22 @@ def configure_telemetry(
 ) -> bool:
     """Enable trace and metric export for this process, per ``settings``.
 
-    Idempotent: a second call while configured is a no-op. Returns whether
+    Idempotent: a second call while configured is a no-op, warning with only
+    changed setting names when it differs from the effective config. Returns whether
     telemetry is now on. ``process`` names the role (``api``, ``worker``) on the
     resource. ``span_exporter`` / ``metric_reader`` are the test seams: an
     injected exporter is attached with a synchronous processor so a test reads
     its spans the moment they end, and an injected reader replaces OTLP export.
     """
+    requested = _configuration(settings, process)
+    if is_configured():
+        effective = _state.configuration or {}
+        changed = sorted(name for name, value in requested.items() if effective.get(name) != value)
+        if changed:
+            log.warning("telemetry.reconfigure_ignored", changed_settings=changed)
+        return True
     if not settings.telemetry_enabled:
         return False
-    if is_configured():
-        return True
 
     # Deferred: only an enabled process pays for the SDK and exporters.
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -256,6 +283,7 @@ def configure_telemetry(
         _state.instruments = _build_instruments(meter_provider.get_meter(_SCOPE, settings.version))
 
     _state.capture_content = settings.telemetry_capture_content
+    _state.configuration = requested
     log.info(
         "telemetry.configured",
         process=process,
@@ -278,6 +306,7 @@ def shutdown_telemetry() -> None:
     _state.tracer = _NOOP_TRACER
     _state.instruments = _NOOP_INSTRUMENTS
     _state.capture_content = False
+    _state.configuration = None
     # Exporter failures are the collector's problem, never a shutdown failure.
     if tracer_provider is not None:
         try:
