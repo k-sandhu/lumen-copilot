@@ -6,7 +6,7 @@
  * silent no-op.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { KnowledgeModeControl } from './KnowledgeModeControl';
 import { resolveAvailability } from '../model/knowledgeModes';
@@ -14,7 +14,11 @@ import { resolveAvailability } from '../model/knowledgeModes';
 describe('KnowledgeModeControl', () => {
   it('marks active modes via aria-pressed and offers all four (E3-12 visible)', () => {
     render(
-      <KnowledgeModeControl value={['company', 'web']} availability={{ web: { available: true } }} onChange={() => {}} />,
+      <KnowledgeModeControl
+        value={['company', 'web']}
+        availability={{ web: { available: true } }}
+        onChange={() => {}}
+      />,
     );
     const group = screen.getByRole('group', { name: /knowledge modes/i });
     expect(group).toBeInTheDocument();
@@ -31,8 +35,47 @@ describe('KnowledgeModeControl', () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(<KnowledgeModeControl value={['company']} onChange={onChange} />);
-    await user.click(screen.getByRole('button', { name: 'Model' }));
-    expect(onChange).toHaveBeenCalledWith(['company', 'model']);
+    await user.click(screen.getByRole('button', { name: 'Uploaded' }));
+    expect(onChange).toHaveBeenCalledWith(['company', 'uploaded']);
+  });
+
+  it('never offers Model as a working toggle (#581: answers are grounded)', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<KnowledgeModeControl value={['company', 'model']} onChange={onChange} />);
+    const modelMode = screen.getByRole('button', { name: 'Model' });
+    expect(modelMode).toBeDisabled();
+    expect(modelMode).toHaveAttribute('aria-pressed', 'false');
+    expect(modelMode.getAttribute('title')).toMatch(/not used|grounded/i);
+    expect(within(modelMode).getByText('not used')).toBeVisible();
+    await user.click(modelMode);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('readOnly renders every mode disabled with in-use modes pressed (#581)', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <KnowledgeModeControl
+        value={['company', 'web']}
+        availability={{ web: { available: true } }}
+        onChange={onChange}
+        readOnly
+      />,
+    );
+    for (const name of ['Company', 'Uploaded', 'Web', 'Model']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+    expect(screen.getByRole('button', { name: 'Web' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Company' }));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('does not offer working toggles when no change handler exists (#581)', () => {
+    render(<KnowledgeModeControl value={['company']} />);
+    for (const name of ['Company', 'Uploaded', 'Web', 'Model']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
   });
 
   it('turns a mode OFF when it is already active', async () => {
@@ -99,9 +142,10 @@ describe('resolveAvailability', () => {
     expect(resolveAvailability('web', { web: { available: true } }).available).toBe(true);
   });
 
-  it('leaves non-web modes available by default', () => {
+  it('leaves company/uploaded available by default but never model (#581)', () => {
     expect(resolveAvailability('company', undefined).available).toBe(true);
     expect(resolveAvailability('uploaded', undefined).available).toBe(true);
-    expect(resolveAvailability('model', undefined).available).toBe(true);
+    expect(resolveAvailability('model', undefined).available).toBe(false);
+    expect(resolveAvailability('model', { model: { available: true } }).available).toBe(false);
   });
 });

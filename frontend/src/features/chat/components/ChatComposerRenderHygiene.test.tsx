@@ -100,7 +100,6 @@ beforeEach(() => {
     activeStreamId: null,
     pendingModel: null,
     viewer: null,
-    sessionScope: null,
   });
   bubbleRenders.length = 0;
   installFetch();

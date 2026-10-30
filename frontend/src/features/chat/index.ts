@@ -21,6 +21,9 @@ export {
   sourceMetadataRows,
   initialModes,
   modeAvailability,
+  modesFromEffectiveScope,
+  availabilityFromEffectiveScope,
+  MODE_EXCLUDED_REASON,
   usedWebSearch,
   partitionCitations,
   DEFAULT_CHAT_MODES,
@@ -40,6 +43,7 @@ export {
 // drags ChatView → lib/markdown into the entry chunk and closes a barrel cycle.
 export {
   useChatSessions,
+  useChatSession,
   useMessages,
   useCreateSession,
   useUpdateSession,

@@ -525,6 +525,27 @@ export interface MessageList {
   next_cursor?: string | null;
 }
 
+/** Per-field adjustability of an EffectiveKnowledgeScope (#581) — all false. */
+export interface EffectiveKnowledgeScopeAdjustable {
+  modes: false;
+  collection_ids: false;
+  source_ids: false;
+}
+
+/**
+ * The server-authoritative scope of an assistant-bound session (#581),
+ * resolved from the PINNED assistant version. `modes` never contains
+ * `model` (answers are always grounded).
+ */
+export interface EffectiveKnowledgeScope {
+  assistant_id: string;
+  assistant_version_id: string;
+  modes: KnowledgeMode[];
+  collection_ids: string[];
+  source_ids: string[];
+  adjustable: EffectiveKnowledgeScopeAdjustable;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -534,6 +555,8 @@ export interface ChatSession {
   message_count: number;
   created_at: string;
   updated_at: string;
+  /** Pinned assistant version's effective scope (#581); null for ad-hoc chat. */
+  effective_scope?: EffectiveKnowledgeScope | null;
 }
 
 export interface ChatSessionList {

@@ -126,9 +126,31 @@ describe('Composer', () => {
   it('reports a mode toggle to the parent (#221)', async () => {
     const { onModesChange } = setup();
     const user = userEvent.setup();
-    // Toggling "Model" on adds it to the active set, preserving canonical order.
-    await user.click(screen.getByRole('button', { name: /model/i }));
-    expect(onModesChange).toHaveBeenCalledWith(['company', 'uploaded', 'model']);
+    // Toggling "Uploaded" off narrows the active set, preserving canonical order.
+    await user.click(screen.getByRole('button', { name: /uploaded/i }));
+    expect(onModesChange).toHaveBeenCalledWith(['company']);
+  });
+
+  it('Model is disabled as not used, never a toggle (#581)', async () => {
+    const { onModesChange } = setup();
+    const user = userEvent.setup();
+    const modelMode = screen.getByRole('button', { name: /model/i });
+    expect(modelMode).toBeDisabled();
+    expect(modelMode.getAttribute('title')).toMatch(/not used|grounded/i);
+    await user.click(modelMode);
+    expect(onModesChange).not.toHaveBeenCalled();
+  });
+
+  it('modesReadOnly disables every mode chip (#581 server-authoritative scope)', () => {
+    setup({
+      modesReadOnly: true,
+      modes: ['company', 'web'],
+      modeAvailability: { web: { available: true } },
+    });
+    for (const name of [/company/i, /uploaded/i, /^web$/i, /model/i]) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+    expect(screen.getByRole('button', { name: /^web$/i })).toHaveAttribute('aria-pressed', 'true');
   });
 });
 

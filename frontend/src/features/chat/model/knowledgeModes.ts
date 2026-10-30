@@ -33,7 +33,7 @@ export const MODE_CONFIG: Record<KnowledgeMode, ModeConfig> = {
   model: {
     label: 'Model',
     icon: 'sparkles',
-    hint: 'Allow the model to answer from its own training knowledge',
+    hint: 'Model knowledge is not used — answers are always grounded in cited sources',
   },
 };
 
@@ -47,16 +47,24 @@ export interface ModeAvailability {
   reason?: string;
 }
 
+/** Why Model is never an active mode (#581): answers are always grounded. */
+export const MODEL_NOT_USED_REASON =
+  'Model knowledge is not used — answers are always grounded in cited sources.';
+
 /**
  * Resolve a mode's availability. Web fails closed: absent ⇒ unavailable with a
  * default reason, so a deploy/assistant that never enabled web shows a disabled
- * toggle rather than a working-looking one. Every other mode is available unless
- * a caller explicitly marks it unavailable.
+ * toggle rather than a working-looking one. Model is NEVER available (#581):
+ * it was a toggle with no effect, and answers are always grounded. Every other
+ * mode is available unless a caller explicitly marks it unavailable.
  */
 export function resolveAvailability(
   mode: KnowledgeMode,
   availability: Partial<Record<KnowledgeMode, ModeAvailability>> | undefined,
 ): ModeAvailability {
+  if (mode === 'model') {
+    return { available: false, reason: MODEL_NOT_USED_REASON };
+  }
   const entry = availability?.[mode];
   if (entry) return entry;
   if (mode === 'web') {

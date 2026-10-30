@@ -6820,6 +6820,17 @@ class AssistantVersionRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_assistant_version(row) if row is not None else None
 
+    async def get_many(self, version_ids: list[UUID]) -> dict[UUID, AssistantVersion]:
+        """Versions by id in one query (tenant-scoped); missing ids are absent."""
+        if not version_ids:
+            return {}
+        stmt = select(models.AssistantVersion).where(
+            models.AssistantVersion.tenant_id == self._tenant_id,
+            models.AssistantVersion.id.in_(version_ids),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {v.id: v for v in (_to_assistant_version(r) for r in rows)}
+
     async def get_by_number(self, assistant_id: UUID, version: int) -> AssistantVersion | None:
         """The specific numbered version of an assistant (for rollback), tenant-scoped."""
         stmt = select(models.AssistantVersion).where(

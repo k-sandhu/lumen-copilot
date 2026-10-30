@@ -27,6 +27,12 @@ Two decisions are load-bearing on the invariants and are non-negotiable in every
 
 ## Decision
 
+Session scope projection amendment (2026-10-29, #581 part 2):
+[spec 0030](../specs/0030-session-effective-knowledge-scope.md) defines the
+server-authoritative pinned scope returned on chat sessions and the fixed
+knowledge-mode display. It records the owner's legacy effective-modes rule,
+excludes model knowledge, and introduces no user narrowing.
+
 ### 1. Data model — `assistants` + immutable `assistant_versions`; nullable FKs on `chat_sessions`
 
 Two new tenant/owner-scoped tables in `backend/app/db/` (models + repositories; the owning module per [ADR-0004 §6](0004-architecture-boundaries-and-adapters.md)). Both are `TenantScopedMixin` (non-null `tenant_id`, FK → `tenants.id`, INV-1) and inherit the fail-closed RLS backstop already applied to every tenant-scoped table ([spec 0004 §2.1](../specs/0004-security-and-domain-invariants.md), migration `0007`).
