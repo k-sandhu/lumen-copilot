@@ -814,6 +814,7 @@ export const AUDIT_EVENT_TYPES = [
   'llm_provider.created',
   'llm_provider.deleted',
   'llm_provider.discovered',
+  'llm_provider.connection_tested',
   'llm_provider.updated',
   'mcp_server.deleted',
   'mcp_server.registered',
@@ -2545,23 +2546,75 @@ export interface RunDeliveryList {
 export type LlmProviderType = 'openai_compatible';
 
 /**
- * Model-discovery state from the last probe. `pending` before the first discovery,
- * `ready` after a successful `GET /models` snapshot, `error` when the last discovery
- * failed (see `last_error`).
+ * Evidence-based validation state (spec 0029). `pending` before the first probe,
+ * `reachable` when the catalog was discovered but auth/capabilities are unverified,
+ * `ready` only after test-connection passed, `error` when the last probe failed
+ * (see `last_error_code`).
  */
-export type LlmProviderStatus = 'pending' | 'ready' | 'error';
+export type LlmProviderStatus = 'pending' | 'reachable' | 'ready' | 'error';
+
+export type ProviderValidationCheckName =
+  | 'config_valid'
+  | 'reachable'
+  | 'catalog_discovered'
+  | 'auth_verified'
+  | 'capabilities_verified';
+
+export type ProviderValidationCheckStatus = 'passed' | 'failed' | 'unverified' | 'not_applicable';
+
+export type ProviderValidationCode =
+  | 'blocked_address'
+  | 'dns_failed'
+  | 'timeout'
+  | 'connection_failed'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'not_found'
+  | 'rate_limited'
+  | 'provider_error'
+  | 'unexpected_status'
+  | 'invalid_response'
+  | 'response_too_large'
+  | 'validation_failed'
+  | null;
+
+export interface ProviderValidationCheck {
+  name: ProviderValidationCheckName;
+  status: ProviderValidationCheckStatus;
+  code?: ProviderValidationCode;
+}
+
+export interface ProviderValidationResult {
+  status: LlmProviderStatus;
+  checks: ProviderValidationCheck[];
+  stage?: 'config' | 'discovery' | 'connection_test' | null;
+  code?: ProviderValidationCode;
+  retryable: boolean;
+  correlation_id: string;
+  tested_model?: string | null;
+  validated_at?: string | null;
+}
+
+export interface ProviderTestConnectionRequest {
+  model: string;
+}
+
+export interface ProviderTestConnectionResponse {
+  provider: LlmProvider;
+  validation: ProviderValidationResult;
+}
 
 export interface LlmProviderModel {
   id: string;
-  label: string | null;
+  label?: string | null;
 }
 
 /**
  * 200/201 item from the /admin/llm-providers surface — one registered per-tenant LLM
- * provider (foundation PR). The response NEVER includes the stored API key — only a
- * masked `secret_hint`. `discovered_models` is the last successful `GET /models`
- * snapshot. This catalog is not yet wired into the chat model picker or completion
- * routing (a follow-up PR).
+ * provider. The response NEVER includes the stored API key or any fragment of it —
+ * only `has_api_key` (presence, spec 0029). `discovered_models` is the last
+ * successful `GET /models` snapshot; `last_error` is a fixed safe message keyed by
+ * `last_error_code`. Only `ready` providers surface in the picker and route.
  */
 export interface LlmProvider {
   id: string;
@@ -2570,10 +2623,15 @@ export interface LlmProvider {
   base_url: string;
   enabled: boolean;
   status: LlmProviderStatus;
-  last_discovery_at: string | null;
-  last_error: string | null;
+  last_discovery_at?: string | null;
+  last_error?: string | null;
+  last_error_code?: string | null;
   discovered_models: LlmProviderModel[];
-  secret_hint: string | null;
+  has_api_key: boolean;
+  validation_checks: ProviderValidationCheck[];
+  validation?: ProviderValidationResult | null;
+  validated_at?: string | null;
+  validation_grandfathered: boolean;
   owner_id: string;
   created_at: string;
   updated_at: string;

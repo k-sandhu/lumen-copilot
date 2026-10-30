@@ -162,6 +162,7 @@ class SecretsService:
         name: str,
         kind: SecretKind,
         plaintext: str,
+        include_hint: bool = True,
     ) -> SecretRef:
         """Encrypt + persist a credential; return its plaintext-free ref (AC-1).
 
@@ -183,6 +184,9 @@ class SecretsService:
         Returns a :class:`SecretRef` (id + metadata + hint) — the only shape any
         HTTP surface may serialize (no value, no ciphertext).
 
+        ``include_hint=False`` stores a constant presence marker and emits
+        presence-only audit metadata for provider credentials (spec 0029).
+
         Raises:
             ValidationError: ``name`` is blank or ``plaintext`` is empty (422).
         """
@@ -199,7 +203,7 @@ class SecretsService:
             ciphertext=envelope.ciphertext,
             nonce=envelope.nonce,
             key_version=envelope.key_version,
-            hint=_make_hint(plaintext),
+            hint=_make_hint(plaintext) if include_hint else "****",
             created_by=self._owner_id,
         )
         await self._audit.emit(
@@ -210,7 +214,11 @@ class SecretsService:
             outcome=AuditOutcome.ALLOWED,
             request_id=self._request_id,
             source_ip=self._source_ip,
-            metadata={"name": secret.name, "kind": secret.kind.value, "hint": secret.hint},
+            metadata={
+                "name": secret.name,
+                "kind": secret.kind.value,
+                **({"hint": secret.hint} if include_hint else {"has_secret": True}),
+            },
         )
         return _to_ref(secret)
 

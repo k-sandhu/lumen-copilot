@@ -1076,11 +1076,37 @@ class LlmProviderModelResponse(BaseModel):
     label: str | None = None
 
 
+class ProviderValidationCheckResponse(BaseModel):
+    """``#/components/schemas/ProviderValidationCheck`` — one independent check."""
+
+    model_config = {"extra": "forbid"}
+
+    name: str
+    status: str
+    code: str | None = None
+
+
+class ProviderValidationResultResponse(BaseModel):
+    """``#/components/schemas/ProviderValidationResult`` — one validation run."""
+
+    model_config = {"extra": "forbid"}
+
+    status: str
+    checks: list[ProviderValidationCheckResponse]
+    stage: str | None = None
+    code: str | None = None
+    retryable: bool
+    correlation_id: str
+    tested_model: str | None = None
+    validated_at: datetime | None = None
+
+
 class LlmProviderResponse(BaseModel):
     """``#/components/schemas/LlmProvider`` — the wire projection of a provider.
 
-    Carries only the masked ``secret_hint`` — **never** the stored API-key value.
-    The ``api_key_secret_ref`` is a server-internal detail and is not exposed.
+    Carries only ``has_api_key`` (presence) — **never** the stored API-key
+    value or any fragment of it (spec 0029). The ``api_key_secret_ref`` and
+    vault hint are server-internal and are not exposed.
     """
 
     model_config = {"extra": "forbid"}
@@ -1093,11 +1119,33 @@ class LlmProviderResponse(BaseModel):
     status: str
     last_discovery_at: datetime | None = None
     last_error: str | None = None
+    last_error_code: str | None = None
     discovered_models: list[LlmProviderModelResponse]
-    secret_hint: str | None = None
+    has_api_key: bool
+    validation_checks: list[ProviderValidationCheckResponse]
+    validated_at: datetime | None = None
+    validation_grandfathered: bool
+    validation: ProviderValidationResultResponse | None = None
     owner_id: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class ProviderTestConnectionRequest(BaseModel):
+    """``#/components/schemas/ProviderTestConnectionRequest`` — the model to test."""
+
+    model_config = {"extra": "forbid"}
+
+    model: str = Field(min_length=1, max_length=500)
+
+
+class ProviderTestConnectionResponse(BaseModel):
+    """``#/components/schemas/ProviderTestConnectionResponse``."""
+
+    model_config = {"extra": "forbid"}
+
+    provider: LlmProviderResponse
+    validation: ProviderValidationResultResponse
 
 
 class LlmProviderListResponse(BaseModel):
@@ -1112,7 +1160,7 @@ class LlmProviderCreateRequest(BaseModel):
     """``#/components/schemas/LlmProviderCreate`` — register a provider (write-only key).
 
     The optional ``api_key`` is write-only: stored envelope-encrypted via CC-C and
-    never returned (the response carries only a masked ``secret_hint``).
+    never returned (the response carries only ``has_api_key`` presence).
     """
 
     model_config = {"extra": "forbid"}
@@ -1146,6 +1194,19 @@ class LlmProviderUpdateRequest(BaseModel):
         return self
 
 
+def _to_validation_checks(
+    checks: list[dict[str, object]],
+) -> list[ProviderValidationCheckResponse]:
+    return [
+        ProviderValidationCheckResponse(
+            name=str(c.get("name", "")),
+            status=str(c.get("status", "unverified")),
+            code=(str(c["code"]) if c.get("code") is not None else None),
+        )
+        for c in checks
+    ]
+
+
 def _to_llm_provider(provider: LlmProvider) -> LlmProviderResponse:
     return LlmProviderResponse(
         id=provider.id,
@@ -1156,6 +1217,7 @@ def _to_llm_provider(provider: LlmProvider) -> LlmProviderResponse:
         status=provider.status.value,
         last_discovery_at=provider.last_discovery_at,
         last_error=provider.last_error,
+        last_error_code=provider.last_error_code,
         discovered_models=[
             LlmProviderModelResponse(
                 id=str(m.get("id", "")),
@@ -1163,7 +1225,15 @@ def _to_llm_provider(provider: LlmProvider) -> LlmProviderResponse:
             )
             for m in provider.discovered_models
         ],
-        secret_hint=provider.secret_hint,
+        has_api_key=provider.api_key_secret_ref is not None,
+        validation_checks=_to_validation_checks(provider.validation_checks),
+        validated_at=provider.validated_at,
+        validation_grandfathered=provider.validation_grandfathered,
+        validation=(
+            ProviderValidationResultResponse.model_validate(provider.validation_result)
+            if provider.validation_result is not None
+            else None
+        ),
         owner_id=provider.owner_id,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
@@ -1219,7 +1289,8 @@ async def list_llm_providers(
     """The caller's tenant's registered LLM providers + discovered models + status.
 
     Admin-only via the router gate (INV-5); tenant-scoped via ``current_tenant``
-    (INV-1). The stored API key is never returned — only a masked ``secret_hint``.
+    (INV-1). Reads expose only ``has_api_key`` presence, never the stored key or
+    any fragment of it, alongside validation checks and the last validation result.
     """
     service = _build_llm_provider_service(
         session=session,
@@ -1252,9 +1323,11 @@ async def create_llm_provider(
 
     Validates the provider type + base URL (unsupported type / non-https / SSRF-blocked
     → 422). The optional ``api_key`` is stored envelope-encrypted via CC-C and never
-    returned — the response carries only a masked ``secret_hint``. Discovery runs on
-    create: a reachable provider returns ``status: ready`` with its ``discovered_models``;
-    a bad key/url returns ``status: error`` + ``last_error`` (never a 500). Audited
+    returned — the response carries only ``has_api_key`` presence. Successful discovery
+    returns ``status: reachable`` with ``discovered_models``; authentication and chat
+    capabilities remain unverified (authentication is not applicable without a key).
+    Only an explicit Test connection can establish Ready. A failed discovery returns
+    ``status: error`` with safe ``last_error`` / ``last_error_code`` diagnostics. Audited
     (INV-6). Admin-only via the router gate (INV-5); tenant-scoped (INV-1).
     """
     service = _build_llm_provider_service(
@@ -1294,8 +1367,11 @@ async def update_llm_provider(
 
     ``api_key`` is tri-state: absent = unchanged, a string = rotate, ``null`` = clear.
     Changing the ``base_url`` re-runs https + SSRF validation (else 422) and, like a
-    key rotation, re-runs model discovery. The key value is never returned — only the
-    updated masked ``secret_hint``. Audited (INV-6). Admin-only (INV-5); tenant-scoped
+    key rotation or clearing, re-runs model discovery. Successful discovery resets the
+    provider to ``status: reachable``; authentication and chat capabilities remain
+    unverified (authentication is not applicable without a key) until Test connection
+    establishes Ready. The key value is never returned — only ``has_api_key`` presence.
+    Audited (INV-6). Admin-only (INV-5); tenant-scoped
     (INV-1) — a foreign-tenant id is 404 (never 403).
     """
     service = _build_llm_provider_service(
@@ -1365,9 +1441,12 @@ async def refresh_llm_provider(
 ) -> LlmProviderResponse:
     """Re-run model discovery for a provider on demand; persist the outcome. Else 404.
 
-    Both a healthy (``status: ready``) and an unreachable/erroring (``status: error``)
-    result return **200** — the outcome is in ``status`` / ``last_error``, never the
-    HTTP code. The API key is fetched in-process at discovery time and never returned.
+    Successful discovery returns ``status: reachable``; authentication and chat
+    capabilities remain unverified (authentication is not applicable without a key).
+    Only Test connection can establish Ready. Both discovery success and failure
+    return **200** — the outcome is in ``status`` and the validation result, with safe
+    ``last_error`` / ``last_error_code`` on failure. Reads expose only ``has_api_key``
+    presence, never the key value or any fragment of it.
     Audited (INV-6). Admin-only (INV-5); tenant-scoped (INV-1).
     """
     service = _build_llm_provider_service(
@@ -1383,3 +1462,55 @@ async def refresh_llm_provider(
         raise NotFoundError("LLM provider not found.")
     await session.commit()
     return _to_llm_provider(provider)
+
+
+@router.post(
+    "/llm-providers/{provider_id}/test-connection",
+    response_model=ProviderTestConnectionResponse,
+    response_model_exclude_none=True,
+)
+async def test_llm_provider_connection(
+    provider_id: UUID,
+    body: ProviderTestConnectionRequest,
+    request: Request,
+    session: DbSession,
+    principal: CurrentUser,
+    tenant_id: CurrentTenant,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> ProviderTestConnectionResponse:
+    """Test a provider with ONE minimal bounded chat request; else 404 / 422.
+
+    Sends a single ``max_tokens=1`` request to the admin-selected discovered
+    model (the provider may bill for it). Success is the only path to
+    ``status: ready``; failure records ``status: error`` with a stable safe
+    code. Both outcomes return **200** with the validation result. An unknown
+    model is **422**. Audited (INV-6). Admin-only (INV-5); tenant-scoped
+    (INV-1) — a foreign-tenant id is 404.
+    """
+    service = _build_llm_provider_service(
+        session=session,
+        principal=principal,
+        tenant_id=tenant_id,
+        settings=settings,
+        make_audit_sink=make_audit_sink,
+        request=request,
+    )
+    result = await service.test_connection(provider_id, model=body.model)
+    if result is None:
+        raise NotFoundError("LLM provider not found.")
+    provider, outcome = result
+    await session.commit()
+    return ProviderTestConnectionResponse(
+        provider=_to_llm_provider(provider),
+        validation=ProviderValidationResultResponse(
+            status=outcome.status.value,
+            checks=_to_validation_checks(outcome.checks),
+            stage=outcome.stage,
+            code=outcome.code,
+            retryable=outcome.retryable,
+            correlation_id=extract_request_id(request) or "unknown",
+            tested_model=outcome.tested_model,
+            validated_at=outcome.validated_at,
+        ),
+    )

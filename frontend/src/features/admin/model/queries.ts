@@ -50,14 +50,17 @@ import {
   updateLlmProvider,
   deleteLlmProvider,
   refreshLlmProvider,
+  testLlmProviderConnection,
 } from '@/api';
 import { currentUserQueryKey } from '@/features/auth';
+import { modelsKey } from '@/features/models';
 import { useEphemeralMutation } from '@/lib/useEphemeralMutation';
 import type {
   LlmProviderUpdate,
   LlmProviderCreate,
   LlmProviderList,
   LlmProvider,
+  ProviderTestConnectionResponse,
   TenantBranding,
   AutonomyPolicy,
   AutonomyPolicyUpdate,
@@ -468,6 +471,7 @@ export function useCreateLlmProvider() {
     mutationFn: (body, { signal }) => createLlmProvider(body, signal),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+      void qc.invalidateQueries({ queryKey: modelsKey });
     },
   });
 }
@@ -482,6 +486,7 @@ export function useUpdateLlmProvider(): UseMutationResult<
     mutationFn: ({ id, body }) => updateLlmProvider(id, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+      void qc.invalidateQueries({ queryKey: modelsKey });
     },
   });
 }
@@ -492,6 +497,7 @@ export function useDeleteLlmProvider(): UseMutationResult<void, unknown, string>
     mutationFn: (id) => deleteLlmProvider(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+      void qc.invalidateQueries({ queryKey: modelsKey });
     },
   });
 }
@@ -502,6 +508,27 @@ export function useRefreshLlmProvider(): UseMutationResult<LlmProvider, unknown,
     mutationFn: (id) => refreshLlmProvider(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+      void qc.invalidateQueries({ queryKey: modelsKey });
+    },
+  });
+}
+
+/**
+ * Test a provider connection with one bounded request to the selected model
+ * (spec 0029). The 200 result carries the updated provider + the validation
+ * checks either way; only transport/4xx failures reject.
+ */
+export function useTestLlmProviderConnection(): UseMutationResult<
+  ProviderTestConnectionResponse,
+  unknown,
+  { id: string; model: string }
+> {
+  const qc = useQueryClient();
+  return useMutation<ProviderTestConnectionResponse, unknown, { id: string; model: string }>({
+    mutationFn: ({ id, model }) => testLlmProviderConnection(id, model),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: llmProvidersQueryKey });
+      void qc.invalidateQueries({ queryKey: modelsKey });
     },
   });
 }

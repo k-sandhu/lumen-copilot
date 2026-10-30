@@ -288,6 +288,7 @@ async def test_provider_refresh_empty_returning_is_a_terminal_denial(context):
         _resolve_api_key=AsyncMock(return_value=None),
         _discover_models=AsyncMock(return_value=[]),
         _providers=SimpleNamespace(set_discovery=AsyncMock(return_value=None)),
+        _request_id="terminal",
     )
     service._run_discovery = lambda value: LlmProviderService._run_discovery(service, value)
     with pytest.raises(NotFoundError):
