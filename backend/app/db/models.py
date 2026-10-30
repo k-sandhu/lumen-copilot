@@ -2217,6 +2217,9 @@ class CodeRun(TenantScopedMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Measured peak mem / cpu time / max pids / output bytes (best-effort).
     resource_usage: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # The enforced bounds the run was admitted under + why it ended (#589).
+    effective_limits: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    termination_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # The pinned base-image digest actually used (reproducibility, E3-7).
     image_digest: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Ids of artifacts the run emitted (collected via CC-B, tenant-scoped). Stored as

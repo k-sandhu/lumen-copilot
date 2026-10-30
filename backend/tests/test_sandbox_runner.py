@@ -86,6 +86,7 @@ async def test_execute_ensures_root_writable_unbounded_session_then_runs() -> No
         "memory_bytes": None,
         "pids_limit": None,
         "wall_clock_seconds": None,
+        "scratch_bytes": None,
         # The one bound that IS sent: the runner must not read an unbounded amount of
         # a model-controlled output directory into the memory of the single
         # Docker-socket holder. It was `None` here, and dead on the runner side too.
@@ -303,3 +304,25 @@ def test_the_operator_sentence_names_the_variable_and_the_public_one_does_not() 
     assert "SANDBOX_RUNNER_TOKEN" in operator
     for leak in ("SANDBOX_RUNNER_TOKEN", "sandbox-runner", "401", "secret", "token"):
         assert leak not in public
+
+
+async def test_execution_transport_has_a_finite_deadline_and_forwards_wall_clock() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert 0 < request.extensions["timeout"]["read"] < 1000
+        if request.method == "PUT":
+            return httpx.Response(200, json={"status": "active"})
+        assert json.loads(request.content)["wall_clock_seconds"] == 7
+        return httpx.Response(
+            200,
+            json={
+                "status": "timeout",
+                "termination_reason": "sandbox_limit_wall_clock",
+                "duration_ms": 7000,
+            },
+        )
+
+    runner = HttpSandboxRunner("http://runner:8000", transport=httpx.MockTransport(handler))
+    result = await runner.execute(
+        _session(), RunSpec(code="while True: pass", wall_clock_seconds=7)
+    )
+    assert result.termination_reason == "sandbox_limit_wall_clock"

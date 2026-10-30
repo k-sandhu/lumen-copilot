@@ -89,6 +89,18 @@ SANDBOX_REASON_RUNNER_UNAUTHORIZED = "sandbox_runner_unauthorized"
 #: policy denial would send both the user and the operator looking for a block that
 #: does not exist.
 SANDBOX_REASON_CONCURRENCY_EXCEEDED = "sandbox_concurrency_exceeded"
+#: The tenant's daily sandbox runtime budget is exhausted (#589).
+SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED = "sandbox_daily_runtime_exceeded"
+#: The accounting store (Redis leases/daily counters) is unavailable, so the
+#: run was refused fail-closed rather than admitted unaccounted (#589).
+SANDBOX_REASON_ACCOUNTING_UNAVAILABLE = "sandbox_accounting_unavailable"
+#: Termination reasons for runs the RUNNER bounded (#589). These are persisted
+#: on ``code_runs.termination_reason`` and double as outcome reason codes.
+SANDBOX_REASON_LIMIT_WALL_CLOCK = "sandbox_limit_wall_clock"
+SANDBOX_REASON_LIMIT_MEMORY = "sandbox_limit_memory"
+SANDBOX_REASON_LIMIT_PIDS = "sandbox_limit_pids"
+SANDBOX_REASON_LIMIT_SCRATCH = "sandbox_limit_scratch"
+SANDBOX_REASON_LIMIT_OUTPUT = "sandbox_limit_output"
 #: The run crashed for an unclassified reason inside the sandbox path.
 SANDBOX_REASON_RUN_ERROR = "sandbox_run_error"
 
@@ -151,6 +163,32 @@ SANDBOX_REASON_MESSAGES: dict[str, str] = {
         "execution image named by SANDBOX_IMAGE is present on the host daemon — the "
         "runner never pulls it."
     ),
+    SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED: (
+        "This workspace has used its daily code-execution runtime budget "
+        "(tenant policy `daily_runtime_cap_s`, capped by "
+        "SANDBOX_DAILY_RUNTIME_SECONDS_PER_TENANT). The budget resets at UTC "
+        "midnight; an admin may raise the tenant value up to the deploy ceiling."
+    ),
+    SANDBOX_REASON_ACCOUNTING_UNAVAILABLE: (
+        "The sandbox accounting store (Redis concurrency leases and daily "
+        "runtime counters) is unavailable, so the run was refused rather than "
+        "admitted unaccounted. Check Redis (REDIS_URL) and retry."
+    ),
+    SANDBOX_REASON_LIMIT_WALL_CLOCK: (
+        "The run exceeded its per-execution wall-clock limit and its sandbox "
+        "container was destroyed by the runner."
+    ),
+    SANDBOX_REASON_LIMIT_PIDS: "The run exceeded its process/thread limit and was stopped.",
+    SANDBOX_REASON_LIMIT_MEMORY: (
+        "The run exceeded its memory limit (OOM state or allocation failure in "
+        "the session container)."
+    ),
+    SANDBOX_REASON_LIMIT_SCRATCH: (
+        "The run exhausted its scratch-space limit (the workspace tmpfs reported no space left)."
+    ),
+    SANDBOX_REASON_LIMIT_OUTPUT: (
+        "The run's output exceeded a stream or collection cap; collection was truncated."
+    ),
     SANDBOX_REASON_RUN_ERROR: "The sandbox run failed unexpectedly.",
 }
 
@@ -197,6 +235,28 @@ SANDBOX_REASON_PUBLIC_MESSAGES: dict[str, str] = {
         "packages, or with different ones."
     ),
     SANDBOX_REASON_RUNNER_ERROR: ("The code sandbox could not run this code. Try again shortly."),
+    SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED: (
+        "This workspace has used its daily code-execution allowance. Try again "
+        "tomorrow, or ask an admin to review the allowance under Admin → Code execution."
+    ),
+    SANDBOX_REASON_ACCOUNTING_UNAVAILABLE: (
+        "Code execution could not be accounted for right now, so the run was "
+        "refused rather than run unchecked. Try again shortly."
+    ),
+    SANDBOX_REASON_LIMIT_WALL_CLOCK: (
+        "The code ran longer than this workspace's per-run time limit and was stopped."
+    ),
+    SANDBOX_REASON_LIMIT_PIDS: "The run exceeded its process/thread limit and was stopped.",
+    SANDBOX_REASON_LIMIT_MEMORY: (
+        "The code used more memory than this workspace's per-run limit and was stopped."
+    ),
+    SANDBOX_REASON_LIMIT_SCRATCH: (
+        "The code used more workspace disk space than this workspace's per-run limit allows."
+    ),
+    SANDBOX_REASON_LIMIT_OUTPUT: (
+        "The code produced more output files than can be collected for one run; "
+        "only part of the output was kept."
+    ),
     SANDBOX_REASON_RUN_ERROR: "The sandbox run failed unexpectedly.",
 }
 
@@ -225,7 +285,14 @@ def sandbox_reason_public_message(reason: str) -> str:
 
 
 __all__ = [
+    "SANDBOX_REASON_ACCOUNTING_UNAVAILABLE",
+    "SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED",
     "SANDBOX_REASON_DEPLOY_DISABLED",
+    "SANDBOX_REASON_LIMIT_MEMORY",
+    "SANDBOX_REASON_LIMIT_PIDS",
+    "SANDBOX_REASON_LIMIT_OUTPUT",
+    "SANDBOX_REASON_LIMIT_SCRATCH",
+    "SANDBOX_REASON_LIMIT_WALL_CLOCK",
     "SANDBOX_REASON_MESSAGES",
     "SANDBOX_REASON_PACKAGE_DENIED",
     "SANDBOX_REASON_POLICY_ABSENT",

@@ -103,6 +103,16 @@ const SANDBOX_POLICY: SandboxPolicy = {
   max_memory_mb_ceiling: 512,
   daily_runtime_cap_s_ceiling: 3600,
   max_concurrency_ceiling: 2,
+  cpus: 1,
+  pids_limit: 128,
+  output_bytes_cap: 33554432,
+  scratch_bytes: 268435456,
+  limits_enabled: true,
+  limit_sources: {},
+  current_concurrency: 0,
+  daily_runtime_used_s: 0,
+  accounting_available: true,
+  denial_reasons: [],
 };
 const AUTONOMY_POLICY: AutonomyPolicy = {
   max_autonomy: 'act_auto',

@@ -1498,30 +1498,22 @@ class Settings(PasswordHashingSettings):
     # (gVisor — the recommended production hardening; a config swap, no code change,
     # ADR-0013 §2). Anything else is rejected fail-fast.
     sandbox_runtime: str = Field(default="runc", alias="SANDBOX_RUNTIME")
-    # ADR-0013 resource caps. ADR-0020 reusable sessions ship UNBOUNDED — no cpu,
-    # memory or PID limit on the execution container — which is a deliberate sponsor
-    # decision (ADR-0020 Consequences) and the largest residual operational risk in
-    # that design: one ``run_python`` call can exhaust host RAM, saturate every core or
-    # fork-bomb, and explicit cancel/reset is the only recovery.
-    #
-    # These three values are what a deploy that does NOT want to accept that risk sends
-    # instead, and ``SANDBOX_SESSION_LIMITS_ENABLED`` is the switch. Off (the default)
-    # preserves ADR-0020's posture exactly; on, they are passed to the runner, which
-    # applies them as ``--memory`` / ``--pids-limit`` / ``--cpus`` on the session
-    # container. They bound a long-lived session rather than one run, so a bound that
-    # is comfortable for a single analysis turn can still stop a later one.
-    #
-    # ``sandbox_wall_clock_seconds`` stays compatibility-only: ADR-0020 removed the
-    # automatic timeout, nothing enforces a wall clock, and the runner's wire schema
-    # refuses the field rather than accept a promise no code keeps.
-    sandbox_cpus: float = Field(default=1.0, alias="SANDBOX_CPUS")
-    sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
+    # ADR-0029 (Proposed), #589: deployment ceilings, narrowed by tenant policy.
+    # The explicit emergency opt-out disables container bounds only; deadlines,
+    # output budgets and tenant accounting always apply.
+    sandbox_cpus: float = Field(default=1.0, ge=1e-9, allow_inf_nan=False, alias="SANDBOX_CPUS")
+    sandbox_memory_bytes: int = Field(
+        default=512 * 1024 * 1024, ge=6 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES"
+    )
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
+    # #589 / ADR-0029 (Proposed): bounded by default. The explicit opt-out
+    # remains for a deploy that deliberately re-accepts ADR-0020's unbounded
+    # posture; it must be set to ``false`` on purpose, never inherited.
     sandbox_session_limits_enabled: bool = Field(
-        default=False, alias="SANDBOX_SESSION_LIMITS_ENABLED"
+        default=True, alias="SANDBOX_SESSION_LIMITS_ENABLED"
     )
-    # ENFORCED, unlike the compatibility values around it: how many bytes of ONE
+    # Output collection: how many bytes of ONE
     # execution's output directory the runner will read into its own memory before it
     # stops and reports partial collection. This protects the RUNNER, not the run —
     # the runner is the single Docker-socket holder, so an unbounded collection let one
@@ -1533,10 +1525,11 @@ class Settings(PasswordHashingSettings):
     # limit even after base64 expansion. The runner clamps anything larger to its own
     # ceiling; lowering this only narrows collection.
     sandbox_output_bytes_cap: int = Field(
-        default=32 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
+        default=32 * 1024 * 1024, le=64 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
     )
     sandbox_scratch_bytes: int = Field(default=256 * 1024 * 1024, alias="SANDBOX_SCRATCH_BYTES")
-    # Compatibility-only tenant quota values; not enforced for ADR-0020 sessions.
+    # Per-tenant quota CEILINGS (#589): enforced by the Redis lease/daily
+    # accounting in ``app.sandbox.accounting``; a tenant policy may only narrow.
     sandbox_max_concurrent_per_tenant: int = Field(
         default=2, alias="SANDBOX_MAX_CONCURRENT_PER_TENANT"
     )
@@ -1553,11 +1546,12 @@ class Settings(PasswordHashingSettings):
         "sandbox_scratch_bytes",
         "sandbox_max_concurrent_per_tenant",
         "sandbox_daily_runtime_seconds_per_tenant",
+        mode="before",
     )
     @classmethod
-    def _sandbox_limits_positive(cls, value: float) -> float:
-        """Keep compatibility-only ADR-0013 policy values syntactically valid."""
-        if value <= 0:
+    def _sandbox_limits_positive(cls, value: object) -> object:
+        """Reject caps that would remove an isolation control."""
+        if isinstance(value, str | int | float) and float(value) <= 0:
             raise ValueError("SANDBOX_* resource caps and quotas must be positive (ADR-0013 §2/§6)")
         return value
 

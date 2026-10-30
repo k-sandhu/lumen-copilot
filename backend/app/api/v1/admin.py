@@ -249,6 +249,17 @@ class SandboxPolicyResponse(BaseModel):
     daily_runtime_cap_s_ceiling: int
     max_concurrency_ceiling: int
 
+    cpus: float | None
+    pids_limit: int | None
+    output_bytes_cap: int | None
+    scratch_bytes: int | None
+    limits_enabled: bool
+    limit_sources: dict[str, str]
+    current_concurrency: int | None
+    daily_runtime_used_s: int | None
+    accounting_available: bool
+    denial_reasons: list[str]
+
 
 class SandboxPolicyUpdateRequest(BaseModel):
     """``#/components/schemas/SandboxPolicyUpdate`` — set the per-tenant sandbox policy.
@@ -440,6 +451,16 @@ def _to_sandbox_policy(view: SandboxPolicyView) -> SandboxPolicyResponse:
         max_memory_mb_ceiling=view.max_memory_mb_ceiling,
         daily_runtime_cap_s_ceiling=view.daily_runtime_cap_s_ceiling,
         max_concurrency_ceiling=view.max_concurrency_ceiling,
+        cpus=view.cpus,
+        pids_limit=view.pids_limit,
+        output_bytes_cap=view.output_bytes_cap,
+        scratch_bytes=view.scratch_bytes,
+        limits_enabled=view.limits_enabled,
+        limit_sources=view.limit_sources,
+        current_concurrency=view.current_concurrency,
+        daily_runtime_used_s=view.daily_runtime_used_s,
+        accounting_available=view.accounting_available,
+        denial_reasons=list(view.denial_reasons),
     )
 
 

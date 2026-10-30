@@ -313,35 +313,61 @@ Two things #509 *did* close without any configuration:
   and sha256 per wheel — so you can answer "did any run install X?" from the trail
   instead of guessing from the top-level request.
 
-### What this does NOT bound
+### Effective limits (ADR-0029, Proposed; owner review required)
 
-The egress limitation above is not the only one, and this runbook used to name only
-that. ADR-0020's Consequences section is explicit, and it belongs here too:
-
-**By default the execution container has no CPU, memory, PID or disk bound.** One
-`run_python` call can allocate until the host is out of RAM, spin every core, fork-bomb,
-or fill `/var/lib/docker` — there is no automatic timeout either, because ADR-0020
-replaced ADR-0013's wall clock with explicit cancel/reset. That is a deliberate sponsor
-decision in exchange for reusable sessions, and it is the design's **largest residual
-operational risk**. Recovery is `POST /chat/sessions/{id}/sandbox/reset` (or cancel),
-and `docker stats` / `docker system df` are where you see it happening.
-
-A deploy that will not accept that can bound the session container:
+Sessions now receive deployment CPU (1 core), memory (512 MiB), process (128),
+wall-clock (30s) and scratch (256 MiB) ceilings by default. Tenant admins may
+narrow runtime, memory, concurrency (default 2) and daily runtime (default 3600s)
+under **Admin → Sandbox governance**. Above-ceiling writes return 422. That panel
+shows the effective source and the actual Redis lease/counter usage, including
+active runtime reservations; unavailable accounting shows unknown usage and
+refuses new executions. Daily budgets reset at UTC midnight. A run spanning the
+boundary settles against the date on which it reserved its budget.
 
 ```bash
-# .env — off by default; ADR-0020's posture is unbounded
+# Deployment ceilings; restart the backend/worker to load changed config.
 SANDBOX_SESSION_LIMITS_ENABLED=true
-SANDBOX_MEMORY_BYTES=536870912   # --memory   on the session container
-SANDBOX_PIDS_LIMIT=128           # --pids-limit
-SANDBOX_CPUS=1.0                 # --cpus
-docker compose restart backend worker
+SANDBOX_CPUS=1.0
+SANDBOX_MEMORY_BYTES=536870912
+SANDBOX_PIDS_LIMIT=128
+SANDBOX_WALL_CLOCK_SECONDS=30
+SANDBOX_SCRATCH_BYTES=268435456
+SANDBOX_MAX_CONCURRENT_PER_TENANT=2
+SANDBOX_DAILY_RUNTIME_SECONDS_PER_TENANT=3600
 ```
 
-These bound a **long-lived session**, not one run (ADR-0020 §4): the container persists
-across turns, so a memory bound that is comfortable for one analysis turn can still kill
-a later turn in the same chat. Existing sandboxes keep the bounds they were created
-with — **reset** a chat's sandbox to re-create it. There is still no wall clock: nothing
-enforces one, so nothing pretends to.
+The next ensure recreates a container if its live bounds differ. Scratch is a
+sized tmpfs; the base filesystem is read-only, and home/temp/packages live in
+`/workspace`. Tmpfs consumes the session's memory allowance and swap is disabled.
+Overages destroy the environment and persist `code_runs.effective_limits` plus
+`termination_reason` (`sandbox_limit_wall_clock|memory|pids|scratch|output`).
+A following run gets a fresh environment. Output collection retains its existing
+32 MiB / 64-file ceiling and each stream retains at most 256K characters; an
+output overage now reports a failed run with only complete files retained.
+
+`SANDBOX_SESSION_LIMITS_ENABLED=false` is an explicit emergency compatibility
+opt-out for **container** bounds; deadlines, output caps and tenant accounting
+remain enforced. Use only while resolving a migration problem, then restore it.
+Governed packages remain importable from `/workspace/.packages` under either
+posture. A changed version replaces the prior distribution's files and metadata;
+the run's wheel resolution describes the version imported by that execution.
+Session files persist after normal executions, while detached background processes
+are killed before output collection and accounting settlement. Cleanup failure
+destroys the environment. Acquisition, preparation, descendant cleanup and output
+collection share the execution deadline; expiry also kills and reaps runner-side
+package acquisition instead of leaving it occupying a worker thread.
+A live producer renews its fenced concurrency lease during execution and pending
+cancellation, including retry waits (exponential backoff, 1s doubling to 60s). Failed/interrupted kills remain pending on
+the same execution: `code_run.cancelled` has outcome `error` and a safe reason
+code. Only confirmed termination records `killed` and an allowed cancellation,
+then settles/releases admission once. Only the first failed attempt adds that error audit; later attempts are logged (`sandbox.kill_unconfirmed`). Renewal failure requests cleanup of the in-flight remote call only — a run whose execution already returned finalises normally, and an accounting-loss kill records `sandbox_accounting_unavailable`, not a user `cancelled` — and it never
+confirms termination or refunds admission. A producer exiting during pending
+cleanup stops renewal and leaves the daily reservation charged.
+A killed worker's concurrency lease expires after the run budget plus cleanup
+grace; its un-settled daily reservation remains conservatively charged. Redis
+outages fail closed (`sandbox_accounting_unavailable`) and never fall back to a
+process-local count. Look for typed denial reasons in `code_run.denied` audit
+metadata and the persisted code run.
 
 **And the `sandbox-runner` service itself has full outbound internet.** Compose gives
 it the default bridge network (it needs one to reach PyPI at all), and it is the process
@@ -378,15 +404,15 @@ docker exec lumen-copilot-postgres-1 psql -U lumen -d lumen -tAc \
   image is missing from the host daemon (§1). The runner answers
   `503 sandbox execution image is not present on the host daemon` for that case,
   and never pulls the image to fix it for you.
-- `status=succeeded` but a file you expected is missing, with *"Only part of the
+- `status=failed` / `sandbox_limit_output` with a missing file, with *"Only part of the
   output directory was collected"* in `stderr` → the run wrote more than
   `SANDBOX_OUTPUT_BYTES_CAP` (default 32 MiB). Collection is budgeted because the
   runner reads those bytes into its own memory and is the single Docker-socket
   holder; a file the budget cuts in half is dropped rather than delivered corrupt.
   Collection follows archive order, so one oversized file also costs you the files
   after it — verified live: with the cap set to 4 KiB, a run writing `big.bin` (2 MB)
-  and `small.txt` returned **no** files and that stderr note, while the run itself
-  still reported `succeeded`. Write fewer/smaller files, or raise the cap (the runner
+  and `small.txt` returned **no** files and that stderr note. The bounded runner
+  reports `failed` / `sandbox_limit_output`. Write fewer/smaller files, or raise the cap (the runner
   clamps it to 64 MiB).
 
 ## 6. Verify it automatically — the live execution test (#506)

@@ -89,6 +89,8 @@ class _Container:
     def exec_run(self, command: list[str], **kwargs: object) -> object:
         del kwargs
         self.commands.append(list(command))
+        if command[:4] == ["python3", "-I", "-S", "-c"]:
+            return SimpleNamespace(exit_code=0, output=(b"{}", b""))
         if command[:4] == ["python", "-m", "pip", "install"]:
             self.events.append("pip-install")
         elif command and command[0] == "python":
@@ -192,6 +194,16 @@ class _Containers:
         runtime = kwargs.get("runtime")
         if isinstance(runtime, str):
             container.attrs["HostConfig"]["Runtime"] = runtime
+        container.attrs["HostConfig"].update(
+            {
+                "Memory": kwargs.get("mem_limit", 0),
+                "MemorySwap": kwargs.get("memswap_limit", 0),
+                "PidsLimit": kwargs.get("pids_limit", 0),
+                "NanoCpus": kwargs.get("nano_cpus", 0),
+                "ReadonlyRootfs": kwargs.get("read_only", False),
+                "Tmpfs": kwargs.get("tmpfs", {}),
+            }
+        )
         self.values.append(container)
         return container
 
@@ -281,15 +293,15 @@ def test_wire_policy_rejects_any_isolation_widening() -> None:
         ContainerPolicy(network_mode="bridge")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         ContainerPolicy(binds=["/host:/workspace"])
-    with pytest.raises(ValidationError):
-        ContainerPolicy(read_only_rootfs=True)  # type: ignore[arg-type]
+    assert ContainerPolicy(read_only_rootfs=True).read_only_rootfs is True
     with pytest.raises(ValidationError):
         ContainerPolicy(cap_drop=["ALL", "NET_ADMIN"])  # type: ignore[list-item]
-    # No wall clock is enforced anywhere in this service, so the field stays ``None``:
-    # accepting a number would be a promise no code keeps (ADR-0020 replaced
-    # ADR-0013's automatic timeout with explicit cancel/reset).
+    # The wall clock IS enforced since #589 (the engine destroys the
+    # container at the deadline), so a positive value is accepted — and a
+    # non-positive one is not.
+    assert ContainerPolicy(wall_clock_seconds=30).wall_clock_seconds == 30
     with pytest.raises(ValidationError):
-        ContainerPolicy(wall_clock_seconds=30)  # type: ignore[arg-type]
+        ContainerPolicy(wall_clock_seconds=0)
     # ``output_bytes_cap`` is the one policy value a caller may set, because lowering
     # it only narrows what the runner will hold in memory. Zero would mean "collect
     # nothing" by accident rather than by decision, and negative is nonsense.
@@ -571,12 +583,18 @@ def test_the_download_argv_ends_option_parsing_before_the_packages(
     """The same separator on the fetch side, which is the one that reaches the index."""
     captured: list[list[str]] = []
 
-    def fake_run(command: list[str], **kwargs: object) -> object:
-        del kwargs
-        captured.append(list(command))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    class Process:
+        pid = 1234
 
-    monkeypatch.setattr("lumen_sandbox_runner.engine.subprocess.run", fake_run)
+        def __init__(self, command, **kwargs):
+            captured.append(list(command))
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr("lumen_sandbox_runner.engine.subprocess.Popen", Process)
+    monkeypatch.setattr("lumen_sandbox_runner.engine.os.killpg", lambda *args: None, raising=False)
+    monkeypatch.setattr("lumen_sandbox_runner.engine.signal.SIGKILL", 9, raising=False)
 
     DockerSandboxEngine._download_binary_packages(("numpy==2.1.0", "pandas"), Path("."))
 

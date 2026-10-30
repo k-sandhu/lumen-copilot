@@ -1675,6 +1675,13 @@ class CodeRun:
     #: model asked for. ``None`` means the run predates the column, which is a
     #: different fact from an empty tuple ("this run installed nothing").
     resolved_packages: tuple[dict[str, str], ...] | None = None
+    #: The enforced bounds this run was admitted under (#589) — deployment
+    #: ceilings narrowed by tenant policy, with per-field source. ``None``
+    #: predates the column (migration 0051).
+    effective_limits: dict[str, object] | None = None
+    #: Why the run ended (#589): ``completed``, a denial reason code, or a
+    #: ``sandbox_limit_*`` code when a bound terminated it.
+    termination_reason: str | None = None
 
     @property
     def is_terminal(self) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -118,6 +119,7 @@ class ContainerFlags:
     memory_bytes: int | None = None
     pids_limit: int | None = None
     wall_clock_seconds: int | None = None
+    scratch_bytes: int | None = None
     # The exception, and it is not about the run: collected output is read into the
     # RUNNER's memory, and the runner is the only Docker-socket holder, so unbounded
     # collection made one chat turn able to take code execution down for every tenant.
@@ -133,11 +135,14 @@ def build_container_flags(spec: SandboxSessionSpec) -> ContainerFlags:
     and, when a deploy opts in, the cpu/memory/PID bounds.
     """
     return ContainerFlags(
+        read_only_rootfs=spec.scratch_bytes is not None,
         runtime=spec.runtime,
         output_bytes_cap=spec.output_bytes_cap,
         cpus=spec.cpus,
         memory_bytes=spec.memory_bytes,
         pids_limit=spec.pids_limit,
+        wall_clock_seconds=spec.wall_clock_seconds,
+        scratch_bytes=spec.scratch_bytes,
     )
 
 
@@ -165,8 +170,14 @@ def _map_status(raw: object) -> CodeRunStatus:
         return CodeRunStatus.FAILED
 
 
+#: Grace beyond a run's wall clock for package install + output collection
+#: before the HTTP read itself gives up (#589). The runner enforces the
+#: deadline by destroying the container; this only bounds a wedged runner.
+_EXECUTE_READ_GRACE_SECONDS = 300.0
+
+
 class HttpSandboxRunner:
-    """No-read-timeout client for the internal reusable-session runner API."""
+    """Wall-clock-bounded client for the internal reusable-session runner API."""
 
     def __init__(
         self,
@@ -181,12 +192,15 @@ class HttpSandboxRunner:
         self._connect_timeout = connect_timeout_seconds
         self._transport = transport
 
-    def _client(self) -> httpx.AsyncClient:
-        # Execution is deliberately unbounded. A finite connect/pool timeout catches
-        # a missing runner, while `read=None` permits a run to finish or be cancelled.
+    def _client(self, *, read_timeout: float = 60.0) -> httpx.AsyncClient:
+        # Bounded (#589): lifecycle calls get a short read timeout; an
+        # execution gets its wall clock plus grace for install/collection.
+        # The runner destroys the container at the wall-clock deadline, so
+        # this timeout only fires when the RUNNER itself is wedged. A
+        # Legacy specs also receive a finite fallback read timeout.
         timeout = httpx.Timeout(
             connect=self._connect_timeout,
-            read=None,
+            read=read_timeout,
             write=60.0,
             pool=self._connect_timeout,
         )
@@ -207,13 +221,20 @@ class HttpSandboxRunner:
 
     async def execute(self, session: SandboxSessionSpec, run: RunSpec) -> RunResult:
         await self.ensure_session(session)
+        read_timeout = float(run.wall_clock_seconds or session.wall_clock_seconds or 30) + (
+            _EXECUTE_READ_GRACE_SECONDS
+        )
         response = await self._request(
             "POST",
             f"/sessions/{session.sandbox_session_id}/executions",
+            read_timeout=read_timeout,
             json={
                 "generation": session.generation,
                 "execution_id": str(run.execution_id),
                 "code": run.code,
+                "wall_clock_seconds": run.wall_clock_seconds,
+                "deadline_unix": time.time()
+                + (run.wall_clock_seconds or session.wall_clock_seconds or 30),
                 "packages": list(run.packages),
                 # Forwarded so the runner can refuse a denied TRANSITIVE dependency
                 # (#509) — the check here only ever saw the top-level request.
@@ -267,9 +288,10 @@ class HttpSandboxRunner:
         *,
         json: Mapping[str, object] | None = None,
         params: Mapping[str, str | int] | None = None,
+        read_timeout: float = 60.0,
     ) -> httpx.Response:
         try:
-            async with self._client() as client:
+            async with self._client(read_timeout=read_timeout) as client:
                 response = await client.request(method, path, json=json, params=params)
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             # Nothing answered. This — and only this — is "unreachable" (#502).
@@ -323,6 +345,7 @@ class HttpSandboxRunner:
                 "memory_bytes": flags.memory_bytes,
                 "pids_limit": flags.pids_limit,
                 "wall_clock_seconds": flags.wall_clock_seconds,
+                "scratch_bytes": flags.scratch_bytes,
                 "output_bytes_cap": flags.output_bytes_cap,
             },
         }
@@ -354,6 +377,11 @@ class HttpSandboxRunner:
             image_digest=raw_digest if isinstance(raw_digest, str) else None,
             resolved_packages=_resolved_packages(body.get("resolved_packages")),
             resource_usage=ResourceUsage.from_dict(body.get("resource_usage")),
+            termination_reason=(
+                str(body["termination_reason"])
+                if isinstance(body.get("termination_reason"), str)
+                else None
+            ),
         )
 
 

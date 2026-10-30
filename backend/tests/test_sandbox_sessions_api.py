@@ -28,6 +28,7 @@ from app.db.repositories import (
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role
 from app.main import create_app
 from app.realtime.backplane import InMemoryBackplane
+from app.sandbox.accounting import InMemorySandboxAccounting
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
 from app.sandbox.tool_runner import ChatSandboxToolRunner
 from tests._db_helpers import copy_sqlite_schema
@@ -82,7 +83,9 @@ class _FakeRunner:
         if self.block_execute:
             await self.execute_release.wait()
         return RunResult(
-            status=CodeRunStatus.SUCCEEDED,
+            status=CodeRunStatus.KILLED
+            if any(run_id == spec.execution_id for _, run_id in self.cancelled)
+            else CodeRunStatus.SUCCEEDED,
             exit_code=0,
             stdout="finished",
             stderr="",
@@ -405,6 +408,7 @@ async def test_chat_run_is_durable_and_cancellable_while_execution_is_blocked(
         next_seq=iter(range(10)).__next__,
         session_id=seeded.alice_chat,
         message_id=None,
+        accounting=InMemorySandboxAccounting(),
     )
     submission = asyncio.create_task(seam.submit(code="while True: pass"))
     await asyncio.wait_for(fake_runner.execute_started.wait(), timeout=2)

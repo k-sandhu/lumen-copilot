@@ -794,12 +794,21 @@ async def test_t1_dispatch_rechecks_policy_after_tool_offer(
 async def test_headless_sandbox_runs_as_owner_under_tenant_policy(
     world: _World, monkeypatch: pytest.MonkeyPatch, enabled: bool
 ) -> None:
+    from functools import partial
+
     from app.domain.entities import CodeRunStatus
+    from app.sandbox.accounting import InMemorySandboxAccounting
+    from app.sandbox.tool_runner import ChatSandboxToolRunner
     from tests._sandbox_helpers import sandbox_settings
     from tests.test_sandbox_tool_runner import _FakeRunner, _ok_result
 
     runner = _FakeRunner(result=_ok_result())
     monkeypatch.setattr("app.services.chat_composition.HttpSandboxRunner", lambda *a, **kw: runner)
+    # Accounting is an injected adapter alongside the fake runner in this offline test.
+    monkeypatch.setattr(
+        "app.services.chat_composition.ChatSandboxToolRunner",
+        partial(ChatSandboxToolRunner, accounting=InMemorySandboxAccounting()),
+    )
     async with world.sessionmaker() as session:
         await TenantSandboxPolicyRepository(session, world.tenant_id).upsert(
             enabled=enabled,

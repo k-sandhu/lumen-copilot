@@ -1379,10 +1379,10 @@ paths:
       summary: The per-tenant code-execution sandbox policy (admin only).
       description: >
         The caller's tenant's sandbox policy: whether code execution is `enabled` and
-        the enforced package allow/deny lists. ADR-0020 reusable sessions are always
-        offline and currently apply no automatic runtime/resource/quota ceilings. The
-        egress and cap fields remain compatibility-only values for older clients and
-        are not enforced by reusable sessions. Absence of a
+        the enforced package allow/deny lists and effective resource ceilings under
+        ADR-0029 (Proposed). Model code is always offline; egress fields remain
+        compatibility-only. Current usage includes active runtime reservations;
+        unavailable accounting fails closed. Absence of a
         stored policy is deny-by-default — code execution stays DISABLED for the tenant
         (matching the deploy-wide kill-switch). Restricted to the `admin` role; any
         other role receives **403** (INV-5). Tenant-scoped (INV-1).
@@ -5049,15 +5049,15 @@ components:
             Whether an invocation still needs approval. Set `false` (with `enabled`
             true) to pre-approve a write-tier tool so the approval gate executes it.
 
-    # --- Sandbox governance policy (ADR-0020 enablement/packages + legacy fields) --
+    # --- Sandbox governance policy (ADR-0029 bounded sessions) --
     SandboxPolicy:
       type: object
       additionalProperties: false
       description: >
         The per-tenant code-execution sandbox policy. `enabled` is deny-by-default
         — a tenant with no stored policy has code execution DISABLED (and every value
-        is the config ceiling). ADR-0020 enforces enablement and package policy; egress
-        and cap fields remain compatibility-only and are not enforced for reusable sessions.
+        is the config ceiling). ADR-0029 (Proposed) enforces deployment ceilings narrowed by tenant policy.
+        Egress fields remain compatibility-only; model code is always offline.
       required:
         [
           enabled,
@@ -5074,6 +5074,8 @@ components:
           max_memory_mb_ceiling,
           daily_runtime_cap_s_ceiling,
           max_concurrency_ceiling,
+          cpus, pids_limit, output_bytes_cap, scratch_bytes, limits_enabled,
+          limit_sources, current_concurrency, daily_runtime_used_s, accounting_available, denial_reasons,
         ]
       properties:
         enabled:
@@ -5107,23 +5109,19 @@ components:
         max_runtime_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions have no automatic timeout.
+          description: Enforced per-execution deadline in seconds.
         max_memory_mb:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions have no memory cap.
+          description: Enforced session memory ceiling in MiB.
         daily_runtime_cap_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions have no daily runtime cap.
+          description: UTC-day runtime allowance; includes reservations for active runs.
         max_concurrency:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions do not enforce this quota.
+          description: Atomic tenant execution-lease cap.
         is_default:
           type: boolean
           description: >
@@ -5145,14 +5143,36 @@ components:
           type: integer
           minimum: 1
           description: The deploy-wide concurrency cap a per-tenant value cannot exceed.
+        cpus: { type: [number, "null"], exclusiveMinimum: 0 }
+        pids_limit: { type: [integer, "null"], minimum: 1 }
+        output_bytes_cap: { type: integer, minimum: 1 }
+        scratch_bytes: { type: [integer, "null"], minimum: 1 }
+        limits_enabled:
+          type: boolean
+          description: Whether container bounds are enabled; wall clock, output and quotas always apply.
+        limit_sources:
+          type: object
+          additionalProperties: { type: string, enum: [deployment_default, tenant_override] }
+          description: Source of each effective cap (policy field names).
+        current_concurrency: { type: [integer, "null"], minimum: 0 }
+        daily_runtime_used_s:
+          type: [integer, "null"]
+          minimum: 0
+          description: Accounted seconds including active reservations, reset at UTC midnight.
+        accounting_available:
+          type: boolean
+          description: False means usage is unknown and new executions fail closed.
+        denial_reasons:
+          type: array
+          items: { type: string }
+          description: Current admission constraints; authoritative admission is atomic.
 
     SandboxPolicyUpdate:
       type: object
       additionalProperties: false
       description: >
-        Set per-tenant enablement and package policy. All legacy fields remain required
-        for wire compatibility but ADR-0020 does not enforce egress or cap values. An
-        out-of-range compatibility value is still **422** (INV-8).
+        Set per-tenant enablement, packages and narrowing limits. Non-positive or
+        above-deployment-ceiling limits return **422** (INV-8). Egress remains offline.
       required:
         [
           enabled,
@@ -5190,23 +5210,19 @@ components:
         max_runtime_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only; no automatic timeout is enforced.
+          description: Enforced per-execution deadline in seconds.
         max_memory_mb:
           type: integer
-          minimum: 1
-          deprecated: true
-          description: Compatibility-only; no memory cap is enforced.
+          minimum: 6
+          description: Enforced session memory ceiling in MiB.
         daily_runtime_cap_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only; no daily runtime cap is enforced.
+          description: UTC-day runtime allowance; includes reservations for active runs.
         max_concurrency:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only; no tenant concurrency quota is enforced.
+          description: Atomic tenant execution-lease cap.
 
     # --- Assistant autonomy cap (per-tenant ceiling, #218) ------------------
     AutonomyPolicy:
@@ -6383,6 +6399,23 @@ components:
         last_used_at: { type: [string, "null"], format: date-time }
         closed_at: { type: [string, "null"], format: date-time }
 
+    SandboxEffectiveLimits:
+      type: object
+      additionalProperties: false
+      required: [cpus, memory_bytes, pids_limit, wall_clock_seconds, scratch_bytes, output_bytes_cap, max_concurrency, daily_runtime_cap_s, sources]
+      properties:
+        cpus: { type: [number, "null"], exclusiveMinimum: 0 }
+        memory_bytes: { type: [integer, "null"], minimum: 1 }
+        pids_limit: { type: [integer, "null"], minimum: 1 }
+        wall_clock_seconds: { type: integer, minimum: 1 }
+        scratch_bytes: { type: [integer, "null"], minimum: 1 }
+        output_bytes_cap: { type: integer, minimum: 1 }
+        max_concurrency: { type: integer, minimum: 1 }
+        daily_runtime_cap_s: { type: integer, minimum: 1 }
+        sources:
+          type: object
+          additionalProperties: { type: string, enum: [deployment_default, tenant_override] }
+
     CodeRun:
       type: object
       additionalProperties: false
@@ -6436,6 +6469,14 @@ components:
             - { $ref: "#/components/schemas/ResourceUsage" }
             - { type: "null" }
           description: Measured resource consumption; null until the run finishes.
+        effective_limits:
+          oneOf:
+            - { $ref: "#/components/schemas/SandboxEffectiveLimits" }
+            - { type: "null" }
+          description: Immutable admitted caps and sources; null for historical or queued runs.
+        termination_reason:
+          type: [string, "null"]
+          description: completed, cancelled, a sandbox_limit_* code, or typed admission/runner failure.
         artifact_ids:
           type: array
           description: >
