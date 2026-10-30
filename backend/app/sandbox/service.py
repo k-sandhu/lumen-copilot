@@ -1137,26 +1137,41 @@ class SandboxService:
                     # Audit only the first failure (and the final outcome above)
                     # so an unreachable runner cannot flood the audit trail with
                     # one row per retry; every attempt is still logged (R3-002).
-                    await session.rollback()
-                    await bind_tenant(session, self._tenant_id)
-                    # The latch lives on the ownership object, shared with
-                    # the chat confirmed-kill callback, so one execution
-                    # gets exactly one error audit however cleanup is
-                    # handed onward. It is marked only after the commit
-                    # lands: a cancellation interrupting this bookkeeping
-                    # leaves the audit to whoever continues cleanup.
-                    auditing = not ownership.failure_audited
-                    if auditing:
-                        await self._audit_run(
-                            audit,
-                            AuditAction.CODE_RUN_CANCELLED,
-                            run.id,
-                            AuditOutcome.ERROR,
-                            {"reason_code": reason_code},
+                    try:
+                        await session.rollback()
+                        await bind_tenant(session, self._tenant_id)
+                        # The latch lives on the ownership object, shared with
+                        # the chat confirmed-kill callback, so one execution
+                        # gets exactly one error audit however cleanup is
+                        # handed onward. It is marked only after the commit
+                        # lands: a cancellation interrupting this bookkeeping
+                        # leaves the audit to whoever continues cleanup.
+                        auditing = not ownership.failure_audited
+                        if auditing:
+                            await self._audit_run(
+                                audit,
+                                AuditAction.CODE_RUN_CANCELLED,
+                                run.id,
+                                AuditOutcome.ERROR,
+                                {"reason_code": reason_code},
+                            )
+                        await session.commit()
+                        if auditing:
+                            ownership.mark_failure_audited()
+                    except Exception as bookkeeping_exc:  # noqa: BLE001
+                        # TR3-001: failing to RECORD a failed kill (a DB blip
+                        # during the same outage) is one more unconfirmed
+                        # attempt, never an exit. Escaping here would close
+                        # the ownership under a live producer and let the
+                        # slot expire while the execution still runs. The
+                        # latch stays unset so a later attempt re-audits.
+                        log.warning(
+                            "sandbox.kill_unconfirmed",
+                            code_run_id=str(run.id),
+                            reason_code=reason_code,
+                            attempt=attempt,
+                            bookkeeping_error=type(bookkeeping_exc).__name__,
                         )
-                    await session.commit()
-                    if auditing:
-                        ownership.mark_failure_audited()
                 # A producer cancellation landing in this backoff wait (or
                 # in the bookkeeping above) escapes the loop: with a chat
                 # callback it hands ownership onward as pending cleanup in

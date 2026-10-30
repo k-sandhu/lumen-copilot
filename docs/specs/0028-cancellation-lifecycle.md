@@ -106,7 +106,10 @@ run's `termination_reason`. An accounting loss latched before a Stop stays
 an allowed `code_run.cancelled`) even when the Stop is what interrupts cleanup,
 while the chat message and turn still reflect the user's Stop — the partial answer
 kept, marked cancelled. A Stop observed before any accounting failure stays
-`cancelled` even if a later renewal tick fails. The producer
+`cancelled` even if a later renewal tick fails. "First" is decided when the producer
+first observes the cancellation: if a renewal failure and a Stop land in the same
+event-loop turn, before the producer resumes, the pending Stop wins the tie and the run
+is recorded `cancelled`. The producer
 publishes no terminal or cancelled partial/audit until the kill and its durable
 state are confirmed. Repeated Stop waits on that same producer; each request can
 return 503 while cleanup is pending. Once cleanup succeeds, the producer commits
