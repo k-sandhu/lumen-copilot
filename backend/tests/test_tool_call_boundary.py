@@ -19,6 +19,7 @@ from app.domain.entities import AuditOutcome
 from app.domain.llm import ChatMessage, Role, ToolCall, ToolSpec
 from app.domain.tools import ERROR_BAD_ARGS, ERROR_TOOL_TIMEOUT, RiskTier, ToolHandlerResult
 from app.llm.gateway import LLMGateway, _ToolCallAccumulator
+from app.mcp import MCP_ERROR_TIMEOUT
 from app.mcp.client import McpSession, _to_tool_result
 from app.services.tools.runner import hash_args
 from app.services.tools.types import ToolContext, ToolDefinition
@@ -430,3 +431,46 @@ async def test_mcp_adapter_does_not_convert_external_cancellation_to_result() ->
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0])
+async def test_nonpositive_tool_timeout_never_dispatches(world: _World, seconds: float) -> None:
+    invoked: list[str] = []
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
+        invoked.append("ran")
+        return ToolHandlerResult(content="already too late")
+
+    definition = ToolDefinition(
+        name="probe",
+        description="d",
+        json_schema={"type": "object"},
+        handler=handler,
+        timeout_seconds=seconds,
+    )
+    runner, _, _ = _make_runner(
+        world, allowed=frozenset({"probe"}), extra_tools={"probe": definition}
+    )
+    result = await runner.run(call=_call(""), context=_context(world))
+    assert invoked == []
+    assert not result.ok and result.error == ERROR_TOOL_TIMEOUT
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0])
+async def test_mcp_nonpositive_timeout_never_dispatches(seconds: float) -> None:
+    invoked: list[str] = []
+
+    class Session:
+        async def call_tool(self, name: str, *, arguments: dict[str, Any]) -> CallToolResult:
+            invoked.append("ran")
+            return CallToolResult(content=[TextContent(type="text", text="already too late")])
+
+    session = McpSession(
+        slug="probe",
+        session=Session(),
+        exit_stack=AsyncExitStack(),
+        call_timeout_seconds=seconds,
+    )  # type: ignore[arg-type]
+    result = await session.call_tool("probe", {})
+    assert invoked == []
+    assert not result.ok and result.error_code == MCP_ERROR_TIMEOUT

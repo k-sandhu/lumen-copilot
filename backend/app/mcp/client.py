@@ -129,6 +129,8 @@ class McpSession:
         """
         timer = asyncio.timeout(self._call_timeout_seconds)
         try:
+            if self._call_timeout_seconds <= 0:
+                raise TimeoutError
             async with timer:
                 result: CallToolResult = await self._session.call_tool(name, arguments=args)
             if _is_genuine_cancellation():

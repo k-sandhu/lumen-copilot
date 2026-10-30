@@ -75,8 +75,10 @@ Cancellation is control flow, never an ordinary tool failure. Whenever the runne
 maps a handler exception or normal return to a result, a pending cancellation on
 the current task must propagate as `CancelledError`, including when a handler
 swallows cancellation or converts it to another exception. An expired per-tool
-timeout discards a late return and produces the existing timeout failure. These
-guards do not change approval/audit ordering or the answer cancellation lifecycle.
+timeout discards a late return and produces the existing timeout failure. A
+non-positive timeout refuses before dispatch, including a handler that would
+return without awaiting. These guards do not change approval/audit ordering or
+the answer cancellation lifecycle.
 
 Errors distinguish malformed arguments from execution/protocol failure. Missing and forbidden documents/handles share the same safe response. Empty searches suggest broadening or discovery. Remote errors never expose credentials or vendor internals. Reuse only identical read-only calls within one answer; write/approval paths are never deduplicated as reads. Reuse still records each consumer and its provenance and respects cancellation and permission rechecks.
 

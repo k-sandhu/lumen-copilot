@@ -637,6 +637,8 @@ class ToolRunner:
         context = replace(context, allowed_tools=self._allowed)
         timer = asyncio.timeout(definition.timeout_seconds)
         try:
+            if definition.timeout_seconds is not None and definition.timeout_seconds <= 0:
+                raise TimeoutError
             async with timer:
                 body = await definition.handler(call.arguments, context)
             _raise_if_cancelling()
