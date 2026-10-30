@@ -45,7 +45,7 @@ function live(text: string): LiveAnswer {
     codeRuns: [],
     steps: [],
     narration: null,
-  askUser: null,
+    askUser: null,
     problem: null,
     model: 'frontier/opus',
   };
@@ -202,15 +202,12 @@ describe('live narration (#414)', () => {
   });
 
   it('hides narration once answer text streams (never in the bubble)', () => {
-    render(
-      thread({ live: { ...live('The answer begins'), narration: 'Searching…' } }),
-    );
+    render(thread({ live: { ...live('The answer begins'), narration: 'Searching…' } }));
     expect(screen.queryByTestId('live-narration')).toBeNull();
     expect(screen.getByText(/The answer begins/)).toBeInTheDocument();
     expect(screen.queryByText(/Searching…/)).toBeNull();
   });
 });
-
 
 it('#574 reload renders the persisted partial as stopped', () => {
   render(
@@ -222,4 +219,51 @@ it('#574 reload renders the persisted partial as stopped', () => {
   );
   expect(screen.getByText('Kept partial')).toBeInTheDocument();
   expect(screen.getByTestId('message-cancelled')).toHaveTextContent(/stopped by you/i);
+});
+
+const limit = {
+  kind: 'tool_calls' as const,
+  message: 'Research stopped at its lookup limit; this answer uses the sources found so far.',
+};
+
+it('#833 reload renders the server limitation beneath the assistant answer', () => {
+  render(
+    thread({
+      messages: [{ ...message('m1', 'Answer from available sources.'), role: 'assistant', limit }],
+    }),
+  );
+  const answer = screen.getByRole('article', { name: 'assistant message' });
+  const note = screen.getByRole('note');
+  expect(answer).toContainElement(note);
+  expect(note).toHaveTextContent(limit.message);
+  expect(note).toHaveClass('text-foreground-muted');
+});
+
+it.each([undefined, null])('#833 an ordinary answer renders no limit note (%s)', (limit) => {
+  render(
+    thread({ messages: [{ ...message('m1', 'Ordinary answer.'), role: 'assistant', limit }] }),
+  );
+  expect(screen.queryByRole('note')).not.toBeInTheDocument();
+});
+
+it.each(['user', 'system'] as const)('#833 does not attach a limit note to a %s turn', (role) => {
+  render(thread({ messages: [{ ...message('m1', 'Other turn.'), role, limit }] }));
+  expect(screen.queryByRole('note')).not.toBeInTheDocument();
+});
+
+it('#833 renders the limitation as plain text', () => {
+  render(
+    thread({
+      messages: [
+        {
+          ...message('m1', 'Available answer.'),
+          role: 'assistant',
+          limit: { ...limit, message: '<em>Research stopped.</em>' },
+        },
+      ],
+    }),
+  );
+  const note = screen.getByRole('note');
+  expect(note).toHaveTextContent('<em>Research stopped.</em>');
+  expect(note.querySelector('em')).toBeNull();
 });
