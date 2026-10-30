@@ -61,6 +61,9 @@ come from the gateway's own `_extract_usage`, the same numbers `llm_usage`
 stores. Streaming spans are not made "current" (an async generator can be
 finalized in another context). They end exactly once, on completion, provider
 error, or consumer close/cancel.
+Malformed successful responses also end their spans before propagating the
+original parsing error. Streams retain answer text for telemetry only while
+their span records content; capture-off still records structure and usage.
 
 No HTTP server spans are exported. A chat answer runs in a background task
 after a 202, so a request span would be a short, misleading root, and

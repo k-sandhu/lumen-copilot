@@ -592,18 +592,22 @@ class LLMGateway:
             call.fail(exc)
             raise
 
-        choice = response.choices[0]
-        completion = Completion(
-            content=choice.message.content or "",
-            model=model_id,
-            finish_reason=getattr(choice, "finish_reason", None),
-            usage=_extract_usage(response),
-        )
-        call.succeed(
-            content=completion.content,
-            finish_reason=completion.finish_reason,
-            usage=completion.usage,
-        )
+        try:
+            choice = response.choices[0]
+            completion = Completion(
+                content=choice.message.content or "",
+                model=model_id,
+                finish_reason=getattr(choice, "finish_reason", None),
+                usage=_extract_usage(response),
+            )
+            call.succeed(
+                content=completion.content,
+                finish_reason=completion.finish_reason,
+                usage=completion.usage,
+            )
+        except BaseException as exc:
+            call.fail(exc)
+            raise
         return completion
 
     async def stream(
@@ -657,7 +661,8 @@ class LLMGateway:
                 content = getattr(delta, "content", None)
                 if content:
                     call.first_chunk()
-                    parts.append(content)
+                    if call.records_content:
+                        parts.append(content)
                     yield CompletionChunk(delta=content, index=index)
                     index += 1
         except GeneratorExit:
@@ -862,7 +867,8 @@ class LLMGateway:
                 content = getattr(delta, "content", None)
                 if content:
                     call.first_chunk()
-                    text_parts.append(content)
+                    if call.records_content:
+                        text_parts.append(content)
                     yield StreamEvent(text=content)
                 fragments = getattr(delta, "tool_calls", None) or []
                 if fragments:

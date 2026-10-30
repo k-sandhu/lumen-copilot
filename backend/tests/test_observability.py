@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import uuid
+import weakref
 from collections.abc import Iterator, Sequence
 from contextlib import aclosing
 from pathlib import Path
@@ -444,6 +445,101 @@ async def test_chat_records_an_llm_span(
     assert attrs["llm.token_count.total"] == 150
     assert attrs["output.value"] == "Fourteen thousand six hundred."
     assert _API_KEY not in _all_attribute_text(telemetry.spans)
+
+
+@pytest.mark.parametrize("stage", ["choices", "usage", "succeed"])
+async def test_malformed_chat_ends_span_and_reraises_the_same_exception(
+    telemetry: _Telemetry, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    from types import SimpleNamespace
+
+    from app.llm import gateway as gateway_module
+
+    failure = IndexError(f"malformed 200 {_API_KEY}")
+
+    class _BrokenChoices:
+        def __getitem__(self, index: int) -> None:
+            raise failure
+
+    def _fail(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    choices = [SimpleNamespace(message=SimpleNamespace(content="answer"), finish_reason="stop")]
+    response = SimpleNamespace(choices=_BrokenChoices() if stage == "choices" else choices)
+    _patch_acompletion(monkeypatch, response)
+    if stage == "usage":
+        monkeypatch.setattr(gateway_module, "_extract_usage", _fail)
+    if stage == "succeed":
+        monkeypatch.setattr(LlmCall, "succeed", _fail)
+    with pytest.raises(IndexError) as caught:
+        await LLMGateway(_settings()).chat(_MESSAGES)
+    assert caught.value is failure
+    [span] = telemetry.named("llm.chat")
+    assert span.status.status_code is StatusCode.ERROR
+    assert (span.attributes or {})["error.type"] == "IndexError"
+    assert _API_KEY not in _all_attribute_text(telemetry.spans)
+    [duration] = telemetry.metric_points("gen_ai.client.operation.duration")
+    assert duration.count == 1 and duration.attributes["error.type"] == "IndexError"
+
+
+@pytest.mark.parametrize("mode", ["off", "structure", "content"])
+@pytest.mark.parametrize("method", ["stream", "stream_tools"])
+async def test_stream_retains_text_only_when_recording_content(
+    monkeypatch: pytest.MonkeyPatch, mode: str, method: str
+) -> None:
+    class _Text(str):
+        pass
+
+    references: list[weakref.ReferenceType[_Text]] = []
+
+    class _EphemeralStream(_Stream):
+        async def __anext__(self) -> _Chunk:
+            if self._index == 3:
+                self._index += 1
+                return _Chunk([_Choice(_Delta(), finish_reason="stop")], usage=_Usage())
+            if self._index > 3:
+                raise StopAsyncIteration
+            text = _Text(f"chunk {self._index} ")
+            references.append(weakref.ref(text))
+            self._index += 1
+            return _Chunk([_Choice(_Delta(content=text))])
+
+    shutdown_telemetry()
+    try:
+        observed = (
+            None if mode == "off" else _configure(TELEMETRY_CAPTURE_CONTENT=str(mode == "content"))
+        )
+        stream = _EphemeralStream([])
+        _patch_acompletion(monkeypatch, stream)
+        gateway = LLMGateway(_settings())
+        events = (
+            gateway.stream(_MESSAGES)
+            if method == "stream"
+            else gateway.stream_tools(_MESSAGES, tools=_TOOLS)
+        )
+        text_count = 0
+        async with aclosing(events):
+            async for event in events:
+                text = event.delta if method == "stream" else event.text
+                if text:
+                    text_count += 1
+                if text_count == 3:
+                    assert (references[0]() is not None) is (mode == "content")
+        assert text_count == 3 and stream.closed
+        if observed is not None:
+            [span] = observed.named(f"llm.{method}")
+            attrs = span.attributes or {}
+            assert attrs["llm.output_messages.0.message.role"] == "assistant"
+            if mode == "content":
+                assert attrs["output.value"] == "chunk 0 chunk 1 chunk 2 "
+            else:
+                assert "output.value" not in attrs
+                assert "llm.output_messages.0.message.content" not in attrs
+            if method == "stream_tools":
+                assert attrs["llm.finish_reason"] == "stop"
+                assert attrs["llm.token_count.total"] == 150
+    finally:
+        shutdown_telemetry()
 
 
 async def test_content_capture_off_keeps_structure_and_drops_content(

@@ -136,6 +136,11 @@ class LlmCall:
         if messages:
             self._span.set_input(messages[-1].content)
 
+    @property
+    def records_content(self) -> bool:
+        """Whether this call records content, so streams can skip retaining text."""
+        return self._span.recording and telemetry.capture_content()
+
     def first_chunk(self) -> None:
         """Mark the first streamed content or tool-call chunk (time to first token)."""
         if self._first_chunk_at is not None or self._ended:
