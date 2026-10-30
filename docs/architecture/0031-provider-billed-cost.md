@@ -36,6 +36,14 @@ tokens arrive. Gateway dispatch evidence distinguishes this from a local
 preflight refusal. A successful response without usage is also one unpriced
 call. No prompt, answer, or tool content enters spend telemetry.
 
+Completion SDK retries are disabled at the gateway. The runtime's existing
+bounded retry/failover path accounts each failed attempt before issuing another
+request, so a later priced success cannot hide potentially billed failures.
+Dispatch evidence comes from the adapter's pre-API-call event after provider
+resolution and parameter validation, or a returned response; entering the
+library alone supplies no evidence. The event callback reads only the event
+type and never logs or retains request contents.
+
 ## Wire and follow-up
 
 `done.data.usage` gains optional `costUsd` (nonnegative decimal string or null)

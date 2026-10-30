@@ -23,6 +23,9 @@ domain :class:`~app.domain.llm.ToolCall` / :class:`~app.domain.llm.StreamEvent`
 the next turn. Provider-billed cost is extracted here only (ADR-0031), never
 estimated from local prices. Missing cost remains explicitly unpriced. Spend
 ceilings and tenant budgets remain separate concerns (#833 / #300).
+Completion retries belong to the runtime: SDK retries are disabled so each
+potentially billed attempt has its own accounting scope. Adapter pre-call
+events supply dispatch evidence only after local provider/parameter validation.
 """
 
 from __future__ import annotations
@@ -68,6 +71,17 @@ if TYPE_CHECKING:
 
 
 log = get_logger(__name__)
+
+
+def _provider_call_event(details: dict[str, Any]) -> None:
+    """Record the adapter's validated request boundary, without logging content.
+
+    The library resolves the provider and validates adapter parameters before this
+    callback. Entering ``acompletion`` alone is not dispatch evidence. The same
+    callback also receives post-call events, which must not count as requests.
+    """
+    if details.get("log_event_type") == "pre_api_call":
+        mark_dispatched()
 
 
 class LlmProviderError(DependencyError):
@@ -571,16 +585,18 @@ class LLMGateway:
         model_id = model or self._settings.llm_model
         try:
             wire_messages = self._to_wire_messages(messages)
-            mark_dispatched()
             response = await litellm.acompletion(
                 model=model_id,
                 messages=wire_messages,
                 stream=False,
+                num_retries=0,
+                logger_fn=_provider_call_event,
                 **_accounting_options(model_id, api_base),
                 timeout=self._settings.llm_timeout_seconds,
                 **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
+            mark_dispatched()
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
@@ -615,15 +631,17 @@ class LLMGateway:
         model_id = model or self._settings.llm_model
         try:
             wire_messages = self._to_wire_messages(messages)
-            mark_dispatched()
             response = await litellm.acompletion(
                 model=model_id,
                 messages=wire_messages,
                 stream=True,
+                num_retries=0,
+                logger_fn=_provider_call_event,
                 **_accounting_options(model_id, api_base, streaming=True),
                 timeout=self._settings.llm_timeout_seconds,
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
+            mark_dispatched()
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
@@ -788,17 +806,19 @@ class LLMGateway:
                 self._to_wire_messages(provider_messages), family
             )
             wire_tool_specs = self._to_wire_tools(provider_tools)
-            mark_dispatched()
             response = await litellm.acompletion(
                 model=model_id,
                 messages=wire_messages,
                 tools=wire_tool_specs,
                 stream=True,
+                num_retries=0,
+                logger_fn=_provider_call_event,
                 stream_options={"include_usage": True},
                 timeout=self._settings.llm_timeout_seconds,
                 **extra,
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
+            mark_dispatched()
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
@@ -927,10 +947,10 @@ class LLMGateway:
             )
             client_kwargs = {"client": client} if client is not None else {}
             wire_inputs = list(inputs)
-            mark_dispatched()
             response = await litellm.aembedding(
                 model=model_id,
                 input=wire_inputs,
+                logger_fn=_provider_call_event,
                 timeout=self._settings.llm_timeout_seconds,
                 # Pin the response encoding: the OpenAI SDK under LiteLLM defaults
                 # to base64, which some OpenAI-compatible providers reject —
@@ -943,6 +963,7 @@ class LLMGateway:
                 **credentials,
                 **client_kwargs,
             )
+            mark_dispatched()
         except Exception as exc:  # noqa: BLE001 — mapped to a typed AppError
             raise _map_vendor_error(exc) from None
 
