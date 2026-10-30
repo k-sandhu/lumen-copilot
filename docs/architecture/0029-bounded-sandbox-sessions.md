@@ -32,7 +32,7 @@ unlimited.
    | Memory | `SANDBOX_MEMORY_BYTES` (512 MiB) | runner `--memory` |
    | PIDs | `SANDBOX_PIDS_LIMIT` (128) | runner `--pids-limit` |
    | Wall clock (per execution) | `SANDBOX_WALL_CLOCK_SECONDS` (30) | runner destroys the container at the deadline |
-   | Scratch (writable session workspace) | `SANDBOX_SCRATCH_BYTES` (256 MiB) | sized tmpfs on `/workspace` |
+   | Scratch (writable session workspace) | `SANDBOX_SCRATCH_BYTES` (256 MiB) | tmpfs-backed volume on `/workspace` |
    | Output collection | `SANDBOX_OUTPUT_BYTES_CAP` (32 MiB) | runner collection budget (unchanged) |
    | Per-tenant concurrency | `SANDBOX_MAX_CONCURRENT_PER_TENANT` (2) | Redis lease |
    | Per-tenant daily runtime | `SANDBOX_DAILY_RUNTIME_SECONDS_PER_TENANT` (3600) | Redis daily counter |
@@ -75,7 +75,12 @@ unlimited.
    from the requested bounds is destroyed and recreated (the same
    treatment a runtime mismatch already gets). Scratch is a sized tmpfs
    on `/workspace` — chosen over overlay storage quota because it does
-   not depend on host filesystem quota support. The base filesystem becomes
+   not depend on host filesystem quota support. It is mounted as an
+   anonymous local-driver **volume** with tmpfs options (`size`, `nosuid`,
+   `nodev`), never a `tmpfs` mount: Docker's archive API, which stages code
+   and inputs and collects outputs, cannot see tmpfs mounts, so a tmpfs mount
+   failed every bounded execution (#838). The volume is removed with its
+   container. The base filesystem becomes
    read-only when scratch bounds are enabled so code cannot bypass the quota
    via another directory. Home, temp files and installed packages move into
    that same workspace; contained root can still mutate that environment.

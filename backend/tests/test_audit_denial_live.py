@@ -201,6 +201,11 @@ async def test_durable_denial_pool_isolation_concurrency_and_cross_tenant_rls_li
                     text(f"GRANT SELECT, INSERT ON TABLE {table} " f'TO "{app_role}"')
                 )
             await owner_connection.execute(text(f'GRANT UPDATE ON TABLE users TO "{app_role}"'))
+            # Provider edits lock the row (SELECT ... FOR UPDATE, #826), which
+            # PostgreSQL authorizes only with UPDATE; the app role always has it.
+            await owner_connection.execute(
+                text(f'GRANT UPDATE ON TABLE llm_providers TO "{app_role}"')
+            )
 
         audit_engine = create_async_engine(
             app_url,

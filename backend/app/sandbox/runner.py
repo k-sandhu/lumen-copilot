@@ -110,11 +110,9 @@ class ContainerFlags:
     cap_drop: tuple[str, ...] = ("ALL",)
     security_opt: tuple[str, ...] = ("no-new-privileges:true",)
     runtime: str = "runc"
-    # ADR-0020 intentionally starts without automatic CPU/memory/PID/time limits, so
-    # these stay ``None`` unless a deploy sets ``SANDBOX_SESSION_LIMITS_ENABLED``. The
-    # runner's wire schema accepts a positive value and applies the engine flag; a
-    # wall clock is the exception, since no code enforces one (ADR-0020 replaced the
-    # ADR-0013 timeout with explicit cancel/reset).
+    # ADR-0029 (Proposed) turns the session bounds on by default; they stay ``None``
+    # only under the ``SANDBOX_SESSION_LIMITS_ENABLED=false`` opt-out. The runner's
+    # wire schema accepts a positive value and applies the engine flag.
     cpus: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None

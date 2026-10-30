@@ -1182,6 +1182,9 @@ class SandboxService:
                 await self._retry_sleep(delay)
                 delay = min(delay * 2, 60.0)
             if accounting_loss and not (producer is not None and producer.cancelling() > 0):
+                # Every exit hands the caller a tenant-bound transaction; the
+                # commit above ended the one this loop bound (#838).
+                await bind_tenant(session, self._tenant_id)
                 return ExecutionOutcome(CodeRunStatus.KILLED, SANDBOX_REASON_ACCOUNTING_UNAVAILABLE)
             raise
         except Exception as exc:  # noqa: BLE001 - a run never remains stuck
