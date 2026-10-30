@@ -113,6 +113,102 @@ async def test_transcript_sink_no_answer_yields_placeholder_summary() -> None:
     assert outcome.summary  # a stable placeholder, never empty
 
 
+# --- #578: a denied/unavailable tool can never fold into Succeeded ----------
+
+
+def _tool_result(seq: int, *, ok: bool, error: str | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {"callId": f"c{seq}", "tool": "run_python", "ok": ok}
+    if error is not None:
+        data["error"] = error
+    return envelopes.event("s1", seq, name="tool_result", data=data)
+
+
+def _done_stream(*middle: dict[str, Any]) -> list[dict[str, Any]]:
+    envs = [envelopes.start("s1", 0, data={"messageId": None})]
+    envs.extend(middle)
+    envs.append(envelopes.delta("s1", 90, {"text": "A partial answer."}))
+    envs.append(envelopes.done("s1", 91, data={"citationCount": 0}))
+    return envs
+
+
+async def test_denied_tool_result_cannot_fold_into_succeeded() -> None:
+    """A ``code_execution_denied`` tool result + ``done`` is Failed/tool_failure (#578)."""
+    sink = RunTranscriptSink(stream_id="s1")
+    await _publish_all(
+        sink, "s1", _done_stream(_tool_result(1, ok=False, error="code_execution_denied"))
+    )
+    outcome = sink.outcome()
+    assert outcome.status is RunStatus.FAILED
+    assert outcome.error is not None
+    assert outcome.error.code == "tool_failure"
+
+
+async def test_approval_and_missing_tool_results_cannot_fold_into_succeeded() -> None:
+    """Policy/approval denials and a missing adapter are tool failures too (#578)."""
+    for code in ("approval_denied", "tool_not_permitted", "tool_not_found"):
+        sink = RunTranscriptSink(stream_id="s1")
+        await _publish_all(sink, "s1", _done_stream(_tool_result(1, ok=False, error=code)))
+        outcome = sink.outcome()
+        assert outcome.status is RunStatus.FAILED, code
+        assert outcome.error is not None and outcome.error.code == "tool_failure", code
+
+
+async def test_unavailable_tool_synonym_cannot_fold_into_succeeded() -> None:
+    """An unenumerated unavailable/disabled spelling still fails closed (#578)."""
+    for code in ("sandbox_unavailable", "web_search_disabled"):
+        sink = RunTranscriptSink(stream_id="s1")
+        await _publish_all(sink, "s1", _done_stream(_tool_result(1, ok=False, error=code)))
+        outcome = sink.outcome()
+        assert outcome.status is RunStatus.FAILED, code
+        assert outcome.error is not None and outcome.error.code == "tool_failure", code
+
+
+async def test_recoverable_tool_error_can_still_succeed() -> None:
+    """A recoverable error the model moved past (bad args/timeout) still succeeds (#578)."""
+    for code in ("tool_bad_args", "tool_timeout", "tool_error", "service_unavailable"):
+        sink = RunTranscriptSink(stream_id="s1")
+        await _publish_all(sink, "s1", _done_stream(_tool_result(1, ok=False, error=code)))
+        outcome = sink.outcome()
+        assert outcome.status is RunStatus.SUCCEEDED, code
+        assert outcome.error is None, code
+
+
+async def test_any_denied_tool_among_successes_fails_the_run() -> None:
+    sink = RunTranscriptSink(stream_id="s1")
+    await _publish_all(
+        sink,
+        "s1",
+        _done_stream(
+            _tool_result(1, ok=True),
+            _tool_result(2, ok=False, error="autonomy_denied"),
+        ),
+    )
+    outcome = sink.outcome()
+    assert outcome.status is RunStatus.FAILED
+    assert outcome.error is not None and outcome.error.code == "tool_failure"
+
+
+async def test_denial_remains_tool_failure_when_the_stream_also_errors() -> None:
+    """Any denied capability is Failed/tool_failure, including an errored stream."""
+    sink = RunTranscriptSink(stream_id="s1")
+    await _publish_all(
+        sink,
+        "s1",
+        [
+            envelopes.start("s1", 0, data={"messageId": None}),
+            _tool_result(1, ok=False, error="code_execution_denied"),
+            envelopes.error(
+                "s1",
+                2,
+                {"code": "model_unavailable", "detail": "The model was unavailable."},
+            ),
+        ],
+    )
+    outcome = sink.outcome()
+    assert outcome.status is RunStatus.FAILED
+    assert outcome.error is not None and outcome.error.code == "tool_failure"
+
+
 async def test_tee_sink_fans_out_to_every_sink() -> None:
     """A watched run dual-publishes: every wrapped sink receives each envelope (ADR-0015 §3)."""
     transcript = RunTranscriptSink(stream_id="s1")

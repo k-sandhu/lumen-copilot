@@ -47,6 +47,7 @@ celery_app.conf.update(
         "app.tasks.connector_poll",
         "app.tasks.artifact_retention",
         "app.tasks.run_assistant",
+        "app.tasks.run_reaper",
         "app.tasks.scheduler",
         "app.tasks.run_digest",
         "app.tasks.run_sandbox",
@@ -75,7 +76,11 @@ celery_app.conf.update(
         "expired-upload-sweep": {
             "task": "lumen.sweep_expired_uploads",
             "schedule": float(_settings.upload_janitor_interval_seconds),
-        }
+        },
+        "stale-run-reaper": {
+            "task": "lumen.reap_stale_runs",
+            "schedule": float(_settings.run_reaper_interval_seconds),
+        },
     },
 )
 

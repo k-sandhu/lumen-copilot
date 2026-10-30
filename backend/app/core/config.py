@@ -1313,6 +1313,19 @@ class Settings(PasswordHashingSettings):
     # retried — it escalates to a human immediately. Mirrors ``ingestion_*``.
     run_max_retries: int = Field(default=3, alias="RUN_MAX_RETRIES")
     run_retry_backoff_seconds: int = Field(default=5, alias="RUN_RETRY_BACKOFF_SECONDS")
+    # Stale-run reaper (#578): a worker that dies after claiming a run can leave
+    # it ``running`` forever (redelivery sees a non-queued run and no-ops), and
+    # a stuck run blocks later fires of its schedule via the overlap skip. The
+    # Beat reaper (``lumen.reap_stale_runs``) fails running claims/queued retries
+    # longer than ``run_stale_after_seconds``. Six hours exceeds the conservative
+    # model envelope: 22 turns (20 + synthesis + length continuation)
+    # x 4 routes (primary + 3 fallbacks)
+    # x (3 attempts x 60s + 2 backoffs x 10s) = 17600s, with 4000s headroom
+    # for tools/persistence. This is an age policy, not a proven runtime maximum:
+    # streaming/tool execution can be unbounded. Raise it for longer workloads,
+    # tenant turn overrides, model/tool timeouts, or retry backoff (ADR-0015 §5).
+    run_stale_after_seconds: int = Field(default=21600, alias="RUN_STALE_AFTER_SECONDS")
+    run_reaper_interval_seconds: int = Field(default=900, alias="RUN_REAPER_INTERVAL_SECONDS")
 
     @field_validator(
         "redbeat_lock_timeout_seconds",
@@ -1321,6 +1334,8 @@ class Settings(PasswordHashingSettings):
         "run_rate_backoff_seconds",
         "run_max_in_flight_per_tenant",
         "run_digest_interval_seconds",
+        "run_stale_after_seconds",
+        "run_reaper_interval_seconds",
     )
     @classmethod
     def _scheduler_counts_positive(cls, value: int) -> int:
@@ -1334,7 +1349,8 @@ class Settings(PasswordHashingSettings):
         if value <= 0:
             raise ValueError(
                 "REDBEAT_LOCK_TIMEOUT_SECONDS / RUN_RATE_* / RUN_MAX_IN_FLIGHT_PER_TENANT "
-                "/ RUN_DIGEST_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
+                "/ RUN_DIGEST_INTERVAL_SECONDS / RUN_STALE_AFTER_SECONDS "
+                "/ RUN_REAPER_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
             )
         return value
 
