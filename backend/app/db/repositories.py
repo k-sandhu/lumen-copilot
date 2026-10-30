@@ -8459,6 +8459,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
         covers_through_message_id: UUID,
         covered_created_at: datetime,
         mentioned_documents: dict[UUID, str] | None = None,
+        replace_invalid_version: int | None = None,
     ) -> tuple[bool, SessionSummary | None]:
         """Advance the rolling summary; returns ``(accepted, row)``.
 
@@ -8470,6 +8471,10 @@ class SessionSummaryRepository(_TenantScopedRepository):
         a DIFFERENT boundary id are allowed (second-resolution timestamps);
         the id inequality keeps an identical rewrite idempotent. The summary
         text and the mention map are size-capped here (the write chokepoint).
+
+        An invalid stored summary may rebuild from the first canonical batch.
+        That replacement requires the observed version, instead of advancing
+        an untrusted cursor. A racing valid summary wins. Evidence is untouched.
         """
         text_value = summary[:_SUMMARY_MAX_CHARS]
         mentioned_payload = {
@@ -8496,18 +8501,25 @@ class SessionSummaryRepository(_TenantScopedRepository):
                 "version": models.SessionSummary.version + 1,
             },
             where=(
-                models.SessionSummary.covers_through_created_at.is_(None)
-                | (models.SessionSummary.covers_through_created_at < covered_created_at)
-                | (
-                    (models.SessionSummary.covers_through_created_at == covered_created_at)
-                    # ORDERED tie-break (#446 round-2 blocker 3): within one
-                    # second, coverage may only advance toward the LARGER
-                    # boundary id — an arbitrary but STABLE total order, so a
-                    # stale A can never be re-accepted after B (the A->B->A
-                    # probe). A same-second boundary with a smaller id waits
-                    # for the next pass (a strictly-newer timestamp) — progress
-                    # converges, regression cannot happen.
-                    & (models.SessionSummary.covers_through_message_id < covers_through_message_id)
+                (models.SessionSummary.version == replace_invalid_version)
+                if replace_invalid_version is not None
+                else (
+                    models.SessionSummary.covers_through_created_at.is_(None)
+                    | (models.SessionSummary.covers_through_created_at < covered_created_at)
+                    | (
+                        (models.SessionSummary.covers_through_created_at == covered_created_at)
+                        # ORDERED tie-break (#446 round-2 blocker 3): within one
+                        # second, coverage may only advance toward the LARGER
+                        # boundary id — an arbitrary but STABLE total order, so a
+                        # stale A can never be re-accepted after B (the A->B->A
+                        # probe). A same-second boundary with a smaller id waits
+                        # for the next pass (a strictly-newer timestamp) — progress
+                        # converges, regression cannot happen.
+                        & (
+                            models.SessionSummary.covers_through_message_id
+                            < covers_through_message_id
+                        )
+                    )
                 )
             ),
         )

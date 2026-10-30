@@ -163,7 +163,9 @@ async def test_stream_tools_yields_text_then_terminal(monkeypatch: pytest.Monkey
             events.append(ev)
 
     texts = [e.text for e in events if e.text]
-    assert texts == ["Hello", ", world"]
+    # Guard lookbehind can move provider chunk boundaries without losing text.
+    assert "".join(texts) == "Hello, world"
+    assert all(e.finish_reason is None for e in events[:-1])
     terminal = events[-1]
     assert terminal.finish_reason == "stop"
     assert terminal.tool_calls == ()

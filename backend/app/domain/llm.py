@@ -90,6 +90,8 @@ class Completion:
     model: str
     finish_reason: str | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Internal provenance: strict data consumers must reject cleaned remnants.
+    content_filtered: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -31,6 +31,7 @@ from uuid import UUID
 
 from app.domain.recall import MAX_RECALL_TURN_CHARS, clip_recall_text
 from app.domain.tools import ERROR_BAD_ARGS, ERROR_TOOL_ERROR, RiskTier, ToolHandlerResult
+from app.llm.reasoning_guard import sanitize_provider_text
 from app.services.tools.types import RecalledTurn, ToolContext, ToolDefinition
 
 READ_CONVERSATION_TOOL_NAME = "read_conversation"
@@ -91,9 +92,10 @@ def _clip(text: str, budget: int) -> str:
 
 
 def _render_turn(turn: RecalledTurn, *, text: str, budget: int) -> str:
-    body = _clip(text, budget)
+    escaped = text.replace("`", "\\u0060").replace("<", "\\u003c").replace(">", "\\u003e")
+    body = _clip(escaped, budget)
     stamp = turn.created_at.isoformat(timespec="seconds")
-    return _clip(f"[{stamp}] {turn.role}:\n{body}", budget + _TURN_FRAME_BUDGET - 2)
+    return f"[{stamp}] {turn.role}:\n```turn-data\n{body}\n```"
 
 
 def _render_documents(names: dict[UUID, str], *, limit: int, budget: int) -> str:
@@ -214,6 +216,11 @@ async def _read_conversation(args: dict[str, Any], ctx: ToolContext) -> ToolHand
             continue
         text = turn.content
         if turn.role == "assistant":
+            # #573: a stored assistant turn is provider output from before the
+            # gateway guard may have existed — replay must not re-inject
+            # inline reasoning or chat-template control text as tool data.
+            # User turns are authored data and stay verbatim.
+            text = sanitize_provider_text(text)
             # Snapshot the full contributing row's dependencies before ANY
             # rendering, including a body clipped to zero original characters.
             released_sources.update(turn.cited_document_ids)

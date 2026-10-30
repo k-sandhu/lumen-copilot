@@ -77,6 +77,7 @@ from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCit
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
 from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec
 from app.domain.retrieval import RetrievedPassage
+from app.domain.summary import redact_summary_names
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
 from app.llm.context import (
@@ -1202,9 +1203,10 @@ class ChatRuntime:
                 )
                 evidence_sources.add(doc_id)
             if summary:
-                for doc_id, name in mentioned_documents:
-                    if doc_id not in permitted and name and name in summary:
-                        summary = summary.replace(name, "[document no longer accessible]")
+                summary = redact_summary_names(
+                    summary,
+                    tuple(name for doc_id, name in mentioned_documents if doc_id not in permitted),
+                )
             # INV-6: rehydration is an audited read-side event — how many ids
             # were requested vs still permitted (never the content).
             await audit.emit(

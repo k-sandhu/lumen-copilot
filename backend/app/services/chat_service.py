@@ -66,6 +66,7 @@ from app.domain.entities import (
     MessageRole,
     ToolInvocation,
 )
+from app.domain.summary import stored_summary_text
 from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.retrieval.permissions import AllowSet
@@ -735,9 +736,21 @@ class ChatService:
         mentioned: tuple[tuple[UUID, str], ...] = ()
         compaction_cursor: tuple[datetime, UUID] | None = None
         if summary_row is not None:
-            summary_text = summary_row.summary
             evidence = summary_row.evidence
             mentioned = summary_row.mentioned_documents
+            # #573 validate-on-read: a stored summary is untrusted data. A row
+            # that fails the strict schema / bounded leakage checks is treated
+            # as ABSENT — no summary text and no compaction cursor, so this
+            # turn falls back to the full verbatim history below. Only a
+            # sanitized reason code is logged, never the stored payload.
+            summary_text, invalid_reason = stored_summary_text(summary_row.summary)
+            if summary_row.summary and summary_text is None:
+                log.warning(
+                    "chat.summary_rejected_on_read",
+                    session_id=str(session_id),
+                    reason=invalid_reason,
+                )
+                mentioned = ()
         if (
             summary_row is not None
             and summary_text

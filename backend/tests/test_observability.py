@@ -541,6 +541,57 @@ async def test_malformed_chat_ends_span_and_reraises_the_same_exception(
     assert duration.count == 1 and duration.attributes["error.type"] == "IndexError"
 
 
+@pytest.mark.parametrize("method", ["chat", "stream", "stream_tools"])
+async def test_llm_span_records_only_reasoning_guarded_text(
+    telemetry: _Telemetry, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """The span sees exactly what callers see: #573's guard runs before #818's recording.
+
+    Inline reasoning split across chunk boundaries and a chat-template control
+    token must never reach ``output.value`` / output messages, even with content
+    capture on (ADR-0027): the trace may only record published text.
+    """
+    secret = "SECRET-PLAN-7f3a"
+    pieces = ["<thi", f"nk>{secret} step one", " step two</think>", "Visible answer.", "<|im_end|>"]
+    if method == "chat":
+
+        class _Message:
+            content = "".join(pieces)
+
+        class _Response:
+            choices = [type("C", (), {"message": _Message(), "finish_reason": "stop"})()]
+            usage = _Usage()
+
+        _patch_acompletion(monkeypatch, _Response())
+        completion = await LLMGateway(_settings()).chat(_MESSAGES)
+        published = completion.content
+    else:
+        chunks = [_Chunk([_Choice(_Delta(content=piece))]) for piece in pieces]
+        chunks.append(_Chunk([_Choice(_Delta(), finish_reason="stop")], usage=_Usage()))
+        _patch_acompletion(monkeypatch, _Stream(chunks))
+        gateway = LLMGateway(_settings())
+        events = (
+            gateway.stream(_MESSAGES)
+            if method == "stream"
+            else gateway.stream_tools(_MESSAGES, tools=_TOOLS)
+        )
+        async with aclosing(events):
+            published = "".join(
+                [
+                    (event.delta if method == "stream" else event.text) or ""
+                    async for event in events
+                ]
+            )
+    assert published == "Visible answer."
+    [span] = telemetry.named(f"llm.{method}")
+    attrs = span.attributes or {}
+    assert attrs["output.value"] == "Visible answer."
+    assert attrs["llm.output_messages.0.message.content"] == "Visible answer."
+    recorded = _all_attribute_text(telemetry.spans)
+    assert secret not in recorded
+    assert "<think" not in recorded and "<|im_end|>" not in recorded
+
+
 @pytest.mark.parametrize("mode", ["off", "structure", "content"])
 @pytest.mark.parametrize("method", ["stream", "stream_tools"])
 async def test_stream_retains_text_only_when_recording_content(
@@ -582,8 +633,11 @@ async def test_stream_retains_text_only_when_recording_content(
                 text = event.delta if method == "stream" else event.text
                 if text:
                     text_count += 1
-                if text_count == 3:
-                    assert (references[0]() is not None) is (mode == "content")
+                if text_count == 3 and mode != "content":
+                    # Without content capture no provider text is retained. With it,
+                    # the span keeps the #573-guarded copy (a new string, so not this
+                    # object); the recorded ``output.value`` below proves retention.
+                    assert references[0]() is None
         assert text_count == 3 and stream.closed
         if observed is not None:
             [span] = observed.named(f"llm.{method}")
@@ -768,7 +822,9 @@ async def test_real_stream_span_is_parented_under_turn(
         turn.answered(
             answer="answer", model_used="m", finish_reason="stop", citation_count=0, total_tokens=0
         )
-    assert [chunk.delta for chunk in chunks] == ["answer"] and stream.closed
+    # #573's guard may withhold a possible sentinel prefix across a chunk
+    # boundary, so the published text, not its chunking, is the contract.
+    assert "".join(chunk.delta for chunk in chunks) == "answer" and stream.closed
     [root] = telemetry.named("chat.turn")
     [llm] = telemetry.named("llm.stream")
     _assert_child(llm, root)
