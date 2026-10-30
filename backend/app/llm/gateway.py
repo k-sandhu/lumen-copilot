@@ -55,6 +55,7 @@ from app.domain.llm import (
     Transcription,
 )
 from app.llm.cache_scope import cache_scopes
+from app.llm.reasoning_guard import ReasoningGuard
 from app.llm.tool_names import ToolNameMap
 from app.llm.tool_wire import wire_tools
 from app.observability import EmbeddingSpan, LlmCall, observe_embedding
@@ -594,11 +595,20 @@ class LLMGateway:
 
         try:
             choice = response.choices[0]
+            # #573: provider output is untrusted — inline reasoning blocks and
+            # chat-template tokens never leave the gateway (a separate vendor
+            # reasoning field is already dropped by reading only ``content``).
+            # The span records only the guarded text (ADR-0027).
+            guard = ReasoningGuard()
+            content = guard.feed(choice.message.content or "") + guard.flush()
+            if guard.blocked:
+                log.info("llm.reasoning_blocked", blocks=guard.blocked_blocks)
             completion = Completion(
-                content=choice.message.content or "",
+                content=content,
                 model=model_id,
                 finish_reason=getattr(choice, "finish_reason", None),
                 usage=_extract_usage(response),
+                content_filtered=guard.blocked,
             )
             call.succeed(
                 content=completion.content,
@@ -655,16 +665,30 @@ class LLMGateway:
 
         index = 0
         parts: list[str] = []
+        # #573: strip inline reasoning BEFORE publishing, statefully across
+        # chunks, so what streams is exactly what callers may persist — and the
+        # only content the span may record (ADR-0027).
+        guard = ReasoningGuard()
         try:
             async for part in response:
                 delta = part.choices[0].delta
                 content = getattr(delta, "content", None)
                 if content:
                     call.first_chunk()
-                    if call.records_content:
-                        parts.append(content)
-                    yield CompletionChunk(delta=content, index=index)
-                    index += 1
+                    safe = guard.feed(content)
+                    if safe:
+                        if call.records_content:
+                            parts.append(safe)
+                        yield CompletionChunk(delta=safe, index=index)
+                        index += 1
+            flushed = guard.flush()
+            if flushed:
+                if call.records_content:
+                    parts.append(flushed)
+                yield CompletionChunk(delta=flushed, index=index)
+                index += 1
+            if guard.blocked:
+                log.info("llm.reasoning_blocked", blocks=guard.blocked_blocks)
         except GeneratorExit:
             call.abandon()
             raise
@@ -852,6 +876,8 @@ class LLMGateway:
         # Tool-call fragments arrive across many chunks keyed by ``index``; we
         # accumulate name + the arguments string per index and parse once at end.
         tool_acc: dict[int, _ToolCallAccumulator] = {}
+        # #573: reasoning guard for this turn's text (see ``stream``).
+        guard = ReasoningGuard()
         tool_call_signalled = False
         finish_reason: str | None = None
         usage: TokenUsage | None = None
@@ -867,9 +893,11 @@ class LLMGateway:
                 content = getattr(delta, "content", None)
                 if content:
                     call.first_chunk()
-                    if call.records_content:
-                        text_parts.append(content)
-                    yield StreamEvent(text=content)
+                    safe = guard.feed(content)
+                    if safe:
+                        if call.records_content:
+                            text_parts.append(safe)
+                        yield StreamEvent(text=safe)
                 fragments = getattr(delta, "tool_calls", None) or []
                 if fragments:
                     call.first_chunk()
@@ -886,6 +914,21 @@ class LLMGateway:
                 fr = getattr(choice, "finish_reason", None)
                 if fr:
                     finish_reason = fr
+            # A length continuation starts a fresh guard. Never let it resume hidden
+            # reasoning or a withheld marker/sentinel prefix from this completion.
+            # Keep the safe partial answer and suppress continuation instead of flushing.
+            if finish_reason == "length" and not guard.continuation_safe:
+                finish_reason = "stop"
+                flushed = ""
+                log.info("llm.unsafe_continuation_blocked")
+            else:
+                flushed = guard.flush()
+            if flushed:
+                if call.records_content:
+                    text_parts.append(flushed)
+                yield StreamEvent(text=flushed)
+            if guard.blocked:
+                log.info("llm.reasoning_blocked", blocks=guard.blocked_blocks)
         except GeneratorExit:
             call.abandon()
             raise

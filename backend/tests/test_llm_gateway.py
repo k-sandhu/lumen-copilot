@@ -847,9 +847,10 @@ async def test_stream_yields_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
         assert isinstance(chunk, CompletionChunk)
         chunks.append(chunk)
 
-    # Empty-content deltas are skipped; indices are contiguous.
-    assert [c.delta for c in chunks] == ["Hel", "lo", "!"]
-    assert [c.index for c in chunks] == [0, 1, 2]
+    # Guard lookbehind may move chunk boundaries; content and indices survive.
+    assert "".join(c.delta for c in chunks) == "Hello!"
+    assert all(c.delta for c in chunks)
+    assert [c.index for c in chunks] == list(range(len(chunks)))
     # Stream closed at the end of consumption.
     assert fake.closed is True
 

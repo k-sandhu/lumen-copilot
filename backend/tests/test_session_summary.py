@@ -213,7 +213,11 @@ class _FakeGateway:
     ) -> Completion:
         _FakeGateway.last_user_block = messages[-1].content
         return Completion(
-            content="SUMMARY: goals and answers so far.",
+            # #573: the summarizer contract is strict typed JSON, not free text.
+            content=(
+                '{"facts": ["SUMMARY: goals and answers so far."], '
+                '"decisions": [], "open_questions": [], "evidence_refs": []}'
+            ),
             model=model or "m",
             usage=TokenUsage(prompt_tokens=50, completion_tokens=20, total_tokens=70),
         )
@@ -268,7 +272,8 @@ async def test_task_summarizes_preserving_the_verbatim_tail(
     async with ctx.sessionmaker() as session:
         row = await SessionSummaryRepository(session, ctx.tenant_id).get_for_session(ctx.session_id)
         assert row is not None
-        assert row.summary == "SUMMARY: goals and answers so far."
+        # Stored as canonical validated JSON (#573); readers render it to text.
+        assert row.summary is not None and "goals and answers so far" in row.summary
         assert row.covers_through_message_id == ctx.message_ids[9]
         assert row.version == 1
         # The verbatim tail's content never reached the summarizer prompt…
@@ -890,11 +895,13 @@ async def test_the_bar_never_exceeds_what_the_model_is_allowed_to_write(
         await session.commit()
 
     class _Compliant(_GarbageGateway):
-        # ~200 chars: far under "300 words", comfortably a real summary.
+        # Comfortably a real structured summary (#573 JSON contract).
         payload = (
-            "The user asked about regional revenue and the assistant walked through "
-            "the northern and southern figures, flagged one unresolved attribution "
-            "question, and agreed to follow up next week."
+            '{"facts": ["The user asked about regional revenue and the assistant '
+            'walked through the northern and southern figures."], '
+            '"decisions": ["Follow up next week."], '
+            '"open_questions": ["One unresolved attribution question remains."], '
+            '"evidence_refs": []}'
         )
 
     monkeypatch.setattr(task_module, "LLMGateway", _Compliant)
@@ -945,9 +952,11 @@ async def test_a_genuine_summary_is_still_accepted(
 
     class _Real(_GarbageGateway):
         payload = (
-            "The user asked about Q3 revenue across regions. The assistant reported a "
-            "12% rise in the northern region driven by two renewals, flat performance "
-            "in the south, and an unresolved question about west-region attribution."
+            '{"facts": ["The user asked about Q3 revenue across regions.", '
+            '"The assistant reported a 12% rise in the northern region driven by '
+            'two renewals and flat performance in the south."], "decisions": [], '
+            '"open_questions": ["An unresolved question about west-region '
+            'attribution remains."], "evidence_refs": []}'
         )
 
     monkeypatch.setattr(task_module, "LLMGateway", _Real)

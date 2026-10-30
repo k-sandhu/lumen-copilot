@@ -51,6 +51,7 @@ from app.domain.entities import (
     MessageRole,
     Role,
 )
+from app.domain.summary import RollingSummary, serialize_summary
 from app.realtime.backplane import InMemoryBackplane
 from app.services.audit import AuditSink
 from app.services.chat_service import ChatService
@@ -1115,7 +1116,7 @@ async def test_send_filters_summarized_history_and_threads_the_summary(
         by_id = {m.id: m for m in rows}
         accepted, _row = await summaries.upsert_summary(
             created.session.id,
-            summary="They discussed old turns 0-3.",
+            summary=serialize_summary(RollingSummary(facts=("They discussed old turns 0-3.",))),
             covers_through_message_id=boundary,
             covered_created_at=by_id[boundary].created_at,
         )
@@ -1126,7 +1127,9 @@ async def test_send_filters_summarized_history_and_threads_the_summary(
         )
         await session.commit()
     assert result is not None
-    assert result.summary == "They discussed old turns 0-3."
+    assert result.summary == serialize_summary(
+        RollingSummary(facts=("They discussed old turns 0-3.",))
+    )
     assert result.evidence == ((doc_id, chunk_id),)
     # History = only turns AFTER the coverage boundary (4, 5) — never the
     # summarized ones.
