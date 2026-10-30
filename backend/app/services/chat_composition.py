@@ -5,7 +5,7 @@ Interactive chat, Assistant Test, and headless runs used to construct
 wiring a different subset of adapters — and none wired an artifact
 writer, so a real chat's ``write_file`` could never persist. This module
 is the single builder: every mode gets the same model-route resolver,
-fallback validator, and context config from ``Settings``; the deliberate
+fallback validator, context config, and answer budgets from ``Settings``; the deliberate
 per-mode differences are spelled out in one place:
 
 | Seam | interactive | test | headless |
@@ -13,16 +13,16 @@ per-mode differences are spelled out in one place:
 | MCP tools (one factory) | yes | no | yes |
 | Sandbox (``run_python``) | yes | no (by design) | yes (new, #576/#578) |
 | Artifact writer (``write_file``) | yes | no (simulates) | yes |
-| Interactive affordances (suggestions, deadlines) | yes | no | no |
+| Interactive affordances (suggestions, publish margin) | yes | no | no |
+| Shared answer deadlines and budgets | yes | yes | yes |
 | Tool concurrency | configured | **1** (shared rollback session) | configured |
 
 Behaviour-preserving except the deliberate additions: the artifact
 writer on interactive + headless, and the sandbox on headless runs
 (executing as the run owner, still gated by the deploy/tenant sandbox
-policy inside the sandbox service). Per-mode deadlines/budgets are
-unchanged — they are the cancel lane's scope; the
-:class:`ChatCompositionOptions` bag keeps the signature easy to extend
-without touching the three call sites again.
+policy inside the sandbox service). Shared answer budgets (#574) are composed
+here for all three modes. The :class:`ChatCompositionOptions` bag preserves
+caller injection without duplicating runtime construction.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from app.llm.context import ContextConfig
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
 from app.sandbox.tool_runner import ChatSandboxToolRunner
+from app.services.answer_budgets import budgets_from_settings
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
 from app.services.audit import AuditSink
 from app.services.chat_runtime import (
@@ -80,7 +81,7 @@ class ChatCompositionOptions:
     their module-level ``ChatRuntime`` name, so existing tests that
     monkeypatch that name keep intercepting construction.
     ``extra_runtime_kwargs`` is the forward-compat slot (e.g. a
-    ``retrieval_factory`` override in tests, budget knobs later) merged
+    ``retrieval_factory`` override in tests) merged
     over the composed kwargs.
     """
 
@@ -320,9 +321,9 @@ def build_chat_runtime(
     """Build the ``ChatRuntime`` for one answer surface — the only builder (#576).
 
     ``mode`` selects the deliberate per-surface seams in the module table;
-    everything else (model routing, fallback validation, context budget)
-    is identical across modes. Interactive deadlines/suggestions keep
-    their current values — budgets are another lane's scope.
+    everything else (model routing, fallback validation, context and answer budgets)
+    is identical across modes. Suggestions and publish margins remain interactive;
+    Test retains its serial, rollback-only, simulated-write seams.
     """
     opts = options or ChatCompositionOptions()
     interactive = mode == "interactive"
@@ -348,6 +349,7 @@ def build_chat_runtime(
         "request_id": request_id,
         "source_ip": source_ip,
         "default_max_tool_turns": settings.chat_max_tool_turns,
+        "budgets": budgets_from_settings(settings),
         # Assistant Test is HARDCODED serial: its sessionmaker routes every
         # open to one shared rollback-only session (see assistant test).
         "tool_concurrency": 1 if mode == "test" else settings.chat_tool_concurrency,

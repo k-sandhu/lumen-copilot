@@ -1670,6 +1670,7 @@ async def test_a_fanned_out_recall_gets_an_isolated_session(ctx: _Ctx) -> None:
         async def _noop(*_args: object, **_kwargs: object) -> None:
             return None
 
+        runtime._check_cancelled = _noop  # type: ignore[method-assign]  # noqa: SLF001
         runtime._publish_tool_call = _noop  # type: ignore[method-assign]  # noqa: SLF001
         runtime._publish_tool_result = _noop  # type: ignore[method-assign]  # noqa: SLF001
 

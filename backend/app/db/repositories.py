@@ -462,6 +462,7 @@ def _to_message(row: models.Message) -> Message:
             if row.source_document_ids is not None
             else None
         ),
+        finish_reason=getattr(row, "finish_reason", None),
     )
 
 
@@ -4102,6 +4103,7 @@ class MessageRepository(_TenantScopedRepository):
         model: str | None = None,
         question: AskUserQuestion | None = None,
         source_document_ids: Sequence[UUID] | None = None,
+        finish_reason: str | None = None,
     ) -> Message:
         """Persist a message under a **pre-minted** id (the streamed answer path).
 
@@ -4126,6 +4128,7 @@ class MessageRepository(_TenantScopedRepository):
                 if source_document_ids is not None
                 else None
             ),
+            finish_reason=finish_reason,
         )
         self._session.add(row)
         await self._session.flush()

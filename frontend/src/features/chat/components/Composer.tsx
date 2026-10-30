@@ -48,6 +48,8 @@ export interface ComposerProps {
   busy: boolean;
   /** True while the answer is streaming (shows Stop instead of Send). */
   streaming: boolean;
+  /** Server cancellation is pending acknowledgement. */
+  stopping?: boolean;
   onSend: (content: string) => void;
   onStop: () => void;
   /** Disable everything (e.g. no session selected). */
@@ -94,6 +96,7 @@ function ComposerComponent({
   onModelChange,
   busy,
   streaming,
+  stopping = false,
   onSend,
   onStop,
   disabled = false,
@@ -470,11 +473,12 @@ function ComposerComponent({
             <button
               type="button"
               onClick={onStop}
-              aria-label="Stop generating"
+              disabled={stopping}
+              aria-label={stopping ? 'Stopping answer' : 'Stop generating'}
               className="lc-stop-btn"
             >
               <span className="lc-stop-glyph" aria-hidden="true" />
-              Stop
+              {stopping ? 'Stopping…' : 'Stop'}
             </button>
           ) : (
             <button

@@ -360,8 +360,8 @@ A live producer renews its fenced concurrency lease during execution and pending
 cancellation, including retry waits (exponential backoff, 1s doubling to 60s). Failed/interrupted kills remain pending on
 the same execution: `code_run.cancelled` has outcome `error` and a safe reason
 code. Only confirmed termination records `killed` and an allowed cancellation,
-then settles/releases admission once. Only the first failed attempt adds that error audit; later attempts are logged (`sandbox.kill_unconfirmed`). Renewal failure requests cleanup of the in-flight remote call only — a run whose execution already returned finalises normally, and an accounting-loss kill records `sandbox_accounting_unavailable`, not a user `cancelled` — and it never
-confirms termination or refunds admission. A producer exiting during pending
+then settles/releases admission once. Only the first failed attempt adds that error audit — one error row per execution, latched on the single ownership object that holds lease, heartbeat and reservation and is handed onward whenever a Stop, deadline or shutdown interrupts unconfirmed cleanup; later attempts are logged (`sandbox.kill_unconfirmed`). Renewal failure requests cleanup of the in-flight remote call only — a run whose execution already returned finalises normally, and an accounting-loss kill records `sandbox_accounting_unavailable`, not a user `cancelled` — and it never
+confirms termination or refunds admission. The first established cause wins the run's `termination_reason`: an accounting loss latched before a Stop stays `sandbox_accounting_unavailable` (never an allowed `code_run.cancelled`) while the chat turn still shows the Stop; a Stop seen first stays `cancelled`. A producer genuinely dying during pending
 cleanup stops renewal and leaves the daily reservation charged.
 A killed worker's concurrency lease expires after the run budget plus cleanup
 grace; its un-settled daily reservation remains conservatively charged. Redis

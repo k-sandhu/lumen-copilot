@@ -825,6 +825,24 @@ class Settings(PasswordHashingSettings):
     # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
     chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
 
+    # Shared per-answer budgets (#574, spec 0028): applied identically to live
+    # chat, assistant Test, and headless runs via ``AnswerBudgets``. The wall
+    # clock cancels the entire answer, including an in-flight tool/provider;
+    # the external cap bounds web+MCP calls
+    # per answer (underneath it, the per-tenant rate limits still apply).
+    chat_answer_wall_clock_seconds: float = Field(
+        default=600.0, gt=0, le=3600, alias="CHAT_ANSWER_WALL_CLOCK_SECONDS"
+    )
+    chat_cancel_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=120, alias="CHAT_CANCEL_TIMEOUT_SECONDS"
+    )
+    chat_max_model_calls_per_answer: int = Field(
+        default=23, ge=1, le=200, alias="CHAT_MAX_MODEL_CALLS_PER_ANSWER"
+    )
+    chat_max_external_calls_per_answer: int = Field(
+        default=30, ge=1, le=200, alias="CHAT_MAX_EXTERNAL_CALLS_PER_ANSWER"
+    )
+
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.
     # A nicety, so it is config-gated and time-bounded; any failure is a silent
@@ -1317,13 +1335,12 @@ class Settings(PasswordHashingSettings):
     # it ``running`` forever (redelivery sees a non-queued run and no-ops), and
     # a stuck run blocks later fires of its schedule via the overlap skip. The
     # Beat reaper (``lumen.reap_stale_runs``) fails running claims/queued retries
-    # longer than ``run_stale_after_seconds``. Six hours exceeds the conservative
-    # model envelope: 22 turns (20 + synthesis + length continuation)
-    # x 4 routes (primary + 3 fallbacks)
-    # x (3 attempts x 60s + 2 backoffs x 10s) = 17600s, with 4000s headroom
-    # for tools/persistence. This is an age policy, not a proven runtime maximum:
-    # streaming/tool execution can be unbounded. Raise it for longer workloads,
-    # tenant turn overrides, model/tool timeouts, or retry backoff (ADR-0015 §5).
+    # longer than ``run_stale_after_seconds``. Six hours leaves headroom above
+    # the shared 600s answer budget (#574, spec 0028), retries and persistence.
+    # Pending cleanup/persistence can outlive that deadline: this is an age
+    # policy, not a proven runtime maximum, and reaping does not kill tools.
+    # Raise it for longer configured budgets, cleanup or retry workloads
+    # (ADR-0015 §5).
     run_stale_after_seconds: int = Field(default=21600, alias="RUN_STALE_AFTER_SECONDS")
     run_reaper_interval_seconds: int = Field(default=900, alias="RUN_REAPER_INTERVAL_SECONDS")
 

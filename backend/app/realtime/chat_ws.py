@@ -147,6 +147,6 @@ async def chat_ws(
         # Client closed mid-stream — stop relaying (the producer is decoupled and
         # continues/finishes independently; cancellation of generation is handled
         # by the runtime task).
-        log.info("ws_chat.disconnect", stream_id=stream_id)
+        log.info("ws_chat.disconnect", stream_id=stream_id, outcome="disconnected")
     finally:
         await subscription.aclose()

@@ -69,6 +69,9 @@ class AuditAction(str, enum.Enum):
     USER_IDENTITY_ATTESTED = "user.identity_attested"
     RETRIEVAL_QUERY = "retrieval.query"
     ANSWER_GENERATED = "answer.generated"
+    # #574: exactly one event per user-cancelled answer, written with the
+    # persisted partial (or alone when nothing had streamed).
+    ANSWER_CANCELLED = "answer.cancelled"
     # #416 (ADR-0016 §3.2): the rolling-summary write and the next-answer
     # evidence rehydration are audited reads/writes of conversational state.
     SESSION_SUMMARIZED = "session.summarized"

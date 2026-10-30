@@ -27,10 +27,13 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.db import models
 from app.db.repositories import (
     ChatSessionRepository,
     CodeRunRepository,
@@ -45,11 +48,14 @@ from app.domain.code_execution import (
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role
 from app.realtime.backplane import InMemoryBackplane
 from app.sandbox.accounting import AccountingUnavailable, InMemorySandboxAccounting
+from app.sandbox.runner import SandboxRunnerUnavailable
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.sandbox.tool_runner import ChatSandboxToolRunner
+from app.services.tools.types import ToolCancellationPending
 from app.storage.keys import build_artifact_key
 from tests._db_helpers import copy_sqlite_schema
 from tests._sandbox_helpers import sandbox_settings
+from tests.test_sandbox_pending_cleanup import CountingAccounting, RecordingSleep
 
 import app.db.models  # noqa: F401  isort: skip — register tables on Base.metadata
 
@@ -385,6 +391,217 @@ async def test_accounting_loss_during_execution_returns_killed_summary(world: _W
     assert results[0]["data"]["status"] == "killed"
 
 
+async def _audits(world: _World, action: str, outcome: str) -> list[models.AuditEvent]:
+    return list(
+        await world.session.scalars(
+            select(models.AuditEvent).where(
+                models.AuditEvent.action == action,
+                models.AuditEvent.outcome == outcome,
+            )
+        )
+    )
+
+
+async def test_renewal_failure_after_execution_finalises_via_chat_seam(
+    world: _World,
+) -> None:
+    """TF2/R3-001 under #830: post-execution renewal loss cannot cancel the turn.
+
+    The run parks in output capture after ``runner.execute`` has returned, so
+    a failing heartbeat tick has no in-flight call to cancel. Finalisation is
+    normal: succeeded summary, one ``code_result``, one ``code_run.finished``
+    audit, no cancellation audit, and admission settled/released once.
+    """
+    heartbeat = _BarrierSleep()
+
+    class Accounting(CountingAccounting):
+        async def renew_lease(self, *args: Any, **kwargs: Any) -> None:
+            raise AccountingUnavailable("accounting down")
+
+    class ParkingStore(_FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release: asyncio.Future[None] | None = None
+
+        async def put_artifact(
+            self, tenant_id: str, data: bytes, content_type: str, filename: str
+        ) -> object:
+            self.release = asyncio.get_running_loop().create_future()
+            self.entered.set()
+            await self.release
+            return await super().put_artifact(tenant_id, data, content_type, filename)
+
+    accounting = Accounting()
+    store = ParkingStore()
+    backplane = InMemoryBackplane()
+    runner = _FakeRunner(
+        result=_ok_result(
+            stdout="done\n",
+            output_files=(OutputFile(filename="c.png", content_type="image/png", data=b"x"),),
+        )
+    )
+    seam = world.seam(
+        runner, backplane=backplane, store=store, accounting=accounting, lease_sleep=heartbeat
+    )
+    task = asyncio.create_task(seam.submit(code="print('done')"))
+    try:
+        await store.entered.wait()
+        (await heartbeat.waits.get()).set_result(None)
+        # The next wait proves the failed-renewal tick was fully handled
+        # while the run was parked in capture.
+        await heartbeat.waits.get()
+        assert store.release is not None
+        if not store.release.done():
+            store.release.set_result(None)
+        summary = await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert not task.cancelled()
+    assert summary.status is CodeRunStatus.SUCCEEDED
+    run = await CodeRunRepository(world.session, world.tenant_id).get(summary.code_run_id)
+    assert run is not None
+    assert run.status is CodeRunStatus.SUCCEEDED
+    assert run.termination_reason == "completed"
+    assert len(await _audits(world, "code_run.finished", "allowed")) == 1
+    assert await _audits(world, "code_run.cancelled", "allowed") == []
+    assert await _audits(world, "code_run.cancelled", "error") == []
+    results = [e for e in _events(backplane, "stream-1") if e.get("name") == "code_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["status"] == "succeeded"
+    assert accounting.settlements == accounting.releases == 1
+
+
+async def test_accounting_loss_kill_retries_without_becoming_user_cancellation(
+    world: _World,
+) -> None:
+    """TF2: an accounting-loss kill under #830 never becomes a user Stop.
+
+    The first confirming kill fails; pending cleanup retries the same
+    identity with recorded backoff and returns a killed accounting outcome.
+    The chat Stop callback is not used: no allowed ``code_run.cancelled``,
+    and the terminal audit is ``code_run.finished``/error carrying the
+    accounting reason code.
+    """
+    entered = asyncio.Event()
+    heartbeat = _BarrierSleep()
+    retry = RecordingSleep()
+
+    class Accounting(CountingAccounting):
+        async def renew_lease(self, *args: Any, **kwargs: Any) -> None:
+            raise AccountingUnavailable("accounting down")
+
+    class Runner(_FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kills: list[uuid.UUID] = []
+
+        async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
+            self.calls += 1
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, value: SandboxSessionSpec, execution_id: uuid.UUID) -> None:
+            self.kills.append(execution_id)
+            if len(self.kills) == 1:
+                raise SandboxRunnerUnavailable("unconfirmed")
+
+    accounting = Accounting()
+    runner = Runner()
+    backplane = InMemoryBackplane()
+    seam = world.seam(
+        runner,
+        backplane=backplane,
+        accounting=accounting,
+        lease_sleep=heartbeat,
+        retry_sleep=retry,
+    )
+    task = asyncio.create_task(seam.submit(code="while True: pass"))
+    try:
+        await entered.wait()
+        (await heartbeat.waits.get()).set_result(None)
+        summary = await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert not task.cancelled()
+    assert summary.status is CodeRunStatus.KILLED
+    assert summary.reason_code == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+    assert runner.kills == [summary.code_run_id, summary.code_run_id]
+    assert retry.delays == [1.0]
+    run = await CodeRunRepository(world.session, world.tenant_id).get(summary.code_run_id)
+    assert run is not None
+    assert run.status is CodeRunStatus.KILLED
+    assert run.termination_reason == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+    errored = await _audits(world, "code_run.finished", "error")
+    assert len(errored) == 1
+    assert errored[0].event_metadata.get("reason_code") == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+    assert await _audits(world, "code_run.cancelled", "allowed") == []
+    # Only the first unconfirmed attempt wrote an error audit (R3-002).
+    assert len(await _audits(world, "code_run.cancelled", "error")) == 1
+    results = [e for e in _events(backplane, "stream-1") if e.get("name") == "code_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["status"] == "killed"
+    assert accounting.settlements == accounting.releases == 1
+
+
+async def test_chat_stop_cleanup_audits_first_failure_only(world: _World) -> None:
+    """TF2/R3-002: user Stop kill retries through ``_cancel_run`` flood-guard.
+
+    Cancelling the submission (Stop) defers to producer-owned pending
+    cleanup. Three kill attempts fail, the fourth confirms: exactly one
+    error audit (the first failure), one allowed ``code_run.cancelled``, a
+    ``cancelled`` terminal (a Stop never claims the accounting reason), and
+    admission settled/released once.
+    """
+    entered = asyncio.Event()
+    heartbeat = _BarrierSleep()
+    accounting = CountingAccounting()
+
+    class Runner(_FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kills: list[uuid.UUID] = []
+
+        async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
+            self.calls += 1
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, value: SandboxSessionSpec, execution_id: uuid.UUID) -> None:
+            self.kills.append(execution_id)
+            if len(self.kills) <= 3:
+                raise SandboxRunnerUnavailable("unconfirmed")
+
+    runner = Runner()
+    seam = world.seam(
+        runner, backplane=InMemoryBackplane(), accounting=accounting, lease_sleep=heartbeat
+    )
+    task = asyncio.create_task(seam.submit(code="while True: pass"))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(ToolCancellationPending) as pending_info:
+        await task
+    pending = pending_info.value
+    for _ in range(2):
+        with pytest.raises(SandboxRunnerUnavailable):
+            await pending.cleanup()
+    await pending.cleanup()
+    assert len(runner.kills) == 4
+    assert len(set(runner.kills)) == 1
+    run = await CodeRunRepository(world.session, world.tenant_id).get(runner.kills[0])
+    assert run is not None
+    assert run.status is CodeRunStatus.KILLED
+    assert run.termination_reason == "cancelled"
+    assert len(await _audits(world, "code_run.cancelled", "error")) == 1
+    assert len(await _audits(world, "code_run.cancelled", "allowed")) == 1
+    assert accounting.settlements == accounting.releases == 1
+    assert (await accounting.usage(world.tenant_id))[0] == 0
+
+
 async def test_runner_crash_becomes_failed_terminal_not_exception(world: _World) -> None:
     backplane = InMemoryBackplane()
     runner = _FakeRunner(raises=RuntimeError("runner exploded"))
@@ -398,3 +615,32 @@ async def test_runner_crash_becomes_failed_terminal_not_exception(world: _World)
     results = [e for e in _events(backplane, "stream-1") if e.get("name") == "code_result"]
     assert len(results) == 1
     assert results[0]["data"]["status"] == "failed"
+
+
+async def test_chat_stop_cancels_active_sandbox_without_late_output(world: _World) -> None:
+    import asyncio
+
+    entered = asyncio.Event()
+    cancelled: list[uuid.UUID] = []
+
+    class BlockingRunner(_FakeRunner):
+        async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, value: SandboxSessionSpec, execution_id: uuid.UUID) -> None:
+            cancelled.append(execution_id)
+
+    backplane = InMemoryBackplane()
+    seam = world.seam(BlockingRunner(), backplane=backplane)
+    task = asyncio.create_task(seam.submit(code="while True: pass"))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(cancelled) == 1
+    async with world.sessionmaker() as session:
+        run = await CodeRunRepository(session, world.tenant_id).get(cancelled[0])
+        assert run is not None and run.status is CodeRunStatus.KILLED
+    assert not backplane._replay.get("stream-1")

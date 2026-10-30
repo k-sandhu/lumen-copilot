@@ -180,7 +180,7 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0052_sandbox_limits"]
+    assert list(script.get_heads()) == ["0053_message_finish_reason"]
     bound = script.get_revision("0050_assistant_bound")
     assert bound is not None
     assert bound.down_revision == "0049_discovery_metadata"
@@ -190,6 +190,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     sandbox_limits = script.get_revision("0052_sandbox_limits")
     assert sandbox_limits is not None
     assert sandbox_limits.down_revision == "0051_provider_validation"
+    finish_reason = script.get_revision("0053_message_finish_reason")
+    assert finish_reason is not None
+    assert finish_reason.down_revision == "0052_sandbox_limits"
     locations = script.get_revision("0047_ingestion_locations")
     assert locations is not None
     assert locations.down_revision == "0046_message_source_provenance"
