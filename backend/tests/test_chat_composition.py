@@ -944,3 +944,121 @@ async def test_generated_artifact_api_round_trip_and_foreign_ids_return_404(worl
         assert (await client.get(path)).status_code == 404
     assert world.store.objects == {}
     assert await _count(world, models.Artifact) == 0
+
+
+@pytest.mark.parametrize("mode", ["interactive", "test", "headless"])
+def test_composition_applies_shared_budget_settings_in_every_mode(mode: str) -> None:
+    from app.core.config import Settings
+    from app.services.answer_budgets import budgets_from_settings
+
+    settings = Settings(CHAT_ANSWER_WALL_CLOCK_SECONDS=77, CHAT_MAX_EXTERNAL_CALLS_PER_ANSWER=3)
+    runtime = build_chat_runtime(
+        mode=mode,  # type: ignore[arg-type]
+        principal=Principal(user_id=uuid.uuid4(), tenant_id=uuid.uuid4(), roles=(Role.MEMBER,)),
+        backplane=InMemoryBackplane(),
+        settings=settings,
+        sessionmaker=None,  # type: ignore[arg-type]
+        gateway=_write_then_answer_gateway(),  # type: ignore[arg-type]
+        request_id="composition-budgets",
+        source_ip="unknown",
+    )
+    assert runtime._budgets == budgets_from_settings(settings)
+
+
+@pytest.mark.parametrize("same_replica", [False, True])
+async def test_stop_waits_for_artifact_compensation_before_acknowledgement(
+    world: _World, same_replica: bool
+) -> None:
+    from app.realtime.backplane import StreamOwner, is_terminal
+    from app.services.stream_cancellation import StreamCancellationService
+    from app.services.stream_registry import StreamRegistry
+
+    after_write = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    class Store(_FakeStore):
+        async def delete_artifact(self, tenant_id: str, key: str) -> None:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            await super().delete_artifact(tenant_id, key)
+
+    class PausedGateway(_ScriptedGateway):
+        async def stream_tools(self, *args: object, **kwargs: object) -> AsyncIterator[StreamEvent]:
+            if self._index == 1:
+                after_write.set()
+                await asyncio.Event().wait()
+            async for item in super().stream_tools(*args, **kwargs):
+                yield item
+
+    world.store = Store()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    await backplane.bind_owner(stream_id, StreamOwner(world.alice_id, world.tenant_id))
+    runtime = build_chat_runtime(
+        mode="interactive",
+        principal=world.alice,
+        backplane=backplane,
+        settings=get_settings(),
+        sessionmaker=world.sessionmaker,
+        gateway=PausedGateway(_write_then_answer_gateway()._turns),  # type: ignore[arg-type]
+        request_id="cancel-artifact",
+        source_ip="unknown",
+        options=ChatCompositionOptions(
+            object_store_factory=lambda: world.store,  # type: ignore[return-value]
+            extra_runtime_kwargs={"retrieval_factory": lambda _s: _FakeRetrieval()},
+        ),
+    )
+    producer = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=world.session_id,
+            question="Write the result file.",
+            model="test-model",
+            history=[],
+            collection_ids=None,
+            assistant_config=_write_file_config(),
+        )
+    )
+    registry = StreamRegistry()
+    registry.register(stream_id, task=producer, runtime=runtime)
+    request = None
+    try:
+        await asyncio.wait_for(after_write.wait(), 30)
+        assert len(world.store.objects) == 1
+        async with world.sessionmaker() as session:
+            service = StreamCancellationService(
+                backplane=backplane,
+                registry=registry if same_replica else StreamRegistry(),
+                denials=denial_context(
+                    RecordingDurableAuditTransactions(), session, world.tenant_id, world.alice_id
+                ),
+                timeout_seconds=60,
+            )
+            request = asyncio.create_task(
+                service.cancel(stream_id=stream_id, principal=world.alice)
+            )
+            await asyncio.wait_for(cleanup_started.wait(), 30)
+            assert await backplane.get_terminal(stream_id) is None
+            assert not request.done()
+            assert registry.is_active(stream_id)
+            release_cleanup.set()
+            terminal = await asyncio.wait_for(asyncio.shield(request), 30)
+            assert terminal["type"] == "cancelled"
+            assert await asyncio.wait_for(asyncio.shield(producer), 30) is False
+        assert world.store.objects == {}
+        assert await _count(world, models.Artifact) == 0
+        actions = await _audit_actions(world)
+        assert "artifact.created" not in actions
+        assert actions.count("answer.cancelled") == 1
+        async with world.sessionmaker() as session:
+            message = (await session.scalars(select(models.Message))).one()
+            assert message.finish_reason == "cancelled"
+        assert [e["type"] for e in backplane._replay[stream_id] if is_terminal(e)] == ["cancelled"]
+    finally:
+        release_cleanup.set()
+        if request is not None:
+            await asyncio.gather(request, return_exceptions=True)
+        if not producer.done():
+            producer.cancel()
+        await asyncio.gather(producer, return_exceptions=True)

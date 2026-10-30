@@ -52,6 +52,7 @@ export {
   closeSandboxSession,
   listMessages,
   sendMessage,
+  cancelChatStream,
   getSessionUsage,
 } from './chat';
 export type { PageParams } from './chat';

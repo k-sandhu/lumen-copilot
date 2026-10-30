@@ -808,6 +808,9 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     # the REST AskUserQuestion payload verbatim, so the UI can re-render the
     # options after reload. NULL for every other turn.
     question: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # How an assistant turn ended (#574): "cancelled" for a partial answer
+    # persisted at user Stop; NULL for ordinary/legacy turns.
+    finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Immutable answer-level provenance, independent of chunk/citation cascades.
     # NULL means unknown (legacy); [] means explicitly no source documents.
     # No document FK: deletion must retain the id so recall fails closed.

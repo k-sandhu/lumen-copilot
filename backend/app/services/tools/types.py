@@ -30,6 +30,18 @@ from app.services.artifacts_service import ArtifactLinks
 from app.services.tools.handles import EvidenceHandles
 
 
+class ToolCancellationPending(Exception):
+    """The tool await stopped locally, but remote cleanup still needs confirmation.
+
+    This is control flow, never a model-facing tool result. The callback retains
+    the execution identity and opens a fresh transaction for each cleanup retry.
+    """
+
+    def __init__(self, cleanup: Callable[[], Awaitable[None]]) -> None:
+        super().__init__("Tool cancellation cleanup is unconfirmed.")
+        self.cleanup = cleanup
+
+
 @runtime_checkable
 class ArtifactWriter(Protocol):
     """The narrow artifact-write seam a T1 file-writing tool persists through (#220).
@@ -536,6 +548,7 @@ __all__ = [
     "SandboxRun",
     "SandboxToolRunner",
     "ToolContext",
+    "ToolCancellationPending",
     "ToolDefinition",
     "ToolHandler",
     "TranscriptReader",

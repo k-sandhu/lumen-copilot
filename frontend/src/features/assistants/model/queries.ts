@@ -18,6 +18,7 @@
  * admin-only → a non-admin caller gets 403 which we surface honestly). Those are
  * plain reads cached generously; they never mutate here.
  */
+import { useCallback, useEffect, useRef } from 'react';
 import {
   useInfiniteQuery,
   useMutation,
@@ -189,9 +190,21 @@ export function useRollbackAssistant(id: string) {
  * library/detail caches are untouched.
  */
 export function useTestAssistant(id: string) {
-  return useMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
-    mutationFn: (body) => testAssistant(id, body),
+  // #574: each run owns an AbortController; `cancel()` aborts the fetch, the
+  // server sees the disconnect and stops the preview runtime.
+  const controllerRef = useRef<AbortController | null>(null);
+  const mutation = useMutation<AssistantTestTrace, unknown, AssistantTestRequest>({
+    mutationFn: (body) => {
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      return testAssistant(id, body, controller.signal);
+    },
   });
+  const cancel = useCallback(() => {
+    controllerRef.current?.abort();
+  }, []);
+  useEffect(() => () => controllerRef.current?.abort(), []);
+  return { ...mutation, cancel };
 }
 
 /** Delete an assistant head (204). Refreshes the library. */

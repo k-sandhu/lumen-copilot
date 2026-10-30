@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -58,6 +58,8 @@ from app.services.chat_service import (
     SessionPage,
     SessionView,
 )
+from app.services.stream_cancellation import StreamCancellationService
+from app.services.stream_registry import StreamRegistry
 from app.tasks.summarize import enqueue_summarize
 
 log = get_logger(__name__)
@@ -254,6 +256,7 @@ class MessageResponse(BaseModel):
     web_citations: list[WebCitationResponse] = Field(default_factory=list)
     tool_invocations: list[MessageToolInvocationResponse]
     question: AskUserQuestionResponse | None = None
+    finish_reason: str | None = None
     created_at: datetime
 
 
@@ -329,6 +332,16 @@ class SendMessageResponse(BaseModel):
 
     message: MessageResponse
     stream_id: str
+
+
+class CancelStreamResponse(BaseModel):
+    """``#/components/schemas/CancelStreamResponse`` (#574)."""
+
+    model_config = {"extra": "forbid"}
+
+    stream_id: str
+    status: Literal["cancelled", "already_completed"]
+    terminal: dict[str, Any]
 
 
 # --- Serialisation helpers --------------------------------------------------
@@ -436,6 +449,7 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         ],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         question=_question_to_response(m.question),
+        finish_reason=m.finish_reason,
         created_at=m.created_at,
     )
 
@@ -961,6 +975,40 @@ async def send_message(
     )
 
 
+@router.post("/streams/{stream_id}/cancel", response_model=CancelStreamResponse)
+async def cancel_chat_stream(
+    stream_id: str,
+    request: Request,
+    principal: CurrentUser,
+    backplane: BackplaneDep,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> CancelStreamResponse:
+    """Cancel an in-flight answer stream (#574, spec 0028).
+
+    Owner-checked via the same stream-owner binding the WS consumer uses:
+    unknown and foreign/cross-tenant ids are the same 404 (INV-1/INV-2).
+    Idempotent: a settled stream is the documented no-op. The local producer
+    (if this replica owns it) is cancelled through the stream registry; the
+    backplane signal interrupts an active await on another replica too;
+    acknowledgement waits for the producer terminal. The runtime emits exactly one
+    ``cancelled`` terminal and one ``answer.cancelled`` audit event.
+    """
+    terminal = await StreamCancellationService(
+        backplane=backplane,
+        registry=request.app.state.stream_registry,
+        timeout_seconds=settings.chat_cancel_timeout_seconds,
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=principal.tenant_id, principal=principal, request=request
+        ),
+    ).cancel(stream_id=stream_id, principal=principal)
+    return CancelStreamResponse(
+        stream_id=stream_id,
+        terminal=terminal,
+        status="cancelled" if terminal["type"] == "cancelled" else "already_completed",
+    )
+
+
 def _schedule_answer(
     *,
     backplane: Backplane,
@@ -1043,7 +1091,6 @@ def _schedule_answer(
             except Exception as exc:  # noqa: BLE001 — nicety, never the answer
                 log.warning("chat.summarize_enqueue_failed", error_type=type(exc).__name__)
 
-    tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
+    registry: StreamRegistry = request.app.state.stream_registry
     task = asyncio.create_task(_produce())
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
+    registry.register(result.stream_id, task=task, runtime=runtime)

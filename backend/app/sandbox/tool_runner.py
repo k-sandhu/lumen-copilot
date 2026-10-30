@@ -40,21 +40,31 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.db.repositories import CodeRunRepository
+from app.db import session as db_session
+from app.db.repositories import AuditEventRepository, CodeRunRepository, SandboxSessionRepository
 from app.db.tenant_context import bind_tenant
-from app.domain.entities import CodeRun, CodeRunStatus
+from app.domain.audit import AuditAction, AuditActor
+from app.domain.code_execution import (
+    SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
+    sandbox_reason_public_message,
+)
+from app.domain.entities import AuditOutcome, CodeRun, CodeRunStatus
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.sandbox.accounting import SandboxAccounting
+from app.sandbox.admission import AdmissionOwnership
 from app.sandbox.runner import SandboxRunner
-from app.sandbox.service import SandboxService
-from app.services.tools.types import SandboxRun
+from app.sandbox.service import SandboxService, SandboxSessionService, _failure_reason
+from app.services.audit import AuditSink, PermissionDeniedContext, PermissionDeniedRecorder
+from app.services.tools.types import SandboxRun, ToolCancellationPending
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -117,6 +127,12 @@ class ChatSandboxToolRunner:
         self._message_id = message_id
         self._accounting = accounting
         self._retry_sleep, self._lease_sleep = retry_sleep, lease_sleep
+        # R3-002 on the chat Stop path, matching the sandbox service: every
+        # unconfirmed kill attempt is logged, but only the first failure per
+        # execution writes an error audit, so an unreachable runner cannot
+        # flood the append-only trail through this callback's retries.
+        self._kill_attempts: dict[UUID, int] = {}
+        self._kill_failure_audited: set[UUID] = set()
 
     async def submit(self, *, code: str, packages: tuple[str, ...] = ()) -> SandboxRun:
         """Run ``code`` to a terminal status; stream its output; return the summary.
@@ -160,6 +176,7 @@ class ChatSandboxToolRunner:
                     accounting=self._accounting,
                     retry_sleep=self._retry_sleep,
                     lease_sleep=self._lease_sleep,
+                    cancellation_cleanup=self._cancel_run,
                 )
                 # The service walks the row through the deny-by-default gate → running
                 # → terminal, capturing stdout/stderr/exit/artifacts and auditing every
@@ -171,9 +188,33 @@ class ChatSandboxToolRunner:
                 # prose is, as ``stderr``. Reading it from the outcome is what lets the
                 # tool put the stable code in the ``tool_invocations`` row instead of a
                 # truncated sentence (issue #502).
-                outcome = await service.execute_outcome(session, run_id)
+                try:
+                    outcome = await service.execute_outcome(session, run_id)
+                except asyncio.CancelledError:
+                    # Closing the HTTP await alone cannot terminate code in the
+                    # runner. The service already confirmed the kill when the
+                    # cancellation landed inside the runner call (the callback
+                    # above); this covers a cancellation landing anywhere else
+                    # in submission. Commit the killed state before the answer
+                    # acknowledges Stop.
+                    try:
+                        await session.rollback()
+                        await self._cancel_run(run_id)
+                    except (Exception, asyncio.CancelledError) as exc:
+                        # A failed kill must bypass the ordinary tool-error wrapper.
+                        # A second cancellation can interrupt the kill await too;
+                        # it still does not confirm that remote execution stopped.
+                        # Retain the exact execution for producer-owned cleanup;
+                        # only confirmed cleanup may acknowledge successful Stop.
+                        raise ToolCancellationPending(partial(self._cancel_run, run_id)) from exc
+                    raise
                 terminal = await code_runs.get(run_id)
                 await session.commit()
+            except ToolCancellationPending:
+                # Pending cleanup carries the execution's admission
+                # ownership onward; a rollback await here must never be
+                # allowed to replace it with a bare cancellation (TF3).
+                raise
             except Exception:
                 await session.rollback()
                 raise
@@ -198,6 +239,160 @@ class ChatSandboxToolRunner:
         summary = _to_summary(terminal, reason_code=outcome.reason_code)
         await self._emit_result(summary)
         return summary
+
+    async def _cancel_run(self, run_id: UUID, ownership: AdmissionOwnership | None = None) -> None:
+        """Confirm a kill and commit its state, with no transaction held on retry.
+
+        ``ownership`` is the admitted execution's one admission object
+        (TF3): when the sandbox service hands cleanup onward it passes the
+        ownership, so this callback shares the service loop's attempt
+        counter, first-failure error-audit latch and first-cause
+        classification. Without it (a cancellation landing outside the
+        admitted execution, where no service loop ever ran) the runner's
+        own per-run latch below is the only ledger and the cause is the
+        producer cancellation itself.
+        """
+        accounting_loss = (
+            ownership is not None and ownership.cause == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+        )
+        async with self._sessionmaker() as session:
+            await bind_tenant(session, self._tenant_id)
+            lifecycle = SandboxSessionService(
+                session,
+                tenant_id=self._tenant_id,
+                owner_id=self._owner_id,
+                runner=self._runner,
+                settings=self._settings,
+                denials=PermissionDeniedContext(
+                    PermissionDeniedRecorder(
+                        db_session.get_durable_audit_transactions(self._settings),
+                        tenant_id=self._tenant_id,
+                        request_session=session,
+                    ),
+                    actor=AuditActor.system(),
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                ),
+            )
+            runs = CodeRunRepository(session, self._tenant_id)
+            current = await runs.get(run_id)
+            if current is None:
+                raise RuntimeError("Sandbox cleanup execution disappeared.")
+            if current.status in (CodeRunStatus.QUEUED, CodeRunStatus.RUNNING):
+                try:
+                    if accounting_loss:
+                        await self._confirm_accounting_kill(session, lifecycle, runs, current)
+                    else:
+                        await lifecycle.cancel(run_id)
+                    await session.commit()
+                except (Exception, asyncio.CancelledError) as exc:
+                    # A failed kill must not go unrecorded (TR1-001), but only
+                    # the first failure per execution writes the error audit
+                    # (R3-002, as in the service loop); every attempt is still
+                    # logged. Only the stable reason code is persisted — no
+                    # raw transport diagnostics. The latch is the ownership's
+                    # when handed one (shared with the service loop, one
+                    # error row per execution) and is marked only after the
+                    # commit lands.
+                    reason_code = (
+                        "sandbox_cancel_interrupted"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else _failure_reason(exc)
+                    )
+                    if ownership is not None:
+                        attempt = ownership.next_attempt()
+                    else:
+                        attempt = self._kill_attempts.get(run_id, 0) + 1
+                        self._kill_attempts[run_id] = attempt
+                    log.warning(
+                        "sandbox.kill_unconfirmed",
+                        code_run_id=str(run_id),
+                        reason_code=reason_code,
+                        attempt=attempt,
+                    )
+                    await session.rollback()
+                    await bind_tenant(session, self._tenant_id)
+                    auditing = (
+                        not ownership.failure_audited
+                        if ownership is not None
+                        else run_id not in self._kill_failure_audited
+                    )
+                    if auditing:
+                        await AuditSink(AuditEventRepository(session, self._tenant_id)).emit(
+                            action=AuditAction.CODE_RUN_CANCELLED,
+                            actor=AuditActor.user(self._owner_id),
+                            resource_type="code_run",
+                            resource_id=str(run_id),
+                            outcome=AuditOutcome.ERROR,
+                            request_id=self._request_id,
+                            source_ip=self._source_ip,
+                            metadata={"reason_code": reason_code},
+                        )
+                    await session.commit()
+                    if auditing:
+                        if ownership is not None:
+                            ownership.mark_failure_audited()
+                        else:
+                            self._kill_failure_audited.add(run_id)
+                    raise
+
+    async def _confirm_accounting_kill(
+        self,
+        session: AsyncSession,
+        lifecycle: SandboxSessionService,
+        runs: CodeRunRepository,
+        current: CodeRun,
+    ) -> None:
+        """Confirm an accounting-loss kill on the deferred chat path (TF3).
+
+        Mirrors the sandbox service loop's accounting terminal exactly —
+        the same runner kill on the same execution identity, then
+        ``KILLED`` / ``sandbox_accounting_unavailable`` with a
+        ``code_run.finished`` error audit — because the lifecycle user
+        cancel would misrecord a system kill as an allowed
+        ``code_run.cancelled``. The first established cause (accounting
+        loss, latched before any Stop) wins; the chat turn still reflects
+        the user's Stop (spec 0028).
+        """
+        if current.sandbox_session_id is not None and current.sandbox_generation is not None:
+            sandbox = await SandboxSessionRepository(session, self._tenant_id).get(
+                current.sandbox_session_id
+            )
+            await self._runner.cancel(
+                lifecycle._build_spec(  # noqa: SLF001 - same owning module
+                    sandbox_session_id=current.sandbox_session_id,
+                    generation=current.sandbox_generation,
+                    image=current.image_digest
+                    or (
+                        sandbox.image_digest
+                        if sandbox is not None
+                        else self._settings.sandbox_image
+                    ),
+                ),
+                current.id,
+            )
+        await runs.mark_terminal(
+            current.id,
+            status=CodeRunStatus.KILLED,
+            finished_at=datetime.now(UTC),
+            stderr=sandbox_reason_public_message(SANDBOX_REASON_ACCOUNTING_UNAVAILABLE),
+            termination_reason=SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
+        )
+        await AuditSink(AuditEventRepository(session, self._tenant_id)).emit(
+            action=AuditAction.CODE_RUN_FINISHED,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="code_run",
+            resource_id=str(current.id),
+            outcome=AuditOutcome.ERROR,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata={
+                "status": CodeRunStatus.KILLED.value,
+                "termination_reason": SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
+                "reason_code": SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
+                "effective_limits": current.effective_limits,
+            },
+        )
 
     async def _stream_output(self, run: CodeRun) -> None:
         """Emit the run's captured stdout/stderr as ``code_output`` chunks (ADR-0020).

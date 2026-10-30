@@ -368,6 +368,7 @@ def _runtime(
     producer_deadline_at: object = None,
     retry_sleep: object = None,
     answer_max_tokens: int | None = None,
+    budgets: object = None,
 ) -> ChatRuntime:
     extra: dict[str, object] = {}
     if text_coalesce_chars is not None:
@@ -398,6 +399,8 @@ def _runtime(
         extra["terminal_publish_margin_seconds"] = terminal_publish_margin_seconds
     if producer_deadline_at is not None:
         extra["producer_deadline_at"] = producer_deadline_at
+    if budgets is not None:
+        extra["budgets"] = budgets
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -7799,3 +7802,169 @@ async def test_provider_guard_length_continuation_stream_matches_saved_answer(
     saved = [m for m in messages if m.role.value == "assistant"][-1].content
     assert streamed == saved == expected
     assert calls == (2 if expected.endswith("Final answer.") else 1)
+
+
+# --- #574: user cancellation + shared budgets --------------------------------
+
+
+class _BlockingGateway:
+    """Streams one chunk, signals, then blocks until released (deterministic)."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls += 1
+        yield StreamEvent(text="Partial answer so far. ")
+        self.entered.set()
+        await self.release.wait()
+        yield StreamEvent(text="LATE TEXT THAT MUST NEVER LAND")
+        yield StreamEvent(finish_reason="stop")
+
+
+async def test_user_cancel_persists_partial_and_emits_one_cancelled_terminal(
+    ctx: _Ctx,
+) -> None:
+    """#574/#279: Stop cancels the producer, keeps the partial marked cancelled.
+
+    Deterministic handshake: the gateway signals after its first chunk and
+    blocks; the test then requests cancellation (registry semantics: mark +
+    task.cancel). Exactly one ``cancelled`` terminal follows, no further
+    gateway call happens, the late text never persists, and exactly one
+    ``answer.cancelled`` audit event is written.
+    """
+    from sqlalchemy import func, select
+
+    import app.db.models as db_models
+
+    gateway = _BlockingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="test/model",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    entered_task = asyncio.create_task(gateway.entered.wait())
+    done, _pending = await asyncio.wait({task, entered_task}, timeout=30.0)
+    if task in done:  # pragma: no cover - failure diagnostics
+        raise AssertionError(f"runtime finished early: {task.exception()!r}")
+    assert entered_task in done, "gateway never entered"
+    runtime.request_cancel()
+    task.cancel()
+    ok = await task
+    gateway.release.set()
+    envs = await asyncio.wait_for(consumer, timeout=10.0)
+
+    assert ok is False  # not a successful answer -> no summarisation enqueue
+    types = [e["type"] for e in envs]
+    assert types.count("cancelled") == 1
+    assert types.count("done") == 0 and types.count("error") == 0
+    assert types[-1] == "cancelled"
+    assert gateway.calls == 1
+    streamed = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert "LATE TEXT" not in streamed
+
+    async with ctx.sessionmaker() as session:
+        msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assistant = [m for m in msgs if m.role.value == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0].content == "Partial answer so far. "
+        assert assistant[0].finish_reason == "cancelled"
+        count = await session.scalar(
+            select(func.count())
+            .select_from(db_models.AuditEvent)
+            .where(db_models.AuditEvent.action == "answer.cancelled")
+        )
+        assert count == 1
+
+
+async def test_shutdown_cancel_without_request_still_errors_not_cancelled(
+    ctx: _Ctx,
+) -> None:
+    """A bare task cancel (shutdown, #156) keeps the retryable 503 error terminal."""
+    gateway = _BlockingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="test/model",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    entered_task = asyncio.create_task(gateway.entered.wait())
+    done, _pending = await asyncio.wait({task, entered_task}, timeout=30.0)
+    if task in done:  # pragma: no cover - failure diagnostics
+        raise AssertionError(f"runtime finished early: {task.exception()!r}")
+    assert entered_task in done, "gateway never entered"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gateway.release.set()
+    envs = await asyncio.wait_for(consumer, timeout=10.0)
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("cancelled") == 0
+    assert await _assistant_message_count(ctx) == 0
+
+
+async def test_shared_budgets_cap_tool_turns_for_looping_model(ctx: _Ctx) -> None:
+    """The shared budgets object bounds an adversarial always-tool model (#574)."""
+    from app.services.answer_budgets import AnswerBudgets
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [_tool_turn("Searching. ", "c1")],
+        synthesis=[StreamEvent(text="Final."), StreamEvent(finish_reason="stop")],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([passage]),
+        backplane=backplane,
+        default_max_tool_turns=20,
+        budgets=AnswerBudgets(max_tool_turns=2),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="test/model",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=10.0)
+    assert gateway.auto_calls == 2
+    assert gateway.synthesis_calls == 1
+    # Total model calls never exceed tool turns + forced synthesis (+1 length
+    # continuation allowance documented in the budgets module).
+    assert gateway.calls <= 2 + 1 + 1

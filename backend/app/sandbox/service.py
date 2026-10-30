@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import re
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from uuid import UUID, uuid4
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -54,7 +53,7 @@ from app.sandbox.accounting import (
     RedisSandboxAccounting,
     SandboxAccounting,
 )
-from app.sandbox.admission import AdmissionLease
+from app.sandbox.admission import AdmissionLease, AdmissionOwnership
 from app.sandbox.runner import SandboxRunner
 from app.sandbox.spec import EffectiveLimits, RunResult, RunSpec, SandboxSessionSpec, StagedInput
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
@@ -65,6 +64,7 @@ from app.services.audit import (
     audited_resource,
 )
 from app.services.sandbox_policy_service import EffectiveSandboxPolicy, SandboxPolicyReader
+from app.services.tools.types import ToolCancellationPending
 from app.storage import ObjectStore
 
 log = get_logger(__name__)
@@ -707,6 +707,7 @@ class SandboxService:
         accounting: SandboxAccounting | None = None,
         retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        cancellation_cleanup: Callable[[UUID, AdmissionOwnership], Awaitable[None]] | None = None,
     ) -> None:
         self._tenant_id = tenant_id
         self._owner_id = owner_id
@@ -719,6 +720,10 @@ class SandboxService:
         # default; tests inject an in-memory implementation.
         self._accounting = accounting or RedisSandboxAccounting(settings.redis_url)
         self._retry_sleep, self._lease_sleep = retry_sleep, lease_sleep
+        # Chat owns confirmed cleanup retries in a fresh transaction (#574);
+        # the standalone/background path leaves this unset and this service
+        # retries the kill itself on the same admission lease (#589/TF1).
+        self._cancellation_cleanup = cancellation_cleanup
 
     async def _effective_policy(self, session: AsyncSession) -> EffectiveSandboxPolicy:
         return await SandboxPolicyReader(
@@ -839,8 +844,7 @@ class SandboxService:
                 limits=limits,
             )
         reservation_day = datetime.now(UTC)
-        started = time.monotonic()
-        reserved = False
+        deferred = False
         lease = AdmissionLease(
             self._accounting,
             self._tenant_id,
@@ -849,9 +853,23 @@ class SandboxService:
             reserved_seconds + 300,
             self._lease_sleep,
         )
+        # One object owns this admission (lease + heartbeat + reservation)
+        # until confirmed termination / normal completion, or producer
+        # death (TF3). Every exit below either closes it or hands it
+        # onward through ``deferred_cleanup`` — there is no third path.
+        ownership = AdmissionOwnership(
+            lease,
+            self._accounting,
+            tenant_id=self._tenant_id,
+            run_id=run.id,
+            owner_token=owner_token,
+            reserved_seconds=reserved_seconds,
+            reservation_day=reservation_day,
+        )
+
         try:
             try:
-                reserved = await self._accounting.reserve_daily(
+                ownership.reserved = await self._accounting.reserve_daily(
                     self._tenant_id,
                     seconds=reserved_seconds,
                     daily_cap_s=limits.daily_runtime_cap_s,
@@ -861,7 +879,7 @@ class SandboxService:
                 return await self._finalize_denial(
                     runs, audit, run.id, reason=SANDBOX_REASON_ACCOUNTING_UNAVAILABLE, limits=limits
                 )
-            if not reserved:
+            if not ownership.reserved:
                 return await self._finalize_denial(
                     runs, audit, run.id, reason=SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED, limits=limits
                 )
@@ -875,31 +893,38 @@ class SandboxService:
                 packages=packages,
                 inputs=inputs,
                 started_at=reservation_day,
-                lease=lease,
+                ownership=ownership,
             )
+        except ToolCancellationPending as pending:
+            deferred = True
+            raise ToolCancellationPending(ownership.deferred_cleanup(pending.cleanup)) from pending
+        except asyncio.CancelledError:
+            # The structural hand-off (TF3, closing TR1-002/TR2-001 as a
+            # class): a producer cancellation escaping from ANY await of
+            # the admitted path — the in-flight call, a kill attempt, the
+            # accounting-loss backoff wait, failure audit/commit
+            # bookkeeping, or the chat finalizer — while the execution is
+            # still unconfirmed must not take the dead-producer exit when
+            # a live producer continues cleanup (the chat callback). The
+            # same ownership object rides onward, so the heartbeat keeps
+            # renewing past the original TTL and settlement/release
+            # happen once, after confirmation. With no callback (the
+            # standalone/background path), or when nothing is pending,
+            # this is the dead-producer / already-confirmed exit and the
+            # finally below closes ownership without refunding a pending
+            # reservation.
+            if lease.pending and not lease.confirmed and self._cancellation_cleanup is not None:
+                deferred = True
+                cleanup_callback = self._cancellation_cleanup
+
+                async def confirm_kill() -> None:
+                    await cleanup_callback(run.id, ownership)
+
+                raise ToolCancellationPending(ownership.deferred_cleanup(confirm_kill)) from None
+            raise
         finally:
-            await lease.stop()
-
-            # A missed settlement conservatively retains the entire reservation.
-            # Never refund into a new day's counter after a midnight boundary.
-            async def cleanup() -> None:
-                try:
-                    if reserved:
-                        await self._accounting.settle_daily(
-                            self._tenant_id,
-                            reserved_seconds=reserved_seconds,
-                            actual_seconds=min(
-                                reserved_seconds, math.ceil(time.monotonic() - started)
-                            ),
-                            day=reservation_day,
-                        )
-                finally:
-                    await self._accounting.release_lease(
-                        self._tenant_id, run.id, owner_token=owner_token
-                    )
-
-            if not lease.pending or lease.confirmed:
-                await asyncio.shield(cleanup())
+            if not deferred:
+                await ownership.close()
 
     async def _execute_admitted(
         self,
@@ -913,8 +938,9 @@ class SandboxService:
         packages: tuple[str, ...],
         inputs: tuple[StagedInput, ...],
         started_at: datetime,
-        lease: AdmissionLease,
+        ownership: AdmissionOwnership,
     ) -> ExecutionOutcome:
+        lease = ownership.lease
         lifecycle = SandboxSessionService(
             session,
             tenant_id=self._tenant_id,
@@ -1015,16 +1041,41 @@ class SandboxService:
         except asyncio.CancelledError:
             producer = asyncio.current_task()
             producer_cancelled = producer is not None and producer.cancelling() > 0
-            accounting_loss = lease.accounting_lost and not producer_cancelled
-            termination_reason = (
-                SANDBOX_REASON_ACCOUNTING_UNAVAILABLE if accounting_loss else "cancelled"
+            # First established cause wins for the run's terminal
+            # classification (spec 0028): an accounting loss latched
+            # before any producer cancellation stays
+            # ``sandbox_accounting_unavailable`` even if a Stop lands
+            # during cleanup; a Stop observed first stays ``cancelled``
+            # even if a renewal tick fails afterwards (R4/MF). The chat
+            # turn still reflects the user's Stop either way.
+            termination_reason = ownership.latch_cause(
+                SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+                if lease.accounting_lost and not producer_cancelled
+                else "cancelled"
             )
+            accounting_loss = termination_reason == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
             lease.pending = True
             delay = 1.0
-            failure_audited = False
-            attempt = 0
+            if self._cancellation_cleanup is not None and not accounting_loss:
+                # Chat confirms a producer cancellation (user Stop / shutdown)
+                # through its fresh-transaction callback. A failed or
+                # interrupted attempt defers to the producer on this same lease
+                # and execution identity; it never falls through to a second,
+                # parallel cancellation path. An accounting-loss kill is not a
+                # user Stop: it never takes this callback (which records an
+                # allowed ``code_run.cancelled``), and instead confirms through
+                # the loop below, returning a killed outcome (R3-001).
+                try:
+                    await session.rollback()
+                    await self._cancellation_cleanup(run.id, ownership)
+                except (Exception, asyncio.CancelledError) as exc:
+                    raise ToolCancellationPending(
+                        partial(self._cancellation_cleanup, run.id, ownership)
+                    ) from exc
+                lease.confirmed = True
+                raise
             while True:
-                attempt += 1
+                attempt = ownership.next_attempt()
                 try:
                     await self._runner.cancel(session_spec, run.id)
                     await bind_tenant(session, self._tenant_id)
@@ -1086,21 +1137,48 @@ class SandboxService:
                     # Audit only the first failure (and the final outcome above)
                     # so an unreachable runner cannot flood the audit trail with
                     # one row per retry; every attempt is still logged (R3-002).
-                    await session.rollback()
-                    await bind_tenant(session, self._tenant_id)
-                    if not failure_audited:
-                        await self._audit_run(
-                            audit,
-                            AuditAction.CODE_RUN_CANCELLED,
-                            run.id,
-                            AuditOutcome.ERROR,
-                            {"reason_code": reason_code},
+                    try:
+                        await session.rollback()
+                        await bind_tenant(session, self._tenant_id)
+                        # The latch lives on the ownership object, shared with
+                        # the chat confirmed-kill callback, so one execution
+                        # gets exactly one error audit however cleanup is
+                        # handed onward. It is marked only after the commit
+                        # lands: a cancellation interrupting this bookkeeping
+                        # leaves the audit to whoever continues cleanup.
+                        auditing = not ownership.failure_audited
+                        if auditing:
+                            await self._audit_run(
+                                audit,
+                                AuditAction.CODE_RUN_CANCELLED,
+                                run.id,
+                                AuditOutcome.ERROR,
+                                {"reason_code": reason_code},
+                            )
+                        await session.commit()
+                        if auditing:
+                            ownership.mark_failure_audited()
+                    except Exception as bookkeeping_exc:  # noqa: BLE001
+                        # TR3-001: failing to RECORD a failed kill (a DB blip
+                        # during the same outage) is one more unconfirmed
+                        # attempt, never an exit. Escaping here would close
+                        # the ownership under a live producer and let the
+                        # slot expire while the execution still runs. The
+                        # latch stays unset so a later attempt re-audits.
+                        log.warning(
+                            "sandbox.kill_unconfirmed",
+                            code_run_id=str(run.id),
+                            reason_code=reason_code,
+                            attempt=attempt,
+                            bookkeeping_error=type(bookkeeping_exc).__name__,
                         )
-                        failure_audited = True
-                    await session.commit()
-                # Producer shutdown here abandons cleanup without refunding and
-                # stops renewal. A kill interrupted above remains retryable.
-                # Exponential backoff with a ceiling (R3-002).
+                # A producer cancellation landing in this backoff wait (or
+                # in the bookkeeping above) escapes the loop: with a chat
+                # callback it hands ownership onward as pending cleanup in
+                # ``execute_outcome`` (TF3); without one it is producer
+                # death — no refund, renewal stops, expiry recovers. A
+                # kill interrupted above remains retryable. Exponential
+                # backoff with a ceiling (R3-002).
                 await self._retry_sleep(delay)
                 delay = min(delay * 2, 60.0)
             if accounting_loss and not (producer is not None and producer.cancelling() > 0):

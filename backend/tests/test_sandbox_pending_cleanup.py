@@ -727,3 +727,68 @@ async def test_user_stop_takes_precedence_over_failing_renewal_tick(
         cancel_release.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_deferred_lease_follows_finalizer_and_expires_after_producer_death() -> None:
+    from app.sandbox.admission import AdmissionLease
+
+    clock = [datetime(2026, 10, 30, 12, tzinfo=UTC)]
+    accounting = CountingAccounting(now=lambda: clock[0])
+    tenant, run, token = uuid4(), uuid4(), uuid4()
+    assert await accounting.acquire_lease(
+        tenant, run, max_concurrency=1, ttl_seconds=330, owner_token=token
+    )
+    assert await accounting.reserve_daily(tenant, seconds=30, daily_cap_s=3600)
+    heartbeat = BarrierSleep()
+    ready: asyncio.Future[AdmissionLease] = asyncio.get_running_loop().create_future()
+
+    async def original_owner() -> None:
+        lease = AdmissionLease(accounting, tenant, run, token, 330, heartbeat)
+        lease.pending = True
+        ready.set_result(lease)
+        await asyncio.Event().wait()
+
+    original = asyncio.create_task(original_owner())
+    lease = await ready
+    tick = await heartbeat.waits.get()
+    original.cancel()
+    await asyncio.gather(original, return_exceptions=True)
+    finalizer: asyncio.Task[None] | None = None
+    handshake: asyncio.Task[bool] | None = None
+    try:
+        assert tick.cancelled(), "A dead producer must not leave an orphan heartbeat"
+        adopted = asyncio.Event()
+
+        async def live_finalizer() -> None:
+            await lease.adopt()
+            adopted.set()
+            await asyncio.Event().wait()
+
+        finalizer = asyncio.create_task(live_finalizer())
+        handshake = asyncio.create_task(adopted.wait())
+        done, _ = await asyncio.wait({finalizer, handshake}, return_when=asyncio.FIRST_COMPLETED)
+        assert handshake in done, "Deferred cleanup must adopt the same fenced admission"
+        for _ in range(4):
+            tick = await heartbeat.waits.get()
+            clock[0] += timedelta(seconds=100)
+            tick.set_result(None)
+        tick = await heartbeat.waits.get()
+        assert not await accounting.acquire_lease(
+            tenant, uuid4(), max_concurrency=1, ttl_seconds=60
+        )
+        assert accounting.settlements == accounting.releases == 0
+        finalizer.cancel()
+        await asyncio.gather(finalizer, return_exceptions=True)
+        assert tick.cancelled()
+        clock[0] += timedelta(seconds=331)
+        assert await accounting.acquire_lease(tenant, uuid4(), max_concurrency=1, ttl_seconds=60)
+        assert (await accounting.usage(tenant))[1] == 30
+    finally:
+        for task in (original, finalizer, handshake):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *[task for task in (original, finalizer, handshake) if task is not None],
+            return_exceptions=True,
+        )
+        await lease.stop()

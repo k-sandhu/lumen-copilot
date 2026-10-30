@@ -517,6 +517,8 @@ export interface Message {
   tool_invocations?: MessageToolInvocation[];
   /** The clarifying question this turn ended with, if any (spec 0006 #429). */
   question?: AskUserQuestion;
+  /** How the turn ended (#574): 'cancelled' for a stopped partial answer. */
+  finish_reason?: string | null;
   created_at: string;
 }
 
@@ -651,6 +653,14 @@ export interface SendMessageResponse {
   stream_id: string;
 }
 
+/** 200 from POST /chat/streams/{streamId}/cancel (#574). */
+export interface CancelStreamResponse {
+  stream_id: string;
+  status: 'cancelled' | 'already_completed';
+  /** Settled server outcome, also returned when its socket delivery was lost. */
+  terminal: TerminalEnvelope;
+}
+
 // --- Search (contracts/openapi.yaml §search, M2 #80) ---
 
 /** Where a result originated (`connector` reserved; framework is post-MVP). */
@@ -773,6 +783,7 @@ export const AUDIT_EVENT_TYPES = [
   'action.executed',
   'action.requested',
   'answer.generated',
+  'answer.cancelled',
   'artifact.created',
   'artifact.deleted',
   'artifact.downloaded',
@@ -1998,8 +2009,8 @@ export interface SandboxSession {
 }
 
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
-// Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
-export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';
+// Lifecycle: start -> (delta | event)* -> done | error | cancelled, exactly one terminal.
+export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error' | 'cancelled';
 
 interface BaseEnvelope {
   type: EnvelopeType;
@@ -2049,15 +2060,22 @@ export interface ErrorEnvelope extends BaseEnvelope {
   problem: WsProblem;
 }
 
+export interface CancelledEnvelope extends BaseEnvelope {
+  type: 'cancelled';
+  /** Terminal user-cancellation summary (#574; chat: ChatCancelledData). */
+  data: Record<string, unknown>;
+}
+
 export type WsEnvelope =
   | StartEnvelope
   | DeltaEnvelope
   | EventEnvelope
   | DoneEnvelope
-  | ErrorEnvelope;
+  | ErrorEnvelope
+  | CancelledEnvelope;
 
 /** A terminal envelope ends a stream (exactly one per streamId). */
-export type TerminalEnvelope = DoneEnvelope | ErrorEnvelope;
+export type TerminalEnvelope = DoneEnvelope | ErrorEnvelope | CancelledEnvelope;
 
 // --- Chat answer-stream payloads (websocket-envelopes.schema.json x-chatStream) ---
 // These slot into the generic envelope `data`/`event` shapes for a chat answer:
@@ -2212,6 +2230,19 @@ export interface ChatNarration {
 // text as event:narration immediately after, so it is surfaced through the
 // transient narration affordance rather than vanishing. No payload interface is
 // needed (the event carries none); the reducer keys off the name.
+
+/** `cancelled.data` — terminal summary for a user-cancelled chat answer (#574). */
+export interface ChatCancelledData {
+  messageId: string;
+  finishReason: 'cancelled';
+  model?: string;
+  citationCount: number;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}
 
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
