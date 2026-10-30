@@ -278,6 +278,34 @@ class Settings(PasswordHashingSettings):
 
     # --- Observability (environment is inherited with the hashing policy) ---
     log_level: str = Field(default="info", alias="LOG_LEVEL")
+    # OpenTelemetry export (ADR-0027, #817): turn traces → Arize Phoenix, metrics →
+    # Prometheus's OTLP receiver, both OTLP/HTTP. OFF by default: no exporter, no
+    # socket, every helper a no-op. The defaults name the `observability` compose
+    # profile's services; a blank endpoint disables that signal alone.
+    telemetry_enabled: bool = Field(default=False, alias="TELEMETRY_ENABLED")
+    telemetry_traces_endpoint: str = Field(
+        default="http://phoenix:6006/v1/traces", alias="TELEMETRY_TRACES_ENDPOINT"
+    )
+    telemetry_metrics_endpoint: str = Field(
+        default="http://prometheus:9090/api/v1/otlp/v1/metrics",
+        alias="TELEMETRY_METRICS_ENDPOINT",
+    )
+    # Bearer key for an authenticated Phoenix (PHOENIX_ENABLE_AUTH). Required
+    # outside local development, because traces carry tenant content (below).
+    telemetry_traces_api_key: str = Field(default="", alias="TELEMETRY_TRACES_API_KEY")
+    # Prompts, completions, tool I/O and retrieved passages in spans (sponsor
+    # decision: on). False keeps ids, counts, names, status and timing only.
+    telemetry_capture_content: bool = Field(default=True, alias="TELEMETRY_CAPTURE_CONTENT")
+    # The Phoenix project the traces are filed under.
+    telemetry_project_name: str = Field(default="lumen-copilot", alias="TELEMETRY_PROJECT_NAME")
+    telemetry_metrics_export_interval_seconds: float = Field(
+        default=15.0, gt=0, alias="TELEMETRY_METRICS_EXPORT_INTERVAL_SECONDS"
+    )
+    # Longest string a span attribute keeps; longer values are truncated in the
+    # trace (never in the request).
+    telemetry_max_attribute_chars: int = Field(
+        default=65_536, ge=1_024, alias="TELEMETRY_MAX_ATTRIBUTE_CHARS"
+    )
 
     # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
     # Symmetric signing secret for the access JWT. A dev default is provided so
@@ -1695,6 +1723,26 @@ class Settings(PasswordHashingSettings):
         if self.environment != "local" and self.jwt_secret == self._DEV_JWT_SECRET:
             raise ValueError(
                 "JWT_SECRET must be overridden outside the local environment (spec 0004 §2.3)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_authenticated_trace_export_in_prod(self) -> Settings:
+        """Refuse unauthenticated trace export outside ``local`` (ADR-0027 §4).
+
+        Traces carry tenant content when capture is on, so a deployed trace store
+        must be operator-only: Phoenix with authentication, reached with a key.
+        """
+        if (
+            self.environment != "local"
+            and self.telemetry_enabled
+            and self.telemetry_traces_endpoint
+            and self.telemetry_capture_content
+            and not self.telemetry_traces_api_key
+        ):
+            raise ValueError(
+                "TELEMETRY_TRACES_API_KEY is required to export traces with content "
+                "outside the local environment (ADR-0027 §4)"
             )
         return self
 

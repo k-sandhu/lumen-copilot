@@ -58,6 +58,7 @@ from app.domain.discovery import DocumentPage, DocumentRead
 from app.domain.entities import Message
 from app.domain.retrieval import DocumentMatch, DocumentResolution, DocumentText, RetrievedPassage
 from app.llm import LLMGateway
+from app.observability import observe_retrieval
 from app.retrieval import discovery, queries
 from app.retrieval.fusion import rrf_score
 from app.retrieval.permissions import AllowSet
@@ -236,6 +237,31 @@ class RetrievalService:
         k = _clamp_k(k)
         if not query.strip():
             return []
+        # The RETRIEVER span (ADR-0027) records what was searched and which
+        # permitted passages came back — the embed call nests inside it.
+        with observe_retrieval(
+            query=query, k=k, collection_ids=collection_ids, document_ids=document_ids
+        ) as span:
+            passages, engine_hits = await self._search_permitted(
+                principal=principal,
+                query=query,
+                k=k,
+                collection_ids=collection_ids,
+                document_ids=document_ids,
+            )
+            span.retrieved(passages, engine_hits=engine_hits)
+            return passages
+
+    async def _search_permitted(
+        self,
+        *,
+        principal: Principal,
+        query: str,
+        k: int,
+        collection_ids: list[UUID] | None,
+        document_ids: list[UUID] | None,
+    ) -> tuple[list[RetrievedPassage], int]:
+        """:meth:`search`'s body: the permitted passages plus the engine's raw hit count."""
         allow_set = await self._resolve_allow_set(principal)
         allow = await self._allow_filter(allow_set)
 
@@ -263,7 +289,7 @@ class RetrievalService:
             document_ids=document_ids,
         )
         if not hits:
-            return []
+            return [], 0
 
         # Hydrate from Postgres — the source of truth — re-applying the SQL
         # permission predicate (defense in depth — INV-2): a hit the re-check
@@ -308,7 +334,7 @@ class RetrievalService:
                     speaker_name=row.speaker_name,
                 )
             )
-        return passages
+        return passages, len(hits)
 
     async def read_passages(
         self,

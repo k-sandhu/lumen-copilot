@@ -37,6 +37,7 @@ from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
 from app.ingestion.contract import provision_embedding_contract
 from app.llm import aclose_embedding_clients
+from app.observability import HttpMetricsMiddleware, configure_telemetry, shutdown_telemetry
 from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
 from app.search import aclose_search_store
@@ -107,6 +108,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: Settings = app.state.settings
     log.info("startup.begin", environment=settings.environment, version=settings.version)
+    # Trace/metric export (ADR-0027) — a no-op unless TELEMETRY_ENABLED. Here,
+    # not in create_app, so building an app in a test never starts an exporter.
+    configure_telemetry(settings, process="api")
     try:
         await get_object_store().ensure_bucket()
         log.info("startup.bucket_ready", bucket=settings.s3_bucket)
@@ -139,6 +143,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # instance, so the lifespan is what closes it.
     await aclose_async_rate_limit_pools()
     await dispose_engine()
+    # Last: drained answers above may still end spans that must be flushed.
+    shutdown_telemetry()
     log.info("shutdown.complete")
 
 
@@ -229,6 +235,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.answer_tasks = set()
 
     app.add_middleware(CorrelationMiddleware)
+    # Outermost, so the request-duration metric covers correlation and handlers.
+    app.add_middleware(HttpMetricsMiddleware)
     _register_exception_handlers(app)
 
     # Unversioned health probes (contracts/openapi.yaml).

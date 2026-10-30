@@ -81,6 +81,17 @@ The full 16-epic vision in [consolidated-structure.md](../product/consolidated-s
 
 **What stays out** (file a sibling issue, never widen): **write-back into sources** (E5, approval-gated); **webhook/event-driven sync** (E7-2); **third-party / push / SDK-only custom connectors** (isolation must be revisited first — ADR-0019 §4); **SCIM / group expansion** (CC-3 v2 — Google-group ACLs deny until it lands).
 
+### 4.3 Committed scope expansion — operator observability (epic [#300](https://github.com/k-sandhu/lumen-copilot/issues/300))
+
+**Update (2026-10-29).** The sponsor lifted the [#300](https://github.com/k-sandhu/lumen-copilot/issues/300) scope gate for an **operator-facing observability** slice of roadmap **E14 (AgentOps)**, which §4 above had left out beyond the M0 audit log. The first committed feature is [#817](https://github.com/k-sandhu/lumen-copilot/issues/817) (F-AO-5):
+
+- **LLM tracing in Arize Phoenix (self-hosted):** one OpenTelemetry/OpenInference trace per chat turn and headless run, covering retrieval, every model call (messages, tools, tokens, cache use, time to first token), tool calls and sub-agents.
+- **Service and LLM metrics in Prometheus/Grafana:** request latency and errors, model-call latency and errors, token burn, tool and turn outcomes, from the API and every worker.
+
+**Architecture record:** [ADR-0027](../architecture/0027-llm-observability-phoenix-and-metrics.md), which also records Phoenix's Elastic License 2.0 as a scoped exception to ADR-0003's open-source-only rule. **The mission filters (§2) and [spec 0004](0004-security-and-domain-invariants.md) are unchanged.** Observability is an ops surface, distinct from the product audit log (filter 4). It is not tenant-facing: by sponsor decision, traces capture prompt, passage and completion content by default, so the trace store is operator-only, authenticated outside local development, and never receives secrets.
+
+**What stays out** (file a sibling issue, never widen): the **in-app, tenant-facing trace viewer** (F-AO-2); **usage & adoption analytics** (F-AO-1); **cost budgets** (F-AO-3); **run-health boards** (F-AO-4); **export to Arize AX cloud**, or any off-stack trace sink (it needs its own sponsor decision, since content would leave the stack); **LLM-judge evaluations** (E14-3); **alerting**.
+
 ## 5. Personas
 
 Primary (MVP — the people who use or operate the assistant):

@@ -212,6 +212,8 @@ FORBIDDEN_SETTINGS: dict[str, str] = {
     "s3_endpoint_url": "Lumen's object store — return bytes on FetchedDoc.data instead",
     "s3_public_endpoint_url": "Lumen's object store (browser-facing endpoint)",
     "sandbox_runner_url": "Lumen's code-sandbox runner service (ADR-0013)",
+    "telemetry_traces_endpoint": "Lumen's trace store (Arize Phoenix, ADR-0027)",
+    "telemetry_metrics_endpoint": "Lumen's metrics store (Prometheus OTLP receiver, ADR-0027)",
     # Infra identifiers that name Lumen's own stores.
     "s3_bucket": "Lumen's object-store bucket",
     "opensearch_index": "Lumen's search-store index name",
@@ -223,6 +225,7 @@ FORBIDDEN_SETTINGS: dict[str, str] = {
     "openrouter_api_key": "Lumen's LLM-provider API key",
     "chat_prompt_cache_scope_secret": "Lumen's gateway-owned prompt-cache HMAC key",
     "sandbox_runner_token": "Lumen's sandbox-runner credential — never connector-owned",
+    "telemetry_traces_api_key": "Lumen's trace-store credential (ADR-0027)",
     "jwt_secret": "Lumen's token-signing key",
     "test_fast_password_hashing": "Lumen's password-hashing policy — never connector-owned",
     "secrets_encryption_key": (
@@ -346,6 +349,11 @@ ALLOWED_DEPLOYMENT_CONFIG: frozenset[str] = frozenset(
         "source_sync_rate_backoff_seconds",
         "source_sync_rate_max_per_window",
         "source_sync_rate_window_seconds",
+        "telemetry_capture_content",
+        "telemetry_enabled",
+        "telemetry_max_attribute_chars",
+        "telemetry_metrics_export_interval_seconds",
+        "telemetry_project_name",
         "transcription_base_url",
         "transcription_chunk_overlap_seconds",
         "transcription_chunk_seconds",
