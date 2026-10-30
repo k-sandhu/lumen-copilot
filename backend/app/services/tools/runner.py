@@ -380,7 +380,12 @@ class ToolRunner:
         arguments = legacy_arguments(
             call.arguments, definition.json_schema, omit_placeholders=definition.read_only
         )
-        argument_error = validate_arguments(arguments, definition.json_schema)
+        argument_error = (
+            "Send one valid JSON object with finite numbers and valid UTF-8 text "
+            "without NUL characters, within the tool argument size limit."
+            if call.argument_error is not None
+            else validate_arguments(arguments, definition.json_schema)
+        )
         if argument_error is not None:
             return await self._finalise(
                 call=call,
@@ -630,15 +635,17 @@ class ToolRunner:
         # Advice must match the same allow-list enforced above, including when an
         # isolated call scope supplied a fresh or stale context (R1-001 / #610).
         context = replace(context, allowed_tools=self._allowed)
+        timer = asyncio.timeout(definition.timeout_seconds)
         try:
-            if definition.timeout_seconds is None:
+            if definition.timeout_seconds is not None and definition.timeout_seconds <= 0:
+                raise TimeoutError
+            async with timer:
                 body = await definition.handler(call.arguments, context)
-            else:
-                body = await asyncio.wait_for(
-                    definition.handler(call.arguments, context),
-                    timeout=definition.timeout_seconds,
-                )
+            _raise_if_cancelling()
+            if timer.expired():
+                raise TimeoutError
         except TimeoutError:
+            _raise_if_cancelling()
             return ToolResult.failure(
                 call_id=call.id,
                 name=call.name,
@@ -648,6 +655,7 @@ class ToolRunner:
                 duration_ms=_elapsed_ms(started),
             )
         except Exception as exc:  # noqa: BLE001 — a throwing tool must not crash the run
+            _raise_if_cancelling()
             # Log the error *type* only (never the message — it may carry vendor
             # details); the model gets a safe, opaque tool reply (issue #207 §7).
             log.error("tool.failed", tool=call.name, error_type=type(exc).__name__)
@@ -908,6 +916,12 @@ def _as_decision(value: bool | ApprovalDecision) -> ApprovalDecision:
     if isinstance(value, ApprovalDecision):
         return value
     return ApprovalDecision(approved=bool(value))
+
+
+def _raise_if_cancelling() -> None:
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
 
 
 def _elapsed_ms(started: float) -> int:

@@ -525,7 +525,9 @@ class LLMGateway:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
+                            "arguments": (
+                                "{}" if tc.argument_error is not None else json.dumps(tc.arguments)
+                            ),
                         },
                     }
                     for tc in m.tool_calls
@@ -821,7 +823,9 @@ class LLMGateway:
             if closure is not None:
                 closure.closed = closed
 
-        built_calls = (acc.build() for _, acc in sorted(tool_acc.items()))
+        built_calls = _ToolCallAccumulator.build_turn(
+            [acc for _, acc in sorted(tool_acc.items())], messages
+        )
         tool_calls = tuple(
             replace(call, name=name_map.from_wire(call.name)) for call in built_calls
         )
@@ -964,36 +968,94 @@ class LLMGateway:
         return await adapter.transcribe(audio_path)
 
 
+MAX_TOOL_ARGUMENT_CHARACTERS = 20_000
+MAX_TOOL_ARGUMENT_DEPTH = 64
+
+
 class _ToolCallAccumulator:
     """Accumulates a streamed tool call's fragments into one :class:`ToolCall`.
 
     Providers stream a tool call across chunks: the ``id`` + ``name`` arrive once
     (usually the first fragment), the ``arguments`` JSON string arrives in pieces.
-    This stitches them, then parses the arguments at the end (defensively — a
-    malformed/empty arguments string yields ``{}`` rather than crashing the loop).
+    Retention is bounded while streaming. Decode failures remain explicit domain
+    refusals; only an empty argument string is a valid no-argument request.
     """
 
     def __init__(self) -> None:
         self.id: str = ""
         self.name: str = ""
         self._args = ""
+        self._argument_error: str | None = None
 
     def feed(self, *, call_id: str | None, name: str | None, arguments: str | None) -> None:
-        if call_id:
+        if isinstance(call_id, str) and call_id.strip():
             self.id = call_id
         if name:
             self.name = name
-        if arguments:
-            self._args += arguments
+        if arguments is not None and self._argument_error is None:
+            if not isinstance(arguments, str):
+                self._argument_error = "invalid_json"
+            elif len(self._args) + len(arguments) > MAX_TOOL_ARGUMENT_CHARACTERS:
+                self._argument_error = "too_long"
+            else:
+                self._args += arguments
+            if self._argument_error is not None:
+                self._args = ""
 
     def build(self) -> ToolCall:
+        error = self._argument_error
+        parsed: dict[str, Any] = {}
         try:
-            parsed = json.loads(self._args) if self._args.strip() else {}
-        except (ValueError, TypeError):
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        return ToolCall(id=self.id, name=self.name, arguments=parsed)
+            if error is None:
+                self._args.encode("utf-8")
+                decoded = json.loads(
+                    self._args.strip() or "{}", parse_constant=self._reject_constant
+                )
+                if not isinstance(decoded, dict):
+                    raise ValueError("non_object")
+                pending: list[tuple[Any, int]] = [(decoded, 1)]
+                while pending:
+                    value, depth = pending.pop()
+                    if isinstance(value, str) and "\x00" in value:
+                        raise ValueError("invalid_text")
+                    if isinstance(value, dict | list) and depth > MAX_TOOL_ARGUMENT_DEPTH:
+                        raise ValueError("too_deep")
+                    if isinstance(value, dict):
+                        pending.extend((key, depth + 1) for key in value)
+                        pending.extend((child, depth + 1) for child in value.values())
+                    elif isinstance(value, list):
+                        pending.extend((child, depth + 1) for child in value)
+                # Also catches exponent overflow and escaped lone surrogates.
+                json.dumps(decoded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                parsed = decoded
+        except (ValueError, TypeError, RecursionError):
+            error = "invalid_json_object"
+        return ToolCall(id=self.id, name=self.name, arguments=parsed, argument_error=error)
+
+    @staticmethod
+    def _reject_constant(_value: str) -> Any:
+        raise ValueError("non_finite_number")
+
+    @staticmethod
+    def build_turn(
+        accumulators: Sequence[_ToolCallAccumulator], messages: Sequence[ChatMessage]
+    ) -> tuple[ToolCall, ...]:
+        """Preserve real IDs and allocate deterministic replacements before dispatch."""
+        calls = [acc.build() for acc in accumulators]
+        used = {call.id for message in messages for call in message.tool_calls}
+        used.update(message.tool_call_id for message in messages if message.tool_call_id)
+        reserved = used | {call.id for call in calls if call.id}
+        result: list[ToolCall] = []
+        for index, call in enumerate(calls):
+            if not call.id or call.id in used:
+                candidate = f"call_{len(messages)}_{index}"
+                while candidate in reserved:
+                    candidate += "_"
+                call = replace(call, id=candidate)
+                reserved.add(candidate)
+            used.add(call.id)
+            result.append(call)
+        return tuple(result)
 
 
 def _accumulate_tool_call(acc: dict[int, _ToolCallAccumulator], frag: Any) -> None:

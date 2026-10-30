@@ -33,7 +33,7 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 | [0020](0020-reusable-root-sandbox-sessions.md) | Reusable root-capable Python sandbox sessions | Accepted |
 | [0021](0021-data-pack-connector.md) | Data packs as a connector — curated document sets as a managed source | Accepted |
 | [0022](0022-group-access-model.md) | Group access model — group principals, and who a source is visible to (supersedes 0021 §5) | Accepted |
-| [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2 and claim-linked answers | Proposed |
+| [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2, claim-linked answers and tool-call boundary hardening (#831) | Proposed |
 | [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
 | [0026](0026-continuous-integration.md) | Offline backend and frontend CI gates, locked dependencies, caches, and bounded test workers | Accepted |
 

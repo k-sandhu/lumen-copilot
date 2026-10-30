@@ -17,8 +17,8 @@ on:
 **Failure isolation (ADR-0012 §7).** Every failure mode — a blocked egress
 target, a down/refusing server, a timeout, a protocol fault, a malformed frame —
 is caught and returned as a typed result (``ok=False`` / an ``error`` health),
-**never** an exception escaping the module. The chat run reads the result and
-continues.
+**never** a tool-failure exception escaping the module. Genuine cancellation
+propagates as control flow. The chat run reads ordinary failures and continues.
 
 **Secret hygiene (ADR-0012 §3, CC-C #209).** The auth token is fetched in-process
 from the injected resolver at connect time, attached to the transport as a bearer
@@ -29,6 +29,7 @@ structured logs key only off the log-safe server ``slug``.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import timedelta
@@ -69,6 +70,11 @@ _log = structlog.get_logger(__name__)
 # Awaitable: the check runs inside ``connect``, on the serving event loop, so a
 # blocking implementation would park the whole worker per MCP call (#527).
 RateLimitCheck = Callable[[], Awaitable[bool]]
+
+# ADR-0024 #831: one shared budget for model text and serialized trace payload.
+DEFAULT_MCP_RESULT_CHARACTERS = 12_000
+MCP_RESULT_TRUNCATED = "[MCP result truncated; request a narrower result.]"
+MCP_STRUCTURED_OMITTED = "[MCP structured result omitted; request a narrower result.]"
 
 
 class McpSession:
@@ -116,22 +122,32 @@ class McpSession:
 
         Bounds the call with the per-call timeout. Any failure — server down,
         timeout, protocol fault, malformed reply, or an application-level tool
-        error (MCP ``isError``) — is a typed ``ok=False`` result, never a raise
-        (ADR-0012 §7). The arguments are NOT logged (they may carry sensitive
-        values); only the tool name + a boolean outcome are.
+        error (MCP ``isError``) — is a typed ``ok=False`` result; genuine
+        cancellation propagates (ADR-0012 §7, ADR-0024). The arguments are NOT
+        logged (they may carry sensitive values); only the tool name + a boolean
+        outcome are.
         """
+        timer = asyncio.timeout(self._call_timeout_seconds)
         try:
-            result: CallToolResult = await asyncio.wait_for(
-                self._session.call_tool(name, arguments=args),
-                timeout=self._call_timeout_seconds,
-            )
+            if self._call_timeout_seconds <= 0:
+                raise TimeoutError
+            async with timer:
+                result: CallToolResult = await self._session.call_tool(name, arguments=args)
+            if _is_genuine_cancellation():
+                raise asyncio.CancelledError
+            if timer.expired():
+                raise TimeoutError
         except TimeoutError:
+            if _is_genuine_cancellation():
+                raise asyncio.CancelledError from None
             _log.warning("mcp.call_tool_timeout", slug=self._slug, tool=name)
             return McpToolResult.failure(
                 error_code=MCP_ERROR_TIMEOUT,
                 content=f"the MCP tool {name!r} timed out",
             )
         except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - contain everything
+            if _is_genuine_cancellation():
+                raise asyncio.CancelledError from None
             _log.warning(
                 "mcp.call_tool_failed", slug=self._slug, tool=name, error=type(exc).__name__
             )
@@ -306,8 +322,8 @@ class McpClient:
         """Connect, invoke one tool, disconnect — the one-shot invoke helper.
 
         Any connect failure is mapped to a typed ``ok=False`` result carrying the
-        connect ``error_code`` (never a raise). A tool-level failure is contained by
-        :meth:`McpSession.call_tool`.
+        connect ``error_code``. A tool-level failure is contained by
+        :meth:`McpSession.call_tool`; genuine cancellation propagates through both.
         """
         try:
             session = await self.connect(server)
@@ -318,8 +334,13 @@ class McpClient:
             )
         try:
             async with session:
-                return await session.call_tool(name, args)
+                result = await session.call_tool(name, args)
+            if _is_genuine_cancellation():
+                raise asyncio.CancelledError
+            return result
         except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - contain everything
+            if _is_genuine_cancellation():
+                raise asyncio.CancelledError from None
             _log.warning(
                 "mcp.call_tool_teardown_failed", slug=server.slug, error=type(exc).__name__
             )
@@ -572,36 +593,128 @@ def _to_tool_result(name: str, result: CallToolResult) -> McpToolResult:
     run continues.
     """
     content = _render_content(result.content)
+    if result.isError and not content:
+        content = _bound_text(f"the MCP tool {name!r} reported an error")
+    structured = result.structuredContent
+    if structured is not None and not _structured_fits(
+        structured, DEFAULT_MCP_RESULT_CHARACTERS - len(content)
+    ):
+        structured = None
+        marker = MCP_STRUCTURED_OMITTED
+        if len(content) + 1 + len(marker) > DEFAULT_MCP_RESULT_CHARACTERS:
+            if content.endswith(MCP_RESULT_TRUNCATED):
+                content = content[: -len(MCP_RESULT_TRUNCATED)].removesuffix("\n")
+            marker = MCP_RESULT_TRUNCATED + "\n" + marker
+        content = _with_marker(content, marker)
     if result.isError:
         return McpToolResult(
             ok=False,
-            content=content or f"the MCP tool {name!r} reported an error",
+            content=content,
             is_error=True,
             error_code=MCP_ERROR_TOOL_ERROR,
-            structured=result.structuredContent,
+            structured=structured,
         )
     return McpToolResult(
         ok=True,
         content=content,
         is_error=False,
-        structured=result.structuredContent,
+        structured=structured,
     )
 
 
 def _render_content(blocks: list[Any]) -> str:
     """Flatten the content blocks of a tool result into readable text.
 
-    Text blocks are joined verbatim; a non-text block (image/embedded resource) is
+    Text blocks are joined within one budget; a non-text block (image/embedded resource) is
     rendered as a short ``[type]`` placeholder so the model still learns something
     was returned. No vendor object is exposed — only the derived string.
     """
     parts: list[str] = []
+    remaining = DEFAULT_MCP_RESULT_CHARACTERS + 1
     for block in blocks:
-        if isinstance(block, TextContent):
-            parts.append(block.text)
+        text = (
+            block.text
+            if isinstance(block, TextContent)
+            else f"[{getattr(block, 'type', 'content')}]"
+        )
+        if parts:
+            parts.append("\n")
+            remaining -= 1
+        parts.append(text[:remaining])
+        remaining -= min(len(text), remaining)
+        if remaining == 0:
+            break
+    return _bound_text("".join(parts))
+
+
+def _safe_text(text: str) -> str:
+    """Normalize remote surrogate pairs and replace invalid text, within the cap."""
+    return (
+        text.encode("utf-16-le", errors="surrogatepass")
+        .decode("utf-16-le", errors="replace")
+        .replace("\x00", "\ufffd")
+    )
+
+
+def _with_marker(text: str, marker: str) -> str:
+    end = max(0, DEFAULT_MCP_RESULT_CHARACTERS - len(marker) - 1)
+    # A remote Python string can contain an explicit UTF-16 pair rather than a
+    # Unicode scalar. Drop the whole pair if the cut would separate its halves.
+    if (
+        0 < end < len(text)
+        and 0xD800 <= ord(text[end - 1]) <= 0xDBFF
+        and 0xDC00 <= ord(text[end]) <= 0xDFFF
+    ):
+        end -= 1
+    prefix = _safe_text(text[:end])
+    return prefix + "\n" + marker if prefix else marker
+
+
+def _bound_text(text: str) -> str:
+    if len(text) > DEFAULT_MCP_RESULT_CHARACTERS:
+        return _with_marker(text, MCP_RESULT_TRUNCATED)
+    return _safe_text(text)
+
+
+def _structured_fits(value: dict[str, Any], limit: int) -> bool:
+    """Measure JSON without serializing an unbounded string/list into a copy."""
+    remaining = limit
+
+    def consume(size: int) -> None:
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError("size_limit")
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            consume(2)
+            for index, (key, child) in enumerate(item.items()):
+                if not isinstance(key, str):
+                    raise ValueError("invalid_key")
+                consume((2 if index else 0) + 2)
+                visit(key)
+                visit(child)
+        elif isinstance(item, list):
+            consume(2)
+            for index, child in enumerate(item):
+                consume(2 if index else 0)
+                visit(child)
         else:
-            parts.append(f"[{getattr(block, 'type', 'content')}]")
-    return "\n".join(parts)
+            if isinstance(item, str):
+                if len(item) > remaining or "\x00" in item:
+                    raise ValueError("invalid_text_or_size")
+            elif item is not None and not isinstance(item, bool | int | float):
+                raise ValueError("invalid_value")
+            encoded = json.dumps(item, ensure_ascii=False, allow_nan=False)
+            encoded.encode("utf-8")
+            consume(len(encoded))
+
+    try:
+        visit(value)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    return True
 
 
 __all__ = [
