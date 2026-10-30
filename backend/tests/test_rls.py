@@ -636,6 +636,7 @@ async def test_chat_runtime_call_scopes_keep_rls_isolation_on_postgres() -> None
                 tenant_id: object = None,
                 user_id: object = None,
                 session_id: object = None,
+                max_tokens: object = None,
             ):  # noqa: ANN202 — async generator
                 msgs = list(messages)  # type: ignore[arg-type]
                 has_tool = any(getattr(m.role, "value", "") == "tool" for m in msgs)

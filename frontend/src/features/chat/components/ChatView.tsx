@@ -403,6 +403,7 @@ function ActiveSession({
   const stream = useChatStream({
     streamId: activeStreamId,
     onDone: () => onDoneReload(),
+    onCancelled: () => onDoneReload(),
   });
 
   useEffect(() => {
@@ -412,7 +413,7 @@ function ActiveSession({
     // chips nor ghost. An error clears anything already promoted.
     if (stream.phase === 'done' && stream.suggestions) {
       setFollowUps(stream.suggestions.suggestions);
-    } else if (stream.phase === 'error') {
+    } else if (stream.phase === 'error' || stream.phase === 'cancelled') {
       setFollowUps([]);
     }
   }, [stream.phase, stream.suggestions]);
@@ -424,7 +425,11 @@ function ActiveSession({
   // Capture the done messageId once the stream settles successfully.
   useEffect(() => {
     if (stream.phase === 'done' && stream.done) setPendingDoneId(stream.done.messageId);
-  }, [stream.phase, stream.done]);
+    // A cancelled partial retires the same way (#574): once the reload
+    // carries the persisted stopped message, the live bubble stands down.
+    if (stream.phase === 'cancelled' && stream.cancelled)
+      setPendingDoneId(stream.cancelled.messageId);
+  }, [stream.phase, stream.done, stream.cancelled]);
 
   // BE2-7 — persisted-bubble retirement and SOCKET lifetime are separate. The
   // live bubble is retired the moment the authoritative server copy arrives (as
@@ -491,6 +496,7 @@ function ActiveSession({
             askUser: stream.askUser,
             problem: stream.problem,
             model: stream.start?.model ?? model,
+            limit: stream.done?.limit ?? null,
           }
         : null,
     [
@@ -507,6 +513,7 @@ function ActiveSession({
       stream.askUser,
       stream.problem,
       stream.start,
+      stream.done,
       model,
     ],
   );
@@ -544,10 +551,13 @@ function ActiveSession({
   // not the whole `stream` result (a fresh object every render), so `onStop` keeps
   // a stable identity per delta and does not defeat Composer's memo (#495).
   const cancelStream = stream.cancel;
+  // Stop (#574/#279): cancel server-side and KEEP the live partial visible
+  // (marked cancelled) - deliberately no endStream() here, which used to
+  // erase the partial while the backend finished and persisted the full
+  // answer. The persisted stopped message retires the bubble on reload.
   const onStop = useCallback(() => {
     cancelStream();
-    endStream();
-  }, [cancelStream, endStream]);
+  }, [cancelStream]);
 
   // Opening a citation forwards only what the citation wire provides about the
   // source; the answer-time `meta` is NOT source provenance and is intentionally
@@ -600,7 +610,7 @@ function ActiveSession({
     [sessionId, updateSessionMutate],
   );
 
-  const streaming = live?.phase === 'streaming';
+  const streaming = live?.phase === 'streaming' || live?.phase === 'idle' || stream.stopping;
   const busy = send.isPending || streaming === true;
 
   // Bash-style composer recall (spec 0006 AC-5): the caller's own previous
@@ -661,6 +671,19 @@ function ActiveSession({
       </div>
 
       <div className="lc-composer-wrap">
+        {stream.cancelError && (
+          <p role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
+            {stream.cancelError}{' '}
+            <button type="button" onClick={onStop} className="underline">
+              Retry Stop
+            </button>
+          </p>
+        )}
+        {stream.stopping && (
+          <p role="status" className="text-center text-xs">
+            Stopping…
+          </p>
+        )}
         {send.isError && (
           <p role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
             {send.error instanceof ApiError ? send.error.displayMessage : 'Could not send message.'}
@@ -672,6 +695,7 @@ function ActiveSession({
           onModelChange={onModelChange}
           busy={busy}
           streaming={streaming === true}
+          stopping={stream.stopping}
           onSend={onSend}
           onStop={onStop}
           disabled={modelsLoading && (models?.length ?? 0) === 0}

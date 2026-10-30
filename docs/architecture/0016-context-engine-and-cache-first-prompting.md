@@ -107,6 +107,13 @@ Implementation: [#763](https://github.com/k-sandhu/lumen-copilot/issues/763).
 
 ### 2.6 Usage accounting (the substrate — [#409](https://github.com/k-sandhu/lumen-copilot/issues/409))
 
+**Amendment (#832, 2026-10-30):** [ADR-0031](0031-provider-billed-cost.md)
+adds provider-billed USD subtotals and explicit unpriced-call counts to these
+route scopes and the answer-only `done.usage`. Missing cost stays unknown;
+reported zero stays measured. Dispatched failed/cancelled requests remain
+unpriced spend, including the separately recorded suggestions and summaries.
+The existing content-free cache KPI also carries cost and unpriced count.
+
 `TokenUsage` gains `cached_prompt_tokens` / `cache_write_tokens`; the `done` envelope reports them (additive contract fields); the tenant-scoped **`llm_usage` table is the accounting ledger**. Granularity: **one row per (answer, model-route attempt-scope)** — with today's single-model no-retry loop that is exactly one row per answer, keyed by `message_id`. When §4 retries/fallback and ADR-0018 workers land, **additional rows** attribute those spends: each row's `model` is the model *actually used*; fallback-attempt and worker rows carry `message_id` NULL and key by `run_id`/worker identity; per-answer totals are aggregations over the ledger. The uniqueness guard is therefore **partial — one row per non-null `message_id`**. Terminal audit events record the actually-used model whenever it differs from the requested one.
 
 **Amendment ([#490](https://github.com/k-sandhu/lumen-copilot/issues/490) / R2-3, 2026-07-24) — the post-terminal follow-up-suggestions call is attributed to the model that ran it, not to the answer model.** Since #490 the suggestions nicety can run on a *dedicated* (fast) model distinct from the answer's route, so actual-model attribution requires its own row: the suggestion spend is an **additional** message-less scope (`message_id` NULL), `model` = the actual suggestions model, grouped by the answer (`answer_id` + `session_id`) and tagged `run_id = answer_id` so it is at most one per answer (recorded **idempotently** — a repeated post-terminal application is a no-op) and distinguishable from §4 failover scopes. It is **not** folded onto the answer's `message_id`-keyed row, which would misattribute the spend to a model that did not incur it. It is recorded whether or not the completion parses into suggestions (the tokens were billed regardless), and `COUNT(message_id)` still excludes it — a suggestions call is not an extra "answer". This supersedes #489's original one-row wording, which assumed the pre-#490 world where suggestions rode the answer's own route. `done.usage` remains answer-only.
@@ -204,6 +211,17 @@ A tool-calling turn's text streams live as **`event:narration`** (not "thinking"
 
 - **The length continuation stays buffered (tier neither).** The one continuation turn (`finish_reason == "length"`, §4) runs *after* a finalised answer block, so a whole-turn `answer_retract` there would wrongly discard the finalised partial too. It therefore keeps the pre-#488 buffered shape (published after it completes) — which also keeps the "at most one un-finalised speculative block" invariant true. The continuation is a bounded tail; buffering it costs no time-to-first-token (the main turn already streamed).
 - **`max_tokens` on the answer/synthesis call (`CHAT_ANSWER_MAX_TOKENS`, threaded through `stream_tools`).** Answer length — and therefore the tail of the wait — is now bounded; `finish_reason == "length"` becomes an ordinary terminal handled by the one continuation (capping a single answer at ~2× the value). `0`/unset ⇒ unbounded (the pre-#488 shape; the offline/headless default).
+
+**Amendment (#833, spec 0028) � shared answer ceilings.** Every tool-loop
+attempt, including retries and failovers, now has cumulative input/output and
+optional billed-cost admission. A caller without a finite answer-token setting
+uses the existing 1536-token default, so the earlier unbounded offline/headless
+exception no longer applies. Ordinary length continuation remains inside these
+phase ceilings. A limit-triggered tool-free synthesis is one bounded provider
+attempt with no retry, failover, or continuation, inside the global model-call
+and wall-clock caps. These rules and the persisted code-built limit disclosure
+are specified in [spec 0028](../specs/0028-cancellation-lifecycle.md); cost
+accounting remains [ADR-0031](0031-provider-billed-cost.md).
 
 ## Consequences
 

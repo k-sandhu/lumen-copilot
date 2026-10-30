@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -38,6 +39,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -800,6 +802,11 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     # the REST AskUserQuestion payload verbatim, so the UI can re-render the
     # options after reload. NULL for every other turn.
     question: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # How an assistant turn ended (#574): "cancelled" for a partial answer
+    # persisted at user Stop; NULL for ordinary/legacy turns.
+    finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Persist only the server-selected kind; never store model-authored disclosure.
+    limit_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Immutable answer-level provenance, independent of chunk/citation cascades.
     # NULL means unknown (legacy); [] means explicitly no source documents.
     # No document FK: deletion must retain the id so recall fails closed.
@@ -1592,6 +1599,9 @@ class LlmUsage(TenantScopedMixin, Base):
     credit budgets, and the ADR-0018 sub-agent budgets read — the *record*, not
     the dashboard (those are #300's).
 
+    ``cost_usd`` sums provider-billed USD, NULL when no call was priced;
+    ``unpriced_calls`` counts unknown charges, including incomplete dispatches.
+
     Like ``tool_invocations`` it is a trace/analytics table, not the append-only
     audit log: written once (no ``updated_at``), ordinary tenant-scoped access,
     nullable SET-NULL links so deleting a session/message keeps the accounting.
@@ -1632,6 +1642,8 @@ class LlmUsage(TenantScopedMixin, Base):
             "AND cached_prompt_tokens >= 0 AND cache_write_tokens >= 0",
             name="ck_llm_usage_tokens_nonneg",
         ),
+        CheckConstraint("cost_usd >= 0", name="ck_llm_usage_cost_nonneg"),
+        CheckConstraint("unpriced_calls >= 0", name="ck_llm_usage_unpriced_nonneg"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -1668,6 +1680,10 @@ class LlmUsage(TenantScopedMixin, Base):
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cached_prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(48, 30), nullable=True)
+    unpriced_calls: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     # The LAST answer-loop turn's prompt size (suggestions excluded) — window
     # occupancy for the context meter (#434 NEW-1); prompt_tokens stays the
     # billing sum. NULL on legacy rows / providers reporting no usage.

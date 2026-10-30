@@ -454,3 +454,12 @@ describe('#434 NEW-3: mention picker focus semantics', () => {
     expect(input).toHaveAttribute('aria-expanded', 'false');
   });
 });
+
+
+it('#574 disables Stop and announces cancellation while acknowledgement is pending', async () => {
+  const { onStop } = setup({ streaming: true, busy: true, stopping: true });
+  const stop = screen.getByRole('button', { name: /stopping/i });
+  expect(stop).toBeDisabled();
+  await userEvent.setup().click(stop);
+  expect(onStop).not.toHaveBeenCalled();
+});

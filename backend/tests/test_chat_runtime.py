@@ -127,6 +127,7 @@ class _ScriptedGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         if tool_choice == "none":
@@ -172,6 +173,7 @@ class _BoomGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — unreachable, makes this an async generator
@@ -367,6 +369,7 @@ def _runtime(
     producer_deadline_at: object = None,
     retry_sleep: object = None,
     answer_max_tokens: int | None = None,
+    budgets: object = None,
 ) -> ChatRuntime:
     extra: dict[str, object] = {}
     if text_coalesce_chars is not None:
@@ -397,6 +400,8 @@ def _runtime(
         extra["terminal_publish_margin_seconds"] = terminal_publish_margin_seconds
     if producer_deadline_at is not None:
         extra["producer_deadline_at"] = producer_deadline_at
+    if budgets is not None:
+        extra["budgets"] = budgets
     return ChatRuntime(
         sessionmaker=(  # type: ignore[arg-type]
             sessionmaker if sessionmaker is not None else ctx.sessionmaker
@@ -1085,6 +1090,7 @@ class _CapturingGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if self.system_prompt is None and isinstance(messages, list) and messages:
             # The runtime places the composed system prompt as the first ChatMessage.
@@ -1234,6 +1240,7 @@ class _RecordingSearchGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -1460,6 +1467,7 @@ class _RecordingGetDocGateway(_RecordingSearchGateway):
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         from app.llm.context import estimate_message_tokens
 
@@ -1632,6 +1640,8 @@ async def test_usage_summed_reported_and_recorded_with_cache_fields(ctx: _Ctx) -
         "totalTokens": 250,
         "cachedPromptTokens": 90,
         "cacheWriteTokens": 80,
+        "costUsd": None,
+        "unpricedCalls": 2,
     }
 
     # AC-2: one recorded row per answer, tenant-scoped, linked to the message.
@@ -2100,6 +2110,7 @@ class _ModelCapturingGateway(_ScriptedGateway):
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.answer_models.append(model)
         async for ev in super().stream_tools(
@@ -2301,6 +2312,8 @@ async def test_suggestions_row_ledger_linkage_and_read_semantics(
         "totalTokens": 120,
         "cachedPromptTokens": 30,
         "cacheWriteTokens": 40,
+        "costUsd": None,
+        "unpricedCalls": 1,
     }
     kpis = log_rec.kpis()
     assert len(kpis) == 1
@@ -2694,6 +2707,7 @@ async def test_pinned_document_ids_reach_retrieval(ctx: _Ctx) -> None:
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ):
             if self.first_prompt is None:
                 self.first_prompt = list(messages)  # type: ignore[call-overload]
@@ -3149,6 +3163,7 @@ class _RecordingScriptedGateway(_ScriptedGateway):
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.seen.append(list(cast("Sequence[ChatMessage]", messages)))
         async for ev in super().stream_tools(
@@ -3899,6 +3914,7 @@ class _ModelRoutedGateway(_ScriptedGateway):
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.models_called.append(str(model))
         pending = self._failures.get(str(model))
@@ -4284,6 +4300,7 @@ class _MidStreamFaultGateway(_ScriptedGateway):
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         if not self._faulted:
             self._faulted = True
@@ -5622,6 +5639,7 @@ class _HangingGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls += 1
         await asyncio.Event().wait()  # never returns
@@ -6009,6 +6027,7 @@ async def test_narration_closes_the_retry_window(ctx: _Ctx) -> None:
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating… ")
@@ -6097,6 +6116,7 @@ async def test_signal_then_fault_closes_the_window_without_assembled_calls(ctx: 
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(text="Narrating before the fragment… ")
@@ -6144,6 +6164,7 @@ async def test_signal_only_fault_closes_the_window(ctx: _Ctx) -> None:
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.calls_made += 1
             yield StreamEvent(tool_call_started=True)  # NO text at all
@@ -6292,6 +6313,7 @@ async def test_cache_kpi_not_emitted_on_error_terminal(
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             raise DependencyError("provider down")
             yield StreamEvent(text="unreachable")  # pragma: no cover
@@ -6379,6 +6401,7 @@ async def test_gateway_receives_only_domain_cache_identifiers(ctx: _Ctx) -> None
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             self.cache_keys.append((tenant_id, user_id, session_id))
             msgs = list(messages)  # type: ignore[arg-type]
@@ -6582,6 +6605,7 @@ async def test_pending_narration_is_flushed_before_a_terminal_error(ctx: _Ctx) -
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             yield StreamEvent(text="Looking that up... ")
             yield StreamEvent(
@@ -7192,7 +7216,7 @@ class _MaxTokensCapturingGateway(_ScriptedGateway):
 
 async def test_answer_max_tokens_is_threaded_into_stream_tools(ctx: _Ctx) -> None:
     """AC-5 (#488): the configured answer ceiling reaches ``stream_tools`` on the
-    answer turn; an unset ceiling (the offline default) is omitted (None)."""
+    answer turn; an unset legacy ceiling uses the finite #833 fallback."""
     gateway = _MaxTokensCapturingGateway(
         [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
     )
@@ -7218,7 +7242,7 @@ async def test_answer_max_tokens_is_threaded_into_stream_tools(ctx: _Ctx) -> Non
     await asyncio.wait_for(consumer, timeout=2.0)
     assert gateway.max_tokens_seen == [256]
 
-    # Unset (the offline / headless default) threads None -- the exact pre-#488 wire.
+    # An unset legacy ceiling now uses the finite shared default (#833).
     gateway2 = _MaxTokensCapturingGateway(
         [[StreamEvent(text="Answer."), StreamEvent(finish_reason="stop")]]
     )
@@ -7236,7 +7260,7 @@ async def test_answer_max_tokens_is_threaded_into_stream_tools(ctx: _Ctx) -> Non
         collection_ids=None,
     )
     await asyncio.wait_for(consumer2, timeout=2.0)
-    assert gateway2.max_tokens_seen == [None]
+    assert gateway2.max_tokens_seen == [1536]
 
 
 async def _run_recall_only_answer(
@@ -7654,3 +7678,170 @@ async def test_cache_domain_ids_survive_forced_synthesis_and_failover(
     ] * len(gateway.scopes)
     if failover:
         assert fallback in gateway.models_called
+
+
+# --- #574: user cancellation + shared budgets --------------------------------
+
+
+class _BlockingGateway:
+    """Streams one chunk, signals, then blocks until released (deterministic)."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def stream_tools(
+        self,
+        messages: object,
+        *,
+        tools: object,
+        model: object = None,
+        tool_choice: object = None,
+        api_key: object = None,
+        api_base: object = None,
+        tenant_id: object = None,
+        user_id: object = None,
+        session_id: object = None,
+        max_tokens: object = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls += 1
+        yield StreamEvent(text="Partial answer so far. ")
+        self.entered.set()
+        await self.release.wait()
+        yield StreamEvent(text="LATE TEXT THAT MUST NEVER LAND")
+        yield StreamEvent(finish_reason="stop")
+
+
+async def test_user_cancel_persists_partial_and_emits_one_cancelled_terminal(
+    ctx: _Ctx,
+) -> None:
+    """#574/#279: Stop cancels the producer, keeps the partial marked cancelled.
+
+    Deterministic handshake: the gateway signals after its first chunk and
+    blocks; the test then requests cancellation (registry semantics: mark +
+    task.cancel). Exactly one ``cancelled`` terminal follows, no further
+    gateway call happens, the late text never persists, and exactly one
+    ``answer.cancelled`` audit event is written.
+    """
+    from sqlalchemy import func, select
+
+    import app.db.models as db_models
+
+    gateway = _BlockingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="test/model",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    entered_task = asyncio.create_task(gateway.entered.wait())
+    done, _pending = await asyncio.wait({task, entered_task}, timeout=30.0)
+    if task in done:  # pragma: no cover - failure diagnostics
+        raise AssertionError(f"runtime finished early: {task.exception()!r}")
+    assert entered_task in done, "gateway never entered"
+    runtime.request_cancel()
+    task.cancel()
+    ok = await task
+    gateway.release.set()
+    envs = await asyncio.wait_for(consumer, timeout=10.0)
+
+    assert ok is False  # not a successful answer -> no summarisation enqueue
+    types = [e["type"] for e in envs]
+    assert types.count("cancelled") == 1
+    assert types.count("done") == 0 and types.count("error") == 0
+    assert types[-1] == "cancelled"
+    assert gateway.calls == 1
+    streamed = "".join(e["data"]["text"] for e in envs if e["type"] == "delta")  # type: ignore[index]
+    assert "LATE TEXT" not in streamed
+
+    async with ctx.sessionmaker() as session:
+        msgs = await MessageRepository(session, ctx.tenant_id).list_for_session(ctx.session_id)
+        assistant = [m for m in msgs if m.role.value == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0].content == "Partial answer so far. "
+        assert assistant[0].finish_reason == "cancelled"
+        count = await session.scalar(
+            select(func.count())
+            .select_from(db_models.AuditEvent)
+            .where(db_models.AuditEvent.action == "answer.cancelled")
+        )
+        assert count == 1
+
+
+async def test_shutdown_cancel_without_request_still_errors_not_cancelled(
+    ctx: _Ctx,
+) -> None:
+    """A bare task cancel (shutdown, #156) keeps the retryable 503 error terminal."""
+    gateway = _BlockingGateway()
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(ctx, gateway=gateway, retrieval=_FakeRetrieval([]), backplane=backplane)
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    task = asyncio.create_task(
+        runtime.run(
+            stream_id=stream_id,
+            session_id=ctx.session_id,
+            question="q",
+            model="test/model",
+            history=[],
+            collection_ids=None,
+        )
+    )
+    entered_task = asyncio.create_task(gateway.entered.wait())
+    done, _pending = await asyncio.wait({task, entered_task}, timeout=30.0)
+    if task in done:  # pragma: no cover - failure diagnostics
+        raise AssertionError(f"runtime finished early: {task.exception()!r}")
+    assert entered_task in done, "gateway never entered"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gateway.release.set()
+    envs = await asyncio.wait_for(consumer, timeout=10.0)
+    types = [e["type"] for e in envs]
+    assert types.count("error") == 1 and types.count("cancelled") == 0
+    assert await _assistant_message_count(ctx) == 0
+
+
+async def test_shared_budgets_cap_tool_turns_for_looping_model(ctx: _Ctx) -> None:
+    """The shared budgets object bounds an adversarial always-tool model (#574)."""
+    from app.services.answer_budgets import AnswerBudgets
+
+    passage = _passage(ctx.document_id, ctx.chunk_id, "taxes.pdf")
+    gateway = _ScriptedGateway(
+        [_tool_turn("Searching. ", "c1")],
+        synthesis=[StreamEvent(text="Final."), StreamEvent(finish_reason="stop")],
+    )
+    backplane = InMemoryBackplane()
+    stream_id = uuid.uuid4().hex
+    runtime = _runtime(
+        ctx,
+        gateway=gateway,
+        retrieval=_FakeRetrieval([passage]),
+        backplane=backplane,
+        default_max_tool_turns=20,
+        budgets=AnswerBudgets(max_tool_turns=2),
+    )
+    consumer = asyncio.create_task(_drain(backplane, stream_id))
+    await runtime.run(
+        stream_id=stream_id,
+        session_id=ctx.session_id,
+        question="q",
+        model="test/model",
+        history=[],
+        collection_ids=None,
+    )
+    await asyncio.wait_for(consumer, timeout=10.0)
+    assert gateway.auto_calls == 2
+    assert gateway.synthesis_calls == 1
+    # Total model calls never exceed tool turns + forced synthesis (+1 length
+    # continuation allowance documented in the budgets module).
+    assert gateway.calls <= 2 + 1 + 1

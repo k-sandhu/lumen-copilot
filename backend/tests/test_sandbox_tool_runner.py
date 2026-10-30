@@ -26,6 +26,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -323,3 +324,32 @@ async def test_runner_crash_becomes_failed_terminal_not_exception(world: _World)
     results = [e for e in _events(backplane, "stream-1") if e.get("name") == "code_result"]
     assert len(results) == 1
     assert results[0]["data"]["status"] == "failed"
+
+
+async def test_chat_stop_cancels_active_sandbox_without_late_output(world: _World) -> None:
+    import asyncio
+
+    entered = asyncio.Event()
+    cancelled: list[uuid.UUID] = []
+
+    class BlockingRunner(_FakeRunner):
+        async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, value: SandboxSessionSpec, execution_id: uuid.UUID) -> None:
+            cancelled.append(execution_id)
+
+    backplane = InMemoryBackplane()
+    seam = world.seam(BlockingRunner(), backplane=backplane)
+    task = asyncio.create_task(seam.submit(code="while True: pass"))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(cancelled) == 1
+    async with world.sessionmaker() as session:
+        run = await CodeRunRepository(session, world.tenant_id).get(cancelled[0])
+        assert run is not None and run.status is CodeRunStatus.KILLED
+    assert not backplane._replay.get("stream-1")

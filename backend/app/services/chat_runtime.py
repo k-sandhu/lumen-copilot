@@ -40,6 +40,11 @@ stream ends ``done(finishReason="ask_user")``; the user's choice arrives as an
 ordinary next message. After a normal answer, one config-gated, time-bounded
 completion proposes follow-up questions (``event:suggestions``); any failure is
 a silent skip.
+
+**Shared bounds (spec 0028).** Every caller applies the same tool-phase call,
+input/output token and optional billed-cost ceilings. Limit stops allow one
+finite tool-free synthesis, without retries or continuation, and carry a
+server-authored disclosure on the persisted message and success terminal.
 """
 
 from __future__ import annotations
@@ -49,10 +54,11 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from decimal import Decimal, localcontext
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -72,6 +78,7 @@ from app.db.repositories import (
     ToolInvocationRepository,
 )
 from app.db.tenant_context import bind_tenant
+from app.domain.answer_limits import AnswerLimitKind, limit_disclosure
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation, WebCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
@@ -79,10 +86,12 @@ from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall,
 from app.domain.retrieval import RetrievedPassage
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
+from app.llm.calls import begin_call
 from app.llm.context import (
     ContextConfig,
     TokenCounter,
     assemble_context,
+    estimate_message_tokens,
     fit_transcript,
     litellm_token_counter,
     memoizing_token_counter,
@@ -90,6 +99,7 @@ from app.llm.context import (
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
 from app.retrieval import RetrievalService
+from app.services.answer_budgets import AnswerBudgets, is_external_tool
 from app.services.assistant_runtime import AssistantRunConfig, prepend_user_instructions
 from app.services.audit import AuditSink
 from app.services.autonomy_policy_service import AutonomyPolicyReader
@@ -118,6 +128,7 @@ from app.services.tools.registry import default_allowlist, tool_specs
 from app.services.tools.runner import ToolRunner
 from app.services.tools.types import (
     SandboxToolRunner,
+    ToolCancellationPending,
     ToolContext,
     ToolDefinition,
     TranscriptReader,
@@ -454,6 +465,10 @@ class _StreamState:
     # — must NOT retract the answer already on the wire: it is persisted, so wire ==
     # stored must still hold (#148). Guards ``_terminal_error``'s retraction.
     answer_committed: bool = False
+    # Answer text actually published as ``delta`` so far (#574): the partial a
+    # user cancellation persists. Cleared by ``_retract_answer`` with the
+    # speculative text it discards.
+    partial_answer: list[str] = field(default_factory=list)
 
     def next_seq(self) -> int:
         s = self.seq
@@ -461,9 +476,13 @@ class _StreamState:
         return s
 
 
+class _AnswerLimitReached(Exception):
+    """Internal control flow: gather no more evidence, then synthesize once."""
+
+
 @dataclass(slots=True)
 class _Usage:
-    """Mutable running token usage across the turns of one answer.
+    """Mutable token and billed-cost accounting across the turns of one answer.
 
     Carries the provider cache accounting too (#409, ADR-0016 §2.6):
     ``cached_prompt_tokens`` served from the provider's prompt cache and
@@ -476,6 +495,8 @@ class _Usage:
     total_tokens: int = 0
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: Decimal | None = None
+    unpriced_calls: int = 0
     # The LAST answer-loop turn's prompt size — window occupancy, not billing
     # (#434 NEW-1). Set ONLY by ``_stream_one_turn`` (each loop turn overwrites,
     # so the final turn wins); the suggestions nicety accumulates into its OWN
@@ -489,6 +510,8 @@ class _Usage:
         self.total_tokens += usage.total_tokens
         self.cached_prompt_tokens += usage.cached_prompt_tokens
         self.cache_write_tokens += usage.cache_write_tokens
+        self.cost_usd = _sum_cost(self.cost_usd, usage.cost_usd)
+        self.unpriced_calls += int(usage.cost_usd is None)
 
     def snapshot_and_reset(self) -> _Usage:
         """Freeze the current scope's totals and zero the accumulator (#413).
@@ -506,8 +529,20 @@ class _Usage:
         self.total_tokens = 0
         self.cached_prompt_tokens = 0
         self.cache_write_tokens = 0
+        self.cost_usd = None
+        self.unpriced_calls = 0
         self.last_turn_prompt_tokens = None
         return frozen
+
+
+def _sum_cost(left: Decimal | None, right: Decimal | None) -> Decimal | None:
+    if right is None:
+        return left
+    # Preserve the smallest supported charge beside a large subtotal; the
+    # process Decimal default precision (28) would silently round it away.
+    with localcontext() as context:
+        context.prec = 60
+        return (left if left is not None else Decimal(0)) + right
 
 
 def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
@@ -525,6 +560,8 @@ def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
         total.total_tokens += scope.total_tokens
         total.cached_prompt_tokens += scope.cached_prompt_tokens
         total.cache_write_tokens += scope.cache_write_tokens
+        total.cost_usd = _sum_cost(total.cost_usd, scope.cost_usd)
+        total.unpriced_calls += scope.unpriced_calls
     return total
 
 
@@ -551,6 +588,8 @@ def _log_cache_kpi(result: _RunResult) -> None:
         ),
         cache_write_tokens=result.cache_write_tokens,
         usage_reported=reported,
+        cost_usd=format(result.cost_usd, "f") if result.cost_usd is not None else None,
+        unpriced_calls=result.unpriced_calls,
     )
 
 
@@ -597,6 +636,8 @@ class ChatRuntime:
         terminal_publish_margin_seconds: float | None = _DEFAULT_TERMINAL_PUBLISH_MARGIN_SECONDS,
         producer_deadline_at: Callable[[float], float] | None = None,
         answer_max_tokens: int | None = _DEFAULT_ANSWER_MAX_TOKENS,
+        budgets: AnswerBudgets | None = None,
+        answer_deadline_at: Callable[[float], float] | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._gateway = gateway
@@ -604,6 +645,40 @@ class ChatRuntime:
         self._principal = principal
         self._request_id = request_id
         self._source_ip = source_ip
+        # Shared per-answer budgets (#574, spec 0028): when a budgets object is
+        # supplied its set fields win over the legacy individual knobs, so live
+        # chat, assistant Test, and headless runs share one source of bounds.
+        if budgets is not None:
+            default_max_tool_turns = budgets.max_tool_turns
+            if budgets.turn_timeout_seconds is not None:
+                turn_timeout_seconds = budgets.turn_timeout_seconds
+            if budgets.interactive_max_attempts is not None:
+                interactive_max_attempts = budgets.interactive_max_attempts
+            if budgets.answer_max_tokens is not None:
+                answer_max_tokens = budgets.answer_max_tokens
+        self._budgets = budgets or AnswerBudgets(
+            max_tool_turns=default_max_tool_turns,
+            turn_timeout_seconds=turn_timeout_seconds,
+            interactive_max_attempts=interactive_max_attempts,
+            answer_max_tokens=answer_max_tokens,
+        )
+        # Set by ``request_cancel`` (user Stop, #574): distinguishes a user
+        # cancellation from a bare shutdown cancel in ``run``'s CancelledError
+        # arm. The runtime is constructed per answer, so this never leaks.
+        self._cancel_requested = False
+        self._running_task: asyncio.Task[object] | None = None
+        self._stream_state: _StreamState | None = None
+        self._finalising_cancel = False
+        self._model_calls = 0
+        self._outcome_usage = _Usage()
+        self._budget_exhausted = False
+        self._limit_kind: AnswerLimitKind | None = None
+        self._loop_input_tokens = 0
+        self._loop_output_tokens = 0
+        self._completing = False
+        self._settling_error = False
+        self._answer_deadline_factory = answer_deadline_at
+        self._answer_deadline: float | None = None
         # System default tool-turn budget (``Settings.chat_max_tool_turns``); a
         # tenant's ``max_tool_turns`` override beats it when set (issue #148).
         self._default_max_tool_turns = default_max_tool_turns
@@ -712,8 +787,8 @@ class ChatRuntime:
         # leaves the batch behaviour (the gateway request timeout only).
         # ``interactive_max_attempts`` caps the same-route retry ladder for a live
         # turn (2 = one retry); ``None`` keeps the full 3-attempt ladder for
-        # batch/headless callers. Neither is set by the headless/preview/offline
-        # constructors, so their behaviour is byte-identical to pre-#489.
+        # batch/headless callers. The shared budgets now set these for live,
+        # preview and headless composition; legacy direct callers may omit them.
         self._turn_timeout_seconds = turn_timeout_seconds
         self._interactive_max_attempts = interactive_max_attempts
         # BE-7 test seam: mints the absolute monotonic deadline for one interactive
@@ -743,6 +818,104 @@ class ChatRuntime:
         # as unbounded (the setting's documented kill switch).
         self._answer_max_tokens = answer_max_tokens or None
         self._context_audit: ContextAuditSink | None = None
+
+    def request_cancel(self) -> bool:
+        """Cancel once, before the durable completion boundary; late Stop is a no-op."""
+        state = self._stream_state
+        if (
+            self._completing
+            or self._settling_error
+            or (state is not None and (state.answer_committed or state.terminal_sent))
+        ):
+            return False
+        if not self._cancel_requested:
+            self._cancel_requested = True
+            if self._running_task is not None and self._running_task is not asyncio.current_task():
+                self._running_task.cancel()
+        return True
+
+    def _check_answer_deadline(self) -> None:
+        if (
+            not self._finalising_cancel
+            and self._answer_deadline is not None
+            and asyncio.get_running_loop().time() >= self._answer_deadline
+        ):
+            self._budget_exhausted = True
+            raise DependencyError(
+                "The answer wall-clock budget was exhausted.", code="answer_budget_exhausted"
+            )
+
+    async def _check_cancelled(self, state: _StreamState) -> None:
+        if self._finalising_cancel or state.answer_committed:
+            return
+        if self._cancel_requested or await self._backplane.is_cancelled(state.stream_id):
+            self._cancel_requested = True
+            raise asyncio.CancelledError
+        self._check_answer_deadline()
+
+    async def _watch_cancel(self, state: _StreamState) -> None:
+        # Pub/sub interrupts in-flight provider/HTTP/tool awaits on any replica;
+        # the durable key closes both pre-start and subscribe-handshake races.
+        await self._backplane.wait_cancel(state.stream_id)
+        self.request_cancel()
+
+    def _answer_deadline_at(self, seconds: float) -> float:
+        if self._answer_deadline_factory is not None:
+            return self._answer_deadline_factory(seconds)
+        return asyncio.get_running_loop().time() + seconds
+
+    def _claim_model_call(self) -> None:
+        self._check_answer_deadline()
+        if self._cancel_requested and not self._finalising_cancel:
+            raise asyncio.CancelledError
+        cap = self._budgets.max_model_calls
+        if cap is not None and self._model_calls >= cap:
+            self._budget_exhausted = True
+            raise DependencyError(
+                "The answer model-call budget was exhausted.", code="answer_budget_exhausted"
+            )
+        self._model_calls += 1
+
+    def _reach_limit(self, kind: AnswerLimitKind) -> None:
+        self._limit_kind = kind
+        self._budget_exhausted = True
+        raise _AnswerLimitReached
+
+    def _reserve_loop_request(
+        self,
+        *,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolSpec],
+        route_state: _RouteState,
+        usage: _Usage,
+        max_tokens: int | None,
+    ) -> tuple[int, int]:
+        """Reserve one attempt before dispatch, including retries and failovers.
+
+        Control reservations are separate from provider-billed accounting. An
+        attempt without a complete usage report retains its projected input and
+        full requested output allowance; missing usage can never buy more work.
+        """
+        total = _answer_usage_totals(route_state, usage)
+        ceiling = self._budgets.max_cost_usd
+        if ceiling is not None and (
+            total.unpriced_calls > 0 or (total.cost_usd or Decimal(0)) >= ceiling
+        ):
+            self._reach_limit("cost")
+        projected = estimate_message_tokens(
+            messages, tools, counter=self._token_counter_for(route_state.route.model)
+        )
+        if self._loop_input_tokens + projected > self._budgets.max_input_tokens:
+            self._reach_limit("input_tokens")
+        remaining = self._budgets.max_output_tokens - self._loop_output_tokens
+        if remaining <= 0:
+            self._reach_limit("output_tokens")
+        # A legacy unconfigured caller still gets a finite request, using the
+        # same default as CHAT_ANSWER_MAX_TOKENS rather than an unlimited call.
+        requested = min(max_tokens or 1536, remaining)
+        self._loop_input_tokens += projected
+        self._loop_output_tokens += requested
+        return projected, requested
 
     def _token_counter_for(self, model: str) -> TokenCounter:
         """The memoizing token counter for ``model`` (#491) — one per answer/model.
@@ -817,6 +990,20 @@ class ChatRuntime:
         """
         state = _StreamState(stream_id=stream_id, buffer=self._new_coalescer())
         self._context_audit = None
+        self._stream_state = state
+        self._running_task = asyncio.current_task()
+        self._model_calls = 0
+        self._budget_exhausted = False
+        self._limit_kind = None
+        self._loop_input_tokens = 0
+        self._loop_output_tokens = 0
+        watcher = asyncio.create_task(self._watch_cancel(state))
+        deadline = (
+            self._answer_deadline_at(self._budgets.wall_clock_seconds)
+            if self._budgets.wall_clock_seconds is not None
+            else None
+        )
+        self._answer_deadline = deadline
         # Mint the absolute producer→terminal deadline for the interactive path
         # (R2-8, #489 AC-4). The resilient turn is bounded by ``turn_timeout_seconds``
         # leaving the reserved margin; this anchors the WHOLE path so the terminal
@@ -825,77 +1012,183 @@ class ChatRuntime:
         # is wired: the terminal publish stays unbounded, exactly as before.
         self._producer_deadline = self._resolve_producer_deadline()
         assistant_message_id = uuid.uuid4()
-        await self._publish(
-            state,
-            envelopes.start(
-                stream_id,
-                await self._next_seq(state),
-                data={
-                    "sessionId": str(session_id),
-                    "messageId": str(assistant_message_id),
-                    "model": model,
-                },
-            ),
-        )
-        try:
-            async with self._sessionmaker() as session:
-                # Bind the RLS GUC on the runtime's own session for this
-                # transaction (#17): the answer producer runs off the request
-                # path with a fresh session, so it arms the Postgres RLS backstop
-                # itself, keyed off the streaming principal's tenant. No-op off
-                # Postgres (offline tests).
-                await bind_tenant(session, self._principal.tenant_id)
-                # ``_answer`` COMMITS the assistant turn + its base usage row ITSELF,
-                # BEFORE it publishes the terminal ``done`` (#489/BE-1). A commit
-                # failure therefore raises out of ``_answer`` into the error arms
-                # below and becomes a typed ``error`` terminal — never a success
-                # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
-                # runs AFTER that commit in its own independent transaction (it cannot
-                # roll the answer back), so this block has no trailing commit.
+
+        async def retry_cleanup(cleanup: Callable[[], Awaitable[None]]) -> None:
+            # The original kill already failed. Retry only cleanup of that same
+            # execution, never tool/model dispatch. Endpoint deadlines still
+            # return 503 while this producer retains the unconfirmed execution.
+            while True:
+                await self._retry_sleep(1.0)
                 try:
-                    result = await self._answer(
-                        session=session,
-                        state=state,
-                        session_id=session_id,
-                        assistant_message_id=assistant_message_id,
-                        question=question,
-                        model=model,
-                        history=history,
-                        collection_ids=collection_ids,
-                        document_ids=document_ids,
-                        assistant_config=assistant_config,
-                        custom_instructions=custom_instructions,
-                        simulate_writes=simulate_writes,
-                        summary=summary,
-                        evidence=evidence,
-                        mentioned_documents=mentioned_documents,
-                        compaction_cursor=compaction_cursor,
+                    await cleanup()
+                    return
+                except Exception as exc:
+                    log.warning(
+                        "chat_runtime.cancellation_cleanup_pending",
+                        stream_id=stream_id,
+                        error_type=type(exc).__name__,
                     )
-                except AppError as exc:
-                    if (
-                        exc.code == "context_too_large"
-                        and not simulate_writes
-                        and self._context_audit is not None
-                        and self._context_audit.events
-                    ):
-                        records = await ToolInvocationRepository(
-                            session, self._principal.tenant_id
-                        ).list_for_messages([assistant_message_id])
-                        # Release the failed transaction before acquiring the
-                        # restoration session. Never commit business writes or
-                        # forward references to an absent assistant message.
-                        await session.rollback()
-                        async with self._sessionmaker() as recovery:
-                            await bind_tenant(recovery, self._principal.tenant_id)
-                            await AuditSink(
-                                AuditEventRepository(recovery, self._principal.tenant_id)
-                            ).restore_context_rejected(self._context_audit.events)
-                            await ToolInvocationRepository(
-                                recovery, self._principal.tenant_id
-                            ).restore_context_rejected(records.get(assistant_message_id, []))
-                            await recovery.commit()
-                    raise
+
+        async def finish_user_cancel(
+            cleanup: Callable[[], Awaitable[None]] | None = None,
+        ) -> bool:
+            self._finalising_cancel = True
+
+            # User Stop (#574, spec 0028): persist the partial already
+            # streamed (marked cancelled), emit exactly one ``cancelled``
+            # terminal + one ``answer.cancelled`` audit event, and report
+            # not-answered so no summarisation is enqueued. Shielded: the
+            # finalisation must land even though this task was cancelled.
+            async def settle_cancelled() -> None:
+                if cleanup is not None:
+                    await retry_cleanup(cleanup)
+                await self._salvage_usage_after_failure(session_id, assistant_message_id)
+                await self._finalise_cancelled(
+                    state,
+                    session_id=session_id,
+                    assistant_message_id=assistant_message_id,
+                    model=model,
+                )
+
+            finalizer = asyncio.create_task(settle_cancelled())
+            try:
+                await asyncio.shield(finalizer)
+            except asyncio.CancelledError:
+                # Shutdown may cancel a producer already settling user Stop.
+                # Drain the child before the registry/lifespan releases it;
+                # force-shutdown cancellation then cascades to both tasks.
+                await finalizer
+                raise
+            return False
+
+        async def finish_error(
+            status: int,
+            title: str,
+            code: str,
+            detail: str | None,
+            cleanup: Callable[[], Awaitable[None]] | None = None,
+        ) -> None:
+            self._settling_error = True
+
+            async def settle_error() -> None:
+                if cleanup is not None:
+                    await retry_cleanup(cleanup)
+                    # Cleanup may outlive the answer's original publish budget.
+                    self._producer_deadline = asyncio.get_running_loop().time() + 5
+                await self._salvage_usage_after_failure(session_id, assistant_message_id)
+                await self._terminal_error(state, status, title, code, detail)
+
+            finalizer = asyncio.create_task(settle_error())
+            try:
+                await asyncio.shield(finalizer)
+            except asyncio.CancelledError:
+                # Error cleanup is still producer work: shutdown must drain it
+                # before releasing the registry entry and its database resources.
+                await finalizer
+                raise
+
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._publish(
+                    state,
+                    envelopes.start(
+                        stream_id,
+                        await self._next_seq(state),
+                        data={
+                            "sessionId": str(session_id),
+                            "messageId": str(assistant_message_id),
+                            "model": model,
+                        },
+                    ),
+                )
+                await self._check_cancelled(state)
+                if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError
+                async with self._sessionmaker() as session:
+                    # Bind the RLS GUC on the runtime's own session for this
+                    # transaction (#17): the answer producer runs off the request
+                    # path with a fresh session, so it arms the Postgres RLS backstop
+                    # itself, keyed off the streaming principal's tenant. No-op off
+                    # Postgres (offline tests).
+                    await bind_tenant(session, self._principal.tenant_id)
+                    # ``_answer`` COMMITS the assistant turn + its base usage row ITSELF,
+                    # BEFORE it publishes the terminal ``done`` (#489/BE-1). A commit
+                    # failure therefore raises out of ``_answer`` into the error arms
+                    # below and becomes a typed ``error`` terminal — never a success
+                    # ``done`` over a rolled-back answer. The follow-up-suggestions nicety
+                    # runs AFTER that commit in its own independent transaction (it cannot
+                    # roll the answer back), so this block has no trailing commit.
+                    try:
+                        result = await self._answer(
+                            session=session,
+                            state=state,
+                            session_id=session_id,
+                            assistant_message_id=assistant_message_id,
+                            question=question,
+                            model=model,
+                            history=history,
+                            collection_ids=collection_ids,
+                            document_ids=document_ids,
+                            assistant_config=assistant_config,
+                            custom_instructions=custom_instructions,
+                            simulate_writes=simulate_writes,
+                            summary=summary,
+                            evidence=evidence,
+                            mentioned_documents=mentioned_documents,
+                            compaction_cursor=compaction_cursor,
+                        )
+                    except AppError as exc:
+                        if (
+                            exc.code == "context_too_large"
+                            and not simulate_writes
+                            and self._context_audit is not None
+                            and self._context_audit.events
+                        ):
+                            records = await ToolInvocationRepository(
+                                session, self._principal.tenant_id
+                            ).list_for_messages([assistant_message_id])
+                            # Release the failed transaction before acquiring the
+                            # restoration session. Never commit business writes or
+                            # forward references to an absent assistant message.
+                            await session.rollback()
+                            async with self._sessionmaker() as recovery:
+                                await bind_tenant(recovery, self._principal.tenant_id)
+                                await AuditSink(
+                                    AuditEventRepository(recovery, self._principal.tenant_id)
+                                ).restore_context_rejected(self._context_audit.events)
+                                await ToolInvocationRepository(
+                                    recovery, self._principal.tenant_id
+                                ).restore_context_rejected(records.get(assistant_message_id, []))
+                                await recovery.commit()
+                        raise
+        except ToolCancellationPending as exc:
+            if self._cancel_requested:
+                return await finish_user_cancel(exc.cleanup)
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                self._budget_exhausted = True
+                await finish_error(
+                    503,
+                    "Service Unavailable",
+                    "answer_budget_exhausted",
+                    "The answer wall-clock budget was exhausted.",
+                    exc.cleanup,
+                )
+                return False
+            await finish_error(
+                503,
+                "Service Unavailable",
+                "dependency_unavailable",
+                "Server is shutting down.",
+                exc.cleanup,
+            )
+            raise asyncio.CancelledError from exc
         except asyncio.CancelledError:
+            if self._cancel_requested and not state.answer_committed:
+                return await finish_user_cancel()
+            if self._cancel_requested and state.terminal_sent:
+                # The answer completed before the cancel landed: a late Stop
+                # is the documented no-op, and the settled stream stands.
+                return True
             # Shutdown / client-gone cancellation (``main._drain_answer_tasks``
             # cancels every in-flight producer on SIGTERM, issue #156). In Python
             # 3.12 ``CancelledError`` is a ``BaseException``, so it bypasses the
@@ -905,26 +1198,71 @@ class ChatRuntime:
             # on forever. Emit one RETRYABLE terminal (503; the contract has the
             # client treat ``error`` as retryable) then RE-RAISE so the task still
             # stops — never swallow cancellation.
-            await self._salvage_usage_after_failure(session_id, assistant_message_id)
-            await self._terminal_error(
-                state,
+            await finish_error(
                 503,
                 "Service Unavailable",
                 "dependency_unavailable",
                 "Server is shutting down.",
             )
             raise
+        except TimeoutError:
+            if self._cancel_requested and not state.answer_committed:
+                return await finish_user_cancel()
+            self._budget_exhausted = True
+            self._producer_deadline = asyncio.get_running_loop().time() + 5
+            await finish_error(
+                503,
+                "Service Unavailable",
+                "answer_budget_exhausted",
+                "The answer wall-clock budget was exhausted.",
+            )
+            return False
         except AppError as exc:
-            await self._salvage_usage_after_failure(session_id, assistant_message_id)
-            await self._terminal_error(state, exc.status, exc.title, exc.code, exc.detail)
+            if self._cancel_requested and not state.answer_committed:
+                return await finish_user_cancel()
+            if exc.code == "answer_budget_exhausted":
+                self._producer_deadline = asyncio.get_running_loop().time() + 5
+            await finish_error(exc.status, exc.title, exc.code, exc.detail)
             return False
         except Exception as exc:  # noqa: BLE001 — never leak a vendor error to the client
+            if self._cancel_requested and not state.answer_committed:
+                return await finish_user_cancel()
             # Log the error *type* only (never the message — it may carry vendor
             # details / a key). The client gets an opaque 500 problem envelope.
             log.error("chat_runtime.failed", stream_id=stream_id, error_type=type(exc).__name__)
-            await self._salvage_usage_after_failure(session_id, assistant_message_id)
-            await self._terminal_error(state, 500, "Internal Server Error", "internal_error", None)
+            await finish_error(500, "Internal Server Error", "internal_error", None)
             return False
+
+        finally:
+            self._running_task = None
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+            usage = self._outcome_usage
+            if self._salvage is not None:
+                route, current_usage = self._salvage
+                usage = _answer_usage_totals(route, current_usage)
+            outcome = (
+                "user_cancelled"
+                if self._cancel_requested and not state.answer_committed
+                else "budget_exhausted"
+                if self._budget_exhausted
+                else "complete"
+                if state.answer_committed
+                else "failed"
+            )
+            log.info(
+                "llm.answer_outcome",
+                outcome=outcome,
+                stream_id=stream_id,
+                model_calls=self._model_calls,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                cost_usd=format(usage.cost_usd, "f") if usage.cost_usd is not None else None,
+                unpriced_calls=usage.unpriced_calls,
+                limit_kind=self._limit_kind,
+                loop_input_tokens=self._loop_input_tokens,
+                loop_output_tokens=self._loop_output_tokens,
+            )
 
         # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
         # usage row and only THEN published the terminal ``done`` (#489/BE-1): the
@@ -1079,7 +1417,7 @@ class ChatRuntime:
         # data): strings only, non-empty, minus the primary itself.
         tenant_row = await TenantRepository(session).get(tenant_id)
         override = tenant_row.max_tool_turns if tenant_row is not None else None
-        max_tool_turns = max(1, override if override is not None else self._default_max_tool_turns)
+        max_tool_turns = self._budgets.effective_max_tool_turns(tenant_override=override)
         stored = tenant_row.fallback_models or [] if tenant_row else []
         structural: list[str] = []
         for m in stored:
@@ -1335,7 +1673,19 @@ class ChatRuntime:
             )
 
         budget_exhausted = True
+        external_calls_used = 0
+        tool_calls_used = 0
         for turn_index in range(max_tool_turns):
+            await self._check_cancelled(state)
+            if tool_calls_used >= self._budgets.max_tool_calls:
+                self._limit_kind = "tool_calls"
+                break
+            if (
+                self._budgets.max_external_calls is not None
+                and external_calls_used >= self._budgets.max_external_calls
+            ):
+                self._limit_kind = "external_calls"
+                break
             # Re-fit the GROWN transcript to the input budget before every turn
             # (#424 review, finding 1): the loop appends each turn's tool-call +
             # tool-result messages, so a one-shot assembly at the top does not
@@ -1367,17 +1717,29 @@ class ChatRuntime:
                 # turn's `think/completed` step, hence before its tool events.
                 await self._stream_text(state, _TextKind("narration", _turn), text)
 
-            turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
-                state=state,
-                session=session,
-                route_state=route_state,
-                messages=messages,
-                usage=usage,
-                tools=advertised,
-                refit=_refit,
-                narrate=_publish_narration,
-                max_tokens=self._answer_max_tokens,
-            )
+            try:
+                turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
+                    state=state,
+                    session=session,
+                    route_state=route_state,
+                    messages=messages,
+                    usage=usage,
+                    tools=advertised,
+                    refit=_refit,
+                    narrate=_publish_narration,
+                    max_tokens=self._answer_max_tokens,
+                    bounded_loop=True,
+                )
+            except _AnswerLimitReached:
+                await self._emit_step(
+                    state,
+                    key="think",
+                    label="Thinking",
+                    step_state="completed",
+                    detail="research limit reached",
+                    turn=turn_index + 1,
+                )
+                break
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Its text ALREADY streamed
                 # live as answer deltas (#488, speculatively); no tool fragment
@@ -1436,6 +1798,47 @@ class ChatRuntime:
                 ),
                 turn=turn_index + 1,
             )
+            # Admit in call order while preserving replies for every request.
+            # An external refusal leaves room for a later internal call.
+            refusals: dict[int, tuple[str, bool]] = {}
+            admitted_this_round = 0
+            for index, call in enumerate(turn_tool_calls):
+                if tool_calls_used >= self._budgets.max_tool_calls:
+                    refusals[index] = ("tool_calls", False)
+                elif (
+                    is_external_tool(call.name)
+                    and self._budgets.max_external_calls is not None
+                    and external_calls_used >= self._budgets.max_external_calls
+                ):
+                    refusals[index] = ("external_calls", False)
+                elif admitted_this_round >= self._budgets.max_calls_per_round:
+                    refusals[index] = ("calls_per_round", True)
+                else:
+                    admitted_this_round += 1
+                    tool_calls_used += 1
+                    external_calls_used += int(is_external_tool(call.name))
+            total_usage = _answer_usage_totals(route_state, usage)
+            cost_ceiling = self._budgets.max_cost_usd
+            another_round = (
+                turn_index + 1 < max_tool_turns
+                and tool_calls_used < self._budgets.max_tool_calls
+                and (
+                    self._budgets.max_external_calls is None
+                    or external_calls_used < self._budgets.max_external_calls
+                )
+                and self._loop_input_tokens < self._budgets.max_input_tokens
+                and self._loop_output_tokens < self._budgets.max_output_tokens
+                and (
+                    cost_ceiling is None
+                    or (
+                        total_usage.unpriced_calls == 0
+                        and (total_usage.cost_usd or Decimal(0)) < cost_ceiling
+                    )
+                )
+            )
+            if not another_round:
+                refusals = {index: (reason, False) for index, (reason, _) in refusals.items()}
+            await self._check_cancelled(state)
             # The assistant turn that requested tools must be in the transcript
             # before its tool results (provider protocol). Its narration text
             # already streamed live as transient ``event:narration`` (#414) —
@@ -1451,7 +1854,12 @@ class ChatRuntime:
                 context=tool_context,
                 calls=turn_tool_calls,
                 message_id=assistant_message_id,
+                refusals=refusals,
             )
+            # After awaited tool I/O (#574): a Stop signalled during the batch
+            # (cross-replica path) discards the late results - they are never
+            # folded into the transcript, persisted, or cited.
+            await self._check_cancelled(state)
             for call, result in zip(turn_tool_calls, results, strict=True):
                 total_hits += result.hit_count
                 content = result.content
@@ -1542,6 +1950,17 @@ class ChatRuntime:
                     cited.setdefault(passage.chunk_id, citation)
 
         if budget_exhausted:
+            if self._limit_kind is None:
+                self._limit_kind = (
+                    "tool_calls"
+                    if tool_calls_used >= self._budgets.max_tool_calls
+                    else "external_calls"
+                    if self._budgets.max_external_calls is not None
+                    and external_calls_used >= self._budgets.max_external_calls
+                    else "tool_turns"
+                )
+            self._budget_exhausted = True
+            await self._check_cancelled(state)
             # The whole budget went to tool turns and the model never volunteered a
             # tool-free answer (issue #148 — the live empty-answer bug). Force one
             # synthesis turn with tools disabled so the model answers over the
@@ -1578,7 +1997,8 @@ class ChatRuntime:
                 tools=advertised,
                 tool_choice="none",
                 refit=_refit,
-                max_tokens=self._answer_max_tokens,
+                max_tokens=self._answer_max_tokens or 1536,
+                single_attempt=True,
             )
             await self._emit_step(
                 state,
@@ -1610,6 +2030,7 @@ class ChatRuntime:
                 content=ask_question.question,
                 citations=[],
                 question=ask_question,
+                limit_kind=self._limit_kind,
                 prompt_context=prompt_context,
             )
             await self._record_usage_scopes(
@@ -1631,6 +2052,7 @@ class ChatRuntime:
                 cited_document_ids=[],
             )
             answer_usage = _answer_usage_totals(route_state, usage)
+            self._outcome_usage = answer_usage
             ask_result = _RunResult(
                 finish_reason="ask_user",
                 model_used=route_state.model,
@@ -1641,11 +2063,15 @@ class ChatRuntime:
                 total_tokens=answer_usage.total_tokens,
                 cached_prompt_tokens=answer_usage.cached_prompt_tokens,
                 cache_write_tokens=answer_usage.cache_write_tokens,
+                cost_usd=answer_usage.cost_usd,
+                unpriced_calls=answer_usage.unpriced_calls,
             )
             # Commit the persisted question + its usage row BEFORE the terminal
             # (#489/BE-1): a commit failure raises here and becomes a typed ``error``
             # terminal (nothing misleading was published yet), never a success
             # ``done``/``ask_user`` event over a rolled-back question.
+            await self._check_cancelled(state)
+            self._completing = True
             await session.commit()
             # Durable now — DISARM the failure-path salvage (#440 NEW-2 / #413): a
             # post-commit publish failure while emitting ``ask_user``/``done`` reaches
@@ -1667,7 +2093,7 @@ class ChatRuntime:
             )
             return ask_result
 
-        if finish_reason == "length":
+        if finish_reason == "length" and not budget_exhausted:
             # Length continuation (ADR-0016 §4, #413): the answer hit the output
             # cap. Append the buffered partial as the assistant turn and run
             # exactly ONE continuation with tools disabled — a continuation can
@@ -1715,7 +2141,10 @@ class ChatRuntime:
                     # keeps "at most one un-finalised speculative block" true.
                     stream_answer=False,
                     max_tokens=self._answer_max_tokens,
+                    bounded_loop=True,
                 )
+            except _AnswerLimitReached:
+                extra_chunks = []
             except AppError as exc:
                 # Best-effort continuation: if it cannot run (retries
                 # exhausted, or a terminal fault), the already-published
@@ -1816,6 +2245,7 @@ class ChatRuntime:
             # is now EXACTLY the fallback string, so stored == delivered still holds.
             await self._stream_text(state, _ANSWER_TEXT, answer_text)
 
+        await self._check_cancelled(state)
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="started")
         stored_citations = await self._persist(
             session=session,
@@ -1825,6 +2255,7 @@ class ChatRuntime:
             model=route_state.model,
             content=answer_text,
             citations=list(cited.values()),
+            limit_kind=self._limit_kind,
             prompt_context=prompt_context,
         )
         await handle_repo.append(handles.created)
@@ -1891,6 +2322,7 @@ class ChatRuntime:
         # tagged ``run_id = answer_id``, attributed to the actual suggestions model
         # (ADR-0016 §2.6 #490 amendment) — by the post-terminal transaction below.
         answer_usage = _answer_usage_totals(route_state, usage)
+        self._outcome_usage = answer_usage
         run_result = _RunResult(
             finish_reason=finish_reason,
             model_used=route_state.model,
@@ -1901,6 +2333,8 @@ class ChatRuntime:
             total_tokens=answer_usage.total_tokens,
             cached_prompt_tokens=answer_usage.cached_prompt_tokens,
             cache_write_tokens=answer_usage.cache_write_tokens,
+            cost_usd=answer_usage.cost_usd,
+            unpriced_calls=answer_usage.unpriced_calls,
         )
 
         # Record the answer's BASE token/cache usage (#409) — one row per answer, in
@@ -1926,6 +2360,8 @@ class ChatRuntime:
         # usage row are all durable now, so publishing ``done`` cannot report success
         # over a rolled-back answer. A commit failure raises here (before any
         # terminal) into ``run``'s error arms and becomes a typed ``error`` terminal.
+        await self._check_cancelled(state)
+        self._completing = True
         await session.commit()
         # Durable now — DISARM the failure-path salvage (#440 NEW-2 / #413): from here
         # the answer + its base usage row are committed, so a post-commit cancellation
@@ -2079,9 +2515,10 @@ class ChatRuntime:
 
         The answer transaction rolled back — but the provider still billed
         every completed call. Best-effort, in a FRESH independent transaction:
-        each scope that actually spent tokens records as a message-less row
-        (there is no message) under its own model, grouped by ``answer_id``.
-        Empty scopes are skipped (a 422 refused before any provider call must
+        each scope with tokens, priced spend, or unpriced calls records as a
+        message-less row (there is no message) under its own model, grouped by
+        ``answer_id``.
+        Empty scopes are skipped (a local refusal before any provider call must
         not pollute the ledger with zero rows). Never raises — a salvage
         failure is logged (type only) and the original fault stays the story.
         """
@@ -2089,7 +2526,14 @@ class ChatRuntime:
             return
         route_state, usage = self._salvage
         scopes = [*route_state.spent, (route_state.model, usage)]
-        spent = [(m, s) for m, s in scopes if s.total_tokens > 0 or s.prompt_tokens > 0]
+        spent = [
+            (m, s)
+            for m, s in scopes
+            if s.total_tokens > 0
+            or s.prompt_tokens > 0
+            or s.cost_usd is not None
+            or s.unpriced_calls
+        ]
         if not spent:
             return
         try:
@@ -2104,6 +2548,8 @@ class ChatRuntime:
                         total_tokens=scope.total_tokens,
                         cached_prompt_tokens=scope.cached_prompt_tokens,
                         cache_write_tokens=scope.cache_write_tokens,
+                        cost_usd=scope.cost_usd,
+                        unpriced_calls=scope.unpriced_calls,
                         context_prompt_tokens=scope.last_turn_prompt_tokens,
                         session_id=session_id,
                         answer_id=assistant_message_id,
@@ -2142,6 +2588,8 @@ class ChatRuntime:
                 total_tokens=scope.total_tokens,
                 cached_prompt_tokens=scope.cached_prompt_tokens,
                 cache_write_tokens=scope.cache_write_tokens,
+                cost_usd=scope.cost_usd,
+                unpriced_calls=scope.unpriced_calls,
                 context_prompt_tokens=scope.last_turn_prompt_tokens,
                 session_id=session_id,
                 answer_id=assistant_message_id,
@@ -2154,6 +2602,8 @@ class ChatRuntime:
             total_tokens=usage.total_tokens,
             cached_prompt_tokens=usage.cached_prompt_tokens,
             cache_write_tokens=usage.cache_write_tokens,
+            cost_usd=usage.cost_usd,
+            unpriced_calls=usage.unpriced_calls,
             context_prompt_tokens=usage.last_turn_prompt_tokens,
             session_id=session_id,
             answer_id=assistant_message_id,
@@ -2175,6 +2625,8 @@ class ChatRuntime:
         narrate: Callable[[str], Awaitable[None]] | None = None,
         stream_answer: bool = True,
         max_tokens: int | None = None,
+        bounded_loop: bool = False,
+        single_attempt: bool = False,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One turn with bounded retries + model failover (ADR-0016 §4, #413/#488).
 
@@ -2269,21 +2721,36 @@ class ChatRuntime:
             nonlocal messages
             while True:
                 last: LlmProviderError | None = None
-                for attempt in range(self._turn_attempt_count()):
+                for attempt in range(1 if single_attempt else self._turn_attempt_count()):
                     if attempt:
                         delay = _RETRY_BACKOFF_SECONDS[attempt - 1]
                         hint = last.retry_after_seconds if last is not None else None
                         if hint is not None:
                             delay = max(delay, min(hint, _RETRY_AFTER_CAP_SECONDS))
                         await self._retry_sleep(delay)
+                    await self._check_cancelled(state)
+                    request_max_tokens = max_tokens
+                    projected = 0
+                    if bounded_loop:
+                        projected, request_max_tokens = self._reserve_loop_request(
+                            messages=messages,
+                            tools=tools,
+                            route_state=route_state,
+                            usage=usage,
+                            max_tokens=max_tokens,
+                        )
+                    self._claim_model_call()
+                    before_prompt = usage.prompt_tokens
+                    before_output = usage.completion_tokens
+                    completed = False
                     try:
-                        return await self._stream_one_turn(
+                        result = await self._stream_one_turn(
                             messages=messages,
                             route=route_state.route,
                             usage=usage,
                             tools=tools,
                             tool_choice=tool_choice,
-                            max_tokens=max_tokens,
+                            max_tokens=request_max_tokens,
                             narrate=(_narrate_and_close_window if narrate is not None else None),
                             speak=(_speak_answer if stream_answer else None),
                             # Retraction is only meaningful where a tool call can
@@ -2299,8 +2766,10 @@ class ChatRuntime:
                             flush_deadline=_buffer_flush_deadline,
                             flush=_drain_buffer,
                         )
+                        completed = True
+                        return result
                     except LlmProviderError as exc:
-                        if not exc.retryable or emitted["narration"]:
+                        if single_attempt or not exc.retryable or emitted["narration"]:
                             # Terminal — or the turn already emitted narration
                             # (ADR-0016 §4: the retry window closed at first
                             # emission; a retry could duplicate wire output).
@@ -2320,6 +2789,24 @@ class ChatRuntime:
                             attempt=attempt,
                             code=exc.code,
                         )
+                    finally:
+                        if bounded_loop:
+                            # Known spend survives failed attempts too. A
+                            # positive output measurement on a complete request
+                            # can release unused output. Zero is ambiguous with
+                            # cost-only usage defaults, so stays reserved too.
+                            assert request_max_tokens is not None
+                            self._loop_input_tokens += max(
+                                0, usage.prompt_tokens - before_prompt - projected
+                            )
+                            reported_output = max(0, usage.completion_tokens - before_output)
+                            self._loop_output_tokens += (
+                                reported_output - request_max_tokens
+                                if completed
+                                and usage.last_turn_prompt_tokens is not None
+                                and reported_output > 0
+                                else max(0, reported_output - request_max_tokens)
+                            )
                 # Retries exhausted on this route. Fail over if a candidate remains:
                 # close the dying route's usage scope (its spend stays attributed to
                 # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
@@ -2539,30 +3026,39 @@ class ChatRuntime:
             async with self._sessionmaker() as session:
                 await bind_tenant(session, self._principal.tenant_id)
                 route = await self._resolve_suggestions_route(session, answer_route)
-                suggestions = await self._generate_suggestions(
-                    question=question, answer=answer_text, route=route, usage=nicety_usage
-                )
-                # Record the suggestion spend whenever tokens were billed — parse
-                # SUCCESS or MISS alike (R2-3 / #409): the tokens were spent the moment
-                # the completion returned, so an unparseable result must still account
-                # them (the old code RETURNED on a parse miss, dropping billed spend).
-                # Its OWN scope, attributed to the ACTUAL suggestions model
-                # (``route.model``, ADR-0016 §2.6) and recorded idempotently — never
-                # folded onto the answer model's row. A provider that reported nothing
-                # skips the no-op write.
-                if nicety_usage.total_tokens or nicety_usage.prompt_tokens:
-                    usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
-                    await usage_repo.record_suggestion_usage(
-                        model=route.model,
-                        session_id=session_id,
-                        answer_id=assistant_message_id,
-                        prompt_tokens=nicety_usage.prompt_tokens,
-                        completion_tokens=nicety_usage.completion_tokens,
-                        total_tokens=nicety_usage.total_tokens,
-                        cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
-                        cache_write_tokens=nicety_usage.cache_write_tokens,
+                try:
+                    suggestions = await self._generate_suggestions(
+                        question=question, answer=answer_text, route=route, usage=nicety_usage
                     )
-                    await session.commit()
+                finally:
+                    # Record the suggestion spend whenever tokens were billed — parse
+                    # SUCCESS or MISS alike (R2-3 / #409): the tokens were spent the moment
+                    # the completion returned, so an unparseable result must still account
+                    # them (the old code RETURNED on a parse miss, dropping billed spend).
+                    # Its OWN scope, attributed to the ACTUAL suggestions model
+                    # (``route.model``, ADR-0016 §2.6) and recorded idempotently — never
+                    # folded onto the answer model's row. Missing usage and dispatched
+                    # failures remain visible as unpriced calls (ADR-0031).
+                    if (
+                        nicety_usage.total_tokens
+                        or nicety_usage.prompt_tokens
+                        or nicety_usage.cost_usd is not None
+                        or nicety_usage.unpriced_calls
+                    ):
+                        usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
+                        await usage_repo.record_suggestion_usage(
+                            model=route.model,
+                            session_id=session_id,
+                            answer_id=assistant_message_id,
+                            prompt_tokens=nicety_usage.prompt_tokens,
+                            completion_tokens=nicety_usage.completion_tokens,
+                            total_tokens=nicety_usage.total_tokens,
+                            cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
+                            cache_write_tokens=nicety_usage.cache_write_tokens,
+                            cost_usd=nicety_usage.cost_usd,
+                            unpriced_calls=nicety_usage.unpriced_calls,
+                        )
+                        await session.commit()
                 return suggestions
         except Exception as exc:  # noqa: BLE001 — a nicety must never break a settled answer
             log.debug("chat_runtime.suggestions_txn_failed", error_type=type(exc).__name__)
@@ -2641,10 +3137,15 @@ class ChatRuntime:
             tenant_id=self._principal.tenant_id,
             user_id=self._principal.user_id,
             session_id=self._cache_session_id,
-            # Output ceiling (#488): only forwarded when set, so an unbounded
-            # (offline/headless) turn keeps its exact pre-#488 wire.
+            # Output ceiling (#488/#833): tool-phase attempts and the single
+            # synthesis always supply a finite cap, including legacy callers.
             **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
+        call_tracker = begin_call()
+        reported = False
+        completed = False
+        unpriced_before = usage.unpriced_calls
+        usage.last_turn_prompt_tokens = None
         timed = flush is not None and flush_deadline is not None
         pending: asyncio.Task[StreamEvent | object] | None = None
         try:
@@ -2678,7 +3179,11 @@ class ChatRuntime:
                                 continue
                 ev = await pending
                 pending = None
+                if self._cancel_requested:
+                    raise asyncio.CancelledError
+                self._check_answer_deadline()
                 if ev is _STREAM_END:
+                    completed = True
                     break
                 assert isinstance(ev, StreamEvent)
                 if (
@@ -2715,6 +3220,7 @@ class ChatRuntime:
                 if ev.finish_reason:
                     finish_reason = ev.finish_reason
                 if ev.usage is not None:
+                    reported = True
                     usage.add(ev.usage)
                     usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
         finally:
@@ -2725,20 +3231,27 @@ class ChatRuntime:
                 pending.cancel()
                 with suppress(BaseException):
                     await pending
+            if (completed or call_tracker.dispatched) and (
+                not reported or (not completed and usage.unpriced_calls == unpriced_before)
+            ):
+                usage.unpriced_calls += 1
+            call_tracker.finish()
             aclose = getattr(gen, "aclose", None)
             if aclose is not None:
                 with suppress(Exception):
                     await aclose()
         return turn_tool_calls, finish_reason, text_chunks
 
-    @staticmethod
-    async def _next_stream_event(gen: AsyncIterator[StreamEvent]) -> StreamEvent | object:
+    async def _next_stream_event(self, gen: AsyncIterator[StreamEvent]) -> StreamEvent | object:
         """One provider event, or the :data:`_STREAM_END` sentinel at exhaustion.
 
         Wraps ``__anext__`` so its ``StopAsyncIteration`` becomes an ordinary return
         value (a Task must not carry ``StopAsyncIteration`` across ``await``), while a
         provider fault propagates as the task's exception for the caller to raise.
         """
+        if self._cancel_requested:
+            raise asyncio.CancelledError
+        self._check_answer_deadline()
         try:
             return await gen.__anext__()
         except StopAsyncIteration:
@@ -2780,6 +3293,7 @@ class ChatRuntime:
         context: ToolContext,
         calls: Sequence[ToolCall],
         message_id: UUID,
+        refusals: Mapping[int, tuple[str, bool]] | None = None,
     ) -> list[ToolResult]:
         """Run one turn's tool calls — read-only concurrently, the rest serially after.
 
@@ -2824,13 +3338,18 @@ class ChatRuntime:
           session, and only then is that session guaranteed single-writer
           again. Under a mid-batch abort these audits are skipped along with
           the answer — the whole answer transaction rolls back atomically
-          (pre-#412 semantics: a cancelled answer persists nothing).
+          (only the separately finalised cancelled partial survives).
 
         Every publish here happens in THIS coroutine — never in a worker — so
         the stream's ``seq`` mint + publish stay atomic and the wire order
         stays monotonic without a lock.
         """
-        safe = [i for i, c in enumerate(calls) if runner.is_concurrency_safe(c.name)]
+        refusals = refusals or {}
+        safe = [
+            i
+            for i, c in enumerate(calls)
+            if i not in refusals and runner.is_concurrency_safe(c.name)
+        ]
         fan_out = safe if self._tool_concurrency > 1 and len(safe) > 1 else []
         fanned = set(fan_out)
         serial_form = [i for i in range(len(calls)) if i not in fanned]
@@ -2871,6 +3390,7 @@ class ChatRuntime:
                     )
 
             async def _worker(i: int) -> tuple[int, ToolResult]:
+                await self._check_cancelled(state)
                 call = calls[i]
                 scope = _call_scope if runner.requires_call_scope(call.name) else None
                 return i, await runner.run(
@@ -2885,6 +3405,7 @@ class ChatRuntime:
             try:
                 for fut in asyncio.as_completed(tasks):
                     i, result = await fut
+                    await self._check_cancelled(state)
                     done[i] = result
                     await self._publish_tool_result(state, calls[i], result)
             except BaseException:
@@ -2911,11 +3432,23 @@ class ChatRuntime:
         # dispatch event → govern + execute (runtime context, no extra
         # session) → retrieval audit → result event.
         for i in serial_form:
+            await self._check_cancelled(state)
             call = calls[i]
             await self._publish_tool_call(state, call)
-            result = await runner.run(call=call, context=context, message_id=message_id)
+            await self._check_cancelled(state)
+            if i in refusals:
+                reason, retry_next_round = refusals[i]
+                result = await runner.refuse_budget(
+                    call=call,
+                    message_id=message_id,
+                    reason=reason,
+                    retry_next_round=retry_next_round,
+                )
+            else:
+                result = await runner.run(call=call, context=context, message_id=message_id)
+            await self._check_cancelled(state)
             done[i] = result
-            if _is_retrieval_call(call):
+            if i not in refusals and _is_retrieval_call(call):
                 await self._audit_retrieval(audit=audit, call=call, result=result)
             await self._publish_tool_result(state, call, result)
 
@@ -2967,6 +3500,7 @@ class ChatRuntime:
         content: str,
         citations: list[GroundedCitation],
         question: AskUserQuestion | None = None,
+        limit_kind: AnswerLimitKind | None = None,
         prompt_context: Sequence[ChatMessage] | None = None,
     ) -> list[GroundedCitation]:
         """Persist the assistant message + its citations; return citations w/ ids.
@@ -2998,6 +3532,7 @@ class ChatRuntime:
             model=model,
             question=question,
             source_document_ids=sorted(sources, key=str) if provenance_known else None,
+            limit_kind=limit_kind,
         )
         stored: list[GroundedCitation] = []
         for citation in citations:
@@ -3169,7 +3704,10 @@ class ChatRuntime:
             ChatMessage(role=Role.SYSTEM, content=FOLLOW_UP_SYSTEM_PROMPT),
             ChatMessage(role=Role.USER, content=request),
         ]
+        call_tracker = begin_call()
+        completed = False
         try:
+            self._claim_model_call()
             completion = await asyncio.wait_for(
                 self._gateway.chat(
                     prompt,
@@ -3180,12 +3718,17 @@ class ChatRuntime:
                 ),
                 timeout=self._suggestions_timeout_seconds,
             )
+            completed = True
         except Exception as exc:  # noqa: BLE001 — a nicety must never break the stream
             # Type only — the message may carry vendor detail (same discipline
             # as the run()-level handler). CancelledError is a BaseException in
             # 3.12, so shutdown cancellation still propagates.
             log.debug("chat_runtime.suggestions_failed", error_type=type(exc).__name__)
             return []
+        finally:
+            if not completed and call_tracker.dispatched:
+                usage.unpriced_calls += 1
+            call_tracker.finish()
         usage.add(completion.usage)
         return _parse_suggestions(completion.content, limit=self._suggestions_count)
 
@@ -3251,12 +3794,17 @@ class ChatRuntime:
                 "promptTokens": result.prompt_tokens,
                 "completionTokens": result.completion_tokens,
                 "totalTokens": result.total_tokens,
+                "costUsd": format(result.cost_usd, "f") if result.cost_usd is not None else None,
+                "unpricedCalls": result.unpriced_calls,
                 # Provider cache accounting (#409, ADR-0016 §2.6) — additive
                 # contract fields; zero when the provider reports no cache detail.
                 "cachedPromptTokens": result.cached_prompt_tokens,
                 "cacheWriteTokens": result.cache_write_tokens,
             },
         }
+        disclosure = limit_disclosure(self._limit_kind)
+        if disclosure is not None:
+            data["limit"] = disclosure
         if pending_suggestions:
             # One post-terminal ``event:suggestions`` may still follow (#489); the
             # subscriber holds a bounded grace open for it.
@@ -3336,6 +3884,104 @@ class ChatRuntime:
             )
             return False
         return True
+
+    async def _finalise_cancelled(
+        self,
+        state: _StreamState,
+        *,
+        session_id: UUID,
+        assistant_message_id: UUID,
+        model: str,
+    ) -> None:
+        """Settle a user-cancelled stream (#574, spec 0028).
+
+        Flushes any buffered answer text (it was generated before the
+        acknowledgement, so it belongs to the partial), persists the partial
+        marked ``finish_reason="cancelled"`` in an independent transaction
+        (the answer transaction rolled back with the cancellation), writes
+        exactly one ``answer.cancelled`` audit event, and publishes the one
+        ``cancelled`` terminal. No citations attach to a partial. Persistence
+        failure emits an error and prevents a successful Stop acknowledgement.
+        """
+        if state.terminal_sent:
+            return
+        await self._flush_text(state)
+        partial = "".join(state.partial_answer)
+        usage = _Usage()
+        model_used = model
+        if self._salvage is not None:
+            route_state, spent = self._salvage
+            model_used = route_state.model
+            usage = _answer_usage_totals(route_state, spent)
+        try:
+            async with self._sessionmaker() as session:
+                await bind_tenant(session, self._principal.tenant_id)
+                await MessageRepository(session, self._principal.tenant_id).add_with_id(
+                    message_id=assistant_message_id,
+                    session_id=session_id,
+                    role=MessageRole.ASSISTANT,
+                    content=partial,
+                    model=model_used,
+                    finish_reason="cancelled",
+                )
+                await AuditSink(AuditEventRepository(session, self._principal.tenant_id)).emit(
+                    action=AuditAction.ANSWER_CANCELLED,
+                    actor=AuditActor.user(self._principal.user_id),
+                    resource_type="message",
+                    resource_id=str(assistant_message_id),
+                    outcome=AuditOutcome.ALLOWED,
+                    request_id=self._request_id,
+                    source_ip=self._source_ip,
+                    metadata={
+                        "session_id": str(session_id),
+                        "stream_id": state.stream_id,
+                        "model": model_used,
+                        "partial_chars": len(partial),
+                        "outcome": "cancelled",
+                    },
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 - the terminal must still land
+            log.error(
+                "chat_runtime.cancel_persist_failed",
+                stream_id=state.stream_id,
+                error_type=type(exc).__name__,
+            )
+            await self._terminal_error(
+                state,
+                503,
+                "Service Unavailable",
+                "cancellation_persist_failed",
+                "The stopped answer could not be saved.",
+            )
+            return
+        seq = state.terminal_seq if state.terminal_seq is not None else state.next_seq()
+        state.terminal_seq = seq
+        terminal = envelopes.cancelled(
+            state.stream_id,
+            seq,
+            data={
+                "messageId": str(assistant_message_id),
+                "finishReason": "cancelled",
+                "model": model_used,
+                "citationCount": 0,
+                "usage": {
+                    "promptTokens": usage.prompt_tokens,
+                    "completionTokens": usage.completion_tokens,
+                    "totalTokens": usage.total_tokens,
+                },
+            },
+        )
+        for _attempt in range(2):
+            try:
+                if await self._publish_terminal(
+                    state, terminal, deadline=asyncio.get_running_loop().time() + 5
+                ):
+                    state.terminal_sent = True
+                    return
+            except Exception as exc:  # noqa: BLE001 — retry the same idempotent terminal
+                log.warning("chat_runtime.cancel_publish_failed", error_type=type(exc).__name__)
+        log.error("chat_runtime.cancel_terminal_undeliverable", stream_id=state.stream_id)
 
     async def _terminal_error(
         self, state: _StreamState, status: int, title: str, code: str, detail: str | None
@@ -3438,6 +4084,7 @@ class ChatRuntime:
             # An answer ``delta`` is now on the wire — a later retraction (#488)
             # has something to discard on the client.
             state.answer_on_wire = True
+            state.partial_answer.append(text)
             envelope = envelopes.delta(state.stream_id, state.next_seq(), {"text": text})
         await self._publish(state, envelope)
 
@@ -3462,6 +4109,7 @@ class ChatRuntime:
             state.buffer.take()
         else:  # pragma: no cover — defensive; retraction only follows answer text
             await self._flush_text(state)
+        state.partial_answer.clear()
         if not state.answer_on_wire:
             return
         state.answer_on_wire = False
@@ -3469,6 +4117,13 @@ class ChatRuntime:
         await self._publish(state, envelopes.event(state.stream_id, seq, name="answer_retract"))
 
     async def _publish(self, state: _StreamState, envelope: dict[str, object]) -> None:
+        if (
+            self._cancel_requested
+            and not self._finalising_cancel
+            and not state.answer_committed
+            and envelope.get("type") != "start"
+        ):
+            raise asyncio.CancelledError
         await self._backplane.publish(state.stream_id, envelope)
 
 
@@ -3488,6 +4143,8 @@ class _RunResult:
     total_tokens: int
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: Decimal | None = None
+    unpriced_calls: int = 0
 
 
 def _mcp_tool_specs(

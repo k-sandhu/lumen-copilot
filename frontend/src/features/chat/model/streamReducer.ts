@@ -18,6 +18,7 @@
  */
 import type {
   ChatAskUser,
+  ChatCancelledData,
   ChatCitation,
   ChatDoneData,
   ChatStartData,
@@ -34,7 +35,7 @@ import type {
 } from '@/api';
 import { isSafeHttpUrl } from './citation';
 
-export type StreamPhase = 'idle' | 'streaming' | 'done' | 'error';
+export type StreamPhase = 'idle' | 'streaming' | 'done' | 'error' | 'cancelled';
 
 /** The latest retrieval-tool activity, surfaced as "searching documents…". */
 export interface ToolActivity {
@@ -117,6 +118,8 @@ export interface StreamState {
   start: ChatStartData | null;
   /** done.data, on terminal success. */
   done: ChatDoneData | null;
+  /** cancelled.data, on terminal user cancellation (#574). */
+  cancelled: ChatCancelledData | null;
   /** The problem from a terminal WS error envelope (INV-* / disconnect). */
   problem: WsProblem | null;
   /** Highest applied seq, for dedupe / ordering. -1 before any envelope. */
@@ -136,6 +139,7 @@ export const initialStreamState: StreamState = {
   suggestions: null,
   start: null,
   done: null,
+  cancelled: null,
   problem: null,
   lastSeq: -1,
 };
@@ -340,7 +344,7 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
   // un-settling the terminal (phase stays 'done'); a second suggestions event,
   // any other post-terminal envelope, and any post-`error` envelope are still
   // ignored by identity (so useReducer bails out and nothing re-renders).
-  if (state.phase === 'done' || state.phase === 'error') {
+  if (state.phase === 'done' || state.phase === 'error' || state.phase === 'cancelled') {
     if (
       state.phase === 'done' &&
       state.done?.pendingSuggestions === true &&
@@ -492,6 +496,15 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
     case 'error':
       return { ...base, phase: 'error', problem: envelope.problem };
 
+    case 'cancelled':
+      // User Stop settled server-side (#574): the partial in `text` is kept
+      // verbatim (it is exactly what the server persisted, marked cancelled).
+      return {
+        ...base,
+        phase: 'cancelled',
+        cancelled: (envelope.data ?? null) as unknown as ChatCancelledData | null,
+      };
+
     default:
       return base;
   }
@@ -499,6 +512,7 @@ export function reduceStream(state: StreamState, envelope: WsEnvelope): StreamSt
 
 /** Apply a synthetic terminal (used on unexpected disconnect — AC-5). */
 export function terminateWithDisconnect(state: StreamState): StreamState {
-  if (state.phase === 'done' || state.phase === 'error') return state;
+  if (state.phase === 'done' || state.phase === 'error' || state.phase === 'cancelled')
+    return state;
   return { ...state, phase: 'error', problem: DISCONNECT_PROBLEM };
 }

@@ -34,6 +34,7 @@ CRUD surface uses).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
@@ -50,6 +51,7 @@ from app.domain.audit import AuditAction, AuditActor
 from app.domain.entities import Assistant, AuditOutcome, Role
 from app.llm import LLMGateway
 from app.llm.context import ContextConfig
+from app.services.answer_budgets import budgets_from_settings
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.assistants_service import config_from_assistant
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
@@ -149,7 +151,11 @@ class AssistantTestService:
 
     @audited_resource("assistant.test", "assistant", "assistant_id")
     async def run_test(
-        self, assistant_id: UUID, *, input_text: str | None = None
+        self,
+        assistant_id: UUID,
+        *,
+        input_text: str | None = None,
+        cancellation: asyncio.Event | None = None,
     ) -> AssistantTestTrace:
         """Execute a read-only test of a draft assistant; return its debug trace (#215).
 
@@ -179,10 +185,17 @@ class AssistantTestService:
 
         sink = DebugTraceSink(stream_id=f"test:{assistant_id}")
         started = datetime.now(UTC)
-        await self._drive_runtime(config=config, model=model, question=question, sink=sink)
+        await self._drive_runtime(
+            config=config, model=model, question=question, sink=sink, cancellation=cancellation
+        )
         duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
 
-        await self._audit_tested(assistant_id=assistant_id, model=model, ok=sink.finished_ok())
+        await self._audit_tested(
+            assistant_id=assistant_id,
+            model=model,
+            ok=sink.finished_ok(),
+            cancelled=cancellation is not None and cancellation.is_set(),
+        )
 
         return AssistantTestTrace(
             prompt=config.system_prompt,
@@ -203,6 +216,7 @@ class AssistantTestService:
         model: str,
         question: str,
         sink: DebugTraceSink,
+        cancellation: asyncio.Event | None = None,
     ) -> None:
         """Run the shared runtime against ``sink`` in ONE rolled-back transaction (no writes).
 
@@ -296,19 +310,35 @@ class AssistantTestService:
                 # (spec 0006 #429): ask_user is not intercepted (the handler
                 # tells the model to proceed) and no suggestions are generated.
                 interactive=False,
+                # Shared per-answer budgets (#574): same bounds as live chat.
+                budgets=budgets_from_settings(self._settings),
             )
-            await runtime.run(
-                stream_id=sink.stream_id,
-                session_id=chat_session.id,
-                question=question,
-                model=model,
-                history=[],
-                collection_ids=None,
-                assistant_config=config,
-                # The load-bearing guarantee: write-tier tools simulate/deny, so a
-                # test run performs NO real write (no artifact / no code run).
-                simulate_writes=True,
-            )
+
+            async def watch_stop() -> None:
+                if cancellation is None:
+                    await asyncio.Event().wait()
+                else:
+                    await cancellation.wait()
+                    runtime.request_cancel()
+
+            watcher = asyncio.create_task(watch_stop())
+            try:
+                await runtime.run(
+                    stream_id=sink.stream_id,
+                    session_id=chat_session.id,
+                    question=question,
+                    model=model,
+                    history=[],
+                    collection_ids=None,
+                    assistant_config=config,
+                    # The load-bearing guarantee: write-tier tools simulate/deny, so a
+                    # test run performs NO real write (no artifact / no code run).
+                    simulate_writes=True,
+                )
+            finally:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+
         finally:
             # Discard everything the run wrote (chat session + message + citations +
             # the runtime's internal audit) — a preview is side-effect-free apart from
@@ -317,7 +347,9 @@ class AssistantTestService:
             session.close = original_close  # type: ignore[method-assign]
             await session.close()
 
-    async def _audit_tested(self, *, assistant_id: UUID, model: str, ok: bool) -> None:
+    async def _audit_tested(
+        self, *, assistant_id: UUID, model: str, ok: bool, cancelled: bool = False
+    ) -> None:
         """Emit the owner-gated ``assistant.tested`` event (INV-6) on the request session.
 
         A test run mutates nothing, but it is still automation-adjacent activity a
@@ -333,7 +365,12 @@ class AssistantTestService:
             outcome=AuditOutcome.ALLOWED,
             request_id=self._request_id,
             source_ip=self._source_ip,
-            metadata={"model": model, "succeeded": ok, "simulated": True},
+            metadata={
+                "model": model,
+                "succeeded": ok,
+                "simulated": True,
+                "outcome": "cancelled" if cancelled else "complete" if ok else "failed",
+            },
         )
 
 

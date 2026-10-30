@@ -21,9 +21,10 @@
  * (frontend/AGENTS.md "Streaming UX"). On a stream error / disconnect it shows a
  * terminal banner with a Retry affordance (AC-5).
  */
-import { memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { ApiError } from '@/api';
 import type {
+  AnswerLimit,
   AskUserQuestion,
   ChatAskUser,
   ChatModelInfo,
@@ -72,6 +73,7 @@ export interface LiveAnswer {
   askUser: ChatAskUser | null;
   problem: WsProblem | null;
   model?: string | undefined;
+  limit?: AnswerLimit | null | undefined;
 }
 
 /** The WS ask_user payload as the REST question shape the bubble renders. */
@@ -219,7 +221,10 @@ const PersistedMessages = memo(function PersistedMessages({
         chosenAnswer,
         // The footer's "answered <ago>" (#120) is the message/answer time — when
         // this answer was produced, never presented as source provenance.
-        answeredAt: isAssistant ? (relativeTime(message.created_at) ?? undefined) : undefined,
+        answeredAt:
+          isAssistant && message.finish_reason !== 'cancelled'
+            ? (relativeTime(message.created_at) ?? undefined)
+            : undefined,
         showNoCitationsNotice: isAssistant && citations.length === 0,
         // Web usage on a persisted turn is derived from citations only — the
         // persisted trace records that web_search RAN, while the disclosure means
@@ -237,26 +242,33 @@ const PersistedMessages = memo(function PersistedMessages({
         // on the conversation's LAST message with nothing in flight.
         const questionActive = row.isLast && !hasLive && !sendBusy && onSendText !== undefined;
         return (
-          <MessageBubble
-            key={row.id}
-            role={message.role}
-            content={message.content}
-            model={message.model}
-            modelLabel={row.modelLabel}
-            citations={row.citations}
-            sourceMeta={row.sourceMeta}
-            traceSummary={row.traceSummary}
-            traceSteps={row.traceSteps}
-            tools={row.tools}
-            question={message.question}
-            questionActive={questionActive}
-            chosenAnswer={row.chosenAnswer}
-            onChooseOption={onSendText}
-            answeredAt={row.answeredAt}
-            showNoCitationsNotice={row.showNoCitationsNotice}
-            webUsed={row.webUsed}
-            onOpenCitation={onOpenCitation}
-          />
+          <Fragment key={row.id}>
+            <MessageBubble
+              role={message.role}
+              content={message.content}
+              limit={message.limit}
+              model={message.model}
+              modelLabel={row.modelLabel}
+              citations={row.citations}
+              sourceMeta={row.sourceMeta}
+              traceSummary={row.traceSummary}
+              traceSteps={row.traceSteps}
+              tools={row.tools}
+              question={message.question}
+              questionActive={questionActive}
+              chosenAnswer={row.chosenAnswer}
+              onChooseOption={onSendText}
+              answeredAt={row.answeredAt}
+              showNoCitationsNotice={row.showNoCitationsNotice}
+              webUsed={row.webUsed}
+              onOpenCitation={onOpenCitation}
+            />
+            {message.finish_reason === 'cancelled' && (
+              <div role="status" className="lc-thread__banner" data-testid="message-cancelled">
+                <p>Stopped by you — this is the partial answer as it stood when you stopped it.</p>
+              </div>
+            )}
+          </Fragment>
         );
       })}
     </>
@@ -316,6 +328,7 @@ const LiveTurn = memo(function LiveTurn({
         // A question turn streams no deltas — the question text IS the turn's
         // content (matches what persists, spec 0006).
         content={live.text || (live.askUser?.question ?? '')}
+        limit={live.phase === 'done' ? live.limit : null}
         model={live.model}
         modelLabel={labelForModel(live.model, models)}
         citations={liveCitations}
@@ -338,6 +351,11 @@ const LiveTurn = memo(function LiveTurn({
         webUsed={live.phase === 'done' && usedWebSearch(liveCitations, live.tools)}
         onOpenCitation={onOpenCitation}
       />
+      {live.phase === 'cancelled' && (
+        <div role="status" className="lc-thread__banner" data-testid="stream-cancelled">
+          <p>Stopped by you — the partial answer above is kept as-is.</p>
+        </div>
+      )}
       {live.phase === 'error' && (
         <div role="alert" className="lc-thread__banner">
           <p>{live.problem?.detail ?? live.problem?.title ?? 'The answer stream failed.'}</p>

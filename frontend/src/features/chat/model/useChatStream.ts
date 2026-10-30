@@ -15,8 +15,15 @@
  * socket without a network (ADR-0006 Phase 1: test against the client/mocks).
  */
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { WsClient } from '@/api';
-import type { ChatDoneData, WsClientOptions, WsConnectionState, WsEnvelope } from '@/api';
+import { WsClient, cancelChatStream } from '@/api';
+import type {
+  CancelStreamResponse,
+  ChatDoneData,
+  TerminalEnvelope,
+  WsClientOptions,
+  WsConnectionState,
+  WsEnvelope,
+} from '@/api';
 import {
   initialStreamState,
   reduceStream,
@@ -78,12 +85,24 @@ export interface UseChatStreamOptions {
   suggestionsGraceMs?: number;
   /** Called once when the stream reaches `done` (caller reloads history). */
   onDone?: () => void;
+  /**
+   * Called once the server settles the stream as cancelled (#574). The
+   * caller reloads history so the persisted partial replaces the live bubble.
+   */
+  onCancelled?: () => void;
+  /**
+   * The server cancel request (#574). Injectable for tests; defaults to
+   * POST /chat/streams/{id}/cancel. The socket stays open until its terminal
+   * so the partial and persisted answer agree.
+   */
+  cancelRequest?: (streamId: string) => Promise<unknown>;
 }
 
 type Action =
   | { kind: 'reset' }
   | { kind: 'flush'; envelopes: WsEnvelope[] }
-  | { kind: 'disconnect' };
+  | { kind: 'disconnect' }
+  | { kind: 'acknowledge'; terminal: TerminalEnvelope };
 
 function reducer(state: StreamState, action: Action): StreamState {
   switch (action.kind) {
@@ -99,12 +118,25 @@ function reducer(state: StreamState, action: Action): StreamState {
       return action.envelopes.reduce(reduceStream, state);
     case 'disconnect':
       return terminateWithDisconnect(state);
+    case 'acknowledge':
+      // A confirmed server outcome supersedes only the local disconnect guess.
+      // Actual server terminals remain immutable in reduceStream.
+      return reduceStream(
+        state.phase === 'error' && state.problem?.code === 'stream_disconnected'
+          ? { ...state, phase: 'streaming', problem: null }
+          : state,
+        action.terminal,
+      );
   }
 }
 
 export interface UseChatStreamResult extends StreamState {
   connection: WsConnectionState;
-  /** Cancel the in-flight stream (stop button / navigation). */
+  /** Stop is pending server acknowledgement; repeated clicks are disabled. */
+  stopping: boolean;
+  /** Stop could not be confirmed; the producer may still be running. */
+  cancelError: string | null;
+  /** Request server cancellation of the in-flight stream (explicit Stop). */
   cancel: () => void;
   /**
    * True ONLY while the post-terminal suggestions grace is actually armed
@@ -123,6 +155,8 @@ export function useChatStream({
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   suggestionsGraceMs = DEFAULT_SUGGESTIONS_GRACE_MS,
   onDone,
+  onCancelled,
+  cancelRequest = cancelChatStream,
 }: UseChatStreamOptions): UseChatStreamResult {
   const [state, dispatch] = useReducer(reducer, initialStreamState);
   const [connection, setConnection] = useState<WsConnectionState>('closed');
@@ -134,6 +168,10 @@ export function useChatStream({
   const graceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track terminal-ness across the socket's onclose without re-subscribing.
   const terminalRef = useRef(false);
+  const serverTerminalRef = useRef(false);
+  // Unlike the socket generation, this identity survives a transport drop so
+  // the in-flight HTTP acknowledgement can still settle this same answer.
+  const streamIdentityRef = useRef<object | null>(null);
   // FE2-3: ONE generation token for the whole hook, bumped by every event that
   // ends a subscription's authority — a new effect run, effect cleanup,
   // `cancel()`, and every deliberate close. A socket callback captures the
@@ -149,6 +187,11 @@ export function useChatStream({
   const [awaitingSuggestions, setAwaitingSuggestions] = useState(false);
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
+  const onCancelledRef = useRef(onCancelled);
+  onCancelledRef.current = onCancelled;
+  const stoppingRef = useRef(false);
+  const [stopping, setStopping] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   const clearWatchdog = useCallback(() => {
     if (watchdogRef.current !== null) {
@@ -225,6 +268,11 @@ export function useChatStream({
   // connection as closed (which is now the truth, not a prediction).
   const closeStream = useCallback(() => {
     generationRef.current += 1;
+    if (!stoppingRef.current || serverTerminalRef.current) {
+      stoppingRef.current = false;
+      setStopping(false);
+      setCancelError(null);
+    }
     clearWatchdog();
     clearGrace();
     discardPendingText();
@@ -237,12 +285,55 @@ export function useChatStream({
   }, [clearWatchdog, clearGrace, discardPendingText]);
 
   const cancel = useCallback(() => {
-    terminalRef.current = true;
-    closeStream();
-  }, [closeStream]);
+    if (terminalRef.current && serverTerminalRef.current) {
+      // A completed answer ignores late Stop; dismiss only its optional grace.
+      if (awaitingRef.current) closeStream();
+      return;
+    }
+    if (!streamId || stoppingRef.current) return;
+    const identity = streamIdentityRef.current;
+    stoppingRef.current = true;
+    setStopping(true);
+    setCancelError(null);
+    flushPendingText();
+    // Keep the socket for pre-acknowledgement deltas. The HTTP response carries
+    // the same settled terminal and recovers a lost socket terminal, including
+    // a disconnect/watchdog error that was only the client's local guess.
+    void cancelRequest(streamId)
+      .then((response) => {
+        if (streamIdentityRef.current !== identity || serverTerminalRef.current) return;
+        const ack = response as Partial<CancelStreamResponse> | null;
+        const terminal = ack?.terminal;
+        if (
+          ack?.stream_id !== streamId ||
+          !terminal ||
+          terminal.streamId !== streamId ||
+          !['done', 'error', 'cancelled'].includes(terminal.type)
+        ) {
+          throw new Error('Cancellation acknowledgement is invalid.');
+        }
+        serverTerminalRef.current = true;
+        terminalRef.current = true;
+        flushPendingText();
+        dispatch({ kind: 'acknowledge', terminal });
+        closeStream();
+        if (terminal.type === 'cancelled') onCancelledRef.current?.();
+        else if (terminal.type === 'done') onDoneRef.current?.();
+      })
+      .catch(() => {
+        if (streamIdentityRef.current !== identity || serverTerminalRef.current) return;
+        stoppingRef.current = false;
+        setStopping(false);
+        setCancelError('Could not confirm Stop. The answer may still be running. Try Stop again.');
+      });
+  }, [closeStream, flushPendingText, streamId, cancelRequest]);
 
   useEffect(() => {
     if (!streamId) {
+      streamIdentityRef.current = null;
+      stoppingRef.current = false;
+      setStopping(false);
+      setCancelError(null);
       clearWatchdog();
       clearGrace();
       awaitingRef.current = false;
@@ -251,7 +342,13 @@ export function useChatStream({
       return;
     }
 
+    const identity = {};
+    streamIdentityRef.current = identity;
+    serverTerminalRef.current = false;
     dispatch({ kind: 'reset' });
+    stoppingRef.current = false;
+    setStopping(false);
+    setCancelError(null);
     discardPendingText();
     terminalRef.current = false;
     awaitingRef.current = false;
@@ -388,7 +485,11 @@ export function useChatStream({
         dispatch({ kind: 'flush', envelopes: [...buffered, envelope] });
 
         if (envelope.type === 'done') {
+          serverTerminalRef.current = true;
           terminalRef.current = true;
+          stoppingRef.current = false;
+          setStopping(false);
+          setCancelError(null);
           onDoneRef.current?.();
           // #489: a `done` that declares `pendingSuggestions` keeps the socket
           // open for the one trailing `event:suggestions` (the UI already settled
@@ -412,7 +513,16 @@ export function useChatStream({
           return;
         }
         if (envelope.type === 'error') {
+          serverTerminalRef.current = true;
           terminalRef.current = true;
+          closeStream();
+          return;
+        }
+        if (envelope.type === 'cancelled') {
+          serverTerminalRef.current = true;
+          // Server-settled cancellation (#574) - e.g. Stop from another tab.
+          terminalRef.current = true;
+          onCancelledRef.current?.();
           closeStream();
           return;
         }
@@ -437,6 +547,7 @@ export function useChatStream({
       // (#493 AC-4). Deliberately NOT `closeStream()`: this path can run on
       // unmount, where a setState would be pointless work on a dead tree.
       generationRef.current += 1;
+      if (streamIdentityRef.current === identity) streamIdentityRef.current = null;
       terminalRef.current = true;
       awaitingRef.current = false;
       clearWatchdog();
@@ -459,5 +570,5 @@ export function useChatStream({
     cancelScheduledFlush,
   ]);
 
-  return { ...state, connection, cancel, awaitingSuggestions };
+  return { ...state, connection, cancel, awaitingSuggestions, stopping, cancelError };
 }

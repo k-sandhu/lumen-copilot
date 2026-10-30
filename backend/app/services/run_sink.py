@@ -30,6 +30,7 @@ path (the transcript is the durable replay; Redis is the live leg via the tee).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
@@ -106,6 +107,18 @@ class RunTranscriptSink:
         """
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
+        return None
+
+    async def signal_cancel(self, stream_id: str) -> None:  # pragma: no cover
+        return None
+
+    async def is_cancelled(self, stream_id: str) -> bool:  # pragma: no cover
+        return False
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
         return None
 
     def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
@@ -260,6 +273,18 @@ class DebugTraceSink:
     async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
         return None
 
+    async def signal_cancel(self, stream_id: str) -> None:  # pragma: no cover
+        return None
+
+    async def is_cancelled(self, stream_id: str) -> bool:  # pragma: no cover
+        return False
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        return None
+
     def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
         raise NotImplementedError("DebugTraceSink is producer-only; a test run is synchronous.")
 
@@ -375,6 +400,19 @@ class TeeSink:
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
         return await self._sinks[0].get_owner(stream_id)
+
+    async def signal_cancel(self, stream_id: str) -> None:
+        for sink in self._sinks:
+            await sink.signal_cancel(stream_id)
+
+    async def is_cancelled(self, stream_id: str) -> bool:
+        return any([await sink.is_cancelled(stream_id) for sink in self._sinks])
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        return None
 
     def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
         return self._sinks[0].subscribe(stream_id)

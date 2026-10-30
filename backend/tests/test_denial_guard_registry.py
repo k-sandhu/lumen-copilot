@@ -42,6 +42,7 @@ from app.services.runs_service import RunsControlService, RunsReadService, enque
 from app.services.saved_searches_service import SavedSearchService
 from app.services.schedules_service import SchedulesService
 from app.services.sources_service import SourcesService
+from app.services.stream_cancellation import StreamCancellationService
 
 _OWNER_SEAMS = {
     "AssistantsService": AssistantsService,
@@ -49,6 +50,7 @@ _OWNER_SEAMS = {
     "AssistantTestService": AssistantTestService,
     "ChatService": ChatService,
     "ChatStreamAccessService": ChatStreamAccessService,
+    "StreamCancellationService": StreamCancellationService,
     "CollectionsService": CollectionsService,
     "RunsReadService": RunsReadService,
     "RunsControlService": RunsControlService,

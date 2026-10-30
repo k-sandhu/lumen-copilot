@@ -18,9 +18,11 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
+from app.domain.answer_limits import AnswerLimitKind
 from app.domain.chat import AskUserQuestion
 from app.domain.ingestion import ExtractionOutcome, SourceLocation
 from app.domain.scheduling import Cadence
@@ -1172,8 +1174,12 @@ class Message:
     question: AskUserQuestion | None = None
     #: Immutable prompt dependencies, independent of deletable citations.
     source_document_ids: tuple[UUID, ...] | None = None
+    #: How the turn ended (#574): "cancelled" for a stopped partial, else None.
+    finish_reason: str | None = None
     #: Recall-only projection of stored name mentions, captured before text processing.
     mentioned_document_ids: tuple[UUID, ...] = ()
+    #: Server ceiling that ended research; prose is built from the central table.
+    limit_kind: AnswerLimitKind | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1346,6 +1352,8 @@ class LlmUsageRecord:
     total_tokens: int
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: Decimal | None = None
+    unpriced_calls: int = 0
     # Final-turn window occupancy (#434 NEW-1); None ⇒ unknown (legacy row /
     # provider reported no usage) — readers fall back to prompt_tokens.
     context_prompt_tokens: int | None = None

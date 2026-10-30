@@ -17,6 +17,7 @@ import binascii
 import hashlib
 import json
 import re
+from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated, Self
 from urllib.parse import urlsplit
@@ -788,14 +789,57 @@ class Settings(PasswordHashingSettings):
             raise ValueError("CHAT_MAX_TOOL_TURNS must be between 1 and 50 (issue #148)")
         return value
 
-    # Output ceiling for the grounded answer / forced-synthesis turn (#488). Bounds
-    # answer length — and therefore the tail of the "streaming" wait — so a runaway
-    # generation cannot stall time-to-completion. ``finish_reason == "length"`` then
-    # becomes an ordinary terminal handled by the ONE length continuation (ADR-0016
-    # §4), which caps a single answer at ~2× this value. ``0`` ⇒ unbounded (the
-    # pre-#488 shape); the offline/headless runtime default is also unbounded so
-    # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
+    # Per-request output ceiling for answer and synthesis (#488/#833).
+    # A normal length continuation remains inside the cumulative phase ceiling;
+    # forced synthesis is one request with no continuation (spec 0028). Zero
+    # selects the finite legacy fallback of 1536 rather than disabling bounds.
     chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
+
+    # Shared per-answer budgets (#574, spec 0028): applied identically to live
+    # chat, assistant Test, and headless runs via ``AnswerBudgets``. The wall
+    # clock cancels the entire answer, including an in-flight tool/provider;
+    # the external cap bounds web+MCP calls
+    # per answer (underneath it, the per-tenant rate limits still apply).
+    chat_answer_wall_clock_seconds: float = Field(
+        default=600.0, gt=0, le=3600, alias="CHAT_ANSWER_WALL_CLOCK_SECONDS"
+    )
+    chat_cancel_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=120, alias="CHAT_CANCEL_TIMEOUT_SECONDS"
+    )
+    chat_max_model_calls_per_answer: int = Field(
+        default=23, ge=1, le=200, alias="CHAT_MAX_MODEL_CALLS_PER_ANSWER"
+    )
+    chat_max_external_calls_per_answer: int = Field(
+        default=30, ge=1, le=200, alias="CHAT_MAX_EXTERNAL_CALLS_PER_ANSWER"
+    )
+
+    # Tool-loop ceilings (#833); one bounded synthesis remains outside these.
+    chat_max_tool_calls_per_answer: int = Field(
+        default=60, ge=0, alias="CHAT_MAX_TOOL_CALLS_PER_ANSWER"
+    )
+    chat_max_calls_per_round: int = Field(default=8, ge=1, alias="CHAT_MAX_CALLS_PER_ROUND")
+    chat_max_input_tokens_per_answer: int = Field(
+        default=500_000, ge=0, alias="CHAT_MAX_INPUT_TOKENS_PER_ANSWER"
+    )
+    chat_max_output_tokens_per_answer: int = Field(
+        default=16_000, ge=0, alias="CHAT_MAX_OUTPUT_TOKENS_PER_ANSWER"
+    )
+    chat_max_cost_usd_per_answer: Decimal | None = Field(
+        default=None, ge=0, allow_inf_nan=False, alias="CHAT_MAX_COST_USD_PER_ANSWER"
+    )
+
+    @field_validator(
+        "chat_max_tool_calls_per_answer",
+        "chat_max_calls_per_round",
+        "chat_max_input_tokens_per_answer",
+        "chat_max_output_tokens_per_answer",
+        mode="before",
+    )
+    @classmethod
+    def _ceiling_is_not_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Answer ceilings must be numbers, not booleans")
+        return value
 
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.

@@ -216,7 +216,8 @@ async def test_chat_cancel_preserves_approval_before_external_dispatch(world: _W
             },
         )
     ).all()
-    assert runs == [("running", "print(1)")]
+    assert runs == [("killed", "print(1)")]
+    assert sum(e.action == "code_run.cancelled" for e in events) == 1
     assert external.calls == 1
 
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -44,6 +44,7 @@ from app.core.errors import DependencyError, NotFoundError
 from app.core.logging import get_logger
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
+from app.domain.answer_limits import AnswerLimitKind, limit_disclosure
 from app.domain.chat import AskUserQuestion
 from app.domain.entities import Message, MessageRole, SandboxSession, ToolInvocation
 from app.domain.llm import ChatMessage, Role
@@ -52,6 +53,7 @@ from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
 from app.sandbox.service import SandboxDisabledError, SandboxSessionService
 from app.sandbox.tool_runner import ChatSandboxToolRunner
+from app.services.answer_budgets import budgets_from_settings
 from app.services.audit import AuditSink
 from app.services.chat_runtime import ChatRuntime, SandboxContext
 from app.services.chat_service import (
@@ -65,6 +67,8 @@ from app.services.chat_service import (
 from app.services.mcp_servers_service import build_mcp_servers_service
 from app.services.models_service import ChatModelService
 from app.services.provider_models import ModelRouteResolver, build_model_route_resolver
+from app.services.stream_cancellation import StreamCancellationService
+from app.services.stream_registry import StreamRegistry
 from app.services.tools.types import SandboxToolRunner, ToolDefinition
 from app.storage import ObjectStore
 from app.tasks.summarize import enqueue_summarize
@@ -224,6 +228,15 @@ class AskUserQuestionResponse(BaseModel):
     allow_free_text: bool
 
 
+class AnswerLimitResponse(BaseModel):
+    """The server-owned research limitation (spec 0028)."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: AnswerLimitKind
+    message: str
+
+
 class MessageResponse(BaseModel):
     """``#/components/schemas/Message``."""
 
@@ -238,6 +251,8 @@ class MessageResponse(BaseModel):
     web_citations: list[WebCitationResponse] = Field(default_factory=list)
     tool_invocations: list[MessageToolInvocationResponse]
     question: AskUserQuestionResponse | None = None
+    finish_reason: str | None = None
+    limit: AnswerLimitResponse | None = None
     created_at: datetime
 
 
@@ -313,6 +328,16 @@ class SendMessageResponse(BaseModel):
 
     message: MessageResponse
     stream_id: str
+
+
+class CancelStreamResponse(BaseModel):
+    """``#/components/schemas/CancelStreamResponse`` (#574)."""
+
+    model_config = {"extra": "forbid"}
+
+    stream_id: str
+    status: Literal["cancelled", "already_completed"]
+    terminal: dict[str, Any]
 
 
 # --- Serialisation helpers --------------------------------------------------
@@ -405,6 +430,10 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         ],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         question=_question_to_response(m.question),
+        finish_reason=m.finish_reason,
+        limit=AnswerLimitResponse.model_validate(limit_disclosure(m.limit_kind))
+        if m.limit_kind is not None
+        else None,
         created_at=m.created_at,
     )
 
@@ -933,6 +962,40 @@ async def send_message(
     )
 
 
+@router.post("/streams/{stream_id}/cancel", response_model=CancelStreamResponse)
+async def cancel_chat_stream(
+    stream_id: str,
+    request: Request,
+    principal: CurrentUser,
+    backplane: BackplaneDep,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> CancelStreamResponse:
+    """Cancel an in-flight answer stream (#574, spec 0028).
+
+    Owner-checked via the same stream-owner binding the WS consumer uses:
+    unknown and foreign/cross-tenant ids are the same 404 (INV-1/INV-2).
+    Idempotent: a settled stream is the documented no-op. The local producer
+    (if this replica owns it) is cancelled through the stream registry; the
+    backplane signal interrupts an active await on another replica too;
+    acknowledgement waits for the producer terminal. The runtime emits exactly one
+    ``cancelled`` terminal and one ``answer.cancelled`` audit event.
+    """
+    terminal = await StreamCancellationService(
+        backplane=backplane,
+        registry=request.app.state.stream_registry,
+        timeout_seconds=settings.chat_cancel_timeout_seconds,
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=principal.tenant_id, principal=principal, request=request
+        ),
+    ).cancel(stream_id=stream_id, principal=principal)
+    return CancelStreamResponse(
+        stream_id=stream_id,
+        terminal=terminal,
+        status="cancelled" if terminal["type"] == "cancelled" else "already_completed",
+    )
+
+
 def _schedule_answer(
     *,
     backplane: Backplane,
@@ -1035,6 +1098,8 @@ def _schedule_answer(
         # synthesis so length — and the tail of the streaming wait — cannot run
         # away; finish_reason="length" then rides the one length continuation.
         answer_max_tokens=settings.chat_answer_max_tokens,
+        # Shared per-answer budgets (#574): the same object Test + runs pass.
+        budgets=budgets_from_settings(settings),
     )
     history = _to_chat_messages(result.history)
 
@@ -1069,10 +1134,9 @@ def _schedule_answer(
             except Exception as exc:  # noqa: BLE001 — nicety, never the answer
                 log.warning("chat.summarize_enqueue_failed", error_type=type(exc).__name__)
 
-    tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
+    registry: StreamRegistry = request.app.state.stream_registry
     task = asyncio.create_task(_produce())
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
+    registry.register(result.stream_id, task=task, runtime=runtime)
 
 
 def _build_sandbox_factory(
