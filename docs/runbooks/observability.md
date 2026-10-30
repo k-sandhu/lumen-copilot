@@ -43,7 +43,9 @@ Each answer turn is one trace rooted at `chat.turn` (AGENT). Underneath it:
   scores and passage text.
 
 A headless/scheduled run is a `headless_run` (CHAIN) span carrying `lumen.run.id`,
-with its turn nested inside. Phoenix's **Sessions** tab groups turns by chat
+with its turn nested inside. The root is OK on success and ERROR on an error
+terminal, with only the typed error code (never the terminal's message).
+Phoenix's **Sessions** tab groups turns by chat
 session (`session.id`). Filter by user with `user.id`, or by tenant with
 `lumen.tenant_id`.
 

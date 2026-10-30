@@ -52,7 +52,7 @@ from app.observability import (
 )
 from app.observability.telemetry import tracer
 from app.realtime.backplane import InMemoryBackplane
-from tests import test_chat_runtime
+from tests import test_chat_runtime, test_runs_service
 from tests.test_chat_runtime import (
     _Ctx,
     _drain,
@@ -64,6 +64,7 @@ from tests.test_chat_runtime import (
 
 # The chat-runtime suite's seeded tenant/user/session fixture, reused as-is.
 ctx = test_chat_runtime.ctx
+run_ctx = test_runs_service.ctx
 
 _API_KEY = "sk-test-observability-key-7f3a"
 
@@ -750,6 +751,40 @@ async def test_headless_chain_parents_a_real_runtime_turn(telemetry: _Telemetry,
     assert (run.attributes or {})["lumen.run.id"] == str(run_id)
     assert (turn.attributes or {})["openinference.span.kind"] == "AGENT"
     _assert_child(turn, run)
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "failed", "escalated"])
+async def test_execute_run_span_reports_terminal_status_without_error_content(
+    telemetry: _Telemetry,
+    run_ctx: test_runs_service._Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    from app.core.errors import ForbiddenError
+    from app.services import runs_service
+
+    sensitive = "run-error-content-must-not-reach-trace"
+    gateway = (
+        test_runs_service._ScriptedGateway(cite_passages=True)
+        if outcome == "succeeded"
+        else test_runs_service._AppErrorGateway(ForbiddenError(sensitive))
+        if outcome == "escalated"
+        else test_runs_service._BoomGateway()
+    )
+    test_runs_service._wire_alice_grant(run_ctx, monkeypatch, gateway=gateway)
+    run_id = await test_runs_service._create_queued_run(run_ctx, owner_id=run_ctx.alice_id)
+    status = await runs_service.execute_run(run_id, run_ctx.tenant_a)
+    assert status.value == outcome
+    [run] = telemetry.named("headless_run")
+    [turn] = telemetry.named("chat.turn")
+    _assert_child(turn, run)
+    attrs = run.attributes or {}
+    assert attrs["lumen.run.id"] == str(run_id)
+    assert attrs["openinference.span.kind"] == "CHAIN"
+    assert run.status.status_code is (StatusCode.OK if outcome == "succeeded" else StatusCode.ERROR)
+    if outcome != "succeeded":
+        assert attrs["error.type"] == ("forbidden" if outcome == "escalated" else "internal_error")
+    assert sensitive not in _all_attribute_text([run])
 
 
 async def test_chat_turn_is_one_trace_with_tool_children(telemetry: _Telemetry, ctx: _Ctx) -> None:

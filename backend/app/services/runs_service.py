@@ -408,8 +408,8 @@ async def execute_run(
         # Phoenix shows which run, assistant and trigger produced it.
         with observe_headless_run(
             run_id=run.id, assistant_id=run.assistant_id, trigger=run.trigger.value
-        ):
-            await runtime.run(
+        ) as span:
+            ok = await runtime.run(
                 stream_id=str(run.id),
                 session_id=session_id,
                 question=question,
@@ -418,6 +418,11 @@ async def execute_run(
                 collection_ids=None,
                 assistant_config=config,
             )
+            if ok:
+                span.ok()
+            else:
+                error = sink.outcome().error
+                span.error(error.code if error is not None else "run_failed")
     except Exception as exc:  # noqa: BLE001 — a run never ends in silence
         # The runtime maps its own errors to a terminal ``error`` envelope, but an
         # error escaping it (or a defect here) must still write a terminal run status.

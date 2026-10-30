@@ -48,7 +48,7 @@ natively:
 | Span | Kind | Where | Carries |
 |---|---|---|---|
 | `chat.turn` | AGENT | `ChatRuntime.run` (interactive, headless, preview) | `session.id`, `user.id`, tenant/assistant metadata, question in, answer out, finish reason, model used |
-| `headless_run` | CHAIN | the headless-run Celery task | `run.id`, assistant, trigger; parent of its turn |
+| `headless_run` | CHAIN | the headless-run Celery task | `lumen.run.id`, assistant, trigger; parent of its turn; OK on success, ERROR with the typed terminal error code on failure |
 | `llm.<operation>` | LLM | `LLMGateway.chat` / `stream` / `stream_tools` | model, provider, invocation parameters, input messages, tools, output message, tool calls, prompt/completion/total and cache-read/cache-write token counts, time to first token |
 | `embedding` | EMBEDDING | `LLMGateway.embed` | model, input count, input texts (no vectors), cache hit |
 | `tool.<name>` | TOOL | `ToolRunner.run` | tool name, arguments, result, ok/error code, duration |
