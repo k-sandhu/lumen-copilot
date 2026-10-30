@@ -159,7 +159,11 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0052_message_finish_reason"]
+    assert list(script.get_heads()) == ["0054_billed_cost"]
+    billed = script.get_revision("0054_billed_cost")
+    assert billed is not None and billed.down_revision == "0052_message_finish_reason"
+    finish = script.get_revision("0052_message_finish_reason")
+    assert finish is not None and finish.down_revision == "0049_discovery_metadata"
     locations = script.get_revision("0047_ingestion_locations")
     assert locations is not None
     assert locations.down_revision == "0046_message_source_provenance"
@@ -2200,3 +2204,21 @@ def test_offline_direct_media_upload_migration_round_trips(
     assert "alter table citations drop column time_end_ms" in down
     assert "drop constraint fk_chunks_transcript_segment_document" in down
     assert "drop constraint fk_citations_chunk_transcript_segment" in down
+
+
+def test_offline_billed_cost_migration_round_trips(capsys: pytest.CaptureFixture[str]) -> None:
+    """#832 adds nullable measured spend and nonnegative unpriced calls reversibly."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0049_discovery_metadata:0054_billed_cost", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "cost_usd numeric(48, 30)" in up
+    assert "unpriced_calls integer default '0' not null" in up
+    assert "ck_llm_usage_cost_nonneg" in up and "cost_usd >= 0" in up
+    assert "ck_llm_usage_unpriced_nonneg" in up and "unpriced_calls >= 0" in up
+    command.downgrade(cfg, "0054_billed_cost:0049_discovery_metadata", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop constraint ck_llm_usage_cost_nonneg" in down
+    assert "drop constraint ck_llm_usage_unpriced_nonneg" in down
+    assert "drop column cost_usd" in down and "drop column unpriced_calls" in down

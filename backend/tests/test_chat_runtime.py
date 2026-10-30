@@ -1635,6 +1635,8 @@ async def test_usage_summed_reported_and_recorded_with_cache_fields(ctx: _Ctx) -
         "totalTokens": 250,
         "cachedPromptTokens": 90,
         "cacheWriteTokens": 80,
+        "costUsd": None,
+        "unpricedCalls": 2,
     }
 
     # AC-2: one recorded row per answer, tenant-scoped, linked to the message.
@@ -2304,6 +2306,8 @@ async def test_suggestions_row_ledger_linkage_and_read_semantics(
         "totalTokens": 120,
         "cachedPromptTokens": 30,
         "cacheWriteTokens": 40,
+        "costUsd": None,
+        "unpricedCalls": 1,
     }
     kpis = log_rec.kpis()
     assert len(kpis) == 1

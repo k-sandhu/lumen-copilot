@@ -508,7 +508,7 @@ async def test_anthropic_family_marks_prefix_and_last_block_breakpoints(
     # Undecorated entries keep the plain-string shape.
     assert wire[1]["content"] == "first question"
     assert wire[2]["content"] == "first answer"
-    assert set(captured["extra_body"]) == {"session_id"}
+    assert set(captured["extra_body"]) == {"session_id", "usage"}
 
 
 async def test_anthropic_single_message_gets_one_breakpoint(
@@ -666,12 +666,12 @@ async def test_openai_family_sends_prompt_cache_key_untouched_messages(
         )
     ]
 
-    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id"}
+    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id", "usage"}
     assert all(not _has_cache_control(m) for m in captured["messages"])
 
     # Without domain identity there is nothing to steer.
     _ = [ev async for ev in gw.stream_tools(_CONVO, tools=_TOOLS)]
-    assert "extra_body" not in captured
+    assert captured["extra_body"] == {"usage": {"include": True}}
 
 
 async def test_unknown_family_and_kill_switch_send_bare_wire(
@@ -679,7 +679,8 @@ async def test_unknown_family_and_kill_switch_send_bare_wire(
 ) -> None:
     """AC-3: an unknown provider family — and ANY family with the
     ``CHAT_PROMPT_CACHE_ENABLED=false`` kill-switch — sends the exact pre-#411
-    wire: plain-string contents, no ``cache_control``, no ``extra_body``."""
+    cache wire: plain-string contents and no ``cache_control``. Provider usage
+    accounting remains enabled independently of cache hints."""
     captured = _capture_acompletion(monkeypatch)
 
     # Unknown family (cache_key given, still nothing sent).
@@ -694,7 +695,7 @@ async def test_unknown_family_and_kill_switch_send_bare_wire(
             session_id=_CACHE_IDS["session_id"],
         )
     ]
-    assert set(captured["extra_body"]) == {"session_id"}
+    assert set(captured["extra_body"]) == {"session_id", "usage"}
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
 
     # Kill-switch, Anthropic family: no breakpoints.
@@ -728,7 +729,7 @@ async def test_unknown_family_and_kill_switch_send_bare_wire(
             session_id=_CACHE_IDS["session_id"],
         )
     ]
-    assert "extra_body" not in captured
+    assert captured["extra_body"] == {"usage": {"include": True}}
 
 
 async def test_anthropic_prefix_breakpoint_is_stable_across_turns(
@@ -929,7 +930,7 @@ async def test_no_base_route_needs_openrouter_prefix(
             model="openrouter/openai/gpt-5.5",
         )
     ]
-    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id"}
+    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id", "usage"}
     # The reranker name under the openrouter/openai/ namespace steers by
     # PREFIX (openai), not by the "claude" substring: prompt_cache_key, no marks.
     _ = [
@@ -943,7 +944,7 @@ async def test_no_base_route_needs_openrouter_prefix(
             model="openrouter/openai/my-claude-reranker",
         )
     ]
-    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id"}
+    assert set(captured["extra_body"]) == {"prompt_cache_key", "session_id", "usage"}
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
 
 
@@ -981,4 +982,4 @@ async def test_family_re_resolves_per_call_across_failover(
         )
     ]
     assert all(isinstance(m.get("content"), str) for m in captured["messages"])
-    assert set(captured["extra_body"]) == {"session_id"}
+    assert set(captured["extra_body"]) == {"session_id", "usage"}

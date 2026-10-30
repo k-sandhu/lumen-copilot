@@ -30,6 +30,7 @@ import uuid as uuid_mod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -6386,6 +6387,8 @@ def _to_llm_usage(row: models.LlmUsage) -> LlmUsageRecord:
         total_tokens=row.total_tokens,
         cached_prompt_tokens=row.cached_prompt_tokens,
         cache_write_tokens=row.cache_write_tokens,
+        cost_usd=row.cost_usd,
+        unpriced_calls=row.unpriced_calls,
         context_prompt_tokens=row.context_prompt_tokens,
         created_at=row.created_at,
     )
@@ -6414,6 +6417,8 @@ class LlmUsageRepository(_TenantScopedRepository):
         total_tokens: int,
         cached_prompt_tokens: int = 0,
         cache_write_tokens: int = 0,
+        cost_usd: Decimal | None = None,
+        unpriced_calls: int = 0,
         context_prompt_tokens: int | None = None,
         session_id: UUID | None = None,
         answer_id: UUID | None = None,
@@ -6437,6 +6442,8 @@ class LlmUsageRepository(_TenantScopedRepository):
             total_tokens=max(0, total_tokens),
             cached_prompt_tokens=max(0, cached_prompt_tokens),
             cache_write_tokens=max(0, cache_write_tokens),
+            cost_usd=cost_usd,
+            unpriced_calls=max(0, unpriced_calls),
             context_prompt_tokens=(
                 max(0, context_prompt_tokens) if context_prompt_tokens is not None else None
             ),
@@ -6456,6 +6463,8 @@ class LlmUsageRepository(_TenantScopedRepository):
         total_tokens: int,
         cached_prompt_tokens: int = 0,
         cache_write_tokens: int = 0,
+        cost_usd: Decimal | None = None,
+        unpriced_calls: int = 0,
     ) -> bool:
         """Record the post-terminal follow-up-suggestions spend as its OWN usage scope.
 
@@ -6497,6 +6506,8 @@ class LlmUsageRepository(_TenantScopedRepository):
             total_tokens=total_tokens,
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_tokens=cache_write_tokens,
+            cost_usd=cost_usd,
+            unpriced_calls=unpriced_calls,
             session_id=session_id,
             answer_id=answer_id,
             message_id=None,

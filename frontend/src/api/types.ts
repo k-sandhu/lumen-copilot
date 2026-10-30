@@ -2241,6 +2241,10 @@ export interface ChatDoneData {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
+    /** Provider-billed USD subtotal; null means no priced calls (ADR-0031). */
+    costUsd?: string | null;
+    /** Includes dispatched failed or abandoned calls with unknown cost. */
+    unpricedCalls?: number;
     /** Prompt tokens served from the provider's prompt cache (#409). 0 when unreported. */
     cachedPromptTokens?: number;
     /** Prompt tokens written INTO the provider's prompt cache (#409). 0 when unreported. */

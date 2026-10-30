@@ -53,6 +53,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from decimal import Decimal, localcontext
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -79,6 +80,7 @@ from app.domain.llm import ChatMessage, Role, StreamEvent, TokenUsage, ToolCall,
 from app.domain.retrieval import RetrievedPassage
 from app.domain.tools import ToolResult
 from app.llm import LLMGateway, LlmProviderError
+from app.llm.calls import begin_call
 from app.llm.context import (
     ContextConfig,
     TokenCounter,
@@ -469,7 +471,7 @@ class _StreamState:
 
 @dataclass(slots=True)
 class _Usage:
-    """Mutable running token usage across the turns of one answer.
+    """Mutable token and billed-cost accounting across the turns of one answer.
 
     Carries the provider cache accounting too (#409, ADR-0016 §2.6):
     ``cached_prompt_tokens`` served from the provider's prompt cache and
@@ -482,6 +484,8 @@ class _Usage:
     total_tokens: int = 0
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: Decimal | None = None
+    unpriced_calls: int = 0
     # The LAST answer-loop turn's prompt size — window occupancy, not billing
     # (#434 NEW-1). Set ONLY by ``_stream_one_turn`` (each loop turn overwrites,
     # so the final turn wins); the suggestions nicety accumulates into its OWN
@@ -495,6 +499,8 @@ class _Usage:
         self.total_tokens += usage.total_tokens
         self.cached_prompt_tokens += usage.cached_prompt_tokens
         self.cache_write_tokens += usage.cache_write_tokens
+        self.cost_usd = _sum_cost(self.cost_usd, usage.cost_usd)
+        self.unpriced_calls += int(usage.cost_usd is None)
 
     def snapshot_and_reset(self) -> _Usage:
         """Freeze the current scope's totals and zero the accumulator (#413).
@@ -512,8 +518,20 @@ class _Usage:
         self.total_tokens = 0
         self.cached_prompt_tokens = 0
         self.cache_write_tokens = 0
+        self.cost_usd = None
+        self.unpriced_calls = 0
         self.last_turn_prompt_tokens = None
         return frozen
+
+
+def _sum_cost(left: Decimal | None, right: Decimal | None) -> Decimal | None:
+    if right is None:
+        return left
+    # Preserve the smallest supported charge beside a large subtotal; the
+    # process Decimal default precision (28) would silently round it away.
+    with localcontext() as context:
+        context.prec = 60
+        return (left if left is not None else Decimal(0)) + right
 
 
 def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
@@ -531,6 +549,8 @@ def _answer_usage_totals(route_state: _RouteState, current: _Usage) -> _Usage:
         total.total_tokens += scope.total_tokens
         total.cached_prompt_tokens += scope.cached_prompt_tokens
         total.cache_write_tokens += scope.cache_write_tokens
+        total.cost_usd = _sum_cost(total.cost_usd, scope.cost_usd)
+        total.unpriced_calls += scope.unpriced_calls
     return total
 
 
@@ -557,6 +577,8 @@ def _log_cache_kpi(result: _RunResult) -> None:
         ),
         cache_write_tokens=result.cache_write_tokens,
         usage_reported=reported,
+        cost_usd=format(result.cost_usd, "f") if result.cost_usd is not None else None,
+        unpriced_calls=result.unpriced_calls,
     )
 
 
@@ -1916,6 +1938,8 @@ class ChatRuntime:
                 total_tokens=answer_usage.total_tokens,
                 cached_prompt_tokens=answer_usage.cached_prompt_tokens,
                 cache_write_tokens=answer_usage.cache_write_tokens,
+                cost_usd=answer_usage.cost_usd,
+                unpriced_calls=answer_usage.unpriced_calls,
             )
             # Commit the persisted question + its usage row BEFORE the terminal
             # (#489/BE-1): a commit failure raises here and becomes a typed ``error``
@@ -2180,6 +2204,8 @@ class ChatRuntime:
             total_tokens=answer_usage.total_tokens,
             cached_prompt_tokens=answer_usage.cached_prompt_tokens,
             cache_write_tokens=answer_usage.cache_write_tokens,
+            cost_usd=answer_usage.cost_usd,
+            unpriced_calls=answer_usage.unpriced_calls,
         )
 
         # Record the answer's BASE token/cache usage (#409) — one row per answer, in
@@ -2360,9 +2386,10 @@ class ChatRuntime:
 
         The answer transaction rolled back — but the provider still billed
         every completed call. Best-effort, in a FRESH independent transaction:
-        each scope that actually spent tokens records as a message-less row
-        (there is no message) under its own model, grouped by ``answer_id``.
-        Empty scopes are skipped (a 422 refused before any provider call must
+        each scope with tokens, priced spend, or unpriced calls records as a
+        message-less row (there is no message) under its own model, grouped by
+        ``answer_id``.
+        Empty scopes are skipped (a local refusal before any provider call must
         not pollute the ledger with zero rows). Never raises — a salvage
         failure is logged (type only) and the original fault stays the story.
         """
@@ -2370,7 +2397,14 @@ class ChatRuntime:
             return
         route_state, usage = self._salvage
         scopes = [*route_state.spent, (route_state.model, usage)]
-        spent = [(m, s) for m, s in scopes if s.total_tokens > 0 or s.prompt_tokens > 0]
+        spent = [
+            (m, s)
+            for m, s in scopes
+            if s.total_tokens > 0
+            or s.prompt_tokens > 0
+            or s.cost_usd is not None
+            or s.unpriced_calls
+        ]
         if not spent:
             return
         try:
@@ -2385,6 +2419,8 @@ class ChatRuntime:
                         total_tokens=scope.total_tokens,
                         cached_prompt_tokens=scope.cached_prompt_tokens,
                         cache_write_tokens=scope.cache_write_tokens,
+                        cost_usd=scope.cost_usd,
+                        unpriced_calls=scope.unpriced_calls,
                         context_prompt_tokens=scope.last_turn_prompt_tokens,
                         session_id=session_id,
                         answer_id=assistant_message_id,
@@ -2423,6 +2459,8 @@ class ChatRuntime:
                 total_tokens=scope.total_tokens,
                 cached_prompt_tokens=scope.cached_prompt_tokens,
                 cache_write_tokens=scope.cache_write_tokens,
+                cost_usd=scope.cost_usd,
+                unpriced_calls=scope.unpriced_calls,
                 context_prompt_tokens=scope.last_turn_prompt_tokens,
                 session_id=session_id,
                 answer_id=assistant_message_id,
@@ -2435,6 +2473,8 @@ class ChatRuntime:
             total_tokens=usage.total_tokens,
             cached_prompt_tokens=usage.cached_prompt_tokens,
             cache_write_tokens=usage.cache_write_tokens,
+            cost_usd=usage.cost_usd,
+            unpriced_calls=usage.unpriced_calls,
             context_prompt_tokens=usage.last_turn_prompt_tokens,
             session_id=session_id,
             answer_id=assistant_message_id,
@@ -2822,30 +2862,39 @@ class ChatRuntime:
             async with self._sessionmaker() as session:
                 await bind_tenant(session, self._principal.tenant_id)
                 route = await self._resolve_suggestions_route(session, answer_route)
-                suggestions = await self._generate_suggestions(
-                    question=question, answer=answer_text, route=route, usage=nicety_usage
-                )
-                # Record the suggestion spend whenever tokens were billed — parse
-                # SUCCESS or MISS alike (R2-3 / #409): the tokens were spent the moment
-                # the completion returned, so an unparseable result must still account
-                # them (the old code RETURNED on a parse miss, dropping billed spend).
-                # Its OWN scope, attributed to the ACTUAL suggestions model
-                # (``route.model``, ADR-0016 §2.6) and recorded idempotently — never
-                # folded onto the answer model's row. A provider that reported nothing
-                # skips the no-op write.
-                if nicety_usage.total_tokens or nicety_usage.prompt_tokens:
-                    usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
-                    await usage_repo.record_suggestion_usage(
-                        model=route.model,
-                        session_id=session_id,
-                        answer_id=assistant_message_id,
-                        prompt_tokens=nicety_usage.prompt_tokens,
-                        completion_tokens=nicety_usage.completion_tokens,
-                        total_tokens=nicety_usage.total_tokens,
-                        cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
-                        cache_write_tokens=nicety_usage.cache_write_tokens,
+                try:
+                    suggestions = await self._generate_suggestions(
+                        question=question, answer=answer_text, route=route, usage=nicety_usage
                     )
-                    await session.commit()
+                finally:
+                    # Record the suggestion spend whenever tokens were billed — parse
+                    # SUCCESS or MISS alike (R2-3 / #409): the tokens were spent the moment
+                    # the completion returned, so an unparseable result must still account
+                    # them (the old code RETURNED on a parse miss, dropping billed spend).
+                    # Its OWN scope, attributed to the ACTUAL suggestions model
+                    # (``route.model``, ADR-0016 §2.6) and recorded idempotently — never
+                    # folded onto the answer model's row. Missing usage and dispatched
+                    # failures remain visible as unpriced calls (ADR-0031).
+                    if (
+                        nicety_usage.total_tokens
+                        or nicety_usage.prompt_tokens
+                        or nicety_usage.cost_usd is not None
+                        or nicety_usage.unpriced_calls
+                    ):
+                        usage_repo = LlmUsageRepository(session, self._principal.tenant_id)
+                        await usage_repo.record_suggestion_usage(
+                            model=route.model,
+                            session_id=session_id,
+                            answer_id=assistant_message_id,
+                            prompt_tokens=nicety_usage.prompt_tokens,
+                            completion_tokens=nicety_usage.completion_tokens,
+                            total_tokens=nicety_usage.total_tokens,
+                            cached_prompt_tokens=nicety_usage.cached_prompt_tokens,
+                            cache_write_tokens=nicety_usage.cache_write_tokens,
+                            cost_usd=nicety_usage.cost_usd,
+                            unpriced_calls=nicety_usage.unpriced_calls,
+                        )
+                        await session.commit()
                 return suggestions
         except Exception as exc:  # noqa: BLE001 — a nicety must never break a settled answer
             log.debug("chat_runtime.suggestions_txn_failed", error_type=type(exc).__name__)
@@ -2928,6 +2977,10 @@ class ChatRuntime:
             # (offline/headless) turn keeps its exact pre-#488 wire.
             **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
+        call_tracker = begin_call()
+        reported = False
+        completed = False
+        unpriced_before = usage.unpriced_calls
         timed = flush is not None and flush_deadline is not None
         pending: asyncio.Task[StreamEvent | object] | None = None
         try:
@@ -2965,6 +3018,7 @@ class ChatRuntime:
                     raise asyncio.CancelledError
                 self._check_answer_deadline()
                 if ev is _STREAM_END:
+                    completed = True
                     break
                 assert isinstance(ev, StreamEvent)
                 if (
@@ -3001,6 +3055,7 @@ class ChatRuntime:
                 if ev.finish_reason:
                     finish_reason = ev.finish_reason
                 if ev.usage is not None:
+                    reported = True
                     usage.add(ev.usage)
                     usage.last_turn_prompt_tokens = ev.usage.prompt_tokens
         finally:
@@ -3011,6 +3066,11 @@ class ChatRuntime:
                 pending.cancel()
                 with suppress(BaseException):
                     await pending
+            if (completed or call_tracker.dispatched) and (
+                not reported or (not completed and usage.unpriced_calls == unpriced_before)
+            ):
+                usage.unpriced_calls += 1
+            call_tracker.finish()
             aclose = getattr(gen, "aclose", None)
             if aclose is not None:
                 with suppress(Exception):
@@ -3462,6 +3522,8 @@ class ChatRuntime:
             ChatMessage(role=Role.SYSTEM, content=FOLLOW_UP_SYSTEM_PROMPT),
             ChatMessage(role=Role.USER, content=request),
         ]
+        call_tracker = begin_call()
+        completed = False
         try:
             self._claim_model_call()
             completion = await asyncio.wait_for(
@@ -3474,12 +3536,17 @@ class ChatRuntime:
                 ),
                 timeout=self._suggestions_timeout_seconds,
             )
+            completed = True
         except Exception as exc:  # noqa: BLE001 — a nicety must never break the stream
             # Type only — the message may carry vendor detail (same discipline
             # as the run()-level handler). CancelledError is a BaseException in
             # 3.12, so shutdown cancellation still propagates.
             log.debug("chat_runtime.suggestions_failed", error_type=type(exc).__name__)
             return []
+        finally:
+            if not completed and call_tracker.dispatched:
+                usage.unpriced_calls += 1
+            call_tracker.finish()
         usage.add(completion.usage)
         return _parse_suggestions(completion.content, limit=self._suggestions_count)
 
@@ -3545,6 +3612,8 @@ class ChatRuntime:
                 "promptTokens": result.prompt_tokens,
                 "completionTokens": result.completion_tokens,
                 "totalTokens": result.total_tokens,
+                "costUsd": format(result.cost_usd, "f") if result.cost_usd is not None else None,
+                "unpricedCalls": result.unpriced_calls,
                 # Provider cache accounting (#409, ADR-0016 §2.6) — additive
                 # contract fields; zero when the provider reports no cache detail.
                 "cachedPromptTokens": result.cached_prompt_tokens,
@@ -3889,6 +3958,8 @@ class _RunResult:
     total_tokens: int
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: Decimal | None = None
+    unpriced_calls: int = 0
 
 
 def _mcp_tool_specs(
