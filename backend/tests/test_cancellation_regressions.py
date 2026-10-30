@@ -398,7 +398,8 @@ async def test_external_budget_caps_looping_mcp_calls(ctx: _Ctx) -> None:
     )
     envelopes = await _drain(backplane, stream_id)
     assert len(calls) == 2, envelopes
-    assert gateway.auto_calls == 3
+    # Exhaustion is checked before another tool-loop request (#833).
+    assert gateway.auto_calls == 2
     assert gateway.synthesis_calls == 1
     envelopes = await _drain(backplane, stream_id)
     assert [env["type"] for env in envelopes if is_terminal(env)] == ["done"]

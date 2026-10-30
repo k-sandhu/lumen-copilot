@@ -159,7 +159,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0054_billed_cost"]
+    assert list(script.get_heads()) == ["0055_answer_limit"]
+    limit = script.get_revision("0055_answer_limit")
+    assert limit is not None and limit.down_revision == "0054_billed_cost"
     billed = script.get_revision("0054_billed_cost")
     assert billed is not None and billed.down_revision == "0052_message_finish_reason"
     finish = script.get_revision("0052_message_finish_reason")

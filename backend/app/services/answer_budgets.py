@@ -11,6 +11,7 @@ including retries, fallback routes, synthesis, continuation and suggestions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from app.core.config import Settings
 
@@ -29,11 +30,10 @@ def is_external_tool(tool_name: str) -> bool:
 class AnswerBudgets:
     """The spend bounds for one answer, shared by all runtime callers.
 
-    ``None`` fields mean "no runtime-level bound" (the underlying gateway or
-    rate-limit bound still applies). Defaults mirror the module defaults the
-    runtime used before #574 so an un-wired caller keeps its old behaviour
-    except for the new wall-clock/external caps, which default to the
-    configured live-chat values in :func:`budgets_from_settings`.
+    ``None`` disables the optional cost, deadline and attempt bounds. Tool,
+    round and cumulative token ceilings always apply, including to legacy
+    callers that do not supply settings. The tool phase reserves unknown
+    provider usage conservatively; billed usage remains a separate fact.
     """
 
     max_tool_turns: int = 20
@@ -43,6 +43,25 @@ class AnswerBudgets:
     wall_clock_seconds: float | None = None
     max_external_calls: int | None = None
     max_model_calls: int | None = None
+    max_tool_calls: int = 60
+    max_calls_per_round: int = 8
+    max_input_tokens: int = 500_000
+    max_output_tokens: int = 16_000
+    max_cost_usd: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("max_tool_calls", "max_input_tokens", "max_output_tokens"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if type(self.max_calls_per_round) is not int or self.max_calls_per_round < 1:
+            raise ValueError("max_calls_per_round must be a positive integer")
+        if self.max_cost_usd is not None and (
+            not isinstance(self.max_cost_usd, Decimal)
+            or not self.max_cost_usd.is_finite()
+            or self.max_cost_usd < 0
+        ):
+            raise ValueError("max_cost_usd must be a finite nonnegative Decimal")
 
     def effective_max_tool_turns(self, *, tenant_override: int | None) -> int:
         """The loop bound: the tenant override (#148) beats the shared default."""
@@ -60,6 +79,11 @@ def budgets_from_settings(settings: Settings) -> AnswerBudgets:
         wall_clock_seconds=settings.chat_answer_wall_clock_seconds,
         max_external_calls=settings.chat_max_external_calls_per_answer,
         max_model_calls=settings.chat_max_model_calls_per_answer,
+        max_tool_calls=settings.chat_max_tool_calls_per_answer,
+        max_calls_per_round=settings.chat_max_calls_per_round,
+        max_input_tokens=settings.chat_max_input_tokens_per_answer,
+        max_output_tokens=settings.chat_max_output_tokens_per_answer,
+        max_cost_usd=settings.chat_max_cost_usd_per_answer,
     )
 
 

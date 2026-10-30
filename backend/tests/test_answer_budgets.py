@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import FrozenInstanceError
+from decimal import Decimal
 
 import pytest
 
@@ -117,3 +118,76 @@ async def test_registry_reports_completed_stream() -> None:
     assert registry.known("stream-2") is False
     assert registry.tasks() == []
     assert registry.known(uuid.uuid4().hex) is False
+
+
+def test_research_ceiling_defaults_and_settings_are_shared() -> None:
+    budgets = budgets_from_settings(Settings())
+    assert budgets.max_tool_calls == 60
+    assert budgets.max_calls_per_round == 8
+    assert budgets.max_input_tokens == 500_000
+    assert budgets.max_output_tokens == 16_000
+    assert budgets.max_cost_usd is None
+    tuned = budgets_from_settings(
+        Settings(
+            CHAT_MAX_TOOL_CALLS_PER_ANSWER=7,
+            CHAT_MAX_CALLS_PER_ROUND=2,
+            CHAT_MAX_INPUT_TOKENS_PER_ANSWER=300,
+            CHAT_MAX_OUTPUT_TOKENS_PER_ANSWER=40,
+            CHAT_MAX_COST_USD_PER_ANSWER="0.004",
+        )
+    )
+    assert (
+        tuned.max_tool_calls,
+        tuned.max_calls_per_round,
+        tuned.max_input_tokens,
+        tuned.max_output_tokens,
+        tuned.max_cost_usd,
+    ) == (7, 2, 300, 40, Decimal("0.004"))
+
+
+@pytest.mark.parametrize(
+    "field", ["max_tool_calls", "max_input_tokens", "max_output_tokens", "max_calls_per_round"]
+)
+@pytest.mark.parametrize("value", [-1, True, float("nan"), float("inf")])
+def test_direct_ceiling_values_refuse_invalid_numbers(field: str, value: object) -> None:
+    with pytest.raises(ValueError):
+        AnswerBudgets(**{field: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [Decimal("-1"), Decimal("NaN"), Decimal("Infinity"), True])
+def test_cost_ceiling_refuses_invalid_numbers(value: object) -> None:
+    with pytest.raises(ValueError):
+        AnswerBudgets(max_cost_usd=value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "CHAT_MAX_TOOL_CALLS_PER_ANSWER",
+        "CHAT_MAX_CALLS_PER_ROUND",
+        "CHAT_MAX_INPUT_TOKENS_PER_ANSWER",
+        "CHAT_MAX_OUTPUT_TOKENS_PER_ANSWER",
+        "CHAT_MAX_COST_USD_PER_ANSWER",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, True, "NaN", "Infinity"])
+def test_settings_ceiling_values_fail_at_configuration_boundary(field: str, value: object) -> None:
+    with pytest.raises(ValueError):
+        Settings(**{field: value})
+
+
+def test_numeric_environment_overrides_reach_every_shared_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in {
+        "CHAT_MAX_TOOL_CALLS_PER_ANSWER": "9",
+        "CHAT_MAX_CALLS_PER_ROUND": "3",
+        "CHAT_MAX_INPUT_TOKENS_PER_ANSWER": "6000",
+        "CHAT_MAX_OUTPUT_TOKENS_PER_ANSWER": "120",
+        "CHAT_MAX_COST_USD_PER_ANSWER": "0.003",
+    }.items():
+        monkeypatch.setenv(name, value)
+    budgets = budgets_from_settings(Settings())
+    assert (budgets.max_tool_calls, budgets.max_calls_per_round) == (9, 3)
+    assert (budgets.max_input_tokens, budgets.max_output_tokens) == (6000, 120)
+    assert budgets.max_cost_usd == Decimal("0.003")

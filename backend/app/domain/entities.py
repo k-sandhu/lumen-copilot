@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
+from app.domain.answer_limits import AnswerLimitKind
 from app.domain.chat import AskUserQuestion
 from app.domain.ingestion import ExtractionOutcome, SourceLocation
 from app.domain.scheduling import Cadence
@@ -1177,6 +1178,8 @@ class Message:
     finish_reason: str | None = None
     #: Recall-only projection of stored name mentions, captured before text processing.
     mentioned_document_ids: tuple[UUID, ...] = ()
+    #: Server ceiling that ended research; prose is built from the central table.
+    limit_kind: AnswerLimitKind | None = None
 
 
 @dataclass(frozen=True, slots=True)

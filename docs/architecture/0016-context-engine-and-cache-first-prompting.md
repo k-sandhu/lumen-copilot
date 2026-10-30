@@ -212,6 +212,17 @@ A tool-calling turn's text streams live as **`event:narration`** (not "thinking"
 - **The length continuation stays buffered (tier neither).** The one continuation turn (`finish_reason == "length"`, §4) runs *after* a finalised answer block, so a whole-turn `answer_retract` there would wrongly discard the finalised partial too. It therefore keeps the pre-#488 buffered shape (published after it completes) — which also keeps the "at most one un-finalised speculative block" invariant true. The continuation is a bounded tail; buffering it costs no time-to-first-token (the main turn already streamed).
 - **`max_tokens` on the answer/synthesis call (`CHAT_ANSWER_MAX_TOKENS`, threaded through `stream_tools`).** Answer length — and therefore the tail of the wait — is now bounded; `finish_reason == "length"` becomes an ordinary terminal handled by the one continuation (capping a single answer at ~2× the value). `0`/unset ⇒ unbounded (the pre-#488 shape; the offline/headless default).
 
+**Amendment (#833, spec 0028) � shared answer ceilings.** Every tool-loop
+attempt, including retries and failovers, now has cumulative input/output and
+optional billed-cost admission. A caller without a finite answer-token setting
+uses the existing 1536-token default, so the earlier unbounded offline/headless
+exception no longer applies. Ordinary length continuation remains inside these
+phase ceilings. A limit-triggered tool-free synthesis is one bounded provider
+attempt with no retry, failover, or continuation, inside the global model-call
+and wall-clock caps. These rules and the persisted code-built limit disclosure
+are specified in [spec 0028](../specs/0028-cancellation-lifecycle.md); cost
+accounting remains [ADR-0031](0031-provider-billed-cost.md).
+
 ## Consequences
 
 - **Targets, each with a gate** (not guarantees): tool-heavy input-cost reduction ~50–80% — *measured by the §2.6 cache-hit KPI on a fixed golden workload before/after #411*; multi-call tool latency approaching max-of-latencies — *the #412 test workload*; zero context-window 422s on golden conversations — *the #410/#416 suites*.

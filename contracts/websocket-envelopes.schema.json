@@ -235,12 +235,25 @@
         "error": { "type": "string", "description": "Typed error code when ok=false (e.g. tool_not_permitted, approval_denied, tool_error, tool_timeout). Additive (CC-7 #207)." }
       }
     },
+    "AnswerLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": { "enum": ["tool_turns", "tool_calls", "external_calls", "input_tokens", "output_tokens", "cost"] },
+        "message": { "type": "string", "description": "One complete code-built sentence, with no model text or numeric allowances (spec 0028)." }
+      }
+    },
     "ChatDoneData": {
       "type": "object",
       "additionalProperties": false,
       "description": "`done.data` — terminal success summary for a chat answer.",
       "required": ["messageId", "finishReason", "citationCount"],
       "properties": {
+        "limit": {
+          "anyOf": [{ "$ref": "#/$defs/AnswerLimit" }, { "type": "null" }],
+          "description": "Research stopped at this ceiling; omitted on normal completion for wire compatibility. Identical to Message.limit after reload."
+        },
         "messageId": { "type": "string", "format": "uuid" },
         "finishReason": { "type": "string", "description": "e.g. stop, length, content_filter, ask_user (the turn ended with a clarifying question — spec 0006 #429)." },
         "model": {

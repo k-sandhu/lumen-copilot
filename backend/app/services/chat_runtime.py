@@ -40,6 +40,11 @@ stream ends ``done(finishReason="ask_user")``; the user's choice arrives as an
 ordinary next message. After a normal answer, one config-gated, time-bounded
 completion proposes follow-up questions (``event:suggestions``); any failure is
 a silent skip.
+
+**Shared bounds (spec 0028).** Every caller applies the same tool-phase call,
+input/output token and optional billed-cost ceilings. Limit stops allow one
+finite tool-free synthesis, without retries or continuation, and carry a
+server-authored disclosure on the persisted message and success terminal.
 """
 
 from __future__ import annotations
@@ -49,7 +54,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -73,6 +78,7 @@ from app.db.repositories import (
     ToolInvocationRepository,
 )
 from app.db.tenant_context import bind_tenant
+from app.domain.answer_limits import AnswerLimitKind, limit_disclosure
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.chat import AskUserQuestion, AskUserValidationError, GroundedCitation, WebCitation
 from app.domain.entities import AuditOutcome, AutonomyLevel, MessageRole
@@ -85,6 +91,7 @@ from app.llm.context import (
     ContextConfig,
     TokenCounter,
     assemble_context,
+    estimate_message_tokens,
     fit_transcript,
     litellm_token_counter,
     memoizing_token_counter,
@@ -469,6 +476,10 @@ class _StreamState:
         return s
 
 
+class _AnswerLimitReached(Exception):
+    """Internal control flow: gather no more evidence, then synthesize once."""
+
+
 @dataclass(slots=True)
 class _Usage:
     """Mutable token and billed-cost accounting across the turns of one answer.
@@ -661,6 +672,9 @@ class ChatRuntime:
         self._model_calls = 0
         self._outcome_usage = _Usage()
         self._budget_exhausted = False
+        self._limit_kind: AnswerLimitKind | None = None
+        self._loop_input_tokens = 0
+        self._loop_output_tokens = 0
         self._completing = False
         self._settling_error = False
         self._answer_deadline_factory = answer_deadline_at
@@ -862,6 +876,47 @@ class ChatRuntime:
             )
         self._model_calls += 1
 
+    def _reach_limit(self, kind: AnswerLimitKind) -> None:
+        self._limit_kind = kind
+        self._budget_exhausted = True
+        raise _AnswerLimitReached
+
+    def _reserve_loop_request(
+        self,
+        *,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolSpec],
+        route_state: _RouteState,
+        usage: _Usage,
+        max_tokens: int | None,
+    ) -> tuple[int, int]:
+        """Reserve one attempt before dispatch, including retries and failovers.
+
+        Control reservations are separate from provider-billed accounting. An
+        attempt without a complete usage report retains its projected input and
+        full requested output allowance; missing usage can never buy more work.
+        """
+        total = _answer_usage_totals(route_state, usage)
+        ceiling = self._budgets.max_cost_usd
+        if ceiling is not None and (
+            total.unpriced_calls > 0 or (total.cost_usd or Decimal(0)) >= ceiling
+        ):
+            self._reach_limit("cost")
+        projected = estimate_message_tokens(
+            messages, tools, counter=self._token_counter_for(route_state.route.model)
+        )
+        if self._loop_input_tokens + projected > self._budgets.max_input_tokens:
+            self._reach_limit("input_tokens")
+        remaining = self._budgets.max_output_tokens - self._loop_output_tokens
+        if remaining <= 0:
+            self._reach_limit("output_tokens")
+        # A legacy unconfigured caller still gets a finite request, using the
+        # same default as CHAT_ANSWER_MAX_TOKENS rather than an unlimited call.
+        requested = min(max_tokens or 1536, remaining)
+        self._loop_input_tokens += projected
+        self._loop_output_tokens += requested
+        return projected, requested
+
     def _token_counter_for(self, model: str) -> TokenCounter:
         """The memoizing token counter for ``model`` (#491) — one per answer/model.
 
@@ -939,6 +994,9 @@ class ChatRuntime:
         self._running_task = asyncio.current_task()
         self._model_calls = 0
         self._budget_exhausted = False
+        self._limit_kind = None
+        self._loop_input_tokens = 0
+        self._loop_output_tokens = 0
         watcher = asyncio.create_task(self._watch_cancel(state))
         deadline = (
             self._answer_deadline_at(self._budgets.wall_clock_seconds)
@@ -1199,6 +1257,11 @@ class ChatRuntime:
                 model_calls=self._model_calls,
                 prompt_tokens=usage.prompt_tokens,
                 completion_tokens=usage.completion_tokens,
+                cost_usd=format(usage.cost_usd, "f") if usage.cost_usd is not None else None,
+                unpriced_calls=usage.unpriced_calls,
+                limit_kind=self._limit_kind,
+                loop_input_tokens=self._loop_input_tokens,
+                loop_output_tokens=self._loop_output_tokens,
             )
 
         # Reaching here means ``_answer`` COMMITTED the assistant turn + its base
@@ -1611,8 +1674,18 @@ class ChatRuntime:
 
         budget_exhausted = True
         external_calls_used = 0
+        tool_calls_used = 0
         for turn_index in range(max_tool_turns):
             await self._check_cancelled(state)
+            if tool_calls_used >= self._budgets.max_tool_calls:
+                self._limit_kind = "tool_calls"
+                break
+            if (
+                self._budgets.max_external_calls is not None
+                and external_calls_used >= self._budgets.max_external_calls
+            ):
+                self._limit_kind = "external_calls"
+                break
             # Re-fit the GROWN transcript to the input budget before every turn
             # (#424 review, finding 1): the loop appends each turn's tool-call +
             # tool-result messages, so a one-shot assembly at the top does not
@@ -1644,17 +1717,29 @@ class ChatRuntime:
                 # turn's `think/completed` step, hence before its tool events.
                 await self._stream_text(state, _TextKind("narration", _turn), text)
 
-            turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
-                state=state,
-                session=session,
-                route_state=route_state,
-                messages=messages,
-                usage=usage,
-                tools=advertised,
-                refit=_refit,
-                narrate=_publish_narration,
-                max_tokens=self._answer_max_tokens,
-            )
+            try:
+                turn_tool_calls, finish_reason, turn_text = await self._stream_turn_resilient(
+                    state=state,
+                    session=session,
+                    route_state=route_state,
+                    messages=messages,
+                    usage=usage,
+                    tools=advertised,
+                    refit=_refit,
+                    narrate=_publish_narration,
+                    max_tokens=self._answer_max_tokens,
+                    bounded_loop=True,
+                )
+            except _AnswerLimitReached:
+                await self._emit_step(
+                    state,
+                    key="think",
+                    label="Thinking",
+                    step_state="completed",
+                    detail="research limit reached",
+                    turn=turn_index + 1,
+                )
+                break
             if not turn_tool_calls:
                 # Tool-free turn → this is the answer. Its text ALREADY streamed
                 # live as answer deltas (#488, speculatively); no tool fragment
@@ -1713,18 +1798,46 @@ class ChatRuntime:
                 ),
                 turn=turn_index + 1,
             )
-            # Per-answer external-call cap (#574): a batch that would exceed
-            # it is not executed at all - the loop falls through to the forced
-            # synthesis over what was already gathered, so provider/web/MCP
-            # counts never exceed the shared budget.
-            batch_external = sum(1 for c in turn_tool_calls if is_external_tool(c.name))
-            if (
-                self._budgets.max_external_calls is not None
-                and external_calls_used + batch_external > self._budgets.max_external_calls
-            ):
-                log.info("chat_runtime.external_budget_spent", stream_id=state.stream_id)
-                break
-            external_calls_used += batch_external
+            # Admit in call order while preserving replies for every request.
+            # An external refusal leaves room for a later internal call.
+            refusals: dict[int, tuple[str, bool]] = {}
+            admitted_this_round = 0
+            for index, call in enumerate(turn_tool_calls):
+                if tool_calls_used >= self._budgets.max_tool_calls:
+                    refusals[index] = ("tool_calls", False)
+                elif (
+                    is_external_tool(call.name)
+                    and self._budgets.max_external_calls is not None
+                    and external_calls_used >= self._budgets.max_external_calls
+                ):
+                    refusals[index] = ("external_calls", False)
+                elif admitted_this_round >= self._budgets.max_calls_per_round:
+                    refusals[index] = ("calls_per_round", True)
+                else:
+                    admitted_this_round += 1
+                    tool_calls_used += 1
+                    external_calls_used += int(is_external_tool(call.name))
+            total_usage = _answer_usage_totals(route_state, usage)
+            cost_ceiling = self._budgets.max_cost_usd
+            another_round = (
+                turn_index + 1 < max_tool_turns
+                and tool_calls_used < self._budgets.max_tool_calls
+                and (
+                    self._budgets.max_external_calls is None
+                    or external_calls_used < self._budgets.max_external_calls
+                )
+                and self._loop_input_tokens < self._budgets.max_input_tokens
+                and self._loop_output_tokens < self._budgets.max_output_tokens
+                and (
+                    cost_ceiling is None
+                    or (
+                        total_usage.unpriced_calls == 0
+                        and (total_usage.cost_usd or Decimal(0)) < cost_ceiling
+                    )
+                )
+            )
+            if not another_round:
+                refusals = {index: (reason, False) for index, (reason, _) in refusals.items()}
             await self._check_cancelled(state)
             # The assistant turn that requested tools must be in the transcript
             # before its tool results (provider protocol). Its narration text
@@ -1741,6 +1854,7 @@ class ChatRuntime:
                 context=tool_context,
                 calls=turn_tool_calls,
                 message_id=assistant_message_id,
+                refusals=refusals,
             )
             # After awaited tool I/O (#574): a Stop signalled during the batch
             # (cross-replica path) discards the late results - they are never
@@ -1836,6 +1950,15 @@ class ChatRuntime:
                     cited.setdefault(passage.chunk_id, citation)
 
         if budget_exhausted:
+            if self._limit_kind is None:
+                self._limit_kind = (
+                    "tool_calls"
+                    if tool_calls_used >= self._budgets.max_tool_calls
+                    else "external_calls"
+                    if self._budgets.max_external_calls is not None
+                    and external_calls_used >= self._budgets.max_external_calls
+                    else "tool_turns"
+                )
             self._budget_exhausted = True
             await self._check_cancelled(state)
             # The whole budget went to tool turns and the model never volunteered a
@@ -1874,7 +1997,8 @@ class ChatRuntime:
                 tools=advertised,
                 tool_choice="none",
                 refit=_refit,
-                max_tokens=self._answer_max_tokens,
+                max_tokens=self._answer_max_tokens or 1536,
+                single_attempt=True,
             )
             await self._emit_step(
                 state,
@@ -1906,6 +2030,7 @@ class ChatRuntime:
                 content=ask_question.question,
                 citations=[],
                 question=ask_question,
+                limit_kind=self._limit_kind,
                 prompt_context=prompt_context,
             )
             await self._record_usage_scopes(
@@ -1968,7 +2093,7 @@ class ChatRuntime:
             )
             return ask_result
 
-        if finish_reason == "length":
+        if finish_reason == "length" and not budget_exhausted:
             # Length continuation (ADR-0016 §4, #413): the answer hit the output
             # cap. Append the buffered partial as the assistant turn and run
             # exactly ONE continuation with tools disabled — a continuation can
@@ -2016,7 +2141,10 @@ class ChatRuntime:
                     # keeps "at most one un-finalised speculative block" true.
                     stream_answer=False,
                     max_tokens=self._answer_max_tokens,
+                    bounded_loop=True,
                 )
+            except _AnswerLimitReached:
+                extra_chunks = []
             except AppError as exc:
                 # Best-effort continuation: if it cannot run (retries
                 # exhausted, or a terminal fault), the already-published
@@ -2127,6 +2255,7 @@ class ChatRuntime:
             model=route_state.model,
             content=answer_text,
             citations=list(cited.values()),
+            limit_kind=self._limit_kind,
             prompt_context=prompt_context,
         )
         await handle_repo.append(handles.created)
@@ -2496,6 +2625,8 @@ class ChatRuntime:
         narrate: Callable[[str], Awaitable[None]] | None = None,
         stream_answer: bool = True,
         max_tokens: int | None = None,
+        bounded_loop: bool = False,
+        single_attempt: bool = False,
     ) -> tuple[list[ToolCall], str, list[str]]:
         """One turn with bounded retries + model failover (ADR-0016 §4, #413/#488).
 
@@ -2590,7 +2721,7 @@ class ChatRuntime:
             nonlocal messages
             while True:
                 last: LlmProviderError | None = None
-                for attempt in range(self._turn_attempt_count()):
+                for attempt in range(1 if single_attempt else self._turn_attempt_count()):
                     if attempt:
                         delay = _RETRY_BACKOFF_SECONDS[attempt - 1]
                         hint = last.retry_after_seconds if last is not None else None
@@ -2598,15 +2729,28 @@ class ChatRuntime:
                             delay = max(delay, min(hint, _RETRY_AFTER_CAP_SECONDS))
                         await self._retry_sleep(delay)
                     await self._check_cancelled(state)
+                    request_max_tokens = max_tokens
+                    projected = 0
+                    if bounded_loop:
+                        projected, request_max_tokens = self._reserve_loop_request(
+                            messages=messages,
+                            tools=tools,
+                            route_state=route_state,
+                            usage=usage,
+                            max_tokens=max_tokens,
+                        )
                     self._claim_model_call()
+                    before_prompt = usage.prompt_tokens
+                    before_output = usage.completion_tokens
+                    completed = False
                     try:
-                        return await self._stream_one_turn(
+                        result = await self._stream_one_turn(
                             messages=messages,
                             route=route_state.route,
                             usage=usage,
                             tools=tools,
                             tool_choice=tool_choice,
-                            max_tokens=max_tokens,
+                            max_tokens=request_max_tokens,
                             narrate=(_narrate_and_close_window if narrate is not None else None),
                             speak=(_speak_answer if stream_answer else None),
                             # Retraction is only meaningful where a tool call can
@@ -2622,8 +2766,10 @@ class ChatRuntime:
                             flush_deadline=_buffer_flush_deadline,
                             flush=_drain_buffer,
                         )
+                        completed = True
+                        return result
                     except LlmProviderError as exc:
-                        if not exc.retryable or emitted["narration"]:
+                        if single_attempt or not exc.retryable or emitted["narration"]:
                             # Terminal — or the turn already emitted narration
                             # (ADR-0016 §4: the retry window closed at first
                             # emission; a retry could duplicate wire output).
@@ -2643,6 +2789,24 @@ class ChatRuntime:
                             attempt=attempt,
                             code=exc.code,
                         )
+                    finally:
+                        if bounded_loop:
+                            # Known spend survives failed attempts too. A
+                            # positive output measurement on a complete request
+                            # can release unused output. Zero is ambiguous with
+                            # cost-only usage defaults, so stays reserved too.
+                            assert request_max_tokens is not None
+                            self._loop_input_tokens += max(
+                                0, usage.prompt_tokens - before_prompt - projected
+                            )
+                            reported_output = max(0, usage.completion_tokens - before_output)
+                            self._loop_output_tokens += (
+                                reported_output - request_max_tokens
+                                if completed
+                                and usage.last_turn_prompt_tokens is not None
+                                and reported_output > 0
+                                else max(0, reported_output - request_max_tokens)
+                            )
                 # Retries exhausted on this route. Fail over if a candidate remains:
                 # close the dying route's usage scope (its spend stays attributed to
                 # it — ADR-0016 §2.6), then REFIT the transcript to the new route's
@@ -2973,14 +3137,15 @@ class ChatRuntime:
             tenant_id=self._principal.tenant_id,
             user_id=self._principal.user_id,
             session_id=self._cache_session_id,
-            # Output ceiling (#488): only forwarded when set, so an unbounded
-            # (offline/headless) turn keeps its exact pre-#488 wire.
+            # Output ceiling (#488/#833): tool-phase attempts and the single
+            # synthesis always supply a finite cap, including legacy callers.
             **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         call_tracker = begin_call()
         reported = False
         completed = False
         unpriced_before = usage.unpriced_calls
+        usage.last_turn_prompt_tokens = None
         timed = flush is not None and flush_deadline is not None
         pending: asyncio.Task[StreamEvent | object] | None = None
         try:
@@ -3128,6 +3293,7 @@ class ChatRuntime:
         context: ToolContext,
         calls: Sequence[ToolCall],
         message_id: UUID,
+        refusals: Mapping[int, tuple[str, bool]] | None = None,
     ) -> list[ToolResult]:
         """Run one turn's tool calls — read-only concurrently, the rest serially after.
 
@@ -3178,7 +3344,12 @@ class ChatRuntime:
         the stream's ``seq`` mint + publish stay atomic and the wire order
         stays monotonic without a lock.
         """
-        safe = [i for i, c in enumerate(calls) if runner.is_concurrency_safe(c.name)]
+        refusals = refusals or {}
+        safe = [
+            i
+            for i, c in enumerate(calls)
+            if i not in refusals and runner.is_concurrency_safe(c.name)
+        ]
         fan_out = safe if self._tool_concurrency > 1 and len(safe) > 1 else []
         fanned = set(fan_out)
         serial_form = [i for i in range(len(calls)) if i not in fanned]
@@ -3265,10 +3436,19 @@ class ChatRuntime:
             call = calls[i]
             await self._publish_tool_call(state, call)
             await self._check_cancelled(state)
-            result = await runner.run(call=call, context=context, message_id=message_id)
+            if i in refusals:
+                reason, retry_next_round = refusals[i]
+                result = await runner.refuse_budget(
+                    call=call,
+                    message_id=message_id,
+                    reason=reason,
+                    retry_next_round=retry_next_round,
+                )
+            else:
+                result = await runner.run(call=call, context=context, message_id=message_id)
             await self._check_cancelled(state)
             done[i] = result
-            if _is_retrieval_call(call):
+            if i not in refusals and _is_retrieval_call(call):
                 await self._audit_retrieval(audit=audit, call=call, result=result)
             await self._publish_tool_result(state, call, result)
 
@@ -3320,6 +3500,7 @@ class ChatRuntime:
         content: str,
         citations: list[GroundedCitation],
         question: AskUserQuestion | None = None,
+        limit_kind: AnswerLimitKind | None = None,
         prompt_context: Sequence[ChatMessage] | None = None,
     ) -> list[GroundedCitation]:
         """Persist the assistant message + its citations; return citations w/ ids.
@@ -3351,6 +3532,7 @@ class ChatRuntime:
             model=model,
             question=question,
             source_document_ids=sorted(sources, key=str) if provenance_known else None,
+            limit_kind=limit_kind,
         )
         stored: list[GroundedCitation] = []
         for citation in citations:
@@ -3620,6 +3802,9 @@ class ChatRuntime:
                 "cacheWriteTokens": result.cache_write_tokens,
             },
         }
+        disclosure = limit_disclosure(self._limit_kind)
+        if disclosure is not None:
+            data["limit"] = disclosure
         if pending_suggestions:
             # One post-terminal ``event:suggestions`` may still follow (#489); the
             # subscriber holds a bounded grace open for it.

@@ -11,8 +11,8 @@
  * CitationChip → opens the SourceInspector), a FreshnessPill, and a
  * PermissionPill (honest by construction: the backend only returns sources the
  * caller may see — spec 0004 INV-2). A zero-citation answer still says so
- * honestly. All signals are derived from data the turn ALREADY has — no contract
- * change.
+ * honestly. Research-limit disclosures render the server's code-built sentence
+ * directly beneath the answer (spec 0028, #833).
  *
  * Pure/presentational: streaming state, tool activity, citation collection, and
  * trust-signal derivation are owned by the hook/parent; this component renders
@@ -21,7 +21,7 @@
 import { memo } from 'react';
 import { MarkdownView } from '@/lib/markdown';
 import { FreshnessPill, Icon, PermissionPill, RetrievalTrace, type TraceStep } from '@/ui';
-import type { AskUserQuestion, ChatStep, MessageRole } from '@/api';
+import type { AnswerLimit, AskUserQuestion, ChatStep, MessageRole } from '@/api';
 import { hostOf, isSafeHttpUrl, type UiCitation } from '../model/citation';
 import { groupCitationsByDocument, partitionCitations } from '../model/presentation';
 import { ToolActivity } from './ToolActivity';
@@ -66,6 +66,8 @@ export interface MessageBubbleProps {
   codeRuns?: CodeRunActivity[];
   /** True while this assistant turn is still streaming (shows a caret). */
   streaming?: boolean;
+  /** The server's complete, code-built research limitation, when a ceiling ended the turn. */
+  limit?: AnswerLimit | null | undefined;
   /**
    * Live run-phase steps (spec 0006 #429) — the streaming turn only. Rendered
    * as a timeline while no answer text has arrived (the pre-token void), then
@@ -110,6 +112,7 @@ function MessageBubbleComponent({
   tools = [],
   codeRuns = [],
   streaming = false,
+  limit,
   steps = [],
   question,
   questionActive = false,
@@ -211,6 +214,12 @@ function MessageBubbleComponent({
               </MarkdownView>
               {streaming && <span className="lc-caret" aria-hidden="true" />}
             </div>
+
+            {role === 'assistant' && !streaming && limit && (
+              <p role="note" className="mt-3 text-sm text-foreground-muted">
+                {limit.message}
+              </p>
+            )}
 
             {/* Clarifying-question options (spec 0006 #429): clickable while this
                 is the conversation's last turn, inert (chosen highlighted) after. */}

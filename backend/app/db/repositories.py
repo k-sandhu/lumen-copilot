@@ -54,6 +54,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.logging import get_logger
 from app.db import models
+from app.domain.answer_limits import AnswerLimitKind, parse_limit_kind
 from app.domain.audit import AuditSourceOrigin
 from app.domain.chat import AskUserQuestion
 from app.domain.entities import (
@@ -457,6 +458,7 @@ def _to_message(row: models.Message) -> Message:
             else None
         ),
         finish_reason=getattr(row, "finish_reason", None),
+        limit_kind=parse_limit_kind(getattr(row, "limit_kind", None)),
     )
 
 
@@ -4076,6 +4078,7 @@ class MessageRepository(_TenantScopedRepository):
         question: AskUserQuestion | None = None,
         source_document_ids: Sequence[UUID] | None = None,
         finish_reason: str | None = None,
+        limit_kind: AnswerLimitKind | None = None,
     ) -> Message:
         """Persist a message under a **pre-minted** id (the streamed answer path).
 
@@ -4101,6 +4104,7 @@ class MessageRepository(_TenantScopedRepository):
                 else None
             ),
             finish_reason=finish_reason,
+            limit_kind=limit_kind,
         )
         self._session.add(row)
         await self._session.flush()

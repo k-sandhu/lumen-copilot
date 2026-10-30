@@ -4072,6 +4072,19 @@ components:
         title: { type: string }
         snippet: { type: string, description: Exact visible evidence, not a generated summary. }
 
+    AnswerLimit:
+      type: object
+      additionalProperties: false
+      description: Code-built disclosure when research ended at a server ceiling (spec 0028). No model text or numeric allowances.
+      required: [kind, message]
+      properties:
+        kind:
+          type: string
+          enum: [tool_turns, tool_calls, external_calls, input_tokens, output_tokens, cost]
+        message:
+          type: string
+          description: One complete sentence selected by the server for this kind.
+
     Message:
       type: object
       additionalProperties: false
@@ -4098,6 +4111,11 @@ components:
             Governed tool calls behind an assistant message, oldest first
             (empty for user messages) (#377).
           items: { $ref: "#/components/schemas/MessageToolInvocation" }
+        limit:
+          anyOf:
+            - { $ref: "#/components/schemas/AnswerLimit" }
+            - { type: "null" }
+          description: Absent/null for an ordinary answer; persists across history reload.
         finish_reason:
           type: [string, "null"]
           description: >

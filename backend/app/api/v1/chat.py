@@ -44,6 +44,7 @@ from app.core.errors import DependencyError, NotFoundError
 from app.core.logging import get_logger
 from app.db.repositories import AuditEventRepository, CitationView
 from app.db.session import get_sessionmaker
+from app.domain.answer_limits import AnswerLimitKind, limit_disclosure
 from app.domain.chat import AskUserQuestion
 from app.domain.entities import Message, MessageRole, SandboxSession, ToolInvocation
 from app.domain.llm import ChatMessage, Role
@@ -227,6 +228,15 @@ class AskUserQuestionResponse(BaseModel):
     allow_free_text: bool
 
 
+class AnswerLimitResponse(BaseModel):
+    """The server-owned research limitation (spec 0028)."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: AnswerLimitKind
+    message: str
+
+
 class MessageResponse(BaseModel):
     """``#/components/schemas/Message``."""
 
@@ -242,6 +252,7 @@ class MessageResponse(BaseModel):
     tool_invocations: list[MessageToolInvocationResponse]
     question: AskUserQuestionResponse | None = None
     finish_reason: str | None = None
+    limit: AnswerLimitResponse | None = None
     created_at: datetime
 
 
@@ -420,6 +431,9 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         question=_question_to_response(m.question),
         finish_reason=m.finish_reason,
+        limit=AnswerLimitResponse.model_validate(limit_disclosure(m.limit_kind))
+        if m.limit_kind is not None
+        else None,
         created_at=m.created_at,
     )
 

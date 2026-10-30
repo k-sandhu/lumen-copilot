@@ -496,6 +496,7 @@ function ActiveSession({
             askUser: stream.askUser,
             problem: stream.problem,
             model: stream.start?.model ?? model,
+            limit: stream.done?.limit ?? null,
           }
         : null,
     [
@@ -512,6 +513,7 @@ function ActiveSession({
       stream.askUser,
       stream.problem,
       stream.start,
+      stream.done,
       model,
     ],
   );

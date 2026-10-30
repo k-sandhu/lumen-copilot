@@ -805,6 +805,8 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     # How an assistant turn ended (#574): "cancelled" for a partial answer
     # persisted at user Stop; NULL for ordinary/legacy turns.
     finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Persist only the server-selected kind; never store model-authored disclosure.
+    limit_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Immutable answer-level provenance, independent of chunk/citation cascades.
     # NULL means unknown (legacy); [] means explicitly no source documents.
     # No document FK: deletion must retain the id so recall fails closed.

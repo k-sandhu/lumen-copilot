@@ -24,6 +24,7 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { ApiError } from '@/api';
 import type {
+  AnswerLimit,
   AskUserQuestion,
   ChatAskUser,
   ChatModelInfo,
@@ -72,6 +73,7 @@ export interface LiveAnswer {
   askUser: ChatAskUser | null;
   problem: WsProblem | null;
   model?: string | undefined;
+  limit?: AnswerLimit | null | undefined;
 }
 
 /** The WS ask_user payload as the REST question shape the bubble renders. */
@@ -244,6 +246,7 @@ const PersistedMessages = memo(function PersistedMessages({
             <MessageBubble
               role={message.role}
               content={message.content}
+              limit={message.limit}
               model={message.model}
               modelLabel={row.modelLabel}
               citations={row.citations}
@@ -325,6 +328,7 @@ const LiveTurn = memo(function LiveTurn({
         // A question turn streams no deltas — the question text IS the turn's
         // content (matches what persists, spec 0006).
         content={live.text || (live.askUser?.question ?? '')}
+        limit={live.phase === 'done' ? live.limit : null}
         model={live.model}
         modelLabel={labelForModel(live.model, models)}
         citations={liveCitations}

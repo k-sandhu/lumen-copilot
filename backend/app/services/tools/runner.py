@@ -292,6 +292,36 @@ class ToolRunner:
         definition = self._resolve(name)
         return definition is not None and definition.read_only and name in self._allowed
 
+    async def refuse_budget(
+        self,
+        *,
+        call: ToolCall,
+        message_id: UUID | None,
+        reason: str,
+        retry_next_round: bool,
+    ) -> ToolResult:
+        """Record an unexecuted call through the ordered denial path (INV-6)."""
+        retry = (
+            "Request it again in the next round if it is still needed."
+            if retry_next_round
+            else "Do not retry this call; the answer's allowance is exhausted."
+        )
+        return await self._finalise(
+            call=call,
+            args_hash=hash_args(call.arguments),
+            message_id=message_id,
+            ordinal=self.claim_ordinal(),
+            result=ToolResult.failure(
+                call_id=call.id,
+                name=call.name,
+                error="answer_budget_exhausted",
+                content=f"This call did not run because the {reason} limit was reached. {retry}",
+                summary="call skipped at server limit",
+                denied_reason=reason,
+            ),
+            outcome=AuditOutcome.DENIED,
+        )
+
     async def run(
         self,
         *,

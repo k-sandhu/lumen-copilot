@@ -761,3 +761,92 @@ it('#574 Stop keeps the partial through acknowledgement and authoritative histor
     1,
   );
 });
+
+it('#833 keeps the done limitation visible through a parked authoritative history reload', async () => {
+  const limit = {
+    kind: 'input_tokens' as const,
+    message: 'Research stopped at its reading limit; this answer uses the sources found so far.',
+  };
+  const fetchMock = installFetch(() => EMPTY_MESSAGES);
+  const route = fetchMock.getMockImplementation()!;
+  let parkReload = false;
+  let releaseReload!: (response: Response) => void;
+  let reloadStarted!: () => void;
+  const requestedReload = new Promise<void>((resolve) => {
+    reloadStarted = resolve;
+  });
+  const pendingReload = new Promise<Response>((resolve) => {
+    releaseReload = resolve;
+  });
+  fetchMock.mockImplementation((input, init) => {
+    if (
+      parkReload &&
+      String(input).includes('/messages') &&
+      (init?.method ?? 'GET').toUpperCase() === 'GET'
+    ) {
+      reloadStarted();
+      return pendingReload;
+    }
+    return route(input, init);
+  });
+  const user = userEvent.setup();
+  renderView();
+  await user.click(await screen.findByRole('button', { name: 'My chat' }));
+  await user.type(screen.getByLabelText('Message'), 'Answer with available evidence');
+  await user.click(screen.getByRole('button', { name: /send/i }));
+  await waitFor(() => expect(liveSocket).not.toBeNull());
+  act(() => {
+    liveSocket!.emit({
+      type: 'start',
+      streamId: 'stream-1',
+      seq: 0,
+      data: { sessionId: 'sess-1', messageId: 'am-1', model: 'frontier/opus' },
+    });
+    liveSocket!.emit({
+      type: 'delta',
+      streamId: 'stream-1',
+      seq: 1,
+      data: { text: 'Available answer.' },
+    });
+  });
+  await flushDeltaFrame();
+  expect(screen.queryByRole('note')).not.toBeInTheDocument();
+  parkReload = true;
+  try {
+    await act(async () => {
+      liveSocket!.emit({
+        type: 'done',
+        streamId: 'stream-1',
+        seq: 2,
+        data: { messageId: 'am-1', finishReason: 'stop', citationCount: 0, limit },
+      });
+      await requestedReload;
+    });
+    expect(screen.getByRole('note')).toHaveTextContent(limit.message);
+    expect(screen.getAllByText('Available answer.')).toHaveLength(1);
+  } finally {
+    await act(async () => {
+      releaseReload(
+        json({
+          items: [
+            userMsg,
+            {
+              id: 'am-1',
+              session_id: 'sess-1',
+              role: 'assistant',
+              content: 'Available answer.',
+              citations: [],
+              limit,
+              created_at: '2026-06-18T00:01:05Z',
+            },
+          ],
+          next_cursor: null,
+        }),
+      );
+    });
+  }
+  await waitFor(() => expect(useChatStore.getState().activeStreamId).toBeNull());
+  expect(screen.getAllByRole('note')).toHaveLength(1);
+  expect(screen.getByRole('note')).toHaveTextContent(limit.message);
+  expect(screen.getAllByText('Available answer.')).toHaveLength(1);
+});

@@ -175,6 +175,7 @@ async def test_offline_eval_catches_an_ungrounded_answer(eval_ctx: _EvalCtx) -> 
             tenant_id: object = None,
             user_id: object = None,
             session_id: object = None,
+            max_tokens: object = None,
         ) -> AsyncIterator[StreamEvent]:
             # Never calls a tool; just asserts a fact → zero citations → ungrounded.
             yield StreamEvent(text="The standard deduction is $14,600.")

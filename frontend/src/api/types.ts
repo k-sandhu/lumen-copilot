@@ -502,6 +502,12 @@ export interface AskUserQuestion {
   allow_free_text: boolean;
 }
 
+/** Server-built disclosure for a research ceiling (spec 0028, #833). */
+export interface AnswerLimit {
+  kind: 'tool_turns' | 'tool_calls' | 'external_calls' | 'input_tokens' | 'output_tokens' | 'cost';
+  message: string;
+}
+
 export interface Message {
   id: string;
   session_id: string;
@@ -519,6 +525,8 @@ export interface Message {
   question?: AskUserQuestion;
   /** How the turn ended (#574): 'cancelled' for a stopped partial answer. */
   finish_reason?: string | null;
+  /** Research limit disclosure, retained after history reload. */
+  limit?: AnswerLimit | null;
   created_at: string;
 }
 
@@ -2211,6 +2219,8 @@ export interface ChatCancelledData {
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
   messageId: string;
+  /** Omitted on ordinary completion; matches Message.limit after reload. */
+  limit?: AnswerLimit | null;
   /** e.g. stop, length, content_filter, ask_user (spec 0006 #429). */
   finishReason: string;
   /**
