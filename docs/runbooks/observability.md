@@ -88,6 +88,9 @@ Every process pushes over OTLP every `TELEMETRY_METRICS_EXPORT_INTERVAL_SECONDS`
 
 Every series also carries `job` (service), `instance` (host:pid) and
 `lumen_process` (`api` / `worker`). Tenant and user ids are never labels.
+Tool labels and `tool.<name>` span names use the resolved registry or per-run
+tool name; unresolvable names collapse to `unknown`. The span's `tool.name`
+attribute retains the raw requested name for diagnosis.
 
 The dashboard lives in `docker/grafana/dashboards/lumen-service-llm.json` and is
 read-only in the UI. Change the JSON in the repo and restart Grafana.

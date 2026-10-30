@@ -81,7 +81,9 @@ Celery. Instruments:
 - `lumen.llm.tokens` (counter), by operation, model and token type (input,
   output, cache_read, cache_write).
 - `lumen.tool.calls` (counter) and `lumen.tool.duration` (histogram), by tool
-  and outcome.
+  and outcome. Tool labels and `tool.<name>` span names use the resolved static
+  registry or per-run tool name, otherwise `unknown`; only the `tool.name` span
+  attribute keeps the raw requested name.
 - `lumen.retrieval.duration` (histogram).
 - `lumen.chat.turns` (counter) and `lumen.chat.turn.duration` (histogram), by
   outcome and interactive/headless mode.

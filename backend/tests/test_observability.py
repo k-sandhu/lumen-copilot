@@ -180,7 +180,9 @@ def test_telemetry_is_off_by_default_and_helpers_are_no_ops() -> None:
 
 def test_configure_is_idempotent_and_shutdown_returns_to_no_op(telemetry: _Telemetry) -> None:
     assert configure_telemetry(_enabled(), process="test") is True
-    with observe_tool(name="search_text", call_id="c1", arguments={}, ordinal=0):
+    with observe_tool(
+        name="search_text", resolved_name="search_text", call_id="c1", arguments={}, ordinal=0
+    ):
         pass
     assert len(telemetry.named("tool.search_text")) == 1
     resource = telemetry.spans[0].resource.attributes
@@ -567,7 +569,9 @@ async def test_failed_turn_marks_the_root_span_failed(telemetry: _Telemetry, ctx
 async def test_denied_tool_span_is_failed(telemetry: _Telemetry) -> None:
     from app.domain.tools import ToolResult
 
-    with observe_tool(name="write_file", call_id="c9", arguments={}, ordinal=3) as span:
+    with observe_tool(
+        name="write_file", resolved_name="write_file", call_id="c9", arguments={}, ordinal=3
+    ) as span:
         span.finished(
             ToolResult.failure(
                 call_id="c9",
@@ -580,6 +584,44 @@ async def test_denied_tool_span_is_failed(telemetry: _Telemetry) -> None:
     [tool] = telemetry.named("tool.write_file")
     assert tool.status.status_code is StatusCode.ERROR
     assert (tool.attributes or {})["lumen.tool.error"] == "not_permitted"
+
+
+@pytest.mark.parametrize("source", ["unknown", "static", "extra", "off_allow_list"])
+async def test_tool_names_are_bounded_by_resolved_definitions(
+    telemetry: _Telemetry, ctx: _Ctx, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    from app.services.tools import runner as runner_module
+    from tests.test_tool_runner import _context, _make_runner, _ok_tool, _World
+
+    raw_names = ["hallucinated_one", "hallucinated_two"] if source == "unknown" else ["probe"]
+    definition = _ok_tool("mcp:server:probe" if source == "extra" else "probe")
+    monkeypatch.setattr(
+        runner_module,
+        "get_tool",
+        lambda name: definition if source in {"static", "off_allow_list"} else None,
+    )
+    expected_name = "unknown" if source == "unknown" else definition.name
+    async with ctx.sessionmaker() as session:
+        world = _World(session=session, tenant_id=ctx.tenant_id, user_id=ctx.principal.user_id)
+        runner, _, _ = _make_runner(
+            world,
+            allowed=frozenset() if source == "off_allow_list" else frozenset(raw_names),
+            extra_tools={raw_names[0]: definition} if source == "extra" else None,
+        )
+        for index, name in enumerate(raw_names):
+            result = await runner.run(
+                call=ToolCall(id=f"c{index}", name=name, arguments={}), context=_context(world)
+            )
+            assert result.ok is (source in {"static", "extra"})
+
+    assert [span.name for span in telemetry.spans] == [f"tool.{expected_name}"] * len(raw_names)
+    assert [(span.attributes or {})["tool.name"] for span in telemetry.spans] == raw_names
+    for instrument in ("lumen.tool.calls", "lumen.tool.duration"):
+        points = telemetry.metric_points(instrument)
+        assert {point.attributes["lumen.tool.name"] for point in points} == {expected_name}
+        assert sum(getattr(point, "count", getattr(point, "value", 0)) for point in points) == len(
+            raw_names
+        )
 
 
 # --- Export failures never reach the caller -------------------------------------

@@ -308,8 +308,13 @@ class ToolRunner:
         """
         if ordinal is None:
             ordinal = self.claim_ordinal()
+        definition = self._resolve(call.name)
         with observe_tool(
-            name=call.name, call_id=call.id, arguments=call.arguments, ordinal=ordinal
+            name=call.name,
+            resolved_name=definition.name if definition is not None else None,
+            call_id=call.id,
+            arguments=call.arguments,
+            ordinal=ordinal,
         ) as span:
             result = await self._run_governed(
                 call=call, context=context, message_id=message_id, ordinal=ordinal, scope=scope

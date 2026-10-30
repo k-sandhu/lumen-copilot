@@ -159,12 +159,18 @@ class ToolSpan:
 
 @contextmanager
 def observe_tool(
-    *, name: str, call_id: str, arguments: Mapping[str, Any], ordinal: int | None
+    *,
+    name: str,
+    call_id: str,
+    arguments: Mapping[str, Any],
+    ordinal: int | None,
+    resolved_name: str | None = None,
 ) -> Iterator[ToolSpan]:
-    """The TOOL span of one governed tool invocation (``tool.<name>``)."""
+    """A TOOL span with a resolved name (or ``unknown``) for bounded naming/metrics."""
     started = time.monotonic()
+    bounded_name = resolved_name if resolved_name is not None else "unknown"
     with observe(
-        f"tool.{name}",
+        f"tool.{bounded_name}",
         OpenInferenceSpanKindValues.TOOL,
         {
             SpanAttributes.TOOL_NAME: name,
@@ -180,7 +186,7 @@ def observe_tool(
             tool.outcome = "cancelled"
             raise
         finally:
-            attributes = {"lumen.tool.name": name, "outcome": tool.outcome}
+            attributes = {"lumen.tool.name": bounded_name, "outcome": tool.outcome}
             telemetry.instruments().tool_calls.add(1, attributes)
             telemetry.instruments().tool_duration.record(time.monotonic() - started, attributes)
 
