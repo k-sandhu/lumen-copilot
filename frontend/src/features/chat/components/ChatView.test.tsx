@@ -15,7 +15,7 @@ import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { TooltipProvider } from '@/components/Tooltip';
 import { setAccessToken, clearAccessToken } from '@/api';
-import type { WsClientOptions, WsEnvelope } from '@/api';
+import type { ArtifactList, WsClientOptions, WsEnvelope } from '@/api';
 import { ChatView } from './ChatView';
 import { useChatStore } from '../model/chatStore';
 import { setDefaultStreamClientFactory, type StreamSocket } from '../model/useChatStream';
@@ -137,6 +137,7 @@ function installFetch(
   getMessages: () => unknown,
   getUsage: () => unknown = () => ({}),
   getSession: () => unknown = () => SESSIONS.items[0],
+  getArtifacts: () => ArtifactList = () => ({ items: [], next_cursor: null }),
 ) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = typeof input === 'string' ? input : ((input as Request).url ?? String(input));
@@ -147,6 +148,8 @@ function installFetch(
       return Promise.resolve(json(sendResponse, 202));
     if (url.includes('/messages') && method === 'GET') return Promise.resolve(json(getMessages()));
     if (url.includes('/usage') && method === 'GET') return Promise.resolve(json(getUsage()));
+    if (url.includes('/artifacts?') && method === 'GET')
+      return Promise.resolve(json(getArtifacts()));
     if (url.includes('/chat/sessions/') && method === 'PATCH')
       return Promise.resolve(json({ ...SESSIONS.items[0] }));
     if (/\/chat\/sessions\/[^/?]+$/.test(url) && method === 'GET') {
@@ -167,6 +170,7 @@ beforeEach(() => {
     activeStreamId: null,
     pendingModel: null,
     viewer: null,
+    panel: null,
   });
   liveSocket = null;
   restoreFactory = setDefaultStreamClientFactory((opts) => {
@@ -189,6 +193,96 @@ function renderView() {
 }
 
 describe('ChatView (critical flow)', () => {
+  it.each([
+    ['all', 'done'],
+    ['tool', 'done'],
+    ['all', 'error'],
+    ['tool', 'error'],
+  ] as const)(
+    'refreshes an already-open artifact pane after write_file (%s origin, %s terminal)',
+    async (origin, terminal) => {
+      let artifacts: ArtifactList = { items: [], next_cursor: null };
+      const getArtifacts = vi.fn(() => artifacts);
+      installFetch(() => EMPTY_MESSAGES, undefined, undefined, getArtifacts);
+      const user = userEvent.setup();
+      const { queryClient } = renderView();
+      await user.click(await screen.findByRole('button', { name: 'My chat' }));
+      await user.click(screen.getByRole('button', { name: 'Open conversation artifacts' }));
+      if (origin === 'tool') {
+        await user.click(screen.getByRole('button', { name: 'Tool' }));
+      }
+      expect(await screen.findByText(/no artifacts yet/i)).toBeInTheDocument();
+      // Retain another session's cache as a scope guard. The pane stays mounted
+      // throughout; the test advances by socket events, without a stale timer.
+      queryClient.setQueryDefaults(['artifacts', 'list', 'sess-2'], { gcTime: Infinity });
+      queryClient.setQueryData(['artifacts', 'list', 'sess-2', null], artifacts);
+      const initialReads = getArtifacts.mock.calls.length;
+
+      await user.type(screen.getByLabelText('Message'), 'Create result.txt');
+      await user.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(liveSocket).not.toBeNull());
+      act(() => {
+        liveSocket!.emit({
+          type: 'start',
+          streamId: 'stream-1',
+          seq: 0,
+          data: { sessionId: 'sess-1', messageId: 'am-1', model: 'frontier/opus' },
+        });
+        liveSocket!.emit({
+          type: 'event',
+          streamId: 'stream-1',
+          seq: 1,
+          name: 'tool_result',
+          data: { callId: 'file-1', tool: 'write_file', ok: true, summary: 'Wrote result.txt' },
+        });
+      });
+      expect(getArtifacts).toHaveBeenCalledTimes(initialReads);
+      artifacts = {
+        items: [
+          {
+            id: 'art-1',
+            filename: 'result.txt',
+            mime_type: 'text/plain',
+            size_bytes: 12,
+            owner_id: 'u1',
+            produced_by: 'tool',
+            session_id: 'sess-1',
+            run_id: null,
+            tool_invocation_id: 'inv-1',
+            created_at: '2026-10-29T00:00:00Z',
+          },
+        ],
+        next_cursor: null,
+      };
+      act(() => {
+        liveSocket!.emit(
+          terminal === 'done'
+            ? {
+                type: 'done',
+                streamId: 'stream-1',
+                seq: 2,
+                data: { messageId: 'am-1', finishReason: 'stop', citationCount: 0 },
+              }
+            : {
+                type: 'error',
+                streamId: 'stream-1',
+                seq: 2,
+                problem: { title: 'Answer delivery failed', status: 500, detail: 'Try again.' },
+              },
+        );
+      });
+      const list = await screen.findByRole('list', { name: 'Artifacts' });
+      expect(within(list).getByRole('button', { name: /result\.txt/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^download$/i })).toBeInTheDocument();
+      expect(screen.queryByText(/no artifacts yet/i)).not.toBeInTheDocument();
+      expect(useChatStore.getState().panel).toBe('artifacts');
+      expect(getArtifacts).toHaveBeenCalledTimes(initialReads + 1);
+      expect(queryClient.getQueryState(['artifacts', 'list', 'sess-2', null])?.isInvalidated).toBe(
+        false,
+      );
+    },
+  );
+
   it('sends → streams delta/tool/citation → done reloads with a clickable citation (AC-1/2)', async () => {
     let messagesState: unknown = EMPTY_MESSAGES;
     installFetch(() => messagesState);

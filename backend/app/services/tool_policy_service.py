@@ -40,6 +40,58 @@ from app.services.tools.registry import all_tools, has_tool
 
 
 @dataclass(frozen=True, slots=True)
+class EffectiveToolDecision:
+    """The ONE effective governance decision for a tool in a tenant (#576).
+
+    Admin's policy listing, the chat runtime's offered/executable set, and
+    the approval gate all derive from :func:`effective_tool_decision`, so
+    the three can never disagree again (the #576 divergence: Admin showed
+    ``write_file`` enabled/approval-off, the runtime still offered a
+    tenant-disabled tool, and the gate denied a no-override T1 tool as
+    ``tool_policy_absent``).
+
+    ``enabled`` / ``requires_approval`` are the effective flags; ``is_default``
+    says no admin override row exists. The registry default is: enabled,
+    with the tool's own ``requires_approval`` flag (False for T0/T1 such as
+    ``write_file`` — a T1 internal write needs no extra approval, spec 0004
+    §2.5; True for T2+, which therefore stays denied until an admin
+    pre-approves it — INV-7 semantics unchanged).
+    """
+
+    tool_name: str
+    enabled: bool
+    requires_approval: bool
+    is_default: bool
+
+
+def effective_tool_decision(
+    *,
+    tool_name: str,
+    override: TenantToolPolicy | None,
+    registry_requires_approval: bool,
+) -> EffectiveToolDecision:
+    """Resolve one tool's effective decision from its optional override (#576).
+
+    Pure and shared: no override ⇒ the registry default Admin displays
+    (enabled; approval only if the tool itself requires it). An override
+    wins on both flags.
+    """
+    if override is None:
+        return EffectiveToolDecision(
+            tool_name=tool_name,
+            enabled=True,
+            requires_approval=registry_requires_approval,
+            is_default=True,
+        )
+    return EffectiveToolDecision(
+        tool_name=tool_name,
+        enabled=override.enabled,
+        requires_approval=override.requires_approval,
+        is_default=False,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ToolPolicyEntryView:
     """The effective governance for one registered tool in this tenant (issue #223).
 
@@ -152,26 +204,18 @@ class ToolPolicyService:
         default; a gated tool keeps its ``requires_approval`` default, i.e. denied),
         marked ``is_default=True``. An override wins on both flags.
         """
-        override = overrides.get(row.tool_name)
-        if override is None:
-            return ToolPolicyEntryView(
-                tool_name=row.tool_name,
-                risk_tier=row.risk_tier,
-                read_only=row.read_only,
-                # Built-in default: a tool is offered/enabled by default; whether it
-                # still needs approval is its registry ``requires_approval`` flag.
-                enabled=True,
-                requires_approval=row.requires_approval,
-                is_default=True,
-                description=row.description,
-            )
+        decision = effective_tool_decision(
+            tool_name=row.tool_name,
+            override=overrides.get(row.tool_name),
+            registry_requires_approval=row.requires_approval,
+        )
         return ToolPolicyEntryView(
             tool_name=row.tool_name,
             risk_tier=row.risk_tier,
             read_only=row.read_only,
-            enabled=override.enabled,
-            requires_approval=override.requires_approval,
-            is_default=False,
+            enabled=decision.enabled,
+            requires_approval=decision.requires_approval,
+            is_default=decision.is_default,
             description=row.description,
         )
 
@@ -206,4 +250,9 @@ def _registry_rows() -> list[_RegistryRow]:
     ]
 
 
-__all__ = ["ToolPolicyEntryView", "ToolPolicyService"]
+__all__ = [
+    "EffectiveToolDecision",
+    "ToolPolicyEntryView",
+    "ToolPolicyService",
+    "effective_tool_decision",
+]

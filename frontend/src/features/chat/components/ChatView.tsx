@@ -25,7 +25,7 @@ import { useChatSession, useMessages, useSendMessage, useUpdateSession } from '.
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';
-import { ArtifactPanel } from '@/features/artifacts';
+import { ArtifactPanel, artifactKeys } from '@/features/artifacts';
 import { HistorySidebar } from './HistorySidebar';
 import { ChatThread, type LiveAnswer } from './ChatThread';
 import { Composer, type PinnedDocument } from './Composer';
@@ -73,6 +73,9 @@ export function ChatView() {
     void queryClient.invalidateQueries({ queryKey: chatKeys.messages(activeSessionId) });
     // A settled answer moved the token accounting (spec 0007 AC-1).
     void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
+    // A committed write_file can add an artifact while this pane stays mounted.
+    // Refresh every origin filter for this session, including the context pane.
+    void queryClient.invalidateQueries({ queryKey: artifactKeys.sessionLists(activeSessionId) });
   }, [activeSessionId, queryClient]);
 
   // BE2-7: the follow-up suggestion is generated AFTER the terminal, so its
@@ -409,6 +412,12 @@ function ActiveSession({
     streamId: activeStreamId,
     onDone: () => onDoneReload(),
   });
+
+  useEffect(() => {
+    // Delivery can fail after a write committed; refresh persisted artifacts on
+    // error as well as done without relying on tool_result's pre-commit event.
+    if (stream.phase === 'error') onDoneReload();
+  }, [stream.phase, onDoneReload]);
 
   useEffect(() => {
     // Promote suggestions only once the stream settled successfully (#434

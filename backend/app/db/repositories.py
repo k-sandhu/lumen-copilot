@@ -2982,6 +2982,18 @@ class ArtifactRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_artifact(r) for r in rows]
 
+    async def exists_with_storage_key(self, storage_key: str) -> bool:
+        """Whether any row in this tenant already references ``storage_key`` (#576).
+
+        The tool writer reads this after its answer transaction ends, preserving
+        bytes if a commit succeeded even when its acknowledgement was lost.
+        """
+        stmt = select(models.Artifact.id).where(
+            models.Artifact.tenant_id == self._tenant_id,
+            models.Artifact.storage_key == storage_key,
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def delete(self, artifact_id: UUID) -> bool:
         """Delete an artifact **row** (tenant-scoped); returns ``False`` if absent.
 
@@ -6295,6 +6307,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
         self,
         *,
         tool_name: str,
+        invocation_id: UUID | None = None,
         args_hash: str,
         ok: bool,
         duration_ms: int,
@@ -6312,6 +6325,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
         an unbounded string into the trace.
         """
         row = models.ToolInvocation(
+            id=invocation_id or uuid4(),
             tenant_id=self._tenant_id,
             session_id=session_id,
             message_id=message_id,

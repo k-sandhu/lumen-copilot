@@ -41,7 +41,10 @@ first-class and visible:
   surface; the panel shows what the conversation *used*.)
 - **Artifacts-in-chat reuses the artifacts feature wholesale.** The chat view
   mounts the existing `ArtifactPanel` scoped by `sessionId` in a side pane (the
-  citation-inspector pattern); per-message artifact chips already exist via
+  citation-inspector pattern). Settled answers invalidate all origin-filtered
+  artifact listings for that session, including error terminals that may follow
+  a committed write, so an already-open pane refreshes without remounting.
+  Per-message artifact chips already exist via
   `CodeRunPanel`. No new endpoint, no new viewer.
 - **@-mentions pin retrieval, they don't upload.** The picker suggests over the
   caller's *permitted* documents via the existing permission-trimmed

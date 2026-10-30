@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -71,19 +70,16 @@ from app.domain.entities import (
 )
 from app.domain.escalation import classify_terminal, is_transient, normalize_reason
 from app.llm import LLMGateway
-from app.llm.context import ContextConfig
 from app.observability import observe_headless_run
 from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
+from app.services.chat_composition import ChatCompositionOptions, build_chat_runtime
 from app.services.chat_runtime import ChatRuntime
 from app.services.citation_access import audit_withholding, resolve_permitted_documents
-from app.services.mcp_servers_service import build_mcp_servers_service
-from app.services.models_service import ChatModelService, is_allowed_model
-from app.services.provider_models import build_model_route_resolver
+from app.services.models_service import is_allowed_model
 from app.services.run_delivery_service import deliver_run
 from app.services.run_sink import RunTranscriptSink
-from app.services.tools.types import ToolDefinition
 
 log = get_logger(__name__)
 
@@ -389,47 +385,21 @@ async def execute_run(
     # the stream. Any failure here is caught below and written as a terminal.
     question = _question_from_inputs(config, run.inputs)
     sink = RunTranscriptSink(stream_id=str(run.id))
-    runtime = ChatRuntime(
+    # The ONE composition in ``headless`` mode (#576): same model route /
+    # fallback validation / context / MCP as interactive chat (a provider:
+    # fallback must resolve exactly alike, #440), non-interactive (nobody
+    # can answer ask_user, spec 0006), and — new in #576 — the sandbox and
+    # artifact writer wired under the run owner's identity.
+    runtime = build_chat_runtime(
+        mode="headless",
+        principal=principal,
+        backplane=sink,
+        settings=settings,
         sessionmaker=_sessionmaker(),
         gateway=gateway,
-        backplane=sink,
-        principal=principal,
         request_id=request_id,
         source_ip=source_ip,
-        default_max_tool_turns=settings.chat_max_tool_turns,
-        tool_concurrency=settings.chat_tool_concurrency,
-        fallback_model_validator=lambda vsession, mid: ChatModelService(
-            settings, session=vsession, tenant_id=principal.tenant_id
-        ).is_allowed_model_async(mid),
-        # Per-tenant provider routing for the primary AND #413 fallbacks — a
-        # headless run must resolve a ``provider:`` fallback exactly like
-        # interactive chat (#440 round-2 NEW-3: without a resolver every
-        # provider: candidate is an unresolved passthrough the failover guard
-        # skips, so a configured fallback could never rescue a run).
-        model_route_resolver=build_model_route_resolver(
-            settings=settings,
-            tenant_id=principal.tenant_id,
-            owner_id=principal.user_id,
-            roles=principal.roles,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        context_config=ContextConfig(
-            fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
-            output_headroom_tokens=settings.context_output_headroom_tokens,
-            compaction_digest_chars=settings.context_compaction_digest_chars,
-            compaction_chunk_size=settings.context_compaction_chunk_size,
-        ),
-        mcp_tools_factory=_build_run_mcp_tools_factory(
-            principal=principal,
-            settings=settings,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        # Headless: nobody is watching the stream (spec 0006 #429). ask_user is
-        # not intercepted (its handler tells the model to proceed with its best
-        # interpretation) and no follow-up suggestions are generated.
-        interactive=False,
+        options=ChatCompositionOptions(run_id=run.id, runtime_factory=ChatRuntime),
     )
     try:
         # The run's CHAIN span (ADR-0027) parents the turn's AGENT trace, so
@@ -840,40 +810,6 @@ async def _audit_run(
         source_ip=source_ip,
         metadata=metadata,
     )
-
-
-def _build_run_mcp_tools_factory(
-    *,
-    principal: Principal,
-    settings: Settings,
-    request_id: str,
-    source_ip: str,
-) -> Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]:
-    """The MCP-tools resolver a scheduled/manual assistant run uses (issue #227).
-
-    A headless run executes **as** the assistant's owner (``principal``), so its MCP
-    tools are resolved from exactly that owner's registered+enabled servers in the
-    tenant — the same owner-scoped, SSRF-guarded, CC-C-auth path an interactive chat
-    uses. The runtime calls this only when the pinned version's allow-list names an
-    ``mcp:*`` tool; a native-only assistant never touches the MCP servers table.
-    """
-
-    async def _factory(session: AsyncSession) -> dict[str, ToolDefinition]:
-        audit = AuditSink(AuditEventRepository(session, principal.tenant_id))
-        service = build_mcp_servers_service(
-            session,
-            settings=settings,
-            tenant_id=principal.tenant_id,
-            owner_id=principal.user_id,
-            roles=principal.roles,
-            audit=audit,
-            denials=None,  # run-tool resolution is list-only, with no direct-id guard
-            request_id=request_id,
-            source_ip=source_ip,
-        )
-        return await service.resolve_run_tools()
-
-    return _factory
 
 
 async def _load_owner_principal(
