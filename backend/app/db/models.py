@@ -666,6 +666,14 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
         ForeignKey("assistant_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Non-FK bound marker (#581): SET NULL above erases the pin when an assistant
+    # is deleted, which would silently turn a governed session into unrestricted
+    # ad-hoc chat. This flag is set once at creation (assistant-started sessions
+    # only) and never cleared, so the send path can fail closed when the pinned
+    # config can no longer be loaded.
+    assistant_bound: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="session", cascade="all, delete-orphan"

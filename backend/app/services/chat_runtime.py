@@ -1307,6 +1307,10 @@ class ChatRuntime:
             retrieval=retrieval,
             document_id_resolver=handles.document_id,
             collection_ids=effective_collection_ids,
+            # Assistant source scope (#581): the pinned version's published
+            # ``sourceIds`` narrow every retrieval tool, resolved in SQL inside
+            # retrieval/ (the index has no source field). Ad-hoc ⇒ None.
+            source_ids=assistant_config.source_ids if assistant_config is not None else None,
             # Pinned documents (spec 0007 #429): passage search narrows to these
             # ids — an ADDITIONAL filter over the caller's allow-set, applied
             # inside retrieval/ (INV-2 unchanged: an id the caller cannot access
@@ -1652,6 +1656,8 @@ class ChatRuntime:
                 citation_count=0,
                 retrieved_hits=total_hits,
                 cited_document_ids=[],
+                assistant_config=assistant_config,
+                effective_collection_ids=effective_collection_ids,
             )
             answer_usage = _answer_usage_totals(route_state, usage)
             ask_result = _RunResult(
@@ -1771,6 +1777,11 @@ class ChatRuntime:
                 chunk_ids=list(dict.fromkeys(c.chunk_id for c in selected_corpus.values())),
                 collection_ids=effective_collection_ids,
                 document_ids=document_ids,
+                **(
+                    {"source_ids": assistant_config.source_ids}
+                    if assistant_config is not None and assistant_config.source_ids is not None
+                    else {}
+                ),
             )
             valid = {
                 handles.passage(passage): passage
@@ -1896,6 +1907,8 @@ class ChatRuntime:
             # Distinct cited documents, first-appearance order — the provenance
             # the Audit "Answers cited" KPI reads (#249).
             cited_document_ids=list(dict.fromkeys(str(c.document_id) for c in stored_citations)),
+            assistant_config=assistant_config,
+            effective_collection_ids=effective_collection_ids,
         )
         await self._emit_step(state, key="finalize", label="Finalizing", step_state="completed")
 
@@ -3090,6 +3103,8 @@ class ChatRuntime:
         citation_count: int,
         retrieved_hits: int,
         cited_document_ids: Sequence[str],
+        assistant_config: AssistantRunConfig | None = None,
+        effective_collection_ids: list[UUID] | None = None,
     ) -> None:
         await audit.emit(
             action=AuditAction.ANSWER_GENERATED,
@@ -3112,6 +3127,37 @@ class ChatRuntime:
                 # count a grounded answer as cited (#249). Empty ⇒ no candidates
                 # ⇒ honestly "not grounded".
                 "document_ids": list(cited_document_ids),
+                # Assistant provenance (#581, INV-6): which pinned assistant
+                # version produced this answer and the effective knowledge
+                # scope it ran under (modes + scope ids — never document
+                # content). Absent entirely for ad-hoc chat.
+                **(
+                    {
+                        "assistant_id": (
+                            str(assistant_config.assistant_id)
+                            if assistant_config.assistant_id is not None
+                            else None
+                        ),
+                        "assistant_version_id": (
+                            str(assistant_config.assistant_version_id)
+                            if assistant_config.assistant_version_id is not None
+                            else None
+                        ),
+                        "effective_modes": [m.value for m in assistant_config.modes],
+                        "scope_collection_ids": [
+                            str(c)
+                            for c in (
+                                effective_collection_ids
+                                if effective_collection_ids is not None
+                                else assistant_config.collection_ids
+                            )
+                            or []
+                        ],
+                        "scope_source_ids": [str(s) for s in assistant_config.source_ids or []],
+                    }
+                    if assistant_config is not None
+                    else {}
+                ),
             },
         )
 

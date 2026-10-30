@@ -37,6 +37,7 @@ async def find_documents(
     modified_before: datetime | None = None,
     collection_ids: Sequence[UUID] | None = None,
     document_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> DocumentPage:
     if not 1 <= limit <= 50 or sort not in {
         "title_asc",
@@ -66,6 +67,7 @@ async def find_documents(
                 str(modified_before),
                 sorted(map(str, collection_ids)) if collection_ids is not None else None,
                 sorted(map(str, document_ids)) if document_ids is not None else None,
+                sorted(map(str, source_ids)) if source_ids is not None else None,
             ]
         ).encode()
     ).hexdigest()
@@ -122,6 +124,8 @@ async def find_documents(
         stmt = stmt.where(models.Document.collection_id.in_(collection_ids))
     if document_ids is not None:
         stmt = stmt.where(models.Document.id.in_(document_ids))
+    if source_ids is not None:
+        stmt = stmt.where(models.Document.source_id.in_(source_ids))
     if cursor is not None:
         try:
             if len(cursor) > 4096:
@@ -191,10 +195,20 @@ async def read_document(
     max_passages: int = 5,
     collection_ids: Sequence[UUID] | None = None,
     document_ids: Sequence[UUID] | None = None,
+    source_ids: Sequence[UUID] | None = None,
 ) -> DocumentRead | None:
     if start < 0 or (end is not None and end <= start) or not 1 <= max_passages <= 20:
         raise ValidationError("Use start >= 0, end > start and max_passages 1–20.")
-    permitted = select(models.Document).where(
+    length = (
+        select(func.max(models.Chunk.char_end))
+        .where(
+            models.Chunk.tenant_id == allow.tenant_id,
+            models.Chunk.document_id == models.Document.id,
+        )
+        .correlate(models.Document)
+        .scalar_subquery()
+    )
+    permitted = select(models.Document, func.coalesce(length, 0)).where(
         models.Document.tenant_id == allow.tenant_id,
         models.Document.id == document_id,
         models.Document.status == DocumentStatus.READY.value,
@@ -204,8 +218,12 @@ async def read_document(
         permitted = permitted.where(models.Document.collection_id.in_(collection_ids))
     if document_ids is not None:
         permitted = permitted.where(models.Document.id.in_(document_ids))
-    document = (await session.execute(permitted)).scalar_one_or_none()
-    if document is None:
+    if source_ids is not None:
+        permitted = permitted.where(models.Document.source_id.in_(source_ids))
+    # Preserve the early publication/visibility gate before touching chunks.
+    if (
+        await session.execute(permitted.with_only_columns(models.Document.id))
+    ).scalar_one_or_none() is None:
         return None
     # Repeat the current permission predicate in the chunk read, including tenant.
     chunks = (
@@ -223,19 +241,8 @@ async def read_document(
         chunks = chunks.where(models.Document.collection_id.in_(collection_ids))
     if document_ids is not None:
         chunks = chunks.where(models.Document.id.in_(document_ids))
-    total = (
-        await session.execute(
-            select(func.max(models.Chunk.char_end))
-            .join(models.Document)
-            .where(
-                models.Chunk.tenant_id == allow.tenant_id,
-                models.Chunk.document_id == document_id,
-                models.Document.tenant_id == allow.tenant_id,
-                models.Document.status == DocumentStatus.READY.value,
-                _document_permitted(allow),
-            )
-        )
-    ).scalar_one() or 0
+    if source_ids is not None:
+        chunks = chunks.where(models.Document.source_id.in_(source_ids))
     chunks = chunks.where(models.Chunk.char_end > start)
     if end is not None:
         chunks = chunks.where(models.Chunk.char_start < end)
@@ -259,9 +266,17 @@ async def read_document(
         chunk_ids=[row.id for row in rows],
         collection_ids=collection_ids,
         document_ids=document_ids,
+        source_ids=source_ids,
     )
     if len(hydrated) != len(rows):
         return None
+    # Check identity and length together under the complete current scope AFTER
+    # passage reads. An empty hydration alone cannot distinguish an unavailable
+    # document from a permitted empty/out-of-range read (#581, R1-002).
+    current = (await session.execute(permitted)).one_or_none()
+    if current is None:
+        return None
+    document, total = current
     passages = tuple(
         RetrievedPassage(
             chunk_id=row.chunk_id,

@@ -255,6 +255,11 @@ class ToolContext:
     principal: Principal
     retrieval: RetrievalService
     collection_ids: list[UUID] | None = None
+    #: Assistant knowledge-scope source narrowing (#581): when set, retrieval
+    #: only reaches documents whose ``source_id`` is in this list — an ADDITIONAL
+    #: filter over the caller's allow-set, resolved in SQL inside ``retrieval/``
+    #: (the search index carries no source field). ``None`` ⇒ no source narrowing.
+    source_ids: list[UUID] | None = None
     #: Pinned documents (spec 0007 #429): when set, passage search narrows to
     #: these ids — an ADDITIONAL filter over the caller's allow-set, applied
     #: inside ``retrieval/`` (INV-2 unchanged; an inaccessible id contributes

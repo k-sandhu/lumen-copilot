@@ -11,8 +11,10 @@ Builds on [ADR-0011](../architecture/0011-assistant-and-agent-runtime.md) and
 scope, even after the assistant head is edited, republished or rolled back.
 The additive contract is in `contracts/openapi.yaml`: assistant and version
 IDs, effective modes, collection IDs, source IDs, and per-field adjustability.
-Ad-hoc sessions return explicit `null`. Existing deleted/unresolvable pin
-fallback remains unchanged; it cannot manufacture a scope from the head.
+Ad-hoc sessions return explicit `null`. Deleted/unresolvable pins also project
+`null`; they cannot manufacture a scope from the head. The scope-server change
+rejects sends for assistant-bound sessions whose pinned config is unavailable
+(ADR-0011), independently of this read projection.
 
 Effective modes follow the owner's decision:
 
@@ -51,8 +53,11 @@ projection batches the tenant-scoped pinned-version reads.
 
 This lane projects scope and removes ineffective UI controls. Retrieval/tool
 enforcement and answer provenance belong to #581's scope-server lane; they must
-use the same effective-modes rule. No migration is needed. Deletion behavior is
-the pre-existing nullable-FK/runtime fallback, not new enforcement in this lane.
+use the same effective-modes rule. The projection itself needs no migration.
+The scope-server migration adds a durable assistant-bound marker so deletion
+cannot turn a governed conversation into unrestricted ad-hoc chat; sends fail
+closed when its pinned config is unavailable. Previously erased pins cannot be
+reconstructed by that migration (ADR-0011).
 
 To reverse the owner's decision, change `services/knowledge_scope.effective_modes`
 and the adjustability flags together with a specified, persisted narrowing

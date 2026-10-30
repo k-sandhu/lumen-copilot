@@ -9,8 +9,10 @@ Governance (ADR-0014 §5), fail-closed:
 
 * **off by default** — ``default_offered=False`` keeps it out of the ad-hoc chat
   default allow-list (``registry.default_allowlist``); it is offered to the model
-  only when an assistant's allow-list includes it (which the assistant sets only
-  when its ``knowledge_scope`` includes ``web``);
+  only when an assistant's allow-list includes it AND the version's effective
+  knowledge modes include ``web`` — enforced server-side in
+  ``assistant_runtime.assemble_run_config`` (#581), and rejected at configure
+  time when non-empty modes lack ``web`` (422 ``web_search_requires_web_mode``);
 * **tenant/deploy enable** — even when advertised, the handler refuses unless
   ``settings.web_search_enabled`` is true, returning an ``ok=False`` *tool result*
   (the model reads it; the run continues) — a disabled deploy never crashes.

@@ -1092,7 +1092,11 @@ class ChatSession:
     (ADR-0011 §1): a session started from an assistant records both the assistant
     and the exact published version it ran, so the transcript is reproducible after
     the assistant is edited/rolled back. Both ``None`` ⇒ ad-hoc chat (the default,
-    unchanged path).
+    unchanged path) — **unless** ``assistant_bound`` is set: the FKs are
+    ``ON DELETE SET NULL``, so deleting an assistant would otherwise erase the
+    only evidence the session was ever governed by one. The non-FK bound marker
+    survives that deletion so the send path can fail closed (#581) instead of
+    silently continuing as unrestricted ad-hoc chat.
     """
 
     id: UUID
@@ -1104,6 +1108,7 @@ class ChatSession:
     updated_at: datetime
     assistant_id: UUID | None = None
     assistant_version_id: UUID | None = None
+    assistant_bound: bool = False
 
 
 @dataclass(frozen=True, slots=True)
