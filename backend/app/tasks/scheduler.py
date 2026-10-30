@@ -349,7 +349,8 @@ def configure_beat(settings: Settings | None = None) -> None:
     the celery conf so ``celery -A app.tasks.celery_app beat --scheduler
     redbeat.RedBeatScheduler`` reads them, plus the **static** periodic entries the
     Beat always fires regardless of any user schedule: expired uploads, run digests
-    and connector polling. RedBeat merges these with dynamic per-tenant entries.
+    and connector polling, plus stale-run reconciliation. RedBeat merges these
+    with dynamic per-tenant entries.
     Called on app finalization, before RedBeat snapshots its configuration. Idempotent.
     """
     settings = settings or get_settings()
@@ -373,6 +374,12 @@ def configure_beat(settings: Settings | None = None) -> None:
             "expired-upload-sweep": {
                 "task": "lumen.sweep_expired_uploads",
                 "schedule": float(settings.upload_janitor_interval_seconds),
+            },
+            # Stale-run reaper (#578): fails runs abandoned in ``running`` by
+            # a dead worker, exactly once, past RUN_STALE_AFTER_SECONDS.
+            "stale-run-reaper": {
+                "task": "lumen.reap_stale_runs",
+                "schedule": float(settings.run_reaper_interval_seconds),
             },
         },
     )
