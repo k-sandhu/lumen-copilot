@@ -91,6 +91,7 @@ export {
   updateLlmProvider,
   deleteLlmProvider,
   refreshLlmProvider,
+  testLlmProviderConnection,
   updateTenantBranding,
   clearTenantBranding,
   getAutonomyPolicy,

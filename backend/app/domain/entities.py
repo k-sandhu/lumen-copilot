@@ -193,17 +193,19 @@ class McpServerStatus(str, enum.Enum):
 
 
 class LlmProviderStatus(str, enum.Enum):
-    """Discovery state of a registered per-tenant LLM provider (contract ``LlmProviderStatus``).
+    """Evidence-based validation state of a per-tenant LLM provider (spec 0029).
 
-    ``PENDING`` before the first model-discovery probe (a freshly registered
-    provider), ``READY`` after a successful ``GET {base_url}/models`` snapshot,
-    ``ERROR`` when the last discovery failed (see ``last_error``). Mirrors the
+    ``PENDING`` before the first probe, ``REACHABLE`` when the model catalog was
+    discovered but authentication/capabilities are unverified (a public
+    ``GET {base_url}/models`` never implies key validity), ``READY`` only when
+    the required checks passed via the explicit test-connection action,
+    ``ERROR`` when the last probe failed (see ``last_error_code``). Mirrors the
     ``llm_providers.status`` CHECK domain and the frozen ``LlmProviderStatus``
-    contract enum. This is the model-catalog discovery lifecycle only — routing
-    chat/embeddings through a provider is a follow-up PR.
+    contract enum. Only ``READY`` providers are routable (spec 0029).
     """
 
     PENDING = "pending"
+    REACHABLE = "reachable"
     READY = "ready"
     ERROR = "error"
 
@@ -976,6 +978,13 @@ class LlmProvider:
     discovered_models: list[dict[str, object]]
     created_at: datetime
     updated_at: datetime
+    # Evidence-based validation (spec 0029, migration 0050). ``secret_hint``
+    # above is vault-internal and is never projected to the wire or audit.
+    validation_checks: list[dict[str, object]] = field(default_factory=list)
+    last_error_code: str | None = None
+    validated_at: datetime | None = None
+    validation_grandfathered: bool = False
+    validation_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

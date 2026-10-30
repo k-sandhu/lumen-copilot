@@ -3075,9 +3075,10 @@ paths:
       summary: The tenant's registered LLM providers + discovered models (admin only).
       description: >
         The caller's tenant's registered LLM providers, each with its discovered
-        models and discovery/health `status`. Restricted to the `admin` role; any
-        other role receives **403** (INV-5). Tenant-scoped (INV-1). The stored API key
-        is **never** returned — only a masked `secret_hint`.
+        models and evidence-based validation `status` (spec 0029). Restricted to the
+        `admin` role; any other role receives **403** (INV-5). Tenant-scoped (INV-1).
+        The stored API key is **never** returned or echoed — only `has_api_key`
+        (presence) is exposed.
       tags: [admin]
       responses:
         "200":
@@ -3097,9 +3098,12 @@ paths:
         otherwise, INV-5); tenant-scoped (INV-1); audited (INV-6). The `api_key` is
         write-only — stored envelope-encrypted via CC-C, never returned. An
         unsupported `provider_type`, or an invalid / non-https / SSRF-blocked
-        `base_url`, is **422** (INV-8). A reachable provider returns `status: ready`
-        with `discovered_models`; a bad key/url returns `status: error` + `last_error`
-        (never a 500).
+        `base_url`, is **422** (INV-8; the blocked-URL detail is generic and never
+        carries a resolved address). Discovery alone yields at most `status:
+        reachable` (catalog discovered, authentication unverified — a public model
+        list never implies key validity); `status: ready` requires the explicit
+        test-connection action. A failed discovery returns `status: error` + a safe
+        `last_error` / `last_error_code` (never a 500, never raw vendor text).
       tags: [admin]
       requestBody:
         required: true
@@ -3130,8 +3134,9 @@ paths:
         Update a registered LLM provider (rename, retarget `base_url`, toggle
         `enabled`, or rotate/clear the `api_key`). Changing `base_url` re-runs the
         https + SSRF validation (else **422**) and re-runs model discovery; rotating
-        the key likewise re-discovers. The key value is never returned — only the
-        updated masked `secret_hint`. `admin`-only (**403** otherwise, INV-5);
+        the key likewise re-discovers. Re-discovery re-validates from evidence (at
+        most `reachable` until test-connection passes). The key value is never
+        returned or echoed — only `has_api_key` (presence). `admin`-only (**403** otherwise, INV-5);
         tenant-scoped (INV-1) — a cross-tenant id is **404** (never 403). Audited
         (INV-6).
       tags: [admin]
@@ -3176,10 +3181,12 @@ paths:
       summary: Re-run model discovery for a provider (admin only).
       description: >
         Re-run model discovery for the provider via `GET {base_url}/models`, resolving
-        the API key in-process from the CC-C vault. On success `status: ready` with a
-        fresh `discovered_models`; on failure `status: error` + a safe `last_error`
-        (previous snapshot preserved). Both outcomes return **200** — the result is in
-        `status` / `last_error`, not the HTTP code. `admin`-only (**403** otherwise,
+        the API key in-process from the CC-C vault. On success `status: reachable`
+        with a fresh `discovered_models` (authentication stays unverified until
+        test-connection — a public model list never implies key validity); on failure
+        `status: error` + a safe `last_error` / `last_error_code` (previous snapshot
+        preserved). Both outcomes return **200** — the result is in `status` /
+        `last_error_code`, not the HTTP code. `admin`-only (**403** otherwise,
         INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**. Audited (INV-6).
       tags: [admin]
       responses:
@@ -3191,6 +3198,46 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/llm-providers/{providerId}/test-connection:
+    parameters:
+      - name: providerId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The LLM provider id.
+    post:
+      operationId: testLlmProviderConnection
+      summary: Test a provider connection with one minimal bounded request (admin only).
+      description: >
+        Send ONE minimal chat request (`max_tokens: 1`) to the admin-selected
+        discovered `model`, resolving the API key in-process from the CC-C vault.
+        **Cost:** this is a real upstream request; the provider may bill for it
+        (bounded to a single output token). On success the provider's required
+        checks pass (configuration, reachability, catalog, authentication, chat
+        capability) and `status` becomes `ready` — the only path to `ready`. On
+        failure `status` becomes `error` with a stable safe `last_error_code`.
+        Both outcomes return **200** with a `ProviderValidationResult` (stage,
+        code, retryability, correlation id) — raw vendor/network text never
+        reaches the client. An unknown `model` is **422**. `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**.
+        Audited (INV-6).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderTestConnectionRequest" }
+      responses:
+        "200":
+          description: The test completed; the updated provider + validation result are returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderTestConnectionResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
 components:
   parameters:
@@ -4515,6 +4562,7 @@ components:
         - llm_provider.created
         - llm_provider.deleted
         - llm_provider.discovered
+        - llm_provider.connection_tested
         - llm_provider.updated
         - mcp_server.deleted
         - mcp_server.registered
@@ -6957,10 +7005,92 @@ components:
     LlmProviderStatus:
       type: string
       description: >
-        Model-discovery state from the last probe. `pending` before the first
-        discovery, `ready` after a successful `GET /models` snapshot, `error` when
-        the last discovery failed (see `last_error`).
-      enum: [pending, ready, error]
+        Evidence-based validation state (spec 0029). `pending` before the first
+        probe, `reachable` when the model catalog was discovered but
+        authentication/capabilities are unverified, `ready` only when the
+        required checks passed via test-connection, `error` when the last probe
+        failed (see `last_error_code`). Only `ready` providers are routable;
+        pre-existing `ready` rows grandfathered by migration 0050 carry
+        `validation_grandfathered: true` until their next validation.
+      enum: [pending, reachable, ready, error]
+
+    ProviderValidationCheckName:
+      type: string
+      description: One independent provider validation check (spec 0029).
+      enum: [config_valid, reachable, catalog_discovered, auth_verified, capabilities_verified]
+
+    ProviderValidationCheckStatus:
+      type: string
+      enum: [passed, failed, unverified, not_applicable]
+
+    ProviderValidationCode:
+      type: [string, "null"]
+      enum: [blocked_address, dns_failed, timeout, connection_failed, unauthorized, forbidden, not_found, rate_limited, provider_error, unexpected_status, invalid_response, response_too_large, validation_failed, null]
+
+    ProviderValidationCheck:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name: { $ref: "#/components/schemas/ProviderValidationCheckName" }
+        status: { $ref: "#/components/schemas/ProviderValidationCheckStatus" }
+        code:
+          $ref: "#/components/schemas/ProviderValidationCode"
+
+    ProviderValidationResult:
+      type: object
+      additionalProperties: false
+      description: >
+        The outcome of one validation run (discovery or test-connection).
+        `code` is a stable safe code (e.g. `unauthorized`, `timeout`,
+        `dns_failed`, `blocked_address`, `rate_limited`, `provider_error`,
+        `invalid_response`); `correlation_id` joins the result to redacted
+        operator logs. No field ever carries a secret, exception text, a
+        resolved IP, a stack trace, or an external documentation link.
+      required: [status, checks, retryable, correlation_id]
+      properties:
+        status: { $ref: "#/components/schemas/LlmProviderStatus" }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderValidationCheck" }
+        stage:
+          type: [string, "null"]
+          enum: [config, discovery, connection_test, null]
+          description: The stage that failed, or null on success.
+        code:
+          $ref: "#/components/schemas/ProviderValidationCode"
+        retryable:
+          type: boolean
+          description: Whether retrying without a config change could succeed.
+        correlation_id:
+          type: string
+          description: The request correlation id for operator diagnostics.
+        tested_model:
+          type: [string, "null"]
+          description: The model used by test-connection, when one ran.
+        validated_at:
+          type: [string, "null"]
+          format: date-time
+          description: When this validation completed.
+
+    ProviderTestConnectionRequest:
+      type: object
+      additionalProperties: false
+      required: [model]
+      properties:
+        model:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: A discovered model id to send the one bounded test request to.
+
+    ProviderTestConnectionResponse:
+      type: object
+      additionalProperties: false
+      required: [provider, validation]
+      properties:
+        provider: { $ref: "#/components/schemas/LlmProvider" }
+        validation: { $ref: "#/components/schemas/ProviderValidationResult" }
 
     LlmProviderModel:
       type: object
@@ -6980,11 +7110,12 @@ components:
       additionalProperties: false
       description: >
         One registered per-tenant LLM provider, tenant- and owner-scoped (spec 0004
-        INV-1/INV-2). The response **never** includes the stored API-key value — only
-        a masked `secret_hint`. `discovered_models` is the last successful `GET
-        /models` snapshot. Foundation PR: this catalog is not yet wired into the chat
-        model picker or completion routing (a follow-up PR).
-      required: [id, name, provider_type, base_url, enabled, status, discovered_models, owner_id, created_at, updated_at]
+        INV-1/INV-2). The response **never** includes the stored API-key value or any
+        fragment of it — only `has_api_key` (presence). `discovered_models` is the
+        last successful `GET /models` snapshot. `last_error` is a fixed safe message
+        keyed by `last_error_code` — never raw vendor/network text. Only `ready`
+        providers surface in the chat model picker and route completions (spec 0029).
+      required: [id, name, provider_type, base_url, enabled, status, discovered_models, has_api_key, validation_checks, validation_grandfathered, owner_id, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
@@ -7003,18 +7134,37 @@ components:
           description: When the last successful model discovery finished (null before the first success).
         last_error:
           type: [string, "null"]
-          description: Safe failure reason when status is error (never contains the API key).
+          description: Fixed safe failure message for `last_error_code` (never raw vendor text, a resolved IP, or the API key).
+        last_error_code:
+          type: [string, "null"]
+          description: Stable safe failure code from the last probe (e.g. `unauthorized`, `timeout`, `dns_failed`, `blocked_address`).
         discovered_models:
           type: array
           items: { $ref: "#/components/schemas/LlmProviderModel" }
           description: The models discovered on the last successful `GET /models` (empty until first discovery).
-        secret_hint:
-          type: [string, "null"]
+        has_api_key:
+          type: boolean
           description: >
-            A **masked** hint at the stored API key (e.g. `"****abcd"`), or null when
-            no key is stored. This is the ONLY key-derived value ever returned — the
-            actual key is write-only, envelope-encrypted in the CC-C vault, and never
-            serialized through any API.
+            Whether a write-only API key is stored (envelope-encrypted in the CC-C
+            vault). Presence only — no key-derived value is ever returned.
+        validation_checks:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderValidationCheck" }
+          description: The independent validation checks from the last validation run.
+        validation:
+          anyOf:
+            - $ref: "#/components/schemas/ProviderValidationResult"
+            - type: "null"
+          description: Last validation result, including safe diagnostics and original correlation id; null for migrated rows until revalidated.
+        validated_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last validation run completed (staleness signal).
+        validation_grandfathered:
+          type: boolean
+          description: >
+            True for a pre-existing `ready` provider kept routable by migration 0050
+            until its next validation, after which the strict rule applies.
         owner_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -7035,8 +7185,8 @@ components:
         Register an LLM provider. `provider_type` is constrained to the supported
         values (`openai_compatible`); `base_url` must be https and pass the SSRF check
         (else 422). The optional `api_key` is **write-only** — stored envelope-
-        encrypted via CC-C and never returned; the response carries only a masked
-        `secret_hint`. The backend auto-discovers the provider's models on create.
+        encrypted via CC-C and never returned; the response carries only
+        `has_api_key` (presence). The backend auto-discovers the provider's models on create.
       required: [name, provider_type, base_url]
       properties:
         name: { type: string, minLength: 1, maxLength: 200, description: Display name. }

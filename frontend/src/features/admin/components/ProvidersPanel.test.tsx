@@ -28,6 +28,7 @@ const createLlmProvider = vi.hoisted(() => vi.fn());
 const updateLlmProvider = vi.hoisted(() => vi.fn());
 const deleteLlmProvider = vi.hoisted(() => vi.fn());
 const refreshLlmProvider = vi.hoisted(() => vi.fn());
+const testLlmProviderConnection = vi.hoisted(() => vi.fn());
 vi.mock('@/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api')>();
   return {
@@ -37,6 +38,7 @@ vi.mock('@/api', async (importOriginal) => {
     updateLlmProvider,
     deleteLlmProvider,
     refreshLlmProvider,
+    testLlmProviderConnection,
   };
 });
 
@@ -49,14 +51,32 @@ const PROVIDER_READY: LlmProvider = {
   status: 'ready',
   last_discovery_at: '2026-07-03T00:00:00Z',
   last_error: null,
+  last_error_code: null,
   discovered_models: [
     { id: 'openai/gpt-4o', label: 'GPT-4o' },
     { id: 'meta-llama/llama-3-70b', label: null },
   ],
-  secret_hint: '****1234',
+  has_api_key: true,
+  validation_checks: [
+    { name: 'config_valid', status: 'passed', code: null },
+    { name: 'auth_verified', status: 'passed', code: null },
+  ],
+  validated_at: '2026-07-03T00:00:00Z',
+  validation_grandfathered: false,
   owner_id: 'u-1',
   created_at: '2026-07-03T00:00:00Z',
   updated_at: '2026-07-03T00:00:00Z',
+};
+
+const PROVIDER_REACHABLE: LlmProvider = {
+  ...PROVIDER_READY,
+  id: 'p-3',
+  name: 'Unverified',
+  status: 'reachable',
+  validation_checks: [
+    { name: 'config_valid', status: 'passed', code: null },
+    { name: 'auth_verified', status: 'unverified', code: null },
+  ],
 };
 
 const PROVIDER_ERROR: LlmProvider = {
@@ -64,9 +84,11 @@ const PROVIDER_ERROR: LlmProvider = {
   id: 'p-2',
   name: 'Broken',
   status: 'error',
-  last_error: 'HTTPStatusError: 401 Unauthorized',
+  last_error: 'The provider rejected the API key (401).',
+  last_error_code: 'unauthorized',
   discovered_models: [],
-  secret_hint: null,
+  has_api_key: false,
+  validation_checks: [{ name: 'catalog_discovered', status: 'failed', code: 'unauthorized' }],
 };
 
 const LIST_ONE: LlmProviderList = { items: [PROVIDER_READY] };
@@ -79,6 +101,7 @@ beforeEach(() => {
   updateLlmProvider.mockReset();
   deleteLlmProvider.mockReset();
   refreshLlmProvider.mockReset();
+  testLlmProviderConnection.mockReset();
 });
 
 describe('ProvidersPanel', () => {
@@ -133,11 +156,178 @@ describe('ProvidersPanel', () => {
     expect(screen.getByText('https://openrouter.ai/api/v1')).toBeInTheDocument();
     // Status badge + the discovered model ids/labels under the provider.
     expect(screen.getByText('Ready')).toBeInTheDocument();
-    expect(screen.getByText('GPT-4o')).toBeInTheDocument();
-    // A model with no label falls back to its id.
-    expect(screen.getByText('meta-llama/llama-3-70b')).toBeInTheDocument();
-    // The masked hint is shown, and the raw key value never is.
-    expect(screen.getByText(/\*\*\*\*1234/)).toBeInTheDocument();
+    // In the model list and again as a test-connection option.
+    expect(screen.getAllByText('GPT-4o').length).toBeGreaterThan(0);
+    // A model with no label falls back to its id (list + test-connection option).
+    expect(screen.getAllByText('meta-llama/llama-3-70b').length).toBeGreaterThan(0);
+    // Key presence only — no hint fragment is ever rendered (spec 0029).
+    expect(screen.getByText('API key stored')).toBeInTheDocument();
+    expect(screen.queryByText(/\*\*\*\*/)).not.toBeInTheDocument();
+    // Per-check validation status is visible.
+    expect(screen.getByText(/authentication: passed/i)).toBeInTheDocument();
+  });
+
+  it('renders a reachable provider as unverified with per-check status', async () => {
+    listLlmProviders.mockResolvedValue({ items: [PROVIDER_REACHABLE] });
+    renderWithQuery(<ProvidersPanel />);
+
+    expect(await screen.findByText('Unverified')).toBeInTheDocument();
+    expect(screen.getByText(/reachable \u2014 unverified/i)).toBeInTheDocument();
+    expect(screen.getByText(/authentication: unverified/i)).toBeInTheDocument();
+    expect(screen.queryByText('Ready')).not.toBeInTheDocument();
+  });
+
+  it('Test connection sends the selected model and announces readiness', async () => {
+    listLlmProviders.mockResolvedValue({ items: [PROVIDER_REACHABLE] });
+    testLlmProviderConnection.mockResolvedValue({
+      provider: { ...PROVIDER_REACHABLE, status: 'ready' },
+      validation: {
+        status: 'ready',
+        checks: [],
+        stage: null,
+        code: null,
+        retryable: false,
+        correlation_id: 'req-1',
+        tested_model: 'openai/gpt-4o',
+        validated_at: '2026-07-03T00:00:00Z',
+      },
+    });
+    const { queryClient } = renderWithQuery(<ProvidersPanel />);
+    queryClient.setQueryDefaults(['models'], { gcTime: Infinity });
+    queryClient.setQueryData(['models'], []);
+    await screen.findByText('Unverified');
+
+    // The billing implication is stated before execution.
+    expect(screen.getByText(/may bill for it/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /test connection/i }));
+    expect(testLlmProviderConnection).toHaveBeenCalledWith('p-3', 'openai/gpt-4o');
+    expect(await screen.findByText(/test connection passed/i)).toBeInTheDocument();
+    expect(queryClient.getQueryState(['models'])?.isInvalidated).toBe(true);
+  });
+
+  it('flags a grandfathered ready provider for revalidation', async () => {
+    listLlmProviders.mockResolvedValue({
+      items: [{ ...PROVIDER_READY, validation_grandfathered: true }],
+    });
+    renderWithQuery(<ProvidersPanel />);
+
+    expect(await screen.findByText('OpenRouter')).toBeInTheDocument();
+    expect(screen.getByText(/revalidate with test connection/i)).toBeInTheDocument();
+  });
+
+  it('ignores raw provider errors and unknown diagnostic codes', async () => {
+    const raw = 'HTTPStatusError 10.0.0.9 sk-private-value https://docs.example.test/trace';
+    listLlmProviders.mockResolvedValue({
+      items: [{ ...PROVIDER_ERROR, last_error: raw, last_error_code: raw }],
+    });
+    renderWithQuery(<ProvidersPanel />);
+
+    await screen.findByText('Broken');
+    expect(document.body.textContent).not.toContain(raw);
+    expect(screen.getByText(/provider validation failed/i)).toBeInTheDocument();
+  });
+
+  it.each(['transport', 'problem'] as const)(
+    'does not render raw %s errors after a write',
+    async (kind) => {
+      const raw = 'HTTPStatusError 10.0.0.9 sk-private-value https://docs.example.test/trace';
+      listLlmProviders.mockResolvedValue(LIST_ONE);
+      refreshLlmProvider.mockRejectedValue(
+        kind === 'transport'
+          ? new Error(raw)
+          : new ApiError(raw, 502, { type: 'about:blank', title: raw, detail: raw, status: 502 }),
+      );
+      renderWithQuery(<ProvidersPanel />);
+      await screen.findByText(PROVIDER_READY.name);
+
+      await userEvent.click(screen.getByRole('button', { name: /revalidate/i }));
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).not.toContain(raw);
+      expect(alert).toHaveTextContent(/could not update the provider/i);
+    },
+  );
+
+  it('redacts a read error and lets the admin retry', async () => {
+    const raw = 'HTTPStatusError 10.0.0.9 sk-private-value https://docs.example.test/trace';
+    listLlmProviders.mockRejectedValueOnce(new Error(raw)).mockResolvedValue(LIST_ONE);
+    renderWithQuery(<ProvidersPanel />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).not.toContain(raw);
+    expect(alert).toHaveTextContent(/could not load the providers/i);
+    await userEvent.click(within(alert).getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText(PROVIDER_READY.name)).toBeInTheDocument();
+  });
+
+  it('shows a pending test, safe failure diagnostics, then an explicit retry', async () => {
+    listLlmProviders.mockResolvedValue({ items: [PROVIDER_REACHABLE] });
+    let finish!: (value: unknown) => void;
+    testLlmProviderConnection.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderWithQuery(<ProvidersPanel />);
+    await screen.findByText('Unverified');
+    const select = screen.getByRole('combobox', { name: /test model for unverified/i });
+    const selectedModel = PROVIDER_REACHABLE.discovered_models[1]!.id;
+    await userEvent.selectOptions(select, selectedModel);
+    await userEvent.click(screen.getByRole('button', { name: /^test connection$/i }));
+    expect(screen.getByRole('status', { name: /testing connection/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /testing connection/i })).toBeDisabled();
+    expect(select).toBeDisabled();
+    expect(testLlmProviderConnection).toHaveBeenCalledWith('p-3', selectedModel);
+
+    await act(async () =>
+      finish({
+        provider: { ...PROVIDER_REACHABLE, status: 'error' },
+        validation: {
+          status: 'error',
+          checks: [],
+          stage: 'connection_test',
+          code: 'timeout',
+          retryable: true,
+          correlation_id: 'req-safe-1',
+        },
+      }),
+    );
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/did not respond in time/i);
+    expect(alert).toHaveTextContent(/req-safe-1/);
+    expect(alert).toHaveTextContent(/connection test/i);
+    testLlmProviderConnection.mockResolvedValueOnce({
+      provider: { ...PROVIDER_REACHABLE, status: 'ready' },
+      validation: { status: 'ready', checks: [], retryable: false, correlation_id: 'req-safe-2' },
+    });
+    await userEvent.click(within(alert).getByRole('button', { name: /retry test connection/i }));
+    expect(await screen.findByText(/test connection passed/i)).toBeInTheDocument();
+    expect(testLlmProviderConnection).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders persisted safe diagnostics and validation time on reload', async () => {
+    listLlmProviders.mockResolvedValue({
+      items: [
+        {
+          ...PROVIDER_ERROR,
+          validation: {
+            status: 'error',
+            checks: [],
+            stage: 'discovery',
+            code: 'dns_failed',
+            retryable: true,
+            correlation_id: 'req-history-1',
+            validated_at: '2026-10-29T10:00:00Z',
+          },
+        },
+      ],
+    });
+    renderWithQuery(<ProvidersPanel />);
+    await screen.findByText('Broken');
+
+    expect(screen.getByText(/req-history-1/)).toBeInTheDocument();
+    expect(screen.getByText(/could not be resolved/i)).toBeInTheDocument();
+    expect(screen.getByText(/last validated/i)).toBeInTheDocument();
+    expect(document.querySelector('time')).toHaveAttribute('datetime', '2026-10-29T10:00:00Z');
   });
 
   it('renders a discovery-error provider with its last_error (never a blank pane)', async () => {
@@ -146,7 +336,10 @@ describe('ProvidersPanel', () => {
 
     expect(await screen.findByText('Broken')).toBeInTheDocument();
     expect(screen.getByText('Error')).toBeInTheDocument();
-    expect(screen.getByText(/401 Unauthorized/)).toBeInTheDocument();
+    // Only the fixed safe message + stable code render — never raw vendor text.
+    expect(screen.getByText(/rejected the API key/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/unauthorized/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/HTTPStatusError/)).not.toBeInTheDocument();
   });
 
   it('the add-form submit calls createLlmProvider (openai_compatible)', async () => {
@@ -333,15 +526,15 @@ describe('ProvidersPanel', () => {
     },
   );
 
-  it('Refresh calls refreshLlmProvider and surfaces the outcome', async () => {
+  it('Revalidate calls refreshLlmProvider and surfaces the outcome', async () => {
     listLlmProviders.mockResolvedValue(LIST_ONE);
     refreshLlmProvider.mockResolvedValue({ ...PROVIDER_READY, status: 'ready' });
     renderWithQuery(<ProvidersPanel />);
     await screen.findByText('OpenRouter');
 
-    await userEvent.click(screen.getByRole('button', { name: /refresh/i }));
+    await userEvent.click(screen.getByRole('button', { name: /revalidate/i }));
     expect(refreshLlmProvider).toHaveBeenCalledWith('p-1');
-    expect(await screen.findByText(/refreshed openrouter/i)).toBeInTheDocument();
+    expect(await screen.findByText(/revalidated openrouter/i)).toBeInTheDocument();
   });
 
   it('Delete calls deleteLlmProvider', async () => {

@@ -1337,7 +1337,7 @@ class LlmProvider(TenantScopedMixin, TimestampMixin, Base):
             name="ck_llm_providers_provider_type",
         ),
         CheckConstraint(
-            "status in ('pending', 'ready', 'error')",
+            "status in ('pending', 'reachable', 'ready', 'error')",
             name="ck_llm_providers_status",
         ),
     )
@@ -1374,6 +1374,16 @@ class LlmProvider(TenantScopedMixin, TimestampMixin, Base):
     discovered_models: Mapped[list[dict[str, object]]] = mapped_column(
         _JSON, nullable=False, default=list
     )
+    # Evidence-based validation (spec 0029, migration 0050): the independent
+    # checks from the last validation run, the stable safe failure code, the
+    # staleness timestamp, and the grandfather flag for pre-existing ready rows.
+    validation_checks: Mapped[list[dict[str, object]]] = mapped_column(
+        _JSON, nullable=False, default=list
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validation_grandfathered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    validation_result: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
 
 
 class TenantToolPolicy(TenantScopedMixin, TimestampMixin, Base):

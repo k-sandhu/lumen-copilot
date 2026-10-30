@@ -372,6 +372,13 @@ DIRECT_RESOURCE_DENIAL_GUARDS = (
     ),
     DenialGuardRoute(
         "POST",
+        "/api/v1/admin/llm-providers/{provider_id}/test-connection",
+        "LlmProviderService",
+        "llm_provider.test_connection",
+        "require_roles",
+    ),
+    DenialGuardRoute(
+        "POST",
         "/api/v1/admin/members/{member_id}/attest-identity",
         "AdminService",
         "user.identity.attest",

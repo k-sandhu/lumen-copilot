@@ -49,20 +49,31 @@ describe('credential network and storage boundaries (#580)', () => {
     },
   );
 
-  it('provider/MCP reads send no secret body and retain only the masked read shape', async () => {
+  it('provider/MCP reads send no secret body and retain only the safe read shape', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
-      async () =>
+      async (url) =>
         new Response(
-          JSON.stringify({ items: [{ id: 'presence-only', secret_hint: '****safe' }] }),
+          JSON.stringify({
+            items: [
+              String(url).includes('/llm-providers')
+                ? { id: 'presence-only', has_api_key: true }
+                : { id: 'presence-only', secret_hint: '****safe' },
+            ],
+          }),
           {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
           },
         ),
     );
-    const responses = [await listLlmProviders(), await listMcpServers()];
-    for (const response of responses) {
-      expect(response.items[0]?.secret_hint).toBe('****safe');
+    // Provider reads expose presence only (spec 0029); MCP reads keep the
+    // vault's masked hint. Neither ever gains a secret value field.
+    const providers = await listLlmProviders();
+    expect(providers.items[0]?.has_api_key).toBe(true);
+    expect(providers.items[0]).not.toHaveProperty('secret_hint');
+    const servers = await listMcpServers();
+    expect(servers.items[0]?.secret_hint).toBe('****safe');
+    for (const response of [providers, servers]) {
       expect(response.items[0]).not.toHaveProperty('api_key');
       expect(response.items[0]).not.toHaveProperty('auth');
       expect(response.items[0]).not.toHaveProperty('value');

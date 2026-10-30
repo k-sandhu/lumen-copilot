@@ -570,6 +570,11 @@ def _to_llm_provider(row: models.LlmProvider) -> LlmProvider:
         discovered_models=list(row.discovered_models or []),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        validation_checks=list(row.validation_checks or []),
+        last_error_code=row.last_error_code,
+        validated_at=row.validated_at,
+        validation_grandfathered=row.validation_grandfathered,
+        validation_result=row.validation_result,
     )
 
 
@@ -5628,15 +5633,21 @@ class LlmProviderRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return _to_llm_provider(row)
 
-    async def get(self, provider_id: UUID) -> LlmProvider | None:
-        row = await self._get_row(provider_id)
+    async def get(self, provider_id: UUID, *, for_update: bool = False) -> LlmProvider | None:
+        row = await self._get_row(provider_id, for_update=for_update)
         return _to_llm_provider(row) if row is not None else None
 
-    async def _get_row(self, provider_id: UUID) -> models.LlmProvider | None:
+    async def _get_row(
+        self, provider_id: UUID, *, for_update: bool = False
+    ) -> models.LlmProvider | None:
         stmt = select(models.LlmProvider).where(
             models.LlmProvider.tenant_id == self._tenant_id,
             models.LlmProvider.id == provider_id,
         )
+        if for_update:
+            # Hold through network probe + audit + commit. Configuration edits
+            # use the same lock, so stale evidence cannot mark a new key Ready.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_for_tenant(self) -> list[LlmProvider]:
@@ -5700,13 +5711,20 @@ class LlmProviderRepository(_TenantScopedRepository):
         discovered_models: list[dict[str, object]],
         last_error: str | None,
         last_discovery_at: datetime | None,
+        validation_checks: list[dict[str, object]] | None = None,
+        last_error_code: str | None = None,
+        validated_at: datetime | None = None,
+        validation_result: dict[str, object] | None = None,
     ) -> LlmProvider | None:
-        """Persist a discovery outcome: status + discovery timestamp + model snapshot.
+        """Persist a validation outcome: status + checks + model snapshot.
 
-        On a successful discovery the caller passes ``status=ready`` with the fresh
-        ``last_discovery_at`` + discovered models; on a failure ``status=error`` with
-        a safe ``last_error`` (the previous model snapshot is left in place by passing
-        it back). Tenant-scoped; ``None`` for a foreign id.
+        Discovery passes ``status=reachable`` on success (never ``ready`` — spec
+        0029) and ``status=error`` with a safe ``last_error``/``last_error_code``
+        on failure (previous snapshot left in place by passing it back);
+        test-connection passes ``status=ready`` when the required checks pass.
+        Any validation run clears the migration grandfather flag (the strict
+        rule applies from the next validation onward). Tenant-scoped; ``None``
+        for a foreign id.
         """
         row = await self._get_row(provider_id)
         if row is None:
@@ -5715,6 +5733,13 @@ class LlmProviderRepository(_TenantScopedRepository):
         row.last_discovery_at = last_discovery_at
         row.last_error = last_error
         row.discovered_models = discovered_models
+        if validation_checks is not None:
+            row.validation_checks = validation_checks
+        row.last_error_code = last_error_code
+        if validated_at is not None:
+            row.validated_at = validated_at
+        row.validation_grandfathered = False
+        row.validation_result = validation_result
         await self._session.flush()
         await self._session.refresh(row)
         return _to_llm_provider(row)
