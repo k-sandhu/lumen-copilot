@@ -1148,6 +1148,16 @@ export interface SandboxPolicy {
   max_memory_mb_ceiling: number;
   daily_runtime_cap_s_ceiling: number;
   max_concurrency_ceiling: number;
+  cpus: number | null;
+  pids_limit: number | null;
+  output_bytes_cap: number;
+  scratch_bytes: number | null;
+  limits_enabled: boolean;
+  limit_sources: Record<string, 'deployment_default' | 'tenant_override'>;
+  current_concurrency: number | null;
+  daily_runtime_used_s: number | null;
+  accounting_available: boolean;
+  denial_reasons: string[];
 }
 
 /**
@@ -1968,6 +1978,8 @@ export interface CodeRun {
   started_at?: string | null;
   /** When the run reached a terminal status; null until then. */
   finished_at?: string | null;
+  effective_limits?: Record<string, unknown> | null;
+  termination_reason?: string | null;
 }
 
 export type SandboxSessionStatus = 'not_created' | 'active' | 'closed' | 'error';

@@ -813,6 +813,8 @@ def _to_code_run(row: models.CodeRun) -> CodeRun:
         started_at=row.started_at,
         finished_at=row.finished_at,
         created_at=row.created_at,
+        effective_limits=dict(row.effective_limits) if row.effective_limits else None,
+        termination_reason=row.termination_reason,
     )
 
 
@@ -8113,12 +8115,15 @@ class CodeRunRepository(_TenantScopedRepository):
         image_digest: str | None = None,
         sandbox_session_id: UUID | None = None,
         sandbox_generation: int | None = None,
+        effective_limits: dict[str, object] | None = None,
     ) -> CodeRun | None:
         """Atomically transition ``queued`` to ``running``; otherwise return current."""
         values: dict[str, object] = {
             "status": CodeRunStatus.RUNNING.value,
             "started_at": started_at,
         }
+        if effective_limits is not None:
+            values["effective_limits"] = effective_limits
         if image_digest is not None:
             values["image_digest"] = image_digest
         if sandbox_session_id is not None:
@@ -8155,6 +8160,8 @@ class CodeRunRepository(_TenantScopedRepository):
         image_digest: str | None = None,
         artifact_ids: list[UUID] | None = None,
         resolved_packages: tuple[dict[str, str], ...] | None = None,
+        effective_limits: dict[str, object] | None = None,
+        termination_reason: str | None = None,
     ) -> CodeRun | None:
         """Write a run's terminal status + captured result (ADR-0013 §4/§5), tenant-scoped.
 
@@ -8177,6 +8184,10 @@ class CodeRunRepository(_TenantScopedRepository):
             "resource_usage": resource_usage.to_dict() if resource_usage is not None else None,
             "artifact_ids": [str(a) for a in (artifact_ids or [])],
         }
+        if effective_limits is not None:
+            values["effective_limits"] = effective_limits
+        if termination_reason is not None:
+            values["termination_reason"] = termination_reason
         if image_digest is not None:
             values["image_digest"] = image_digest
         if resolved_packages is not None:

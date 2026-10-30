@@ -22,6 +22,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role, SandboxSessionStatus
+from app.sandbox.accounting import InMemorySandboxAccounting
 from app.sandbox.service import (
     SandboxDisabledError,
     SandboxReadService,
@@ -159,13 +160,22 @@ async def _enable(
     )
 
 
-def _service(tenant: UUID, owner: UUID, runner: _FakeRunner, store: _FakeStore) -> SandboxService:
+def _service(
+    tenant: UUID,
+    owner: UUID,
+    runner: _FakeRunner,
+    store: _FakeStore,
+    accounting: InMemorySandboxAccounting | None = None,
+) -> SandboxService:
     return SandboxService(
         tenant_id=tenant,
         owner_id=owner,
         runner=runner,
         object_store=store,  # type: ignore[arg-type]
         settings=sandbox_settings(),
+        # Admission accounting is fail-closed Redis in production (#589);
+        # tests run the in-memory implementation of the same protocol.
+        accounting=accounting or InMemorySandboxAccounting(),
     )
 
 
@@ -689,13 +699,18 @@ async def test_max_concurrency_refuses_a_run_once_the_tenant_is_at_its_limit(
     """
     tenant, owner, chat = await _principal_chat(session)
     await _enable(session, tenant)  # max_concurrency=2 in the helper's policy
-    service = _service(tenant, owner, _FakeRunner(), _FakeStore())
+    accounting = InMemorySandboxAccounting()
+    service = _service(tenant, owner, _FakeRunner(), _FakeStore(), accounting)
     runs = CodeRunRepository(session, tenant)
 
-    # Two runs already EXECUTING — the state the limit is about.
+    # Two runs already EXECUTING — each holds one of the tenant's
+    # concurrency leases (#589 replaced the racy DB count with leases).
     for _ in range(2):
         occupied = await _run(session, tenant, owner, chat)
         await runs.mark_running(occupied.id, started_at=datetime.now(UTC))
+        assert await accounting.acquire_lease(
+            tenant, occupied.id, max_concurrency=2, ttl_seconds=600
+        )
     await session.commit()
 
     third = await _run(session, tenant, owner, chat)

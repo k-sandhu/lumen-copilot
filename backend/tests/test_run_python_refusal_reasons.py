@@ -85,6 +85,7 @@ from app.domain.tools import (
     RiskTier,
     ToolHandlerResult,
 )
+from app.sandbox.accounting import InMemorySandboxAccounting
 from app.sandbox.runner import SandboxRunnerFailed, SandboxRunnerRejected
 from app.sandbox.service import SandboxService
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
@@ -430,6 +431,7 @@ async def _refuse(
         runner=runner or _FakeRunner(),  # type: ignore[arg-type]
         object_store=_FakeStore(),  # type: ignore[arg-type]
         settings=sandbox_settings(SANDBOX_ENABLED="true" if deploy_enabled else "false"),
+        accounting=InMemorySandboxAccounting(),
     )
     status = await service.execute(world.session, run.id)
     persisted = await CodeRunRepository(world.session, world.tenant_id).get(run.id)
@@ -650,6 +652,7 @@ async def test_a_policy_flip_between_the_two_checks_keeps_the_policy_reason(
         runner=runner,  # type: ignore[arg-type]
         object_store=_FakeStore(),  # type: ignore[arg-type]
         settings=sandbox_settings(),
+        accounting=InMemorySandboxAccounting(),
     )
 
     # Flip the workspace policy off in the window between the two checks: the first

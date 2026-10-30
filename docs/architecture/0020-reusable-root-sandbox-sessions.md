@@ -1,5 +1,7 @@
 # 20. Reusable root-capable Python sandbox sessions
 
+> **Amendment proposed in [ADR-0029](0029-bounded-sandbox-sessions.md)** (#589): bounded sessions by default, reversing this ADR's unbounded resource posture.
+
 - **Status:** Accepted *(human sponsor direction, 2026-07-18; issue [#457](https://github.com/k-sandhu/lumen-copilot/issues/457))*
 - **Date:** 2026-07-18
 - **Supersedes in part:** [ADR-0013](0013-code-execution-sandbox.md) — replaces fresh-container-per-run, non-root, read-only-rootfs, per-run resource caps, and automatic wall-clock expiry for interactive `run_python` execution. The dedicated runner boundary, tenant/owner scoping, audit, artifact capture, no host mounts/socket/secrets, and production gVisor posture remain in force.

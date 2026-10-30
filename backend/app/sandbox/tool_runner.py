@@ -38,7 +38,8 @@ the inspector's concern (#232) and layers on top without changing this shape.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,6 +51,7 @@ from app.db.tenant_context import bind_tenant
 from app.domain.entities import CodeRun, CodeRunStatus
 from app.realtime import envelopes
 from app.realtime.backplane import Backplane
+from app.sandbox.accounting import SandboxAccounting
 from app.sandbox.runner import SandboxRunner
 from app.sandbox.service import SandboxService
 from app.services.tools.types import SandboxRun
@@ -71,7 +73,7 @@ class ChatSandboxToolRunner:
     ``stream_id`` / ``session_id`` / ``message_id`` the run links back to. The
     dedicated session keeps code execution out of the answer transaction: the queued
     row is committed before execution and the running row is committed before the
-    unbounded runner call, so cancellation can observe it. All tenant/owner scoping +
+    bounded runner call, so cancellation can observe it. All tenant/owner scoping +
     the deny-by-default enable/package gate live in the composed
     :class:`SandboxService`; this class creates the run row, drives the service, and
     renders the WS events.
@@ -93,6 +95,9 @@ class ChatSandboxToolRunner:
         next_seq: Callable[[], int],
         session_id: UUID | None = None,
         message_id: UUID | None = None,
+        accounting: SandboxAccounting | None = None,
+        retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
@@ -110,6 +115,8 @@ class ChatSandboxToolRunner:
         self._next_seq = next_seq
         self._session_id = session_id
         self._message_id = message_id
+        self._accounting = accounting
+        self._retry_sleep, self._lease_sleep = retry_sleep, lease_sleep
 
     async def submit(self, *, code: str, packages: tuple[str, ...] = ()) -> SandboxRun:
         """Run ``code`` to a terminal status; stream its output; return the summary.
@@ -119,7 +126,7 @@ class ChatSandboxToolRunner:
         re-reads the terminal record and emits its captured stdout/stderr as
         ``code_output`` chunks followed by exactly one ``code_result``. Package
         requirements are policy-checked and installed by the runner before
-        tenant inputs are staged. There is no automatic execution timeout.
+        tenant inputs are staged. The runner enforces the effective execution deadline.
         """
         async with self._sessionmaker() as session:
             try:
@@ -150,10 +157,13 @@ class ChatSandboxToolRunner:
                     settings=self._settings,
                     request_id=self._request_id,
                     source_ip=self._source_ip,
+                    accounting=self._accounting,
+                    retry_sleep=self._retry_sleep,
+                    lease_sleep=self._lease_sleep,
                 )
                 # The service walks the row through the deny-by-default gate → running
                 # → terminal, capturing stdout/stderr/exit/artifacts and auditing every
-                # transition. It commits running state before the unbounded runner call
+                # transition. It commits running state before the bounded runner call
                 # and never raises for a run concern (a crash becomes ``failed``).
                 #
                 # ``execute_outcome`` (not ``execute``) because the typed

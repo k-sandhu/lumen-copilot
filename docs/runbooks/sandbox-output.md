@@ -17,7 +17,9 @@ Output exactly at the limit has no notice. The runner continues draining discard
 output so that a full output pipe cannot block execution. Retention stays bounded
 by the character cap, one lookahead character, decoder state and a source chunk.
 Output-file collection has its separate byte and member budgets; this change does
-not alter those limits or execution policy.
+not alter their byte/member budgets. ADR-0029 (Proposed) reports a stream or
+collection overage as `failed` / `sandbox_limit_output` and destroys the session
+container; a subsequent run creates a fresh environment.
 
 Regression coverage lives in `sandbox_runner/tests/test_engine.py`: controlled
 chunks cover every internal boundary of two-, three- and four-byte UTF-8 characters

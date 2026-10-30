@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 import re
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
@@ -25,7 +29,9 @@ from app.db.repositories import (
 from app.db.tenant_context import bind_tenant
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.code_execution import (
+    SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
     SANDBOX_REASON_CONCURRENCY_EXCEEDED,
+    SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED,
     SANDBOX_REASON_PACKAGE_DENIED,
     SANDBOX_REASON_RUN_ERROR,
     SANDBOX_REASON_RUNNER_UNAVAILABLE,
@@ -42,8 +48,15 @@ from app.domain.entities import (
     SandboxSession,
     SandboxSessionStatus,
 )
+from app.sandbox.accounting import (
+    AccountingUnavailable,
+    ExecutionAlreadyAdmitted,
+    RedisSandboxAccounting,
+    SandboxAccounting,
+)
+from app.sandbox.admission import AdmissionLease
 from app.sandbox.runner import SandboxRunner
-from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec, StagedInput
+from app.sandbox.spec import EffectiveLimits, RunResult, RunSpec, SandboxSessionSpec, StagedInput
 from app.services.artifacts_service import ArtifactLinks, ArtifactsService
 from app.services.audit import (
     AuditSink,
@@ -203,28 +216,62 @@ def _install_refusal(name: str, value: str, shipped: Version | None) -> str:
 
 
 def session_resource_bounds(settings: Settings) -> tuple[float | None, int | None, int | None]:
-    """The cpu / memory / PID bounds for a session container — none unless asked for.
-
-    ADR-0020 launches the execution container with **no** cpu, memory or PID limit. That
-    is a deliberate sponsor decision (its Consequences section: no automatic protection
-    against infinite loops, fork bombs, disk growth or resource monopolisation, with
-    explicit cancel/reset as the recovery path) and it stays the default here — all three
-    values are ``None``, and the runner then calls the engine exactly as it did before.
-
-    What was NOT a decision is that the runner's wire schema typed those fields ``None``,
-    which made the posture unchangeable by configuration: a deploy unwilling to let one
-    ``run_python`` call exhaust host RAM or fill ``/var/lib/docker`` could not even ask
-    for a bound. ``SANDBOX_SESSION_LIMITS_ENABLED`` is that ask, and it carries the
-    ADR-0013 numbers the deploy already configures. Deploy-wide rather than per-tenant on
-    purpose: the resource at risk is the host every tenant shares.
-
-    These bound a long-lived SESSION, not one run (ADR-0020 §4), so a memory bound that
-    is comfortable for a single analysis turn can still stop a later turn in the same
-    chat — which is why this is opt-in rather than a default anyone inherits silently.
-    """
+    """Default-on deployment container ceilings (ADR-0029, Proposed)."""
     if not settings.sandbox_session_limits_enabled:
         return (None, None, None)
     return (settings.sandbox_cpus, settings.sandbox_memory_bytes, settings.sandbox_pids_limit)
+
+
+def resolve_effective_limits(settings: Settings, policy: EffectiveSandboxPolicy) -> EffectiveLimits:
+    """Deployment ceilings narrowed by tenant policy — never widened (#589).
+
+    Tenant-narrowable fields are the ones with a stored tenant value
+    (runtime, memory, daily runtime, concurrency); CPU, PID, scratch and
+    output bounds are deployment-wide. Every value is ``min``'d against its
+    ceiling here as defense in depth, so even a legacy stored row above a
+    since-tightened ceiling cannot widen a run. Under the explicit
+    unbounded opt-out the container bounds are ``None``; concurrency and
+    daily accounting still apply at the tenant-policy values.
+    """
+    bounded = settings.sandbox_session_limits_enabled
+
+    def _source(value: int, ceiling: int) -> str:
+        return "tenant_override" if value < ceiling else "deployment_default"
+
+    return EffectiveLimits(
+        cpus=settings.sandbox_cpus if bounded else None,
+        memory_bytes=(
+            min(policy.max_memory_mb * 1024 * 1024, settings.sandbox_memory_bytes)
+            if bounded
+            else None
+        ),
+        pids_limit=settings.sandbox_pids_limit if bounded else None,
+        wall_clock_seconds=(min(policy.max_runtime_s, settings.sandbox_wall_clock_seconds)),
+        output_bytes_cap=settings.sandbox_output_bytes_cap,
+        scratch_bytes=settings.sandbox_scratch_bytes if bounded else None,
+        max_concurrency=min(policy.max_concurrency, settings.sandbox_max_concurrent_per_tenant),
+        daily_runtime_cap_s=min(
+            policy.daily_runtime_cap_s, settings.sandbox_daily_runtime_seconds_per_tenant
+        ),
+        sources={
+            "cpus": "deployment_default",
+            "memory_bytes": _source(
+                policy.max_memory_mb, settings.sandbox_memory_bytes // (1024 * 1024)
+            ),
+            "pids_limit": "deployment_default",
+            "wall_clock_seconds": _source(
+                policy.max_runtime_s, settings.sandbox_wall_clock_seconds
+            ),
+            "output_bytes_cap": "deployment_default",
+            "scratch_bytes": "deployment_default",
+            "max_concurrency": _source(
+                policy.max_concurrency, settings.sandbox_max_concurrent_per_tenant
+            ),
+            "daily_runtime_cap_s": _source(
+                policy.daily_runtime_cap_s, settings.sandbox_daily_runtime_seconds_per_tenant
+            ),
+        },
+    )
 
 
 def validate_requested_packages(
@@ -341,7 +388,7 @@ class SandboxSessionService:
 
     async def ensure(self, chat_session_id: UUID) -> SandboxSession:
         await self._require_visible_chat(chat_session_id, attempted_action="sandbox_session.ensure")
-        await self._require_enabled(chat_session_id, lifecycle="ensure")
+        policy = await self._require_enabled(chat_session_id, lifecycle="ensure")
         previous = await self._sessions.get_for_chat(chat_session_id)
         value = await self._sessions.get_or_create(
             owner_id=self._owner_id,
@@ -349,7 +396,7 @@ class SandboxSessionService:
             image_digest=self._settings.sandbox_image,
         )
         try:
-            await self._runner.ensure_session(self._spec(value))
+            await self._runner.ensure_session(self._spec(value, policy))
         except Exception:
             await self._sessions.mark_error(value.id, expected_generation=value.generation)
             raise
@@ -374,7 +421,7 @@ class SandboxSessionService:
     @audited_resource("sandbox_session.reset", "chat_session", "chat_session_id")
     async def reset(self, chat_session_id: UUID) -> SandboxSession:
         await self._require_visible_chat(chat_session_id, attempted_action="sandbox_session.reset")
-        await self._require_enabled(chat_session_id, lifecycle="reset")
+        policy = await self._require_enabled(chat_session_id, lifecycle="reset")
         current = await self._sessions.get_for_chat(chat_session_id)
         if current is None:
             return await self.ensure(chat_session_id)
@@ -389,7 +436,9 @@ class SandboxSessionService:
                 code="sandbox_generation_changed",
             )
         try:
-            await self._runner.reset_session(self._spec(current), self._spec(replacement))
+            await self._runner.reset_session(
+                self._spec(current, policy), self._spec(replacement, policy)
+            )
         except Exception:
             await self._sessions.mark_error(current.id, expected_generation=replacement.generation)
             raise
@@ -446,6 +495,7 @@ class SandboxSessionService:
                 status=CodeRunStatus.KILLED,
                 finished_at=datetime.now(UTC),
                 stderr="Code execution was cancelled.",
+                termination_reason="cancelled",
             )
         else:
             sandbox = await self._sessions.get(run.sandbox_session_id)
@@ -467,6 +517,7 @@ class SandboxSessionService:
                 status=CodeRunStatus.KILLED,
                 finished_at=datetime.now(UTC),
                 stderr="Code execution was cancelled.",
+                termination_reason="cancelled",
             )
             replacement = None
             if sandbox is not None and sandbox.generation == run.sandbox_generation:
@@ -509,7 +560,9 @@ class SandboxSessionService:
             )
             raise NotFoundError("Chat session not found.")
 
-    async def _require_enabled(self, chat_session_id: UUID, *, lifecycle: str) -> None:
+    async def _require_enabled(
+        self, chat_session_id: UUID, *, lifecycle: str
+    ) -> EffectiveSandboxPolicy:
         """Refuse a lifecycle action when code execution is off — carrying the reason.
 
         The error CODE stays ``code_execution_disabled`` (a frozen contract value);
@@ -553,19 +606,46 @@ class SandboxSessionService:
                 },
             )
             raise SandboxDisabledError(reason)
+        return policy
 
-    def _spec(self, value: SandboxSession) -> SandboxSessionSpec:
+    def _spec(
+        self, value: SandboxSession, policy: EffectiveSandboxPolicy | None = None
+    ) -> SandboxSessionSpec:
         return self._build_spec(
             sandbox_session_id=value.id,
             generation=value.generation,
             image=value.image_digest,
+            policy=policy,
         )
 
     def _build_spec(
-        self, *, sandbox_session_id: UUID, generation: int, image: str
+        self,
+        *,
+        sandbox_session_id: UUID,
+        generation: int,
+        image: str,
+        policy: EffectiveSandboxPolicy | None = None,
     ) -> SandboxSessionSpec:
-        """The single place a session spec is built, so every path carries one posture."""
-        cpus, memory_bytes, pids_limit = session_resource_bounds(self._settings)
+        """The single place a session spec is built, so every path carries one posture.
+
+        With a resolved tenant ``policy`` the bounds are the tenant-narrowed
+        effective limits (#589); without one (teardown paths that only need
+        the container identity) they are the deployment ceilings.
+        """
+        if policy is not None:
+            limits = resolve_effective_limits(self._settings, policy)
+            cpus = limits.cpus
+            memory_bytes = limits.memory_bytes
+            pids_limit = limits.pids_limit
+            wall_clock_seconds = limits.wall_clock_seconds
+            scratch_bytes = limits.scratch_bytes
+            output_bytes_cap = limits.output_bytes_cap
+        else:
+            cpus, memory_bytes, pids_limit = session_resource_bounds(self._settings)
+            bounded = self._settings.sandbox_session_limits_enabled
+            wall_clock_seconds = self._settings.sandbox_wall_clock_seconds
+            scratch_bytes = self._settings.sandbox_scratch_bytes if bounded else None
+            output_bytes_cap = self._settings.sandbox_output_bytes_cap
         return SandboxSessionSpec(
             sandbox_session_id=sandbox_session_id,
             generation=generation,
@@ -574,10 +654,12 @@ class SandboxSessionService:
             # The runner reads collected output files into its own memory and is the
             # single Docker-socket holder, so this bound is what keeps one chat turn's
             # output from taking code execution down for every tenant.
-            output_bytes_cap=self._settings.sandbox_output_bytes_cap,
+            output_bytes_cap=output_bytes_cap,
             cpus=cpus,
             memory_bytes=memory_bytes,
             pids_limit=pids_limit,
+            wall_clock_seconds=wall_clock_seconds,
+            scratch_bytes=scratch_bytes,
             env=self._session_env(),
         )
 
@@ -622,6 +704,9 @@ class SandboxService:
         settings: Settings,
         request_id: str = "sandbox-task",
         source_ip: str = "system",
+        accounting: SandboxAccounting | None = None,
+        retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._tenant_id = tenant_id
         self._owner_id = owner_id
@@ -630,6 +715,10 @@ class SandboxService:
         self._settings = settings
         self._request_id = request_id
         self._source_ip = source_ip
+        # Admission accounting (#589): Redis-backed and fail-closed by
+        # default; tests inject an in-memory implementation.
+        self._accounting = accounting or RedisSandboxAccounting(settings.redis_url)
+        self._retry_sleep, self._lease_sleep = retry_sleep, lease_sleep
 
     async def _effective_policy(self, session: AsyncSession) -> EffectiveSandboxPolicy:
         return await SandboxPolicyReader(
@@ -685,24 +774,6 @@ class SandboxService:
         elif run.session_id is None:
             reason = SANDBOX_REASON_SESSION_REQUIRED
             denial = sandbox_reason_public_message(reason)
-        elif (in_flight := await runs.count_executing()) >= policy.max_concurrency:
-            # #519: `max_concurrency` was stored, clamped against the deploy ceiling,
-            # returned by the admin API and rendered in the UI — and read by NO runtime
-            # path. An operator who saw concurrent runs overwhelming the runner would
-            # reach for exactly this control, set it, and watch nothing change. Either
-            # enforce it or stop showing it; a limit that silently does nothing is the
-            # worst of the three options.
-            #
-            # Counted, not reserved: this is a coarse admission gate, and two runs
-            # racing the same check can both be admitted. That is acceptable here —
-            # the bound exists to stop runaway fan-out, not to be exact to one run —
-            # and a reservation would need a row lock on the hot path of every turn.
-            reason = SANDBOX_REASON_CONCURRENCY_EXCEEDED
-            denial = sandbox_reason_public_message(reason)
-            operator_detail = (
-                f"{in_flight} run(s) already in flight for this tenant; policy admits "
-                f"{policy.max_concurrency}."
-            )
         else:
             try:
                 # ``packages`` is what the runner must INSTALL — the requested
@@ -723,6 +794,7 @@ class SandboxService:
                 # useful thing an operator can read (#504).
                 denial = exc.detail or sandbox_reason_public_message(reason)
                 operator_detail = denial
+        limits = resolve_effective_limits(self._settings, policy)
         if denial is not None:
             return await self._finalize_denial(
                 runs,
@@ -731,8 +803,118 @@ class SandboxService:
                 reason=reason or SANDBOX_REASON_RUN_ERROR,
                 denial=denial,
                 operator_detail=operator_detail,
+                limits=limits,
             )
 
+        # Atomic admission (#589): a Redis concurrency lease plus a daily
+        # runtime reservation, replacing the racy count-then-act gate. Both
+        # fail CLOSED — an accounting store that cannot answer denies the
+        # run rather than admitting it unaccounted.
+        reserved_seconds = limits.wall_clock_seconds or policy.max_runtime_s
+        owner_token = uuid4()
+        try:
+            leased = await self._accounting.acquire_lease(
+                self._tenant_id,
+                run.id,
+                max_concurrency=limits.max_concurrency,
+                ttl_seconds=reserved_seconds + 300,
+                owner_token=owner_token,
+            )
+        except ExecutionAlreadyAdmitted:
+            return ExecutionOutcome(CodeRunStatus.RUNNING)
+        except AccountingUnavailable:
+            return await self._finalize_denial(
+                runs, audit, run.id, reason=SANDBOX_REASON_ACCOUNTING_UNAVAILABLE, limits=limits
+            )
+        if not leased:
+            return await self._finalize_denial(
+                runs,
+                audit,
+                run.id,
+                reason=SANDBOX_REASON_CONCURRENCY_EXCEEDED,
+                operator_detail=(
+                    f"This tenant already holds {limits.max_concurrency} sandbox "
+                    "concurrency lease(s)."
+                ),
+                limits=limits,
+            )
+        reservation_day = datetime.now(UTC)
+        started = time.monotonic()
+        reserved = False
+        lease = AdmissionLease(
+            self._accounting,
+            self._tenant_id,
+            run.id,
+            owner_token,
+            reserved_seconds + 300,
+            self._lease_sleep,
+        )
+        try:
+            try:
+                reserved = await self._accounting.reserve_daily(
+                    self._tenant_id,
+                    seconds=reserved_seconds,
+                    daily_cap_s=limits.daily_runtime_cap_s,
+                    day=reservation_day,
+                )
+            except AccountingUnavailable:
+                return await self._finalize_denial(
+                    runs, audit, run.id, reason=SANDBOX_REASON_ACCOUNTING_UNAVAILABLE, limits=limits
+                )
+            if not reserved:
+                return await self._finalize_denial(
+                    runs, audit, run.id, reason=SANDBOX_REASON_DAILY_RUNTIME_EXCEEDED, limits=limits
+                )
+            return await self._execute_admitted(
+                session,
+                runs,
+                audit,
+                run,
+                policy=policy,
+                limits=limits,
+                packages=packages,
+                inputs=inputs,
+                started_at=reservation_day,
+                lease=lease,
+            )
+        finally:
+            await lease.stop()
+
+            # A missed settlement conservatively retains the entire reservation.
+            # Never refund into a new day's counter after a midnight boundary.
+            async def cleanup() -> None:
+                try:
+                    if reserved:
+                        await self._accounting.settle_daily(
+                            self._tenant_id,
+                            reserved_seconds=reserved_seconds,
+                            actual_seconds=min(
+                                reserved_seconds, math.ceil(time.monotonic() - started)
+                            ),
+                            day=reservation_day,
+                        )
+                finally:
+                    await self._accounting.release_lease(
+                        self._tenant_id, run.id, owner_token=owner_token
+                    )
+
+            if not lease.pending or lease.confirmed:
+                await asyncio.shield(cleanup())
+
+    async def _execute_admitted(
+        self,
+        session: AsyncSession,
+        runs: CodeRunRepository,
+        audit: AuditSink,
+        run: CodeRun,
+        *,
+        policy: EffectiveSandboxPolicy,
+        limits: EffectiveLimits,
+        packages: tuple[str, ...],
+        inputs: tuple[StagedInput, ...],
+        started_at: datetime,
+        lease: AdmissionLease,
+    ) -> ExecutionOutcome:
         lifecycle = SandboxSessionService(
             session,
             tenant_id=self._tenant_id,
@@ -751,7 +933,6 @@ class SandboxService:
             ),
         )
         assert run.session_id is not None
-        started_at = datetime.now(UTC)
         try:
             sandbox = await lifecycle.ensure(run.session_id)
         except SandboxDisabledError as exc:
@@ -761,7 +942,9 @@ class SandboxService:
             # it would have landed a millisecond earlier — a ``denied`` terminal
             # carrying the policy's own reason code — instead of a ``failed`` run
             # blamed on an unclassified crash (issue #502).
-            return await self._finalize_denial(runs, audit, run.id, reason=exc.sandbox_reason)
+            return await self._finalize_denial(
+                runs, audit, run.id, reason=exc.sandbox_reason, limits=limits
+            )
         except Exception as exc:  # noqa: BLE001 - a run never remains stuck
             log.error(
                 "sandbox.session_start_failed",
@@ -770,15 +953,22 @@ class SandboxService:
                 reason_code=_failure_reason(exc),
             )
             return await self._finalize_failure(
-                runs, audit, run.id, started_at, reason=_failure_reason(exc)
+                runs, audit, run.id, started_at, reason=_failure_reason(exc), limits=limits
             )
-        session_spec = lifecycle._spec(sandbox)  # noqa: SLF001 - same owning module
+        session_spec = lifecycle._spec(sandbox, policy)  # noqa: SLF001 - same owning module
+        if lease.accounting_lost:
+            # Accounting was lost before any remote execution started: refuse
+            # fail-closed instead of launching unaccounted work (R3-001).
+            return await self._finalize_denial(
+                runs, audit, run.id, reason=SANDBOX_REASON_ACCOUNTING_UNAVAILABLE, limits=limits
+            )
         running = await runs.mark_running(
             run.id,
             started_at=started_at,
             image_digest=sandbox.image_digest,
             sandbox_session_id=sandbox.id,
             sandbox_generation=sandbox.generation,
+            effective_limits=limits.to_dict(),
         )
         if running is None:
             return ExecutionOutcome(CodeRunStatus.FAILED)
@@ -796,7 +986,7 @@ class SandboxService:
                 "packages": list(packages),
             },
         )
-        # The runner call is intentionally unbounded (ADR-0020). Publish the active
+        # The runner call is bounded by the run's wall clock (#589). Publish the active
         # identity before crossing that boundary so cancel/reset requests can see it,
         # and end this transaction so no pooled DB connection remains checked out for
         # the duration of model-authored code. SET LOCAL is transaction-scoped, so the
@@ -810,11 +1000,112 @@ class SandboxService:
             # ever saw the top-level request, and `pip install` takes the whole
             # wheelhouse, so a denied distribution could arrive as a dependency.
             denied_packages=policy.denied_packages,
+            wall_clock_seconds=limits.wall_clock_seconds,
             inputs=inputs,
             env=(("LUMEN_OUTPUT_DIR", f"/workspace/.lumen/runs/{run.id}/output"),),
         )
+        # The remote call runs as a child task so an accounting-loss heartbeat
+        # can terminate only this in-flight call. Cancelling the producer task
+        # (user Stop / shutdown) still cancels the child, but a heartbeat tick
+        # after the child returns cannot touch local finalisation (R3-001).
+        execute_task = asyncio.create_task(self._runner.execute(session_spec, spec))
+        lease.attach_in_flight(execute_task)
         try:
-            result = await self._runner.execute(session_spec, spec)
+            result = await execute_task
+        except asyncio.CancelledError:
+            producer = asyncio.current_task()
+            producer_cancelled = producer is not None and producer.cancelling() > 0
+            accounting_loss = lease.accounting_lost and not producer_cancelled
+            termination_reason = (
+                SANDBOX_REASON_ACCOUNTING_UNAVAILABLE if accounting_loss else "cancelled"
+            )
+            lease.pending = True
+            delay = 1.0
+            failure_audited = False
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    await self._runner.cancel(session_spec, run.id)
+                    await bind_tenant(session, self._tenant_id)
+                    await runs.mark_terminal(
+                        run.id,
+                        status=CodeRunStatus.KILLED,
+                        finished_at=datetime.now(UTC),
+                        stderr=(
+                            sandbox_reason_public_message(SANDBOX_REASON_ACCOUNTING_UNAVAILABLE)
+                            if accounting_loss
+                            else ""
+                        ),
+                        termination_reason=termination_reason,
+                    )
+                    if accounting_loss:
+                        # Distinct from a user Stop: a system-forced terminal,
+                        # not an allowed ``code_run.cancelled`` (#830 composes
+                        # user Stop on the cancelled path).
+                        await self._audit_run(
+                            audit,
+                            AuditAction.CODE_RUN_FINISHED,
+                            run.id,
+                            AuditOutcome.ERROR,
+                            {
+                                "status": CodeRunStatus.KILLED.value,
+                                "termination_reason": termination_reason,
+                                "reason_code": SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
+                                "effective_limits": limits.to_dict(),
+                            },
+                        )
+                    else:
+                        await self._audit_run(
+                            audit,
+                            AuditAction.CODE_RUN_CANCELLED,
+                            run.id,
+                            AuditOutcome.ALLOWED,
+                            {
+                                "termination_reason": "cancelled",
+                                "effective_limits": limits.to_dict(),
+                            },
+                        )
+                    await session.commit()
+                    lease.confirmed = True
+                    break
+                except (Exception, asyncio.CancelledError) as exc:
+                    reason_code = (
+                        "sandbox_cancel_interrupted"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else _failure_reason(exc)
+                    )
+                    log.warning(
+                        "sandbox.kill_unconfirmed",
+                        code_run_id=str(run.id),
+                        reason_code=reason_code,
+                        attempt=attempt,
+                    )
+                    # Roll back the failed transaction before auditing. No raw
+                    # transport diagnostics enter the append-only product audit.
+                    # Audit only the first failure (and the final outcome above)
+                    # so an unreachable runner cannot flood the audit trail with
+                    # one row per retry; every attempt is still logged (R3-002).
+                    await session.rollback()
+                    await bind_tenant(session, self._tenant_id)
+                    if not failure_audited:
+                        await self._audit_run(
+                            audit,
+                            AuditAction.CODE_RUN_CANCELLED,
+                            run.id,
+                            AuditOutcome.ERROR,
+                            {"reason_code": reason_code},
+                        )
+                        failure_audited = True
+                    await session.commit()
+                # Producer shutdown here abandons cleanup without refunding and
+                # stops renewal. A kill interrupted above remains retryable.
+                # Exponential backoff with a ceiling (R3-002).
+                await self._retry_sleep(delay)
+                delay = min(delay * 2, 60.0)
+            if accounting_loss and not (producer is not None and producer.cancelling() > 0):
+                return ExecutionOutcome(CodeRunStatus.KILLED, SANDBOX_REASON_ACCOUNTING_UNAVAILABLE)
+            raise
         except Exception as exc:  # noqa: BLE001 - a run never remains stuck
             log.error(
                 "sandbox.run_failed",
@@ -824,8 +1115,10 @@ class SandboxService:
             )
             await bind_tenant(session, self._tenant_id)
             return await self._finalize_failure(
-                runs, audit, run.id, started_at, reason=_failure_reason(exc)
+                runs, audit, run.id, started_at, reason=_failure_reason(exc), limits=limits
             )
+        finally:
+            lease.detach_in_flight(execute_task)
 
         await bind_tenant(session, self._tenant_id)
         artifact_ids = await self._capture_outputs(session, result, run.id, run.session_id)
@@ -841,22 +1134,34 @@ class SandboxService:
             image_digest=result.image_digest or sandbox.image_digest,
             artifact_ids=artifact_ids,
             resolved_packages=result.resolved_packages or None,
+            termination_reason=result.termination_reason
+            or ("completed" if result.status is CodeRunStatus.SUCCEEDED else result.status.value),
         )
         effective_status = terminal.status if terminal is not None else CodeRunStatus.FAILED
         await SandboxSessionRepository(session, self._tenant_id).touch(sandbox.id)
+        limit_reason = (
+            terminal.termination_reason if terminal is not None else result.termination_reason
+        )
+        if not limit_reason or not limit_reason.startswith("sandbox_limit_"):
+            limit_reason = None
         await self._audit_run(
             audit,
             AuditAction.CODE_RUN_FINISHED,
             run.id,
-            AuditOutcome.ALLOWED,
+            AuditOutcome.ERROR if limit_reason else AuditOutcome.ALLOWED,
             {
                 "status": effective_status.value,
                 "exit_code": result.exit_code,
                 "duration_ms": result.duration_ms,
                 "artifact_count": len(artifact_ids),
+                "termination_reason": terminal.termination_reason
+                if terminal
+                else result.termination_reason,
+                "effective_limits": limits.to_dict(),
+                "reason_code": limit_reason,
             },
         )
-        return ExecutionOutcome(effective_status)
+        return ExecutionOutcome(effective_status, limit_reason)
 
     async def _capture_outputs(
         self,
@@ -913,6 +1218,7 @@ class SandboxService:
         reason: str,
         denial: str | None = None,
         operator_detail: str | None = None,
+        limits: EffectiveLimits | None = None,
     ) -> ExecutionOutcome:
         """Write the ``denied`` terminal for a policy refusal, saying WHICH (#502).
 
@@ -934,6 +1240,8 @@ class SandboxService:
             # line above and the audit metadata below (issue #502).
             stderr=denial if denial is not None else sandbox_reason_public_message(reason),
             duration_ms=0,
+            effective_limits=limits.to_dict() if limits is not None else None,
+            termination_reason=reason,
         )
         await self._audit_run(
             audit,
@@ -943,6 +1251,7 @@ class SandboxService:
             {
                 "reason": operator_detail or sandbox_reason_message(reason),
                 "reason_code": reason,
+                "effective_limits": limits.to_dict() if limits else None,
             },
         )
         return ExecutionOutcome(CodeRunStatus.DENIED, reason)
@@ -955,6 +1264,7 @@ class SandboxService:
         started_at: datetime,
         *,
         reason: str = SANDBOX_REASON_RUN_ERROR,
+        limits: EffectiveLimits | None = None,
     ) -> ExecutionOutcome:
         """Terminate a run that could not complete, saying WHAT could not (#502).
 
@@ -971,6 +1281,8 @@ class SandboxService:
             finished_at=finished_at,
             stderr=sandbox_reason_public_message(reason),
             duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+            effective_limits=limits.to_dict() if limits is not None else None,
+            termination_reason=reason,
         )
         effective_status = terminal.status if terminal is not None else CodeRunStatus.FAILED
         await self._audit_run(
@@ -981,6 +1293,7 @@ class SandboxService:
             {
                 "status": effective_status.value,
                 "reason_code": reason,
+                "effective_limits": limits.to_dict() if limits else None,
                 "reason": sandbox_reason_message(reason),
             },
         )
@@ -1043,6 +1356,7 @@ __all__ = [
     "SandboxDisabledError",
     "SandboxService",
     "SandboxSessionService",
+    "resolve_effective_limits",
     "session_resource_bounds",
     "validate_requested_packages",
 ]

@@ -22,8 +22,9 @@ in-memory backplane that captures the published WS envelopes — so no container
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest_asyncio
@@ -37,9 +38,13 @@ from app.db.repositories import (
     TenantSandboxPolicyRepository,
     UserRepository,
 )
-from app.domain.code_execution import SANDBOX_REASON_DEPLOY_DISABLED
+from app.domain.code_execution import (
+    SANDBOX_REASON_ACCOUNTING_UNAVAILABLE,
+    SANDBOX_REASON_DEPLOY_DISABLED,
+)
 from app.domain.entities import CodeRunStatus, ResourceUsage, Role
 from app.realtime.backplane import InMemoryBackplane
+from app.sandbox.accounting import AccountingUnavailable, InMemorySandboxAccounting
 from app.sandbox.spec import OutputFile, RunResult, RunSpec, SandboxSessionSpec
 from app.sandbox.tool_runner import ChatSandboxToolRunner
 from app.storage.keys import build_artifact_key
@@ -139,7 +144,7 @@ class _World:
 
     def seam(
         self,
-        runner: _FakeRunner,
+        runner: Any,
         *,
         backplane: InMemoryBackplane,
         store: _FakeStore | None = None,
@@ -147,6 +152,9 @@ class _World:
         session_id: uuid.UUID | None = None,
         message_id: uuid.UUID | None = None,
         settings_overrides: dict[str, object] | None = None,
+        accounting: InMemorySandboxAccounting | None = None,
+        retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> ChatSandboxToolRunner:
         counter = {"seq": 0}
 
@@ -169,6 +177,9 @@ class _World:
             next_seq=_next_seq,
             session_id=session_id or self.chat_id,
             message_id=message_id,
+            accounting=accounting or InMemorySandboxAccounting(),
+            retry_sleep=retry_sleep,
+            lease_sleep=lease_sleep,
         )
 
 
@@ -308,6 +319,70 @@ async def test_disabled_tenant_is_denied_without_calling_runner(world: _World) -
     results = [e for e in events if e.get("name") == "code_result"]
     assert len(results) == 1
     assert results[0]["data"]["status"] == "denied"
+
+
+class _BarrierSleep:
+    def __init__(self) -> None:
+        self.waits: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue()
+
+    async def __call__(self, _delay: float) -> None:
+        release = asyncio.get_running_loop().create_future()
+        self.waits.put_nowait(release)
+        await release
+
+
+async def test_accounting_loss_during_execution_returns_killed_summary(world: _World) -> None:
+    """R3-001: renewal loss kills only the in-flight call, not the chat turn."""
+    entered = asyncio.Event()
+    heartbeat = _BarrierSleep()
+
+    class Accounting(InMemorySandboxAccounting):
+        async def renew_lease(self, *args: Any, **kwargs: Any) -> None:
+            raise AccountingUnavailable("accounting down")
+
+    class Runner(_FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kills: list[uuid.UUID] = []
+            self.remote_running = True
+
+        async def execute(self, value: SandboxSessionSpec, spec: RunSpec) -> RunResult:
+            self.calls += 1
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, value: SandboxSessionSpec, execution_id: uuid.UUID) -> None:
+            self.kills.append(execution_id)
+            self.remote_running = False
+
+    backplane = InMemoryBackplane()
+    runner = Runner()
+    seam = world.seam(
+        runner,
+        backplane=backplane,
+        accounting=Accounting(),
+        lease_sleep=heartbeat,
+    )
+    task = asyncio.create_task(seam.submit(code="while True: pass"))
+    try:
+        await entered.wait()
+        (await heartbeat.waits.get()).set_result(None)
+        summary = await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert summary.status is CodeRunStatus.KILLED
+    assert summary.reason_code == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+    assert runner.kills == [summary.code_run_id]
+    assert not runner.remote_running
+    run = await CodeRunRepository(world.session, world.tenant_id).get(summary.code_run_id)
+    assert run is not None
+    assert run.status is CodeRunStatus.KILLED
+    assert run.termination_reason == SANDBOX_REASON_ACCOUNTING_UNAVAILABLE
+    results = [e for e in _events(backplane, "stream-1") if e.get("name") == "code_result"]
+    assert len(results) == 1
+    assert results[0]["data"]["status"] == "killed"
 
 
 async def test_runner_crash_becomes_failed_terminal_not_exception(world: _World) -> None:

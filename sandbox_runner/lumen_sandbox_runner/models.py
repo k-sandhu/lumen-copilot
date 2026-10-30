@@ -18,7 +18,7 @@ class ContainerPolicy(BaseModel):
 
     network_mode: Literal["none"] = "none"
     binds: list[str] = Field(default_factory=list, max_length=0)
-    read_only_rootfs: Literal[False] = False
+    read_only_rootfs: bool = False
     user: Literal["0:0"] = "0:0"
     cap_drop: list[Literal["ALL"]] = Field(
         default_factory=lambda: ["ALL"], min_length=1, max_length=1
@@ -33,25 +33,20 @@ class ContainerPolicy(BaseModel):
     # This field is what the caller BELIEVES is in force; a disagreement is refused
     # rather than silently overridden, so a half-restarted deploy is loud.
     runtime: Literal["runc", "runsc"] = "runc"
-    # ADR-0020 ships the execution container with NO cpu, memory or PID bound. That is
-    # a deliberate sponsor decision (ADR-0020 Consequences) and the largest residual
-    # operational risk in the design: one `run_python` call can exhaust host RAM, spin
-    # every core, or fork-bomb, and explicit cancel/reset is the only recovery.
-    #
-    # Typing these ``None`` did something the decision never asked for, though: it made
-    # the posture unchangeable by configuration. A deployer who WANTED a bound could not
-    # ask for one, because the schema rejected the number. They now accept a positive
-    # value, which the engine applies to the container; absent — still the default —
-    # the container is unbounded exactly as before. Narrowing only.
-    cpus: float | None = Field(default=None, gt=0)
+    # Deployment ceilings arrive from the backend; explicit null supports the
+    # emergency container-bound opt-out. Defaults are bounded by backend config.
+    cpus: float | None = Field(default=None, ge=1e-9, allow_inf_nan=False)
     # Docker's own floor for ``--memory`` is 6 MiB; a smaller value is a container the
     # daemon refuses to create, so it is rejected here where the error is readable.
     memory_bytes: int | None = Field(default=None, ge=6 * 1024 * 1024)
     pids_limit: int | None = Field(default=None, ge=1)
-    # Deliberately still ``None``: nothing in this service enforces a wall clock.
-    # ADR-0020 replaced the ADR-0013 automatic timeout with explicit cancel/reset, so
-    # accepting a number here would be a promise no code keeps.
-    wall_clock_seconds: None = None
+    # Enforced since #589: the engine destroys the container when an
+    # execution passes this deadline (per-execution value rides on
+    # ``ExecuteRequest``; this session-level value is the fallback).
+    wall_clock_seconds: int | None = Field(default=None, ge=1)
+    #: Scratch bound for the session workspace, applied as a tmpfs size on
+    #: ``/workspace`` (#589). Narrowing only.
+    scratch_bytes: int | None = Field(default=None, ge=1)
     # The one policy value a caller may choose, because it only ever NARROWS what this
     # process will hold in memory: the runner clamps it to its own ceiling and applies
     # that ceiling when the field is absent. It was typed ``None`` and read by nothing,
@@ -92,6 +87,10 @@ class ExecuteRequest(BaseModel):
     generation: int = Field(ge=1)
     execution_id: UUID
     code: str = Field(min_length=1)
+    #: Per-execution wall clock (#589); at the deadline the engine destroys
+    #: the container and reports ``timeout`` / ``sandbox_limit_wall_clock``.
+    wall_clock_seconds: int | None = Field(default=None, ge=1)
+    deadline_unix: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     packages: list[PackageRequirement] = Field(default_factory=list, max_length=50)
     #: The tenant's deny list, so the RESOLVED dependency tree can be checked against
     #: it (#509). The backend applies it to the top-level request, but only the runner

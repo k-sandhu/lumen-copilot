@@ -7,9 +7,11 @@ import codecs
 import contextlib
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import re
+import signal
 import subprocess
 import sys
 import tarfile
@@ -23,12 +25,16 @@ from uuid import UUID
 
 from packaging.requirements import InvalidRequirement, Requirement
 
+from lumen_sandbox_runner.commands import PACKAGE_REPLACE, PROCESS_CLEANUP, PROCESS_SNAPSHOT
+from lumen_sandbox_runner.execution import ExecutionDeadline, check_deadline, current_deadline
 from lumen_sandbox_runner.models import ContainerPolicy, EnsureSessionRequest, ExecuteRequest
 
 _MANAGED_LABEL = "com.lumen.sandbox.managed"
 _SESSION_LABEL = "com.lumen.sandbox.session"
 _GENERATION_LABEL = "com.lumen.sandbox.generation"
-_IDLE_COMMAND = ["sh", "-lc", "while :; do sleep 3600; done"]
+# Stable idle tree: periodic replacement sleeps would be mistaken for execution
+# descendants when a deployment permits an execution longer than an hour.
+_IDLE_COMMAND = ["sleep", "infinity"]
 
 #: The OCI runtimes this runner will launch: the hardened Docker baseline, or gVisor.
 _KNOWN_RUNTIMES = ("runc", "runsc")
@@ -99,6 +105,13 @@ _collection_permits = threading.BoundedSemaphore(_MAX_CONCURRENT_COLLECTIONS)
 #: The effective budget rides on the container, so an execution against an
 #: already-ensured generation enforces the number that generation was created with.
 _OUTPUT_CAP_LABEL = "com.lumen.sandbox.output-cap"
+
+#: Fingerprint of the resource bounds a container was created with (#589).
+#: Reusing a container whose bounds differ from the ones now requested
+#: would silently run under stale limits, so a mismatch recreates it —
+#: the same treatment a runtime mismatch already gets.
+_BOUNDS_LABEL = "com.lumen.sandbox.bounds"
+_WALL_CLOCK_LABEL = "com.lumen.sandbox.wall-clock"
 
 #: A PEP-503 distribution name and nothing else. Asserted on the parsed name of every
 #: requirement before it reaches a pip argv. It is defence in depth, deliberately: a
@@ -185,6 +198,7 @@ class _BudgetedReader:
         # daemon streaming it. Buffered bytes are still served, then EOF.
         while not self.exhausted and (size < 0 or len(self._buffer) < size):
             try:
+                check_deadline()
                 chunk = next(self._chunks)
             except StopIteration:
                 break
@@ -239,9 +253,9 @@ class DockerSandboxEngine:
 
     @staticmethod
     def _docker_client() -> Any:
-        import docker
+        from lumen_sandbox_runner.transport import DeadlineDockerClient
 
-        return docker.from_env()
+        return DeadlineDockerClient.from_env()
 
     @staticmethod
     def _clip(text: str) -> str:
@@ -396,6 +410,15 @@ class DockerSandboxEngine:
                 if actual is not None and actual != self._runtime:
                     self._remove(container)
                     break
+                # Bounds are creation-time HostConfig (#589): a container
+                # created under different cpu/memory/pid/scratch/output
+                # bounds cannot be re-bounded in place, so recreate it
+                # rather than silently execute under the stale limits.
+                if (container.labels or {}).get(_BOUNDS_LABEL) != self._bounds_fingerprint(
+                    request.container
+                ) or not self._matches_bounds(container, request.container):
+                    self._remove(container)
+                    break
                 if container.status != "running":
                     container.start()
                 return container
@@ -409,16 +432,31 @@ class DockerSandboxEngine:
             _SESSION_LABEL: str(session_id),
             _GENERATION_LABEL: str(request.generation),
             _OUTPUT_CAP_LABEL: str(self._effective_output_cap(request.container.output_bytes_cap)),
+            _BOUNDS_LABEL: self._bounds_fingerprint(request.container),
+            _WALL_CLOCK_LABEL: str(request.container.wall_clock_seconds or ""),
         }
-        return self._client.containers.run(
+        container = self._client.containers.run(
             launch_ref,
             command=_IDLE_COMMAND,
             detach=True,
             name=f"lumen-sandbox-{session_id}-{request.generation}",
             labels=labels,
-            environment=request.env,
+            environment={
+                **request.env,
+                "PYTHONPATH": "/workspace/.packages",
+                **(
+                    {
+                        "HOME": "/workspace/.home",
+                        "TMPDIR": "/workspace/.tmp",
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    }
+                    if request.container.scratch_bytes is not None
+                    else {}
+                ),
+            },
             network_mode="none",
-            read_only=False,
+            read_only=request.container.scratch_bytes is not None
+            or request.container.read_only_rootfs,
             user="0:0",
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
@@ -429,6 +467,50 @@ class DockerSandboxEngine:
             # long-lived container; it does not impose a process/time limit.
             init=True,
             **self._resource_bounds(request.container),
+        )
+        container.reload()
+        if not self._matches_bounds(container, request.container):
+            self._remove(container)
+            raise RunnerError("sandbox container bounds could not be verified")
+        return container
+
+    @staticmethod
+    def _matches_bounds(container: Any, policy: ContainerPolicy) -> bool:
+        host = getattr(container, "attrs", {}).get("HostConfig", {})
+        expected = {
+            "Memory": policy.memory_bytes,
+            "MemorySwap": policy.memory_bytes,
+            "PidsLimit": policy.pids_limit,
+            "NanoCpus": int(policy.cpus * 1_000_000_000) if policy.cpus else None,
+        }
+        if any(value is not None and host.get(key) != value for key, value in expected.items()):
+            return False
+        if host.get("ReadonlyRootfs", False) != (
+            policy.scratch_bytes is not None or policy.read_only_rootfs
+        ):
+            return False
+        if policy.scratch_bytes is not None:
+            tmpfs = host.get("Tmpfs", {})
+            if not host.get("ReadonlyRootfs") or tmpfs.get("/workspace") != (
+                f"rw,nosuid,exec,size={policy.scratch_bytes}"
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _bounds_fingerprint(policy: ContainerPolicy) -> str:
+        """Stable string of every creation-time bound, for the reuse check."""
+        return "|".join(
+            [
+                str(policy.cpus),
+                str(policy.memory_bytes),
+                str(policy.pids_limit),
+                str(policy.scratch_bytes),
+                str(policy.wall_clock_seconds),
+                str(policy.read_only_rootfs),
+                str(DockerSandboxEngine._effective_output_cap(policy.output_bytes_cap)),
+                "execution-process-cleanup-v1",
+            ]
         )
 
     @staticmethod
@@ -444,24 +526,173 @@ class DockerSandboxEngine:
         bounds: dict[str, object] = {}
         if policy.memory_bytes is not None:
             bounds["mem_limit"] = policy.memory_bytes
+            bounds["memswap_limit"] = policy.memory_bytes
         if policy.pids_limit is not None:
             bounds["pids_limit"] = policy.pids_limit
         if policy.cpus is not None:
             # Docker expresses a fractional CPU budget in billionths of a core.
             bounds["nano_cpus"] = int(policy.cpus * 1_000_000_000)
+        if policy.scratch_bytes is not None:
+            # Scratch = the session workspace (#589). A sized tmpfs bounds
+            # disk growth without depending on overlay quota support on
+            # the host filesystem; tmpfs pages also count toward the
+            # memory limit, so effective scratch is min(scratch, memory).
+            bounds["tmpfs"] = {"/workspace": f"rw,nosuid,exec,size={policy.scratch_bytes}"}
         return bounds
 
     def _execute_unlocked(self, container: Any, request: ExecuteRequest) -> dict[str, object]:
+        configured = (container.labels or {}).get(_WALL_CLOCK_LABEL)
+        budgets = [
+            value
+            for value in (int(configured) if configured else None, request.wall_clock_seconds)
+            if value is not None
+        ]
+        if request.deadline_unix is not None:
+            budgets.append(request.deadline_unix - time.time())
+        if budgets and min(budgets) <= 0:
+            self._remove(container)
+            return {
+                "status": "timeout",
+                "termination_reason": "sandbox_limit_wall_clock",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "Execution deadline expired in the queue.",
+                "duration_ms": 0,
+                "output_files": [],
+                "image_digest": self._image_digest(container),
+            }
+        deadline = ExecutionDeadline(min(budgets) if budgets else None)
+        token = current_deadline.set(deadline)
+        timed_out = deadline.expired
+        timer = None
+        started = time.monotonic()
+        baseline: dict[str, str] | None = None
+
+        def stop_processes() -> None:
+            nonlocal baseline
+            if baseline is not None and self._container_running(container):
+                self._stop_execution_processes(container, baseline)
+                baseline = None
+
+        if budgets:
+
+            def expire() -> None:
+                deadline.expire()
+                with contextlib.suppress(Exception):
+                    container.remove(force=True)
+
+            timer = threading.Timer(min(budgets), expire)
+            timer.daemon = True
+            timer.start()
+        try:
+            baseline = self._snapshot_processes(container)
+            try:
+                result = self._execute_body(container, request, stop_processes=stop_processes)
+            finally:
+                try:
+                    stop_processes()
+                except Exception:
+                    # A failed cleanup cannot leave unaccounted work in a reusable
+                    # container, even when preparation failed before model dispatch.
+                    self._remove(container)
+                    raise
+        except Exception as exc:
+            with contextlib.suppress(TimeoutError):
+                check_deadline()
+            reason = self._resource_reason(str(exc))
+            if not timed_out.is_set() and reason is None:
+                raise
+            result = {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": str(exc),
+                "output_files": [],
+                "termination_reason": reason,
+            }
+        finally:
+            if timer is not None:
+                timer.cancel()
+                timer.join()
+            current_deadline.reset(token)
+        if timed_out.is_set():
+            result.update(
+                status="timeout",
+                exit_code=None,
+                output_files=[],
+                stderr="Code execution exceeded its time limit and was stopped.",
+                termination_reason="sandbox_limit_wall_clock",
+            )
+        reason = str(result.get("termination_reason", ""))
+        if reason.startswith("sandbox_limit_"):
+            if self._container_running(container):
+                self._remove(container)
+            if result["status"] == "succeeded":
+                result["status"] = "failed"
+        result["duration_ms"] = int((time.monotonic() - started) * 1000)
+        result.setdefault("image_digest", self._image_digest(container))
+        return result
+
+    @staticmethod
+    def _cgroup_event(container: Any, filename: str, counter: str) -> int:
+        # cgroup v2 signals catch a child OOM or a caught fork/thread failure.
+        # Runtimes that omit these files fall back to OOMKilled/error attribution.
+        try:
+            result = container.exec_run(["cat", f"/sys/fs/cgroup/{filename}"], demux=True)
+            if result.exit_code != 0:
+                return 0
+            stdout = result.output[0] or b""
+            for line in stdout.decode().splitlines():
+                name, value = line.split()
+                if name == counter:
+                    return int(value)
+        except Exception:
+            pass
+        return 0
+
+    @staticmethod
+    def _resource_reason(message: str) -> str | None:
+        message = message.lower()
+        if "no space left on device" in message:
+            return "sandbox_limit_scratch"
+        if "resource temporarily unavailable" in message or "can't start new thread" in message:
+            return "sandbox_limit_pids"
+        if "memoryerror" in message or "cannot allocate memory" in message:
+            return "sandbox_limit_memory"
+        return None
+
+    @staticmethod
+    def _snapshot_processes(container: Any) -> dict[str, str]:
+        check_deadline()
+        outcome = container.exec_run(["python3", "-I", "-S", "-c", PROCESS_SNAPSHOT], demux=True)
+        if outcome.exit_code != 0:
+            raise RunnerError("could not snapshot sandbox processes")
+        return json.loads(outcome.output[0])
+
+    @staticmethod
+    def _stop_execution_processes(container: Any, baseline: dict[str, str]) -> None:
+        DockerSandboxEngine._exec_checked(
+            container, ["python3", "-I", "-S", "-c", PROCESS_CLEANUP, json.dumps(baseline)]
+        )
+
+    def _execute_body(
+        self, container: Any, request: ExecuteRequest, *, stop_processes: Callable[[], None]
+    ) -> dict[str, object]:
         run_root = f"/workspace/.lumen/runs/{request.execution_id}"
         output_dir = f"{run_root}/output"
-        self._exec_checked(container, ["mkdir", "-p", output_dir, "/workspace/inputs"])
+        self._exec_checked(
+            container,
+            ["mkdir", "-p", output_dir, "/workspace/inputs", "/workspace/.home", "/workspace/.tmp"],
+        )
 
         resolved_packages: list[dict[str, str]] = []
         if request.packages:
             packages = self._validated_packages(tuple(request.packages))
             with tempfile.TemporaryDirectory(prefix="lumen-wheels-") as temp:
                 wheelhouse = Path(temp)
+                check_deadline()
                 self._download(packages, wheelhouse)
+                check_deadline()
                 # Both of these read the resolved wheelhouse and must happen BEFORE a
                 # single wheel is staged into the container: a denied dependency that
                 # is copied in and then refused has already crossed the boundary.
@@ -475,6 +706,10 @@ class DockerSandboxEngine:
                     "-m",
                     "pip",
                     "install",
+                    "--no-cache-dir",
+                    "--upgrade",
+                    "--target",
+                    f"{run_root}/packages",
                     "--no-index",
                     "--find-links",
                     f"{run_root}/wheelhouse",
@@ -482,9 +717,22 @@ class DockerSandboxEngine:
                     *packages,
                 ],
             )
+            self._exec_checked(
+                container,
+                [
+                    "python3",
+                    "-I",
+                    "-S",
+                    "-c",
+                    PACKAGE_REPLACE,
+                    json.dumps([p["name"] for p in resolved_packages]),
+                    f"{run_root}/packages",
+                ],
+            )
 
         # Tenant bytes are staged only after package acquisition/installation.
         for value in request.inputs:
+            check_deadline()
             target = self._safe_input_path(value.dest_path)
             self._put_bytes(container, target, base64.b64decode(value.data_b64, validate=True))
             self._exec_checked(container, ["chmod", "0444", target])
@@ -496,11 +744,22 @@ class DockerSandboxEngine:
         # collection never looks (silent zero-artifact success).
         env = {**request.env, "LUMEN_OUTPUT_DIR": output_dir}
         started = time.monotonic()
+        termination_reason = "completed"
+        before_oom = self._cgroup_event(container, "memory.events", "oom_kill")
+        before_pids = self._cgroup_event(container, "pids.events", "max")
         try:
             exit_code, stdout, stderr = self._exec_streaming(
                 container, ["python", code_path], workdir="/workspace", environment=env
             )
-            if exit_code != 0 and not self._container_running(container):
+            container.reload()
+            state = getattr(container, "attrs", {}).get("State", {})
+            if state.get("OOMKilled") or (
+                self._cgroup_event(container, "memory.events", "oom_kill") > before_oom
+            ):
+                stderr = "Code execution exceeded its memory limit and was stopped."
+                status = "killed"
+                termination_reason = "sandbox_limit_memory"
+            elif exit_code != 0 and not self._container_running(container):
                 # Docker returns exit 137 rather than raising when cancel removes a
                 # container during exec. Treat any non-zero outcome from a container
                 # that no longer exists/runs as killed; a user process exiting 137
@@ -509,27 +768,37 @@ class DockerSandboxEngine:
                 stdout = ""
                 stderr = "Code execution was cancelled or the sandbox container stopped."
                 status = "killed"
+                termination_reason = "killed"
+            elif self._cgroup_event(container, "pids.events", "max") > before_pids:
+                status = "failed"
+                termination_reason = "sandbox_limit_pids"
             else:
                 status = "succeeded" if exit_code == 0 else "failed"
-        except Exception as exc:  # container removal during cancel is a killed run
-            exit_code = None
-            stdout = ""
-            stderr = "Code execution was cancelled or the sandbox container stopped."
-            status = "killed"
+                termination_reason = self._resource_reason(stderr) or (
+                    "completed" if exit_code == 0 else "failed"
+                )
+        except Exception as exc:
             if self._container_running(container):
-                raise RunnerError("sandbox execution failed") from exc
+                raise RunnerError(f"sandbox execution failed: {exc}") from exc
+            exit_code, stdout, stderr = None, "", "Sandbox container stopped."
+            status, termination_reason = "killed", "killed"
+        stop_processes()
         duration_ms = int((time.monotonic() - started) * 1000)
         output_files: list[dict[str, object]] = []
         truncated = False
-        if status != "killed":
+        if status in ("succeeded", "failed"):
             budget = self._output_cap_of(container)
             output_files, truncated = self._collect_outputs(container, output_dir, budget)
             if truncated:
+                if termination_reason == "completed":
+                    termination_reason = "sandbox_limit_output"
                 note = (
                     f"Only part of the output directory was collected: it exceeded the "
                     f"{budget}-byte limit for one execution. Write fewer or smaller files."
                 )
                 stderr = f"{stderr}\n{note}" if stderr else note
+        if "[output truncated at " in stdout or "[output truncated at " in stderr:
+            termination_reason = "sandbox_limit_output"
         output_bytes = len(stdout.encode()) + len(stderr.encode())
         return {
             "status": status,
@@ -544,6 +813,7 @@ class DockerSandboxEngine:
             # a run that pulled in thirty distributions audited as one.
             "resolved_packages": resolved_packages,
             "resource_usage": {"output_bytes": output_bytes},
+            "termination_reason": termination_reason,
         }
 
     def _require_agreed_runtime(self, requested: str) -> None:
@@ -689,12 +959,32 @@ class DockerSandboxEngine:
             # fetching altogether, which is the install step's flag, not this one's.
             command += ["--index-url", index_url]
         command += [_END_OF_OPTIONS, *packages]
+        deadline = current_deadline.get() or ExecutionDeadline(None)
+        deadline.remaining()
+        process = subprocess.Popen(  # noqa: S603
+            command, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+        def stop_group() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+
         try:
-            subprocess.run(command, check=True, capture_output=True, text=True)  # noqa: S603
-        except subprocess.CalledProcessError as exc:
-            raise RunnerError(
-                "an approved package could not be downloaded", status_code=422
-            ) from exc
+            with deadline.watch(stop_group):
+                try:
+                    returncode = process.wait(timeout=deadline.remaining())
+                except subprocess.TimeoutExpired:
+                    deadline.expire()
+                    raise TimeoutError("package acquisition exceeded execution deadline") from None
+                deadline.remaining()
+                if returncode:
+                    raise RunnerError(
+                        "an approved package could not be downloaded", status_code=422
+                    )
+        finally:
+            # Also reap descendants if the resolver parent exits before them.
+            stop_group()
+            process.wait()
 
     @staticmethod
     def _resolved_wheelhouse(destination: Path) -> list[dict[str, str]]:
@@ -712,13 +1002,18 @@ class DockerSandboxEngine:
         """
         resolved: list[dict[str, str]] = []
         for wheel in sorted(destination.glob("*.whl")):
-            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            check_deadline()
+            digest = hashlib.sha256()
+            with wheel.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    check_deadline()
+                    digest.update(chunk)
             parts = wheel.name[:-4].split("-")
             resolved.append(
                 {
                     "name": _wheel_distribution(wheel.name),
                     "version": parts[1] if len(parts) > 1 else "",
-                    "sha256": digest,
+                    "sha256": digest.hexdigest(),
                 }
             )
         return resolved
@@ -764,6 +1059,7 @@ class DockerSandboxEngine:
     def _put_bytes(container: Any, target: str, data: bytes) -> None:
         path = PurePosixPath(target)
         archive = io.BytesIO()
+        check_deadline()
         with tarfile.open(fileobj=archive, mode="w") as tar:
             info = tarfile.TarInfo(path.name)
             info.size = len(data)
@@ -778,6 +1074,7 @@ class DockerSandboxEngine:
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w") as tar:
             for path in sorted(source.iterdir()):
+                check_deadline()
                 tar.add(path, arcname=path.name, recursive=False)
         DockerSandboxEngine._exec_checked(container, ["mkdir", "-p", target])
         if not container.put_archive(target, archive.getvalue()):
@@ -785,9 +1082,14 @@ class DockerSandboxEngine:
 
     @staticmethod
     def _exec_checked(container: Any, command: list[str]) -> None:
+        check_deadline()
         outcome = container.exec_run(command, demux=True)
         if int(outcome.exit_code) != 0:
-            raise RunnerError("sandbox preparation command failed", status_code=422)
+            output = outcome.output
+            detail = " ".join((part or b"").decode("utf-8", "replace") for part in output)
+            raise RunnerError(
+                f"sandbox preparation command failed: {detail[:1024]}", status_code=422
+            )
 
     @staticmethod
     def _effective_output_cap(requested: int | None) -> int:
@@ -890,8 +1192,22 @@ class DockerSandboxEngine:
         # Serialise against the process-wide permit BEFORE the archive stream opens:
         # holding it only around the parse would leave the daemon's tar writer and
         # this side's buffers outside the bound, which is most of the peak.
-        with _collection_permits:
+        remaining = check_deadline()
+        acquired = (
+            _collection_permits.acquire(timeout=remaining)
+            if remaining is not None
+            else _collection_permits.acquire()
+        )
+        if not acquired:
+            deadline = current_deadline.get()
+            if deadline:
+                deadline.expire()
+            raise TimeoutError("output collection exceeded execution deadline")
+        try:
+            check_deadline()
             return DockerSandboxEngine._collect_outputs_unlocked(container, output_dir, byte_budget)
+        finally:
+            _collection_permits.release()
 
     @staticmethod
     def _collect_outputs_unlocked(

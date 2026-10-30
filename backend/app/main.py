@@ -40,6 +40,7 @@ from app.llm import aclose_embedding_clients
 from app.observability import HttpMetricsMiddleware, configure_telemetry, shutdown_telemetry
 from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
+from app.sandbox.accounting import aclose_sandbox_accounting_pools
 from app.search import aclose_search_store
 from app.tasks.rate_limit import aclose_async_rate_limit_pools
 
@@ -126,6 +127,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     await _drain_answer_tasks(app, grace_seconds=settings.chat_shutdown_grace_seconds)
+    await aclose_sandbox_accounting_pools()
     # Retire only this serving loop's embedding clients after producers drain.
     await aclose_embedding_clients()
     # Release the shared retrieval-store HTTP client (ADR-0010). Created lazily
