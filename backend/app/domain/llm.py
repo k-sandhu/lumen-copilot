@@ -9,6 +9,7 @@ changes, the gateway maps to/from these and nothing upstream moves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -63,9 +64,10 @@ class ChatMessage:
 class TokenUsage:
     """Token accounting for a completion (cost & observability, CC-8).
 
-    Providers do not always report usage; fields default to ``0`` so callers can
-    sum without ``None`` checks. ``total`` falls back to ``prompt + completion``
-    when the provider omits it.
+    Providers do not always report usage; token fields default to ``0`` so
+    callers can sum them without ``None`` checks. Billed cost defaults to
+    ``None`` (unmeasured), and a reported zero stays measured. ``total`` falls
+    back to ``prompt + completion`` when the provider omits it.
 
     ``cached_prompt_tokens`` / ``cache_write_tokens`` are the provider cache
     accounting (#409, ADR-0016 §2.6): prompt tokens served from the provider's
@@ -80,6 +82,8 @@ class TokenUsage:
     total_tokens: int = 0
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    # Provider-billed USD, never estimated. None is unmeasured, not free (ADR-0031).
+    cost_usd: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,7 @@ class CompletionChunk:
 
     delta: str
     index: int
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +169,9 @@ class Embedding:
 
     vector: list[float] = field(default_factory=list)
     model: str = ""
+    # Batch accounting appears only on the first result, so callers cannot
+    # accidentally multiply the request charge by the number of vectors.
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)

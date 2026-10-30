@@ -20,8 +20,9 @@ leaks a vendor object upward. Notable behaviours:
 incremental answer tokens plus the model's tool-call requests, parsed into
 domain :class:`~app.domain.llm.ToolCall` / :class:`~app.domain.llm.StreamEvent`
 (never a vendor tool object). The agentic loop runs the tools and calls back for
-the next turn. Routing, fallback, cost/limits, and caching remain OUT of this
-scope (issue #25 fences) and get their own decision later.
+the next turn. Provider-billed cost is extracted here only (ADR-0031), never
+estimated from local prices. Missing cost remains explicitly unpriced. Spend
+ceilings and tenant budgets remain separate concerns (#833 / #300).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, overload
@@ -55,6 +57,7 @@ from app.domain.llm import (
     Transcription,
 )
 from app.llm.cache_scope import cache_scopes
+from app.llm.calls import mark_dispatched
 from app.llm.tool_names import ToolNameMap
 from app.llm.tool_wire import wire_tools
 
@@ -567,10 +570,13 @@ class LLMGateway:
 
         model_id = model or self._settings.llm_model
         try:
+            wire_messages = self._to_wire_messages(messages)
+            mark_dispatched()
             response = await litellm.acompletion(
                 model=model_id,
-                messages=self._to_wire_messages(messages),
+                messages=wire_messages,
                 stream=False,
+                **_accounting_options(model_id, api_base),
                 timeout=self._settings.llm_timeout_seconds,
                 **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                 **self._credentials(api_key=api_key, api_base=api_base),
@@ -608,10 +614,13 @@ class LLMGateway:
 
         model_id = model or self._settings.llm_model
         try:
+            wire_messages = self._to_wire_messages(messages)
+            mark_dispatched()
             response = await litellm.acompletion(
                 model=model_id,
-                messages=self._to_wire_messages(messages),
+                messages=wire_messages,
                 stream=True,
+                **_accounting_options(model_id, api_base, streaming=True),
                 timeout=self._settings.llm_timeout_seconds,
                 **self._credentials(api_key=api_key, api_base=api_base),
             )
@@ -621,6 +630,13 @@ class LLMGateway:
         index = 0
         try:
             async for part in response:
+                if getattr(part, "usage", None) is not None:
+                    yield CompletionChunk(
+                        delta="", index=index, usage=_extract_usage(part, response)
+                    )
+                    index += 1
+                if not part.choices:
+                    continue
                 delta = part.choices[0].delta
                 content = getattr(delta, "content", None)
                 if content:
@@ -722,7 +738,7 @@ class LLMGateway:
         model_id = model or self._settings.llm_model
         # ``tool_choice`` is optional: only send it when set so the default turn
         # (auto tool selection) keeps the exact wire shape it has today.
-        extra: dict[str, Any] = {}
+        extra: dict[str, Any] = _accounting_options(model_id, api_base)
         if tool_choice is not None:
             extra["tool_choice"] = tool_choice
         # Output cap (#488): only sent when set, so the default (unbounded) turn
@@ -750,7 +766,7 @@ class LLMGateway:
             hints = {"session_id": sticky}
             if family == "openai":
                 hints["prompt_cache_key"] = partition
-            extra["extra_body"] = hints
+            extra.setdefault("extra_body", {}).update(hints)
         name_map = ToolNameMap(
             [t.name for t in tools]
             + [call.name for message in messages for call in message.tool_calls]
@@ -768,10 +784,15 @@ class LLMGateway:
         ]
         provider_tools = [replace(tool, name=name_map.to_wire(tool.name)) for tool in tools]
         try:
+            wire_messages = _apply_cache_directives(
+                self._to_wire_messages(provider_messages), family
+            )
+            wire_tool_specs = self._to_wire_tools(provider_tools)
+            mark_dispatched()
             response = await litellm.acompletion(
                 model=model_id,
-                messages=_apply_cache_directives(self._to_wire_messages(provider_messages), family),
-                tools=self._to_wire_tools(provider_tools),
+                messages=wire_messages,
+                tools=wire_tool_specs,
                 stream=True,
                 stream_options={"include_usage": True},
                 timeout=self._settings.llm_timeout_seconds,
@@ -789,7 +810,7 @@ class LLMGateway:
         usage: TokenUsage | None = None
         try:
             async for part in response:
-                usage = _extract_usage(part) if getattr(part, "usage", None) else usage
+                usage = _extract_usage(part, response) if getattr(part, "usage", None) else usage
                 choices = getattr(part, "choices", None)
                 if not choices:
                     continue
@@ -905,9 +926,11 @@ class LLMGateway:
                 timeout=self._settings.llm_timeout_seconds,
             )
             client_kwargs = {"client": client} if client is not None else {}
+            wire_inputs = list(inputs)
+            mark_dispatched()
             response = await litellm.aembedding(
                 model=model_id,
-                input=list(inputs),
+                input=wire_inputs,
                 timeout=self._settings.llm_timeout_seconds,
                 # Pin the response encoding: the OpenAI SDK under LiteLLM defaults
                 # to base64, which some OpenAI-compatible providers reject —
@@ -916,6 +939,7 @@ class LLMGateway:
                 # "No embedding data received" (#430). Floats are what this
                 # gateway consumes; every provider serves them.
                 encoding_format="float",
+                **_accounting_options(model_id, effective_api_base),
                 **credentials,
                 **client_kwargs,
             )
@@ -928,7 +952,12 @@ class LLMGateway:
             expected_dimensions=self._settings.llm_embedding_dimensions,
             model=model_id,
         )
-        embeddings = [Embedding(vector=vector, model=model_id) for vector in vectors]
+        embeddings = [
+            Embedding(
+                vector=vector, model=model_id, usage=_extract_usage(response) if i == 0 else None
+            )
+            for i, vector in enumerate(vectors)
+        ]
         if cache_key is not None and len(embeddings) == 1:
             _embed_cache_put(
                 cache_key,
@@ -1041,7 +1070,47 @@ def _details_count(details: Any, key: str) -> int:
     return _as_count(getattr(details, key, 0))
 
 
-def _extract_usage(response: Any) -> TokenUsage:
+def _accounting_options(
+    model: str, api_base: str | None, *, streaming: bool = False
+) -> dict[str, Any]:
+    if _openrouter_model(model, api_base) is None:
+        return {}
+    options: dict[str, Any] = {"extra_body": {"usage": {"include": True}}}
+    if streaming:
+        options["stream_options"] = {"include_usage": True}
+    return options
+
+
+def _billed_cost(value: object) -> Decimal | None:
+    """Validate a provider number without accepting strings or local estimates."""
+    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+        return None
+    try:
+        cost = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not cost.is_finite() or cost < 0 or cost > 1000:
+        return None
+    if cost == 0:
+        return Decimal(0)
+    return cost if cost >= Decimal("1e-30") else None
+
+
+_MISSING_COST = object()
+
+
+def _reported_cost(usage: Any) -> object:
+    if isinstance(usage, Mapping):
+        return usage.get("cost", _MISSING_COST)
+    value = getattr(usage, "cost", _MISSING_COST)
+    if value is _MISSING_COST:
+        extra = getattr(usage, "model_extra", None)
+        if isinstance(extra, Mapping):
+            return extra.get("cost", _MISSING_COST)
+    return value
+
+
+def _extract_usage(response: Any, stream: Any = None) -> TokenUsage:
     """Pull token usage off a LiteLLM response, defensively.
 
     Some providers omit ``usage`` entirely; in that case return a zeroed
@@ -1064,6 +1133,17 @@ def _extract_usage(response: Any) -> TokenUsage:
     usage = getattr(response, "usage", None)
     if usage is None:
         return TokenUsage()
+    cost = _reported_cost(usage)
+    # LiteLLM 1.55.9 synthesizes the final usage with token fields only. Its
+    # original chunks retain provider extras; never read response_cost, which
+    # is a local estimate. A present but invalid cost must stay unpriced.
+    if cost is _MISSING_COST:
+        chunks = getattr(stream, "chunks", None)
+        if isinstance(chunks, list):
+            for chunk in reversed(chunks):
+                cost = _reported_cost(getattr(chunk, "usage", None))
+                if cost is not _MISSING_COST:
+                    break
     prompt = _as_count(getattr(usage, "prompt_tokens", 0))
     completion = _as_count(getattr(usage, "completion_tokens", 0))
     total = _as_count(getattr(usage, "total_tokens", 0)) or (prompt + completion)
@@ -1080,6 +1160,7 @@ def _extract_usage(response: Any) -> TokenUsage:
         total_tokens=total,
         cached_prompt_tokens=cached,
         cache_write_tokens=cache_write,
+        cost_usd=_billed_cost(cost),
     )
 
 

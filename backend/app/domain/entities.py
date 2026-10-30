@@ -18,6 +18,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
@@ -1346,6 +1347,8 @@ class LlmUsageRecord:
     total_tokens: int
     cached_prompt_tokens: int = 0
     cache_write_tokens: int = 0
+    cost_usd: Decimal | None = None
+    unpriced_calls: int = 0
     # Final-turn window occupancy (#434 NEW-1); None ⇒ unknown (legacy row /
     # provider reported no usage) — readers fall back to prompt_tokens.
     context_prompt_tokens: int | None = None

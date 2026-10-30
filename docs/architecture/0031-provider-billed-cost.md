@@ -1,0 +1,57 @@
+# 31. Provider-billed cost and per-answer spend accounting
+
+- **Status:** Proposed
+- **Date:** 2026-10-30
+- **Tracking:** [#832](https://github.com/k-sandhu/lumen-copilot/issues/832)
+- **Builds on:** [ADR-0004](0004-architecture-boundaries-and-adapters.md), [ADR-0016](0016-context-engine-and-cache-first-prompting.md) §2.6
+
+## Decision
+
+Record the provider's billed request cost in USD, never a local price-map
+estimate. Extraction and provider usage-accounting flags belong exclusively to
+`app/llm/`. Callers receive `TokenUsage.cost_usd: Decimal | None`.
+OpenRouter requests include `usage: {include: true}` in `extra_body`, merged
+with existing cache hints. Other providers' requests are unchanged.
+
+Only numeric costs are accepted: missing, boolean, string, negative, non-finite,
+greater than USD 1000, or nonzero below USD 1e-30 means unpriced. A reported
+zero remains a measured zero. The pinned LiteLLM usage object preserves extra
+fields as attributes; its synthesized streaming terminal can discard cost.
+The gateway therefore also checks the wrapper's original usage chunks, never
+its estimated `response_cost` metadata. Embedding responses expose batch usage
+only on the first vector; process-cache hits carry no usage because no request
+was dispatched.
+
+Each route scope stores the priced sum as nullable `NUMERIC(48,30)` and an
+unpriced-call count. NULL means no call in that scope was priced; mixed scopes
+retain the priced subtotal and report the missing calls explicitly. Historical
+rows remain NULL with zero unpriced calls because their call count is unknown.
+Failover closes and resets both counters with the existing token scope. The
+answer terminal totals every scope; suggestions keep their own row. Summaries
+also record their completion cost, including refused summaries.
+
+An attempt dispatched to the provider that fails or is abandoned may have been
+billed. Count it once as unpriced, including cancellation and failure before
+tokens arrive. Gateway dispatch evidence distinguishes this from a local
+preflight refusal. A successful response without usage is also one unpriced
+call. No prompt, answer, or tool content enters spend telemetry.
+
+## Wire and follow-up
+
+`done.data.usage` gains optional `costUsd` (nonnegative decimal string or null)
+and `unpricedCalls` (nonnegative integer). The string avoids JSON float loss;
+older producers and consumers remain compatible. The existing usage UI remains
+unchanged. Repository reads remain tenant scoped; no new usage endpoint is added.
+
+[#833](https://github.com/k-sandhu/lumen-copilot/issues/833) will enforce
+per-answer ceilings using these measurements. A post-request check necessarily
+allows one-request overshoot; unpriced calls must be disclosed, never claimed
+to fit a measured spend bound. This change enforces no ceiling, tenant budget,
+or price catalog.
+
+## Reversal and validation
+
+Extraction is confined to the gateway and can change with provider shapes.
+The migration drops the two columns and checks on downgrade, losing their
+accounting history. Offline gateway, runtime, tenant-isolation, schema, and
+migration regression tests cover these semantics; no paid request is required.
