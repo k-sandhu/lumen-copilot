@@ -44,6 +44,7 @@ def test_scratch_bound_reaches_engine_as_tmpfs_volume() -> None:
     assert kwargs["mem_limit"] == 512 * 1024 * 1024
     assert kwargs["pids_limit"] == 128
     assert kwargs["nano_cpus"] == 1_000_000_000
+    assert kwargs["environment"]["MPLCONFIGDIR"] == "/workspace/.tmp/matplotlib"
     # Never a tmpfs MOUNT: Docker's archive API (put_archive/get_archive) cannot see
     # one, so staging code into it failed every bounded execution (#838).
     assert "tmpfs" not in kwargs

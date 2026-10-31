@@ -83,7 +83,9 @@ unlimited.
    container. The base filesystem becomes
    read-only when scratch bounds are enabled so code cannot bypass the quota
    via another directory. Home, temp files and installed packages move into
-   that same workspace; contained root can still mutate that environment.
+   that same workspace; Matplotlib's configuration and cache also move there
+   because the image's `/opt/mplconfig` is read-only. Contained root can still
+   mutate that environment.
    Packages install into a run-specific staging target, then merge into
    `/workspace/.packages`, on `PYTHONPATH` in both container postures. Replacing
    a distribution removes its previous RECORD-owned files and metadata before

@@ -479,6 +479,7 @@ class DockerSandboxEngine:
                     {
                         "HOME": "/workspace/.home",
                         "TMPDIR": "/workspace/.tmp",
+                        "MPLCONFIGDIR": "/workspace/.tmp/matplotlib",
                         "PYTHONDONTWRITEBYTECODE": "1",
                     }
                     if request.container.scratch_bytes is not None
@@ -548,6 +549,7 @@ class DockerSandboxEngine:
                 str(DockerSandboxEngine._effective_output_cap(policy.output_bytes_cap)),
                 "execution-process-cleanup-v1",
                 "workspace-volume-v1",
+                "bounded-mplconfig-v1",
             ]
         )
 
