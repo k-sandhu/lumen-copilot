@@ -44,8 +44,8 @@ class ContainerPolicy(BaseModel):
     # execution passes this deadline (per-execution value rides on
     # ``ExecuteRequest``; this session-level value is the fallback).
     wall_clock_seconds: int | None = Field(default=None, ge=1)
-    #: Scratch bound for the session workspace, applied as a tmpfs size on
-    #: ``/workspace`` (#589). Narrowing only.
+    #: Scratch bound for the session workspace, applied as the size of the
+    #: tmpfs-backed volume on ``/workspace`` (#589, #838). Narrowing only.
     scratch_bytes: int | None = Field(default=None, ge=1)
     # The one policy value a caller may choose, because it only ever NARROWS what this
     # process will hold in memory: the runner clamps it to its own ceiling and applies

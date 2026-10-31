@@ -48,6 +48,8 @@ class _Container:
         self.attrs = {"Config": {"Env": []}, "HostConfig": {"Runtime": "runc"}}
         self.status = "running"
         self.removed = False
+        #: Whether removal also deleted the container's anonymous volumes (#838).
+        self.removed_volumes = False
         self.python_calls = 0
         self._active = 0
         self.max_active = 0
@@ -81,9 +83,10 @@ class _Container:
     def start(self) -> None:
         self.status = "running"
 
-    def remove(self, *, force: bool) -> None:
+    def remove(self, *, force: bool, v: bool = False) -> None:
         assert force is True
         self.removed = True
+        self.removed_volumes = v
         self.status = "exited"
 
     def exec_run(self, command: list[str], **kwargs: object) -> object:
@@ -202,6 +205,7 @@ class _Containers:
                 "NanoCpus": kwargs.get("nano_cpus", 0),
                 "ReadonlyRootfs": kwargs.get("read_only", False),
                 "Tmpfs": kwargs.get("tmpfs", {}),
+                "Mounts": [dict(m) for m in kwargs.get("mounts") or []],  # type: ignore[attr-defined]
             }
         )
         self.values.append(container)

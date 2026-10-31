@@ -337,7 +337,10 @@ SANDBOX_DAILY_RUNTIME_SECONDS_PER_TENANT=3600
 ```
 
 The next ensure recreates a container if its live bounds differ. Scratch is a
-sized tmpfs; the base filesystem is read-only, and home/temp/packages live in
+sized tmpfs, mounted as an anonymous volume (`docker volume ls` shows it while
+the session container exists; removing the container removes it). It is never a
+plain `--tmpfs` mount, which Docker's copy API cannot reach (#838). The base
+filesystem is read-only, and home/temp/packages live in
 `/workspace`. Tmpfs consumes the session's memory allowance and swap is disabled.
 Overages destroy the environment and persist `code_runs.effective_limits` plus
 `termination_reason` (`sandbox_limit_wall_clock|memory|pids|scratch|output`).

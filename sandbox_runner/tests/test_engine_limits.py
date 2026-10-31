@@ -23,7 +23,7 @@ def test_wall_clock_and_scratch_are_settable_positive_bounds() -> None:
         ContainerPolicy(scratch_bytes=0)
 
 
-def test_scratch_bound_reaches_engine_as_tmpfs() -> None:
+def test_scratch_bound_reaches_engine_as_tmpfs_volume() -> None:
     client = _Client()
     engine = DockerSandboxEngine(client)
     engine.ensure(
@@ -44,9 +44,52 @@ def test_scratch_bound_reaches_engine_as_tmpfs() -> None:
     assert kwargs["mem_limit"] == 512 * 1024 * 1024
     assert kwargs["pids_limit"] == 128
     assert kwargs["nano_cpus"] == 1_000_000_000
-    tmpfs = kwargs.get("tmpfs")
-    assert isinstance(tmpfs, dict)
-    assert "size=67108864" in next(iter(tmpfs.values()))
+    assert kwargs["environment"]["MPLCONFIGDIR"] == "/workspace/.tmp/matplotlib"
+    # Never a tmpfs MOUNT: Docker's archive API (put_archive/get_archive) cannot see
+    # one, so staging code into it failed every bounded execution (#838).
+    assert "tmpfs" not in kwargs
+    (mount,) = kwargs["mounts"]  # type: ignore[misc]
+    assert mount == {
+        "Target": "/workspace",
+        "Type": "volume",
+        "VolumeOptions": {
+            "NoCopy": True,
+            "DriverConfig": {
+                "Name": "local",
+                "Options": {
+                    "type": "tmpfs",
+                    "device": "tmpfs",
+                    "o": "size=67108864,nosuid,nodev",
+                },
+            },
+        },
+    }
+
+
+def test_removed_container_takes_its_workspace_volume_with_it() -> None:
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    request = _ensure().model_copy(update={"container": ContainerPolicy(scratch_bytes=1048576)})
+    engine.ensure(session_id, request)
+    first = client.containers.values[0]
+    engine.ensure(session_id, request.model_copy(update={"generation": 2}))
+    assert first.removed and first.removed_volumes
+
+
+def test_reused_container_with_a_tmpfs_workspace_is_recreated() -> None:
+    """A container from before #838 (tmpfs at /workspace) never serves a run."""
+    client = _Client()
+    engine = DockerSandboxEngine(client)
+    session_id = uuid4()
+    request = _ensure().model_copy(update={"container": ContainerPolicy(scratch_bytes=1048576)})
+    engine.ensure(session_id, request)
+    stale = client.containers.values[0]
+    stale.attrs["HostConfig"]["Mounts"] = []
+    stale.attrs["HostConfig"]["Tmpfs"] = {"/workspace": "rw,nosuid,exec,size=1048576"}
+    engine.ensure(session_id, request)
+    assert stale.removed
+    assert len(client.containers.run_kwargs) == 2
 
 
 def test_reused_container_with_different_bounds_is_recreated() -> None:
@@ -200,7 +243,7 @@ def test_scratch_bound_cannot_be_bypassed_via_writable_root() -> None:
     )
     kwargs = client.containers.run_kwargs[0]
     assert kwargs["read_only"] is True
-    assert "/workspace" in kwargs["tmpfs"]
+    assert [m["Target"] for m in kwargs["mounts"]] == ["/workspace"]  # type: ignore[attr-defined]
 
 
 def test_expired_queue_deadline_never_starts_code(monkeypatch: pytest.MonkeyPatch) -> None:

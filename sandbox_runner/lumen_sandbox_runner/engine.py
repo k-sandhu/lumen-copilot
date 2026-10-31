@@ -39,6 +39,37 @@ _IDLE_COMMAND = ["sleep", "infinity"]
 #: The OCI runtimes this runner will launch: the hardened Docker baseline, or gVisor.
 _KNOWN_RUNTIMES = ("runc", "runsc")
 
+_WORKSPACE = "/workspace"
+
+
+def _workspace_volume(scratch_bytes: int) -> dict[str, Any]:
+    """The bounded session workspace: an anonymous volume backed by a sized tmpfs.
+
+    Never a ``tmpfs`` mount (#838). Docker's archive API — ``put_archive`` for code
+    and inputs, ``get_archive`` for outputs, i.e. ``docker cp`` — cannot see a tmpfs
+    mount, so every bounded execution failed with "Could not find the file". A
+    local-driver volume with tmpfs options keeps the same size bound and memory
+    accounting, is reachable by the archive API under a read-only rootfs, and is
+    deleted with its container (``remove(v=True)``). ``NoCopy`` keeps it empty, as a
+    fresh tmpfs was.
+    """
+    return {
+        "Target": _WORKSPACE,
+        "Type": "volume",
+        "VolumeOptions": {
+            "NoCopy": True,
+            "DriverConfig": {
+                "Name": "local",
+                "Options": {
+                    "type": "tmpfs",
+                    "device": "tmpfs",
+                    "o": f"size={scratch_bytes},nosuid,nodev",
+                },
+            },
+        },
+    }
+
+
 #: Hard ceiling on how many bytes of ONE execution's output directory this process
 #: will read into memory, whatever a caller asks for. ``get_archive`` streams a tar of
 #: a MODEL-CONTROLLED directory: without a budget, one ``open('big','wb').write(...)``
@@ -448,6 +479,7 @@ class DockerSandboxEngine:
                     {
                         "HOME": "/workspace/.home",
                         "TMPDIR": "/workspace/.tmp",
+                        "MPLCONFIGDIR": "/workspace/.tmp/matplotlib",
                         "PYTHONDONTWRITEBYTECODE": "1",
                     }
                     if request.container.scratch_bytes is not None
@@ -490,9 +522,15 @@ class DockerSandboxEngine:
         ):
             return False
         if policy.scratch_bytes is not None:
-            tmpfs = host.get("Tmpfs", {})
-            if not host.get("ReadonlyRootfs") or tmpfs.get("/workspace") != (
-                f"rw,nosuid,exec,size={policy.scratch_bytes}"
+            expected_mount = _workspace_volume(policy.scratch_bytes)
+            workspace = [m for m in host.get("Mounts") or [] if m.get("Target") == _WORKSPACE]
+            if not host.get("ReadonlyRootfs") or len(workspace) != 1:
+                return False
+            (mount,) = workspace
+            if (
+                mount.get("Type") != "volume"
+                or mount.get("Source")
+                or mount.get("VolumeOptions") != expected_mount["VolumeOptions"]
             ):
                 return False
         return True
@@ -510,6 +548,8 @@ class DockerSandboxEngine:
                 str(policy.read_only_rootfs),
                 str(DockerSandboxEngine._effective_output_cap(policy.output_bytes_cap)),
                 "execution-process-cleanup-v1",
+                "workspace-volume-v1",
+                "bounded-mplconfig-v1",
             ]
         )
 
@@ -537,7 +577,8 @@ class DockerSandboxEngine:
             # disk growth without depending on overlay quota support on
             # the host filesystem; tmpfs pages also count toward the
             # memory limit, so effective scratch is min(scratch, memory).
-            bounds["tmpfs"] = {"/workspace": f"rw,nosuid,exec,size={policy.scratch_bytes}"}
+            # Mounted as a tmpfs-backed volume, never a tmpfs mount (#838).
+            bounds["mounts"] = [_workspace_volume(policy.scratch_bytes)]
         return bounds
 
     def _execute_unlocked(self, container: Any, request: ExecuteRequest) -> dict[str, object]:
@@ -579,7 +620,7 @@ class DockerSandboxEngine:
             def expire() -> None:
                 deadline.expire()
                 with contextlib.suppress(Exception):
-                    container.remove(force=True)
+                    container.remove(force=True, v=True)
 
             timer = threading.Timer(min(budgets), expire)
             timer.daemon = True
@@ -875,7 +916,8 @@ class DockerSandboxEngine:
     @staticmethod
     def _remove(container: Any) -> None:
         try:
-            container.remove(force=True)
+            # ``v=True`` deletes the anonymous workspace volume with its container.
+            container.remove(force=True, v=True)
         except Exception as exc:
             raise RunnerError("could not destroy sandbox container") from exc
 
