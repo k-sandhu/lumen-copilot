@@ -31,6 +31,7 @@ import type {
   LlmProviderList,
   LlmProviderCreate,
   LlmProviderUpdate,
+  ProviderTestConnectionResponse,
   Problem,
   TenantBranding,
   AutonomyPolicy,
@@ -366,9 +367,9 @@ export function listLlmProviders(signal?: AbortSignal): Promise<LlmProviderList>
 /**
  * Register an LLM provider and auto-discover its models (admin only). The server
  * validates the provider type + https/SSRF of `base_url` (unsupported/blocked → 422)
- * and stores any `api_key` write-only via CC-C. The returned provider is `ready` with
- * `discovered_models` on a reachable provider, or `error` + `last_error` on a bad
- * key/url (never a 500).
+ * and stores any `api_key` write-only via CC-C. The returned provider is `reachable`
+ * with `discovered_models` on a reachable provider (auth unverified until
+ * test-connection, spec 0029), or `error` + a safe `last_error_code` (never a 500).
  */
 export function createLlmProvider(
   body: LlmProviderCreate,
@@ -393,10 +394,28 @@ export function deleteLlmProvider(id: string): Promise<void> {
 
 /**
  * Re-run model discovery for a provider (admin only). Returns the UPDATED provider: a
- * reachable provider → `status: ready` (+ a fresh `discovered_models`); an
- * unreachable/erroring probe → `status: error` (+ a safe `last_error`). BOTH outcomes
- * return 200 — the result is in `status`, not the HTTP code. A cross-tenant id → 404.
+ * reachable provider → `status: reachable` (+ a fresh `discovered_models`; auth stays
+ * unverified, spec 0029); an unreachable/erroring probe → `status: error` (+ a safe
+ * `last_error_code`). BOTH outcomes return 200 — the result is in `status`, not the
+ * HTTP code. A cross-tenant id → 404.
  */
 export function refreshLlmProvider(id: string): Promise<LlmProvider> {
   return request<LlmProvider>(`/admin/llm-providers/${id}/refresh`, { method: 'POST' });
+}
+
+/**
+ * Test a provider connection with ONE minimal bounded chat request to `model`
+ * (admin only, spec 0029). This is a real upstream request — the provider may bill
+ * for it (bounded to one output token). Success is the only path to `status: ready`;
+ * failure returns 200 with the provider at `status: error` + a stable safe code in
+ * the validation result. An unknown model → 422; a cross-tenant id → 404.
+ */
+export function testLlmProviderConnection(
+  id: string,
+  model: string,
+): Promise<ProviderTestConnectionResponse> {
+  return request<ProviderTestConnectionResponse>(`/admin/llm-providers/${id}/test-connection`, {
+    method: 'POST',
+    json: { model },
+  });
 }

@@ -895,6 +895,20 @@ async def test_get_artifact_round_trips_for_owning_tenant(store: ObjectStore) ->
     client.get_object.assert_awaited_once_with(Bucket="unit-bucket", Key=key)
 
 
+async def test_transactional_artifact_keys_isolate_identical_writes(store: ObjectStore) -> None:
+    client = MagicMock()
+    client.put_object = AsyncMock()
+    _install_mock_client(store, client)
+    data = b"identical file bytes"
+    first = await store.put_artifact("tenant-a", data, "text/csv", "out.txt", object_id="a")
+    second = await store.put_artifact("tenant-a", data, "text/csv", "out.txt", object_id="b")
+    assert first.key != second.key
+    assert first.sha256 == second.sha256 == sha256_hex(data)
+    assert first.key == build_artifact_key("tenant-a", data, "out.txt", object_id="a")
+    assert client.put_object.await_args_list[0].kwargs["Key"] == first.key
+    assert client.put_object.await_args_list[1].kwargs["Key"] == second.key
+
+
 async def test_get_artifact_refuses_cross_tenant_before_io(store: ObjectStore) -> None:
     client = MagicMock()
     client.get_object = AsyncMock()

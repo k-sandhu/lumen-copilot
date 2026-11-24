@@ -33,9 +33,11 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 | [0020](0020-reusable-root-sandbox-sessions.md) | Reusable root-capable Python sandbox sessions | Accepted |
 | [0021](0021-data-pack-connector.md) | Data packs as a connector — curated document sets as a managed source | Accepted |
 | [0022](0022-group-access-model.md) | Group access model — group principals, and who a source is visible to (supersedes 0021 §5) | Accepted |
-| [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2 and claim-linked answers | Proposed |
+| [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2, claim-linked answers and tool-call boundary hardening (#831) | Proposed |
 | [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
 | [0026](0026-continuous-integration.md) | Offline backend and frontend CI gates, locked dependencies, caches, and bounded test workers | Accepted |
 | [0031](0031-provider-billed-cost.md) | Provider-billed cost and per-answer spend accounting | Proposed |
+| [0027](0027-llm-observability-phoenix-and-metrics.md) | LLM observability and ops metrics — OpenTelemetry → Arize Phoenix (self-hosted, ELv2 exception) + Prometheus/Grafana | Accepted |
+| [0029](0029-bounded-sandbox-sessions.md) | Bounded sandbox sessions by default — deployment ceilings, tenant narrowing, atomic accounting (amends 0020) | Proposed |
 
 > The remaining `.claude/` harness work (OD-6 remainder) is tracked in [../specs/0001-open-decisions.md](../specs/0001-open-decisions.md). CI (OD-7) closed through #655 and ADR-0026. Each costly, non-obvious choice gets its own ADR before code lands.

@@ -18,6 +18,7 @@ from app.domain.entities import MessageRole
 from app.domain.llm import ChatMessage, StreamEvent, ToolCall
 from app.domain.llm import Role as LlmRole
 from app.domain.retrieval import DocumentMatch, DocumentText
+from app.domain.summary import RollingSummary, serialize_summary
 from app.domain.tools import RiskTier, ToolHandlerResult
 from app.llm.context import assemble_context
 from app.realtime.backplane import InMemoryBackplane
@@ -365,7 +366,7 @@ async def test_unknown_prompt_provenance_is_never_known_empty(ctx: _Ctx, unknown
             await session.commit()
         history = await live_history(ctx.sessionmaker, ctx.principal, ctx.session_id)
     elif unknown == "summary":
-        summary = "Earlier secret margin 41%"
+        summary = serialize_summary(RollingSummary(facts=("Earlier secret margin 41%",)))
     else:
 
         async def unclassified(args: Any, context: Any) -> ToolHandlerResult:

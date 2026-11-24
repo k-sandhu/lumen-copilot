@@ -98,6 +98,22 @@ def rendered_evidence(
     return f"[{handle}] {passage.document_name}{location}\n{rendered_snippet(passage.text)}"
 
 
+def _scope_kwargs(ctx: ToolContext) -> dict[str, Any]:
+    """The assistant knowledge-scope narrowing for a retrieval call (#581).
+
+    Only non-``None`` axes are passed: an ad-hoc context calls ``retrieval/``
+    exactly as before, while an assistant-scoped context narrows every legacy
+    tool by the published collections/sources (previously these tools ignored
+    the scope entirely and could read any permitted document).
+    """
+    kwargs: dict[str, Any] = {}
+    if ctx.collection_ids is not None:
+        kwargs["collection_ids"] = ctx.collection_ids
+    if ctx.source_ids is not None:
+        kwargs["source_ids"] = ctx.source_ids
+    return kwargs
+
+
 def _clamp_k(value: object, default: int, *, maximum: int = _MAX_K) -> int:
     # An omitted/invalid ``k`` falls back to ``default`` — but still clamped to the
     # ceiling (#424 re-review): under a tight budget ``maximum`` can be lower than
@@ -182,6 +198,7 @@ async def _search_text(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRes
         k=k,
         collection_ids=ctx.collection_ids,
         document_ids=ctx.document_ids,
+        **({"source_ids": ctx.source_ids} if ctx.source_ids is not None else {}),
     )
     if not passages:
         return ToolHandlerResult(
@@ -212,7 +229,7 @@ async def _search_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandl
     # bounded. Defaults to _MAX_K, so a roomy run is unchanged.
     k = _clamp_k(args.get("k"), 10, maximum=min(_MAX_K, ctx.max_k))
     matches = await ctx.retrieval.search_documents(
-        principal=ctx.principal, name_or_query=name_or_query, k=k
+        principal=ctx.principal, name_or_query=name_or_query, k=k, **_scope_kwargs(ctx)
     )
     if not matches:
         return ToolHandlerResult(
@@ -237,7 +254,7 @@ async def _list_documents(args: dict[str, Any], ctx: ToolContext) -> ToolHandler
     # next turn. ``ctx.max_k`` defaults to _LIST_MAX (50), so a roomy run is
     # unchanged — it still lists up to 50.
     k = _clamp_k(args.get("k"), _LIST_MAX, maximum=min(_LIST_MAX, ctx.max_k))
-    matches = await ctx.retrieval.list_documents(principal=ctx.principal, k=k)
+    matches = await ctx.retrieval.list_documents(principal=ctx.principal, k=k, **_scope_kwargs(ctx))
     if not matches:
         # A clean "nothing here" is an ok result, not an error — the user simply
         # has no documents of their own and none shared with them yet.
@@ -285,7 +302,9 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
         resolved = ctx.document_id_resolver(raw_id)
     if isinstance(resolved, UUID):
         resolution = DocumentResolution(
-            document=await ctx.retrieval.get_document(principal=ctx.principal, document_id=resolved)
+            document=await ctx.retrieval.get_document(
+                principal=ctx.principal, document_id=resolved, **_scope_kwargs(ctx)
+            )
         )
     elif handle_only:
         resolution = DocumentResolution()  # No retrieval I/O for rejected handles.
@@ -293,7 +312,7 @@ async def _get_document(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerRe
         # UUID → chunk UUID → literal name → stripped name stays inside retrieval/,
         # under its shared tenant + owner-or-grant predicate (#758).
         resolution = await ctx.retrieval.resolve_document_text(
-            principal=ctx.principal, handle=raw_id
+            principal=ctx.principal, handle=raw_id, **_scope_kwargs(ctx)
         )
     if resolution.candidates:
         lines = [f"- {c.document_name} (id: {c.document_id})" for c in resolution.candidates]

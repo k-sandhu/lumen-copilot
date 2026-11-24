@@ -15,7 +15,7 @@ import userEvent from '@testing-library/user-event';
 import { renderWithQuery } from '@/test/renderWithQuery';
 import { TooltipProvider } from '@/components/Tooltip';
 import { setAccessToken, clearAccessToken } from '@/api';
-import type { WsClientOptions, WsEnvelope } from '@/api';
+import type { ArtifactList, WsClientOptions, WsEnvelope } from '@/api';
 import { ChatView } from './ChatView';
 import { useChatStore } from '../model/chatStore';
 import { setDefaultStreamClientFactory, type StreamSocket } from '../model/useChatStream';
@@ -85,6 +85,7 @@ const SESSIONS = {
       message_count: 0,
       created_at: '2026-06-18T00:00:00Z',
       updated_at: '2026-06-18T00:00:00Z',
+      effective_scope: null,
     },
   ],
   next_cursor: null,
@@ -132,7 +133,12 @@ const RELOADED_MESSAGES = {
  * Route a mocked fetch by URL + method. `messages` flips after the stream done;
  * `usage` flips as the backend records token spend (the context meter reads it).
  */
-function installFetch(getMessages: () => unknown, getUsage: () => unknown = () => ({})) {
+function installFetch(
+  getMessages: () => unknown,
+  getUsage: () => unknown = () => ({}),
+  getSession: () => unknown = () => SESSIONS.items[0],
+  getArtifacts: () => ArtifactList = () => ({ items: [], next_cursor: null }),
+) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = typeof input === 'string' ? input : ((input as Request).url ?? String(input));
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -142,8 +148,15 @@ function installFetch(getMessages: () => unknown, getUsage: () => unknown = () =
       return Promise.resolve(json(sendResponse, 202));
     if (url.includes('/messages') && method === 'GET') return Promise.resolve(json(getMessages()));
     if (url.includes('/usage') && method === 'GET') return Promise.resolve(json(getUsage()));
+    if (url.includes('/artifacts?') && method === 'GET')
+      return Promise.resolve(json(getArtifacts()));
     if (url.includes('/chat/sessions/') && method === 'PATCH')
       return Promise.resolve(json({ ...SESSIONS.items[0] }));
+    if (/\/chat\/sessions\/[^/?]+$/.test(url) && method === 'GET') {
+      return Promise.resolve(getSession()).then((session) =>
+        session instanceof Response ? session : json(session),
+      );
+    }
     return Promise.resolve(json({ items: [], next_cursor: null }));
   });
 }
@@ -157,7 +170,7 @@ beforeEach(() => {
     activeStreamId: null,
     pendingModel: null,
     viewer: null,
-    sessionScope: null,
+    panel: null,
   });
   liveSocket = null;
   restoreFactory = setDefaultStreamClientFactory((opts) => {
@@ -180,6 +193,96 @@ function renderView() {
 }
 
 describe('ChatView (critical flow)', () => {
+  it.each([
+    ['all', 'done'],
+    ['tool', 'done'],
+    ['all', 'error'],
+    ['tool', 'error'],
+  ] as const)(
+    'refreshes an already-open artifact pane after write_file (%s origin, %s terminal)',
+    async (origin, terminal) => {
+      let artifacts: ArtifactList = { items: [], next_cursor: null };
+      const getArtifacts = vi.fn(() => artifacts);
+      installFetch(() => EMPTY_MESSAGES, undefined, undefined, getArtifacts);
+      const user = userEvent.setup();
+      const { queryClient } = renderView();
+      await user.click(await screen.findByRole('button', { name: 'My chat' }));
+      await user.click(screen.getByRole('button', { name: 'Open conversation artifacts' }));
+      if (origin === 'tool') {
+        await user.click(screen.getByRole('button', { name: 'Tool' }));
+      }
+      expect(await screen.findByText(/no artifacts yet/i)).toBeInTheDocument();
+      // Retain another session's cache as a scope guard. The pane stays mounted
+      // throughout; the test advances by socket events, without a stale timer.
+      queryClient.setQueryDefaults(['artifacts', 'list', 'sess-2'], { gcTime: Infinity });
+      queryClient.setQueryData(['artifacts', 'list', 'sess-2', null], artifacts);
+      const initialReads = getArtifacts.mock.calls.length;
+
+      await user.type(screen.getByLabelText('Message'), 'Create result.txt');
+      await user.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(liveSocket).not.toBeNull());
+      act(() => {
+        liveSocket!.emit({
+          type: 'start',
+          streamId: 'stream-1',
+          seq: 0,
+          data: { sessionId: 'sess-1', messageId: 'am-1', model: 'frontier/opus' },
+        });
+        liveSocket!.emit({
+          type: 'event',
+          streamId: 'stream-1',
+          seq: 1,
+          name: 'tool_result',
+          data: { callId: 'file-1', tool: 'write_file', ok: true, summary: 'Wrote result.txt' },
+        });
+      });
+      expect(getArtifacts).toHaveBeenCalledTimes(initialReads);
+      artifacts = {
+        items: [
+          {
+            id: 'art-1',
+            filename: 'result.txt',
+            mime_type: 'text/plain',
+            size_bytes: 12,
+            owner_id: 'u1',
+            produced_by: 'tool',
+            session_id: 'sess-1',
+            run_id: null,
+            tool_invocation_id: 'inv-1',
+            created_at: '2026-10-29T00:00:00Z',
+          },
+        ],
+        next_cursor: null,
+      };
+      act(() => {
+        liveSocket!.emit(
+          terminal === 'done'
+            ? {
+                type: 'done',
+                streamId: 'stream-1',
+                seq: 2,
+                data: { messageId: 'am-1', finishReason: 'stop', citationCount: 0 },
+              }
+            : {
+                type: 'error',
+                streamId: 'stream-1',
+                seq: 2,
+                problem: { title: 'Answer delivery failed', status: 500, detail: 'Try again.' },
+              },
+        );
+      });
+      const list = await screen.findByRole('list', { name: 'Artifacts' });
+      expect(within(list).getByRole('button', { name: /result\.txt/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^download$/i })).toBeInTheDocument();
+      expect(screen.queryByText(/no artifacts yet/i)).not.toBeInTheDocument();
+      expect(useChatStore.getState().panel).toBe('artifacts');
+      expect(getArtifacts).toHaveBeenCalledTimes(initialReads + 1);
+      expect(queryClient.getQueryState(['artifacts', 'list', 'sess-2', null])?.isInvalidated).toBe(
+        false,
+      );
+    },
+  );
+
   it('sends → streams delta/tool/citation → done reloads with a clickable citation (AC-1/2)', async () => {
     let messagesState: unknown = EMPTY_MESSAGES;
     installFetch(() => messagesState);
@@ -433,7 +536,8 @@ describe('ChatView (critical flow)', () => {
     installFetch(() => EMPTY_MESSAGES);
     const user = userEvent.setup();
     renderView();
-    // Opening from the sidebar seeds NO scope → web fails closed.
+    // Opening from the sidebar: the server says ad-hoc (effective_scope null)
+    // → web fails closed.
     await user.click(await screen.findByRole('button', { name: 'My chat' }));
     // Wait for models so the control is enabled — then Web is disabled by
     // AVAILABILITY (not by the loading state), with its reason.
@@ -441,24 +545,124 @@ describe('ChatView (critical flow)', () => {
     const web = await screen.findByRole('button', { name: 'Web' });
     expect(web).toBeDisabled();
     expect(web.getAttribute('title')).toMatch(/not enabled|off/i);
+    // Model is never a working toggle (#581): disabled, not pressed, grounded reason.
+    const modelMode = screen.getByRole('button', { name: 'Model' });
+    expect(modelMode).toBeDisabled();
+    expect(modelMode).toHaveAttribute('aria-pressed', 'false');
+    expect(modelMode.getAttribute('title')).toMatch(/not used|grounded/i);
   });
 
-  it('reflects a web-enabled assistant scope and renders a web citation + disclosure (#221 AC-1/AC-2)', async () => {
-    installFetch(() => EMPTY_MESSAGES);
+  it('surfaces a knowledge-scope load error with Retry instead of guessing modes (#581)', async () => {
+    let failed = true;
+    installFetch(
+      () => EMPTY_MESSAGES,
+      () => ({}),
+      () => (failed ? json({ title: 'Server error', status: 500 }, 500) : SESSIONS.items[0]),
+    );
+    const user = userEvent.setup();
+    renderView();
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/could not load this chat's knowledge scope/i);
+    expect(within(alert).getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    // No mode is claimed while the scope is unknown.
+    expect(screen.getByRole('button', { name: 'Company' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    failed = false;
+    await user.click(within(alert).getByRole('button', { name: /retry/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Company' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      ),
+    );
+    expect(
+      screen.queryByText(/could not load this chat's knowledge scope/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it('loads scope without claiming defaults, then rehydrates Web after remount (#581)', async () => {
+    let resolveScope!: (session: unknown) => void;
+    const scopeRead = new Promise<unknown>((resolve) => {
+      resolveScope = resolve;
+    });
+    const scopedSession = {
+      ...SESSIONS.items[0],
+      effective_scope: {
+        assistant_id: 'a1',
+        assistant_version_id: 'v1',
+        modes: ['web'],
+        collection_ids: [],
+        source_ids: [],
+        adjustable: { modes: false, collection_ids: false, source_ids: false },
+      },
+    };
+    let reads = 0;
+    installFetch(
+      () => EMPTY_MESSAGES,
+      () => ({}),
+      () => {
+        reads += 1;
+        return scopeRead;
+      },
+    );
+    const user = userEvent.setup();
+    const view = renderView();
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
+    expect(await screen.findByText(/Loading knowledge scope/)).toHaveAttribute('role', 'status');
+    for (const name of ['Company', 'Uploaded', 'Web', 'Model']) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+    resolveScope(scopedSession);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Web' })).toHaveAttribute('aria-pressed', 'true'),
+    );
+    expect(screen.getByRole('button', { name: 'Company' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    view.unmount();
+    renderView();
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Web' })).toHaveAttribute('aria-pressed', 'true'),
+    );
+    expect(screen.getByRole('button', { name: 'Web' })).toBeDisabled();
+  });
+
+  it('reopening from history keeps Web from the pinned scope and renders a web citation + disclosure (#581, #221 AC-1/AC-2)', async () => {
+    // The session's server-authoritative effective scope includes web; the
+    // client holds NO launch-time scope (fresh page load, open from history).
+    installFetch(
+      () => EMPTY_MESSAGES,
+      () => ({}),
+      () => ({
+        ...SESSIONS.items[0],
+        effective_scope: {
+          assistant_id: 'a1',
+          assistant_version_id: 'v1',
+          modes: ['company', 'web'],
+          collection_ids: [],
+          source_ids: [],
+          adjustable: { modes: false, collection_ids: false, source_ids: false },
+        },
+      }),
+    );
     const user = userEvent.setup();
     renderView();
 
-    // Simulate launching this session FROM an assistant whose scope includes web
-    // (AssistantLibrary calls openSession(id, modes)); the composer must reflect it.
-    act(() => {
-      useChatStore.getState().openSession('sess-1', ['company', 'web']);
-    });
+    await user.click(await screen.findByRole('button', { name: 'My chat' }));
 
-    // Wait for models to load so the composer (and its mode control) is enabled.
+    // Wait for models to load so the composer is enabled, then for the session
+    // query to hydrate the scope: Web is in use (read-only — not adjustable).
     await waitFor(() => expect(screen.getByLabelText('Message')).not.toBeDisabled());
     const web = await screen.findByRole('button', { name: 'Web' });
-    expect(web).not.toBeDisabled();
-    expect(web).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(web).toHaveAttribute('aria-pressed', 'true'));
+    expect(web).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Model' })).toHaveAttribute('aria-pressed', 'false');
 
     // Send a message and stream a web-search tool + a separate web citation.
     await user.type(screen.getByLabelText('Message'), 'latest AI regulations?');
@@ -690,4 +894,74 @@ describe('#434 round-1: suggestions must not survive a terminal error', () => {
       screen.queryByRole('button', { name: /use suggested question/i }),
     ).not.toBeInTheDocument();
   });
+});
+
+it('#574 Stop keeps the partial through acknowledgement and authoritative history reload', async () => {
+  let messagesState: unknown = EMPTY_MESSAGES;
+  const fetchMock = installFetch(() => messagesState);
+  const route = fetchMock.getMockImplementation()!;
+  let resolveCancel!: (response: Response) => void;
+  fetchMock.mockImplementation((input, init) => {
+    if (String(input).includes('/chat/streams/stream-1/cancel')) {
+      return new Promise((resolve) => {
+        resolveCancel = resolve;
+      });
+    }
+    return route(input, init);
+  });
+  const user = userEvent.setup();
+  renderView();
+  await user.click(await screen.findByRole('button', { name: 'My chat' }));
+  await user.type(screen.getByLabelText('Message'), 'Keep this partial');
+  await user.click(screen.getByRole('button', { name: /send/i }));
+  await waitFor(() => expect(liveSocket).not.toBeNull());
+  act(() => {
+    liveSocket!.emit({
+      type: 'start',
+      streamId: 'stream-1',
+      seq: 0,
+      data: { sessionId: 'sess-1', messageId: 'am-1', model: 'test/model' },
+    });
+    liveSocket!.emit({
+      type: 'delta',
+      streamId: 'stream-1',
+      seq: 1,
+      data: { text: 'Kept partial answer' },
+    });
+  });
+  await user.click(screen.getByRole('button', { name: /stop generating/i }));
+  expect(screen.getByText('Kept partial answer')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /stopping answer/i })).toBeDisabled();
+  expect(screen.queryByTestId('stream-cancelled')).not.toBeInTheDocument();
+  messagesState = {
+    items: [
+      {
+        id: 'am-1',
+        session_id: 'sess-1',
+        role: 'assistant',
+        content: 'Kept partial answer',
+        model: 'test/model',
+        citations: [],
+        finish_reason: 'cancelled',
+        created_at: '2026-06-18T00:01:05Z',
+      },
+    ],
+    next_cursor: null,
+  };
+  await act(async () => {
+    liveSocket!.emit({
+      type: 'cancelled',
+      streamId: 'stream-1',
+      seq: 2,
+      data: { messageId: 'am-1', finishReason: 'cancelled', citationCount: 0 },
+    });
+    resolveCancel(json({ stream_id: 'stream-1', status: 'cancelled' }));
+  });
+  await screen.findByTestId('message-cancelled');
+  expect(screen.getAllByText('Kept partial answer')).toHaveLength(1);
+  expect(screen.queryByTestId('stream-cancelled')).not.toBeInTheDocument();
+  expect(useChatStore.getState().activeStreamId).toBeNull();
+  expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/cancel'))).toHaveLength(
+    1,
+  );
 });

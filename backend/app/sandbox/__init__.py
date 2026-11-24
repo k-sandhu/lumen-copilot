@@ -13,13 +13,14 @@ services. Docker's or the runner's wire objects never escape this boundary.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.sandbox.runner import (
     ContainerFlags,
     HttpSandboxRunner,
     SandboxRunner,
     build_container_flags,
 )
-from app.sandbox.service import SandboxReadService, SandboxService, SandboxSessionService
 from app.sandbox.spec import (
     METADATA_IP,
     EgressPolicy,
@@ -31,6 +32,28 @@ from app.sandbox.spec import (
     SandboxSessionSpec,
     StagedInput,
 )
+
+if TYPE_CHECKING:
+    from app.sandbox.service import SandboxReadService, SandboxService, SandboxSessionService
+
+
+def __getattr__(name: str) -> object:
+    # Policy readers import accounting without pulling their own orchestrator
+    # back through this package. Public service exports remain source-compatible.
+    if name in {"SandboxReadService", "SandboxService", "SandboxSessionService"}:
+        from app.sandbox.service import (
+            SandboxReadService,
+            SandboxService,
+            SandboxSessionService,
+        )
+
+        return {
+            "SandboxReadService": SandboxReadService,
+            "SandboxService": SandboxService,
+            "SandboxSessionService": SandboxSessionService,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "METADATA_IP",

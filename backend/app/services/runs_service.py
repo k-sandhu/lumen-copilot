@@ -33,9 +33,8 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -52,6 +51,7 @@ from app.db.repositories import (
     CitationRepository,
     CitationView,
     GroupRepository,
+    MessageRepository,
     RunRepository,
     RunStepRepository,
     UserRepository,
@@ -70,18 +70,16 @@ from app.domain.entities import (
 )
 from app.domain.escalation import classify_terminal, is_transient, normalize_reason
 from app.llm import LLMGateway
-from app.llm.context import ContextConfig
+from app.observability import observe_headless_run
 from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
+from app.services.chat_composition import ChatCompositionOptions, build_chat_runtime
 from app.services.chat_runtime import ChatRuntime
 from app.services.citation_access import audit_withholding, resolve_permitted_documents
-from app.services.mcp_servers_service import build_mcp_servers_service
-from app.services.models_service import ChatModelService, is_allowed_model
-from app.services.provider_models import build_model_route_resolver
+from app.services.models_service import is_allowed_model
 from app.services.run_delivery_service import deliver_run
 from app.services.run_sink import RunTranscriptSink
-from app.services.tools.types import ToolDefinition
 
 log = get_logger(__name__)
 
@@ -98,17 +96,21 @@ class TransientRunRetry(Exception):
     Raised by :func:`execute_run` when the run's outcome is a **transient** fault (a
     briefly-unavailable model/db/storage) and the retry budget is not yet exhausted.
     The run has been reset to ``queued`` (not made terminal), so the Celery wrapper
-    reschedules it after ``backoff_seconds``. A run is never silently dropped — on
-    retry exhaustion the fold writes a queryable ``failed`` terminal instead of
+    reschedules it after ``backoff_seconds``. Its retained ``started_at`` scopes
+    publication-failure recovery and keeps a lost handoff eligible for reaping.
+    On retry exhaustion the fold writes a queryable ``failed`` terminal instead of
     raising this. Not an :class:`~app.core.errors.AppError`: it never surfaces on an
     HTTP path, only inside the worker.
     """
 
-    def __init__(self, *, attempt: int, backoff_seconds: int, error: RunError) -> None:
+    def __init__(
+        self, *, attempt: int, backoff_seconds: int, error: RunError, started_at: datetime
+    ) -> None:
         super().__init__(f"transient run fault (attempt {attempt}): {error.code}")
         self.attempt = attempt
         self.backoff_seconds = backoff_seconds
         self.error = error
+        self.started_at = started_at
 
 
 # --- Cursor codec (opaque; carries the boundary row id) ---------------------
@@ -314,45 +316,68 @@ async def execute_run(
             # Already claimed (a duplicate delivery) — do not re-run; report its state.
             return run.status
 
+        # Claim before any side effects, including preflight failure audits.
+        started_at = datetime.now(UTC)
+        if run.started_at is not None:
+            # The timestamp fences retry publication recovery. A coarse or
+            # regressing clock must not give two claims the same identity.
+            started_at = max(
+                started_at, run.started_at.replace(tzinfo=UTC) + timedelta(microseconds=1)
+            )
+        claimed = await runs.mark_running(
+            run.id, started_at=started_at, expected_started_at=run.started_at
+        )
+        if claimed is None:
+            return await runs.get_status(run.id) or RunStatus.FAILED
+        # A queued retry keeps the previous claim timestamp and chat identity.
+        # Explicit owner controls clear that timestamp to start a new execution.
+        reuse_session = run.started_at is not None and run.session_id is not None
+        run = claimed
         audit = AuditSink(AuditEventRepository(session, tenant_id))
         principal = await _load_owner_principal(session, tenant_id, run.owner_id)
         config = await _load_run_config(session, tenant_id, run.assistant_version_id)
         if principal is None or config is None:
-            # The owner or the pinned version is gone — cannot run reproducibly.
             reason = "owner_missing" if principal is None else "version_missing"
             await _fail_run(
                 runs,
                 audit,
                 run,
                 RunError(code=reason, message="The run's owner or pinned version is unavailable."),
+                session=session,
+                tenant_id=tenant_id,
+                request_id=request_id,
+                source_ip=source_ip,
             )
             return RunStatus.FAILED
 
         model = _resolve_model(config.model, settings)
-        # Create the internal session the shared runtime persists against (pinned to
-        # the version so the transcript is reproducible; owned by the run owner).
-        chat_session = await ChatSessionRepository(session, tenant_id).create(
-            owner_id=run.owner_id,
-            model=model,
-            title=f"run:{run.id}",
-            assistant_id=run.assistant_id,
-            assistant_version_id=run.assistant_version_id,
-        )
-        session_id = chat_session.id
-        started_at = datetime.now(UTC)
-        await runs.mark_running(run.id, started_at=started_at)
-        await _audit_run(
-            audit,
-            action=AuditAction.RUN_STARTED,
-            run=run,
-            request_id=request_id,
-            source_ip=source_ip,
-            metadata={
-                "assistant_id": str(run.assistant_id),
-                "trigger": run.trigger.value,
-                "session_id": str(session_id),
-            },
-        )
+        # Delivery retry counters are not execution identity: a delayed original
+        # delivery can win a queued retry claim with attempt=0.
+        if reuse_session:
+            session_id = run.session_id
+        else:
+            chat_session = await ChatSessionRepository(session, tenant_id).create(
+                owner_id=run.owner_id,
+                model=model,
+                title=f"run:{run.id}",
+                assistant_id=run.assistant_id,
+                assistant_version_id=run.assistant_version_id,
+            )
+            session_id = chat_session.id
+            await runs.attach_session(run.id, session_id)
+            await _audit_run(
+                audit,
+                action=AuditAction.RUN_STARTED,
+                run=run,
+                request_id=request_id,
+                source_ip=source_ip,
+                metadata={
+                    "assistant_id": str(run.assistant_id),
+                    "trigger": run.trigger.value,
+                    "session_id": str(session_id),
+                },
+            )
+    assert session_id is not None
 
     # --- Phase 2: run the shared runtime against the transcript sink. --------
     # Outside the claim txn: the runtime owns its own session (bound to the tenant
@@ -360,86 +385,108 @@ async def execute_run(
     # the stream. Any failure here is caught below and written as a terminal.
     question = _question_from_inputs(config, run.inputs)
     sink = RunTranscriptSink(stream_id=str(run.id))
-    runtime = ChatRuntime(
+    # The ONE composition in ``headless`` mode (#576): same model route /
+    # fallback validation / context / MCP as interactive chat (a provider:
+    # fallback must resolve exactly alike, #440), non-interactive (nobody
+    # can answer ask_user, spec 0006), and — new in #576 — the sandbox and
+    # artifact writer wired under the run owner's identity.
+    runtime = build_chat_runtime(
+        mode="headless",
+        principal=principal,
+        backplane=sink,
+        settings=settings,
         sessionmaker=_sessionmaker(),
         gateway=gateway,
-        backplane=sink,
-        principal=principal,
         request_id=request_id,
         source_ip=source_ip,
-        default_max_tool_turns=settings.chat_max_tool_turns,
-        tool_concurrency=settings.chat_tool_concurrency,
-        fallback_model_validator=lambda vsession, mid: ChatModelService(
-            settings, session=vsession, tenant_id=principal.tenant_id
-        ).is_allowed_model_async(mid),
-        # Per-tenant provider routing for the primary AND #413 fallbacks — a
-        # headless run must resolve a ``provider:`` fallback exactly like
-        # interactive chat (#440 round-2 NEW-3: without a resolver every
-        # provider: candidate is an unresolved passthrough the failover guard
-        # skips, so a configured fallback could never rescue a run).
-        model_route_resolver=build_model_route_resolver(
-            settings=settings,
-            tenant_id=principal.tenant_id,
-            owner_id=principal.user_id,
-            roles=principal.roles,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        context_config=ContextConfig(
-            fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
-            output_headroom_tokens=settings.context_output_headroom_tokens,
-            compaction_digest_chars=settings.context_compaction_digest_chars,
-            compaction_chunk_size=settings.context_compaction_chunk_size,
-        ),
-        mcp_tools_factory=_build_run_mcp_tools_factory(
-            principal=principal,
-            settings=settings,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        # Headless: nobody is watching the stream (spec 0006 #429). ask_user is
-        # not intercepted (its handler tells the model to proceed with its best
-        # interpretation) and no follow-up suggestions are generated.
-        interactive=False,
+        options=ChatCompositionOptions(run_id=run.id, runtime_factory=ChatRuntime),
     )
     try:
-        await runtime.run(
-            stream_id=str(run.id),
-            session_id=session_id,
-            question=question,
-            model=model,
-            history=[],
-            collection_ids=None,
-            assistant_config=config,
-        )
+        # The run's CHAIN span (ADR-0027) parents the turn's AGENT trace, so
+        # Phoenix shows which run, assistant and trigger produced it.
+        with observe_headless_run(
+            run_id=run.id, assistant_id=run.assistant_id, trigger=run.trigger.value
+        ) as span:
+            ok = await runtime.run(
+                stream_id=str(run.id),
+                session_id=session_id,
+                question=question,
+                model=model,
+                history=[],
+                collection_ids=None,
+                assistant_config=config,
+            )
+            if ok:
+                span.ok()
+            else:
+                error = sink.outcome().error
+                span.error(error.code if error is not None else "run_failed")
     except Exception as exc:  # noqa: BLE001 — a run never ends in silence
         # The runtime maps its own errors to a terminal ``error`` envelope, but an
-        # error escaping it (or a defect here) must still write a terminal run status.
+        # error escaping it (or a defect here) must still write a terminal run
+        # status in a fresh transaction (#578). If even that raises (e.g. the DB
+        # is down), it propagates: the Celery wrapper retries the same ensure in
+        # a fresh loop/engine, and the stale-run reaper is the final backstop.
         log.error("runs.execute_failed", run_id=str(run.id), error_type=type(exc).__name__)
-        async with tenant_session_scope(tenant_id) as session:
-            runs = RunRepository(session, tenant_id)
-            audit = AuditSink(AuditEventRepository(session, tenant_id))
-            failed = await runs.get(run.id)
-            if failed is not None and not failed.is_terminal:
-                await _fail_run(
-                    runs,
-                    audit,
-                    failed,
-                    RunError(code="internal_error", message="The run failed unexpectedly."),
-                    session=session,
-                    tenant_id=tenant_id,
-                    request_id=request_id,
-                    source_ip=source_ip,
-                )
-        return RunStatus.FAILED
+        return await ensure_run_terminal_on_failure(
+            run.id,
+            tenant_id,
+            error=RunError(code="internal_error", message="The run failed unexpectedly."),
+            request_id=request_id,
+            source_ip=source_ip,
+        )
 
     # --- Phase 3: fold the terminal, persist the transcript, audit finish. ---
-    # Route a failure a human should handle (ambiguity / missing input / restricted
-    # data / an unrecoverable tool failure / an approval with no approver) to the
-    # ``escalated`` terminal rather than ``failed`` (E7-5, #239). Deny-by-default: a
-    # transient/internal failure stays ``failed`` so the retry policy can re-drive it
-    # before a human is paged. Either way the run reaches a queryable terminal — never
-    # a silent drop.
+    # Wrapped (#578): ANY failure while persisting the outcome (an FK violation
+    # on a rolled-back message was the original stuck-``running`` repro) rolls
+    # that transaction back and falls through to a fresh-transaction terminal,
+    # so the run can never be stranded in ``running`` by its own bookkeeping.
+    # A transient re-drive signal is not a failure — it propagates untouched.
+    try:
+        return await _persist_run_outcome(
+            run=run,
+            tenant_id=tenant_id,
+            settings=settings,
+            sink=sink,
+            session_id=session_id,
+            attempt=attempt,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+    except TransientRunRetry:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a run never ends in silence
+        log.error("runs.persist_outcome_failed", run_id=str(run.id), error_type=type(exc).__name__)
+        return await ensure_run_terminal_on_failure(
+            run.id,
+            tenant_id,
+            error=RunError(code="internal_error", message="The run failed unexpectedly."),
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+
+
+async def _persist_run_outcome(
+    *,
+    run: Run,
+    tenant_id: UUID,
+    settings: Settings,
+    sink: RunTranscriptSink,
+    session_id: UUID,
+    attempt: int,
+    request_id: str,
+    source_ip: str,
+) -> RunStatus:
+    """Fold the sink outcome into the run's terminal + transcript + audit (Phase 3).
+
+    Route a failure a human should handle (ambiguity / missing input / restricted
+    data / an unrecoverable tool failure / an approval with no approver) to the
+    ``escalated`` terminal rather than ``failed`` (E7-5, #239). Deny-by-default: a
+    transient/internal failure stays ``failed`` so the retry policy can re-drive it
+    before a human is paged. Either way the run reaches a queryable terminal — never
+    a silent drop. Raises :class:`TransientRunRetry` for a re-drive, or propagates
+    a persistence failure for the caller to terminalise in a fresh transaction.
+    """
     outcome = sink.outcome()
 
     # A transient dependency fault with retry budget left is re-driven with backoff
@@ -450,14 +497,21 @@ async def execute_run(
     if is_transient(outcome.error) and attempt < settings.run_max_retries:
         async with tenant_session_scope(tenant_id) as session:
             requeued = RunRepository(session, tenant_id)
-            reset = await requeued.get(run.id)
-            if reset is not None and not reset.is_terminal:
-                await requeued.mark_queued(run.id)
+            reset = await requeued.mark_queued(
+                run.id,
+                expected_status=RunStatus.RUNNING,
+                preserve_claim=True,
+                expected_started_at=run.started_at,
+            )
+            if reset is None:
+                return await requeued.get_status(run.id) or RunStatus.FAILED
         assert outcome.error is not None  # is_transient(None) is False
+        assert reset.started_at is not None
         raise TransientRunRetry(
             attempt=attempt,
             backoff_seconds=settings.run_retry_backoff_seconds * (2**attempt),
             error=outcome.error,
+            started_at=reset.started_at,
         )
 
     terminal_status = classify_terminal(outcome.status, outcome.error)
@@ -468,16 +522,39 @@ async def execute_run(
         current = await runs.get(run.id)
         if current is None:  # pragma: no cover — the run row cannot vanish mid-flight
             return terminal_status
-        await sink.persist(runs=runs, steps=steps, run_id=run.id)
+        if current.is_terminal:
+            # Already terminalised (e.g. the stale-run reaper failed this run
+            # while the runtime was still finishing): exactly one terminal
+            # wins — never overwrite it or duplicate steps/audit/delivery.
+            return current.status
+        # Link the assistant message only when it was actually persisted
+        # (#578): the id rides the ``start`` envelope before the row exists,
+        # and on a failure path the runtime rolls the message back — linking
+        # that dangling id violates the FK and used to strand the run.
+        linked_message_id: UUID | None = None
+        candidate_message_id = sink.message_id()
+        if terminal_status is RunStatus.SUCCEEDED:
+            if candidate_message_id is None:
+                raise RuntimeError("A completed run has no response message.")
+            persisted = await MessageRepository(session, tenant_id).get(candidate_message_id)
+            if persisted is None or persisted.session_id != session_id:
+                raise RuntimeError("A completed run has no persisted response.")
+            linked_message_id = candidate_message_id
         finished = await runs.mark_terminal(
             run.id,
             status=terminal_status,
             finished_at=datetime.now(UTC),
             summary=outcome.summary,
-            message_id=sink.message_id(),
+            message_id=linked_message_id,
             session_id=session_id,
             error=outcome.error,
+            expected_status=RunStatus.RUNNING,
         )
+        if finished is None:
+            return await runs.get_status(run.id) or RunStatus.FAILED
+        # The winning UPDATE holds the row lock until transcript + audit commit;
+        # a losing worker writes no steps, finish audit, or deliveries.
+        await sink.persist(runs=runs, steps=steps, run_id=run.id)
         await _audit_run(
             audit,
             action=AuditAction.RUN_FINISHED,
@@ -511,15 +588,156 @@ async def execute_run(
         # Deliver the completed run to the owner's in-app inbox / digest (#238) —
         # in the SAME txn so the delivery commits atomically with the terminal. A
         # delivery is never a silent drop (a produce failure writes a ``failed`` row).
-        await deliver_run(
+        await _deliver_terminal_run(
             session,
             tenant_id=tenant_id,
-            run=finished if finished is not None else current,
+            run=finished,
             audit=audit,
             request_id=request_id,
             source_ip=source_ip,
         )
     return terminal_status
+
+
+async def ensure_run_terminal_on_failure(
+    run_id: UUID,
+    tenant_id: UUID,
+    *,
+    error: RunError,
+    request_id: str = "run-task",
+    source_ip: str = "system",
+    retry_started_at: datetime | None = None,
+) -> RunStatus:
+    """Fail a claimed run in a fresh transaction, without overwriting a winner.
+
+    Shared by the execution core and Celery wrapper. The atomic terminal CAS
+    owns the finish audit and delivery; redelivery of a terminal run does nothing.
+    A retry publication failure supplies its persisted ``retry_started_at``:
+    only that queued claim can fail, never a newer claimant (even one queued
+    again). A never-claimed queued run stays queued. Database unavailability can
+    prevent this backstop too; the reaper retries abandoned claims/handoffs.
+    """
+    async with tenant_session_scope(tenant_id) as session:
+        runs = RunRepository(session, tenant_id)
+        failed = await runs.mark_terminal(
+            run_id,
+            status=RunStatus.FAILED,
+            finished_at=datetime.now(UTC),
+            error=error,
+            expected_status=RunStatus.QUEUED if retry_started_at is not None else RunStatus.RUNNING,
+            expected_started_at=retry_started_at,
+        )
+        if failed is None:
+            return await runs.get_status(run_id) or RunStatus.FAILED
+        audit = AuditSink(AuditEventRepository(session, tenant_id))
+        await _audit_run(
+            audit,
+            action=AuditAction.RUN_FINISHED,
+            run=failed,
+            request_id=request_id,
+            source_ip=source_ip,
+            metadata={"status": RunStatus.FAILED.value, "error_code": error.code},
+        )
+        await _deliver_terminal_run(
+            session,
+            tenant_id=tenant_id,
+            run=failed,
+            audit=audit,
+            request_id=request_id,
+            source_ip=source_ip,
+        )
+    return RunStatus.FAILED
+
+
+async def _deliver_terminal_run(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    run: Run,
+    audit: AuditSink,
+    request_id: str,
+    source_ip: str,
+) -> None:
+    """Deliver after the terminal update; isolate delivery failures in a savepoint.
+
+    Success commits atomically with the terminal. Even a failed database flush
+    in delivery rolls back only the savepoint, retaining the terminal and its
+    finish audit. A delivery outage must never strand a run or change its result.
+    """
+    try:
+        async with session.begin_nested():
+            await deliver_run(
+                session,
+                tenant_id=tenant_id,
+                run=run,
+                audit=audit,
+                request_id=request_id,
+                source_ip=source_ip,
+            )
+    except Exception as exc:  # noqa: BLE001 — preserve terminal + finish audit
+        log.error("runs.delivery_failed", run_id=str(run.id), error_type=type(exc).__name__)
+
+
+#: The typed reason a stale-run reap records — safe, never vendor text (#578).
+STALE_RUN_ERROR = RunError(
+    code="stale_run_timeout",
+    message="The run did not finish and was marked failed after exceeding the stale-run age limit.",
+)
+
+
+async def reap_stale_run(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    run_id: UUID,
+    older_than: datetime,
+    finished_at: datetime,
+    request_id: str = "run-reaper",
+    source_ip: str = "system",
+) -> bool:
+    """Fail one abandoned running attempt or queued retry handoff, exactly once.
+
+    The atomic CAS (:meth:`RunRepository.fail_stale_running`) re-checks
+    the running/claimed-queued predicate and age cutoff inside the ``UPDATE``, so a run
+    that finished concurrently — or one a racing reaper already failed —
+    loses and this is a no-op (``False``, no audit, no delivery). On a win,
+    ``run.finished`` is audited (INV-6) and the failure is delivered to the
+    owner's inbox in the same transaction. Returns whether this call reaped.
+    The caller owns the transaction boundary (one tenant-scoped txn per run).
+    """
+    runs = RunRepository(session, tenant_id)
+    reaped = await runs.fail_stale_running(
+        run_id, older_than=older_than, finished_at=finished_at, error=STALE_RUN_ERROR
+    )
+    if reaped is None:
+        return False
+    audit = AuditSink(AuditEventRepository(session, tenant_id))
+    await _audit_run(
+        audit,
+        action=AuditAction.RUN_FINISHED,
+        run=reaped,
+        request_id=request_id,
+        source_ip=source_ip,
+        metadata={
+            "status": RunStatus.FAILED.value,
+            "error_code": STALE_RUN_ERROR.code,
+            "reason": "stale_claim",
+            **(
+                {"started_at": reaped.started_at.isoformat()}
+                if reaped.started_at is not None
+                else {}
+            ),
+        },
+    )
+    await _deliver_terminal_run(
+        session,
+        tenant_id=tenant_id,
+        run=reaped,
+        audit=audit,
+        request_id=request_id,
+        source_ip=source_ip,
+    )
+    return True
 
 
 async def _fail_run(
@@ -544,7 +762,10 @@ async def _fail_run(
         status=RunStatus.FAILED,
         finished_at=datetime.now(UTC),
         error=error,
+        expected_status=RunStatus.RUNNING,
     )
+    if failed is None:
+        return
     await _audit_run(
         audit,
         action=AuditAction.RUN_FINISHED,
@@ -554,10 +775,10 @@ async def _fail_run(
         metadata={"status": RunStatus.FAILED.value, "error_code": error.code},
     )
     if session is not None and tenant_id is not None:
-        await deliver_run(
+        await _deliver_terminal_run(
             session,
             tenant_id=tenant_id,
-            run=failed if failed is not None else run,
+            run=failed,
             audit=audit,
             request_id=request_id,
             source_ip=source_ip,
@@ -591,40 +812,6 @@ async def _audit_run(
     )
 
 
-def _build_run_mcp_tools_factory(
-    *,
-    principal: Principal,
-    settings: Settings,
-    request_id: str,
-    source_ip: str,
-) -> Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]:
-    """The MCP-tools resolver a scheduled/manual assistant run uses (issue #227).
-
-    A headless run executes **as** the assistant's owner (``principal``), so its MCP
-    tools are resolved from exactly that owner's registered+enabled servers in the
-    tenant — the same owner-scoped, SSRF-guarded, CC-C-auth path an interactive chat
-    uses. The runtime calls this only when the pinned version's allow-list names an
-    ``mcp:*`` tool; a native-only assistant never touches the MCP servers table.
-    """
-
-    async def _factory(session: AsyncSession) -> dict[str, ToolDefinition]:
-        audit = AuditSink(AuditEventRepository(session, principal.tenant_id))
-        service = build_mcp_servers_service(
-            session,
-            settings=settings,
-            tenant_id=principal.tenant_id,
-            owner_id=principal.user_id,
-            roles=principal.roles,
-            audit=audit,
-            denials=None,  # run-tool resolution is list-only, with no direct-id guard
-            request_id=request_id,
-            source_ip=source_ip,
-        )
-        return await service.resolve_run_tools()
-
-    return _factory
-
-
 async def _load_owner_principal(
     session: AsyncSession, tenant_id: UUID, owner_id: UUID
 ) -> Principal | None:
@@ -656,7 +843,9 @@ async def _load_run_config(
     version = await AssistantVersionRepository(session, tenant_id).get(assistant_version_id)
     if version is None:
         return None
-    return assemble_run_config(version.config)
+    return assemble_run_config(
+        version.config, assistant_id=version.assistant_id, assistant_version_id=version.id
+    )
 
 
 def _question_from_inputs(config: AssistantRunConfig, inputs: dict[str, object]) -> str:

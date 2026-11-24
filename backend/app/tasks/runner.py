@@ -33,6 +33,7 @@ from typing import TypeVar
 
 from app.db.session import dispose_engine
 from app.llm import aclose_embedding_clients
+from app.sandbox.accounting import aclose_sandbox_accounting_pools
 
 _T = TypeVar("_T")
 
@@ -51,6 +52,7 @@ def run_task(coro: Coroutine[object, object, _T]) -> _T:
         try:
             return await coro
         finally:
+            await aclose_sandbox_accounting_pools()
             # Provider transports are owned by this loop, just like DB/Redis.
             await aclose_embedding_clients()
             await dispose_engine()

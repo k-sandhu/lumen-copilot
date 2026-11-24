@@ -15,10 +15,12 @@ since #502 every refusal says *which* switch refused
 (:class:`~app.services.tools.types.ApprovalDecision`), because the four cases below
 need four different fixes:
 
-* No admin row for the tool ⇒ the tool's built-in default applies. A
+* No admin row for the tool ⇒ the tool's built-in default applies (the one
+  ``effective_tool_decision`` Admin also shows, #576). A
   ``requires_approval`` tool has no pre-approval, so it is **denied**
-  (``tool_policy_absent``) — the same behaviour as the old deny-all gate until an
-  admin acts.
+  (``tool_policy_absent``); a T1 tool routed here under
+  ``act_with_approval`` needs no extra approval by default (spec 0004
+  §2.5), so it is **allowed** with no approval record.
 * An admin row with ``enabled=false`` ⇒ denied (``tool_policy_disabled``: the
   tenant disabled the tool).
 * An admin row with ``enabled=true`` but ``requires_approval=true`` ⇒ denied
@@ -38,8 +40,9 @@ need four different fixes:
 * An admin row with ``enabled=true AND requires_approval=false`` ⇒ **allowed** (the
   admin pre-approved it for the tenant).
 
-The runner only routes ``requires_approval`` (⇒ T2+) tools here; T0/T1 tools never
-reach the gate. The gate is tenant-scoped at construction (the tenant resolved from
+The runner routes ``requires_approval`` (⇒ T2+) tools and every T1 dispatch here,
+including ``act_auto``, so revocation during generation takes effect before a write.
+The gate is tenant-scoped at construction (the tenant resolved from
 the running principal, never request input), so it can never consult another
 tenant's policy (INV-1).
 """
@@ -59,6 +62,8 @@ from app.domain.tools import (
     APPROVAL_REASON_POLICY_UNREADABLE,
     APPROVAL_SCOPE_TENANT_PREAPPROVAL,
 )
+from app.services.tool_policy_service import effective_tool_decision
+from app.services.tools.registry import UnknownToolError, get_tool
 from app.services.tools.types import ApprovalDecision, ApprovalRecord, ApprovalRequest
 
 log = get_logger(__name__)
@@ -79,10 +84,10 @@ class PolicyApprovalGate:
     async def request(self, request: ApprovalRequest) -> ApprovalDecision:
         """Decide ``request.tool_name``, naming the switch that refused (#502).
 
-        Approves only when an admin row both enabled AND pre-approved the tool.
-        Deny-by-default (no row) and fail-closed (a read error denies). Only
-        reached for ``requires_approval`` tools — the runner never calls it for
-        T0/T1.
+        T2 requires an explicit recorded tenant pre-approval. Every T1 dispatch
+        reaches this seam, independently of the offered-tool policy snapshot;
+        absent an override it follows Admin's enabled/no-extra-approval default.
+        An unreadable policy always denies.
         """
         tool = request.tool_name
         try:
@@ -101,9 +106,26 @@ class PolicyApprovalGate:
                     "shortly."
                 ),
             )
-        # Deny-by-default: no admin override ⇒ the tool's built-in default (a
-        # requires_approval tool has no pre-approval) ⇒ denied.
+        # The ONE effective decision (#576) — the same resolution Admin's
+        # listing and the runtime's offered set use. Dynamic tools carry their
+        # trusted tier from the runner; T2 still requires recorded pre-approval.
+        try:
+            registry_requires_approval = get_tool(tool).requires_approval
+        except UnknownToolError:
+            registry_requires_approval = request.risk_tier.is_write_tier
+        decision = effective_tool_decision(
+            tool_name=tool,
+            override=policy,
+            registry_requires_approval=registry_requires_approval,
+        )
         if policy is None:
+            if not decision.requires_approval:
+                # A T1 tool at either acting autonomy level with
+                # no override follows the default Admin shows — enabled, no
+                # extra approval (spec 0004 §2.5). Nothing was pre-approved,
+                # so the allow carries no approval record; the runner only
+                # demands one for T2+ (INV-7 unchanged).
+                return ApprovalDecision.allow()
             return ApprovalDecision.deny(
                 APPROVAL_REASON_POLICY_ABSENT,
                 (
@@ -111,7 +133,7 @@ class PolicyApprovalGate:
                     "grants it. An admin can enable it under Admin → Tool governance."
                 ),
             )
-        if not policy.enabled:
+        if not decision.enabled:
             return ApprovalDecision.deny(
                 APPROVAL_REASON_POLICY_DISABLED,
                 (
@@ -119,7 +141,7 @@ class PolicyApprovalGate:
                     "enable it under Admin → Tool governance."
                 ),
             )
-        if policy.requires_approval:
+        if decision.requires_approval:
             # Issue #500 — say the honest thing. The admin enabled the tool but left
             # it flagged "requires approval", and NOTHING in the product can grant
             # that approval: a chat turn has no approver, and the interactive flow is
@@ -134,6 +156,9 @@ class PolicyApprovalGate:
                     "it under Admin → Tool governance to pre-approve it."
                 ),
             )
+        if not request.risk_tier.is_write_tier:
+            # T1 policy permission is not a recorded T2 tenant pre-approval.
+            return ApprovalDecision.allow()
         # Pre-approved for the tenant: enabled AND no longer requiring approval.
         #
         # INV-7 admits this as a "recorded approval" only since the spec 0004 §2.5

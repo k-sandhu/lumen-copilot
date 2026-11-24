@@ -95,6 +95,18 @@ async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 duration_ms=42,
                 resource_usage=ResourceUsage(peak_memory_bytes=2048, output_bytes=6),
                 image_digest="sha256:abc",
+                effective_limits={
+                    "cpus": 1.0,
+                    "memory_bytes": 536870912,
+                    "pids_limit": 128,
+                    "wall_clock_seconds": 30,
+                    "scratch_bytes": 268435456,
+                    "output_bytes_cap": 33554432,
+                    "max_concurrency": 2,
+                    "daily_runtime_cap_s": 3600,
+                    "sources": {},
+                },
+                termination_reason="completed",
             )
             bob_run = await runs_a.create(owner_id=bob.id, code="print('bob')")
             carol_run = await CodeRunRepository(seed, tb.id).create(
@@ -176,6 +188,8 @@ async def test_get_own_code_run_returns_the_record(client: AsyncClient, seeded: 
     assert body["exit_code"] == 0
     assert body["duration_ms"] == 42
     assert body["image_digest"] == "sha256:abc"
+    assert body["effective_limits"]["memory_bytes"] == 536870912
+    assert body["termination_reason"] == "completed"
     assert body["artifact_ids"] == []
     assert body["resource_usage"]["peak_memory_bytes"] == 2048
 

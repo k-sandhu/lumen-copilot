@@ -56,6 +56,15 @@ dependencies = [
     # imports it. Its transports are injected with an SSRF-guarded httpx client so
     # every outbound hop passes the connectors/web/fetch.py egress discipline.
     "mcp==1.12.4",
+    # Ops + LLM observability (ADR-0027, #817): the vendor-neutral OpenTelemetry
+    # SDK and its OTLP/HTTP exporter (traces → Arize Phoenix, metrics → Prometheus's
+    # OTLP receiver), plus the OpenInference attribute vocabulary Phoenix renders.
+    # All Apache-2.0. Imported ONLY by app/observability/ — the single owning module
+    # (ADR-0004 boundary row); no Phoenix/Arize SDK, the sink is reached over OTLP.
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "openinference-semantic-conventions==0.1.41",
 ]
 
 [project.optional-dependencies]

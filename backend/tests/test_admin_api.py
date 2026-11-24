@@ -750,6 +750,16 @@ _SANDBOX_KEYS = {
     "max_memory_mb_ceiling",
     "daily_runtime_cap_s_ceiling",
     "max_concurrency_ceiling",
+    "cpus",
+    "pids_limit",
+    "scratch_bytes",
+    "output_bytes_cap",
+    "limits_enabled",
+    "limit_sources",
+    "current_concurrency",
+    "daily_runtime_used_s",
+    "accounting_available",
+    "denial_reasons",
 }
 
 
@@ -811,13 +821,16 @@ async def test_patch_sandbox_policy_sets_and_reads_back(
     assert body["is_default"] is False
     assert body["allowed_packages"] == ["numpy"]
     assert body["max_runtime_s"] == 20
+    assert body["limit_sources"]["max_runtime_s"] == "tenant_override"
+    assert body["output_bytes_cap"] > 0
+    assert body["cpus"] > 0
     # The policy persists and reads back via GET (round-trip).
     got = await client.get("/api/v1/admin/sandbox-policy", headers=_auth(token))
     assert got.json()["enabled"] is True
     assert got.json()["allowed_packages"] == ["numpy"]
 
 
-async def test_patch_sandbox_policy_clamps_runtime_to_the_config_ceiling(
+async def test_patch_sandbox_policy_rejects_caps_above_the_config_ceiling(
     client: AsyncClient, seeded: _Seeded
 ) -> None:
     """AC-2 (#233): a per-tenant cap ABOVE the config ceiling is clamped down — never widened."""
@@ -830,12 +843,9 @@ async def test_patch_sandbox_policy_clamps_runtime_to_the_config_ceiling(
         headers=_auth(token),
         json=_sandbox_body(max_runtime_s=ceiling + 10_000, max_memory_mb=99_999),
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    # The stored/effective runtime is the ceiling, NOT the widened value.
-    assert body["max_runtime_s"] == ceiling
-    assert body["max_runtime_s"] <= body["max_runtime_s_ceiling"]
-    assert body["max_memory_mb"] <= body["max_memory_mb_ceiling"]
+    assert resp.status_code == 422, resp.text
+    got = await client.get("/api/v1/admin/sandbox-policy", headers=_auth(token))
+    assert got.json()["is_default"] is True
 
 
 async def test_patch_sandbox_policy_strips_metadata_ip_from_egress(

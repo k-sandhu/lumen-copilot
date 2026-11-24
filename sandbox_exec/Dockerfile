@@ -40,7 +40,8 @@ FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983
 # runner's `EnsureSessionRequest.env` allowlist accepts only HOME, PYTHONUNBUFFERED,
 # MPLBACKEND and LANG, and would reject it. It exists ONLY because it is baked here,
 # which is why the build-time cache warm-up below is load-bearing rather than an
-# optimisation.
+# optimisation for the writable-root posture. With bounded scratch, the runner
+# overrides MPLCONFIGDIR to a writable directory inside the workspace.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

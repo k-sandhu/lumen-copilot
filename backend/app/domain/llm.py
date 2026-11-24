@@ -38,6 +38,9 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: A gateway decode refusal, distinct from a valid empty argument object.
+    #: Invalid source text is discarded; the runner emits its own safe sentence.
+    argument_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +97,8 @@ class Completion:
     model: str
     finish_reason: str | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Internal provenance: strict data consumers must reject cleaned remnants.
+    content_filtered: bool = False
 
 
 @dataclass(frozen=True, slots=True)

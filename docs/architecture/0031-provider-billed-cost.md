@@ -63,3 +63,9 @@ Extraction is confined to the gateway and can change with provider shapes.
 The migration drops the two columns and checks on downgrade, losing their
 accounting history. Offline gateway, runtime, tenant-isolation, schema, and
 migration regression tests cover these semantics; no paid request is required.
+
+The integrated migration is `0054_billed_cost`, following
+`0053_message_finish_reason`. The disposable-PostgreSQL migration test verifies
+historical NULL/zero-count backfill, exact decimal/count read-back, rejection
+of negative values, billing-only downgrade with row preservation, re-upgrade,
+and full reversal to base before database teardown.

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.config import get_settings
 from app.domain.entities import CodeRunStatus
 from app.domain.tools import ERROR_BAD_ARGS, RiskTier, ToolHandlerResult
 from app.services.tools.types import SandboxRun, ToolContext, ToolDefinition
@@ -289,9 +290,9 @@ TOOLS: tuple[ToolDefinition, ...] = (
         # allow-list. Offered only via an assistant allow-list, and only when the
         # tenant/deploy enabled code execution (SANDBOX_ENABLED / the #233 enable).
         default_offered=False,
-        # ADR-0020 deliberately has no automatic execution timeout. Explicit
-        # cancellation/reset is the recovery path for an unbounded run.
-        timeout_seconds=None,
+        # The sandbox owns its tenant-narrowed deadline and teardown; this outer
+        # guard bounds a wedged transport after the default runner's cleanup grace.
+        timeout_seconds=float(get_settings().sandbox_wall_clock_seconds + 480),
     ),
 )
 

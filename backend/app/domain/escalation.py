@@ -24,6 +24,7 @@ and an escalation additionally notifies the owner (the service layer).
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from app.domain.entities import RunError, RunStatus
@@ -112,6 +113,67 @@ def should_escalate(error: RunError | None) -> bool:
     return normalize_reason(error.code) in ESCALATION_REASONS
 
 
+# --- Tool-failure classification (#578) --------------------------------------
+# A headless run whose stream ended ``done`` can still have failed at its job:
+# a tool call that was **denied or unavailable** (code execution refused, a
+# policy/approval denial, a tool with no registered adapter) means the
+# assistant could not do what it was configured to do, so the run is Failed
+# with this reason rather than a false Succeeded. Other tool errors — bad
+# arguments, a timeout, a transient handler error the model recovered from —
+# do not hard-fail the run; the failed calls stay visible in the transcript.
+# This is the single classification the success rule hangs on: reversing the
+# decision means changing :func:`is_denied_or_unavailable_tool_error` only.
+
+#: The ``error.code`` a run carries when a denied/unavailable tool fails it.
+TOOL_FAILURE_REASON: Final = "tool_failure"
+
+# The denied/unavailable codes the tool runner emits today (``domain.tools``
+# ``ERROR_*`` + the code-execution tool). Matched by meaning below as well, so
+# a synonym the runner grows later (``sandbox_unavailable``, ``*_disabled``)
+# fails closed instead of slipping through as a recoverable error.
+_DENIED_TOOL_ERRORS: Final[frozenset[str]] = frozenset(
+    {
+        "approval_denied",
+        "autonomy_denied",
+        "code_execution_denied",
+        "tool_not_found",
+        "tool_not_permitted",
+    }
+)
+_DENIED_TOOL_TOKENS: Final[frozenset[str]] = frozenset(
+    {"denied", "disabled", "forbidden", "unavailable"}
+)
+
+
+def is_denied_or_unavailable_tool_error(code: str | None) -> bool:
+    """True when a failed tool result's ``error`` code hard-fails the run (#578).
+
+    Denied/unavailable by meaning, not only by enumeration: an exact known
+    denial code, a ``*_not_permitted`` code, a missing-adapter code, or any
+    code carrying a denied/disabled/forbidden/unavailable token. A failed
+    tool result with **no** error code is unclassifiable, so it fails closed
+    (True) — the sink only calls this for ``ok=False`` results, where the
+    runner guarantees a code. Everything else (bad args, timeout, a generic
+    ``tool_error``) is recoverable and returns False.
+    """
+    if code is None or not code.strip():
+        return True
+    normalized = code.strip().lower()
+    # A transient provider outage is recoverable if the model completed via
+    # another route/tool. "Unavailable" here describes the dependency's health,
+    # rather than an absent adapter or a denied capability.
+    if normalized in _TRANSIENT_REASONS:
+        return False
+    if normalized in _DENIED_TOOL_ERRORS:
+        return True
+    if normalized == "not_permitted" or normalized.endswith("_not_permitted"):
+        return True
+    tokens = frozenset(t for t in re.split(r"[^a-z0-9]+", normalized) if t)
+    if tokens & _DENIED_TOOL_TOKENS:
+        return True
+    return "missing" in tokens and bool(tokens & {"adapter", "tool"})
+
+
 def classify_terminal(status: RunStatus, error: RunError | None) -> RunStatus:
     """Route a run's *provisional* terminal to its final status (E7-5).
 
@@ -132,7 +194,9 @@ __all__ = [
     "ESCALATION_REASONS",
     "ESCALATION_RESTRICTED_DATA",
     "ESCALATION_TOOL_FAILED",
+    "TOOL_FAILURE_REASON",
     "classify_terminal",
+    "is_denied_or_unavailable_tool_error",
     "is_transient",
     "normalize_reason",
     "should_escalate",

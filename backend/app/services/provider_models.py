@@ -37,9 +37,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.errors import ValidationError
 from app.db.repositories import AuditEventRepository, LlmProviderRepository
 from app.domain.audit import AuditActor
-from app.domain.entities import LlmProvider, Role
+from app.domain.entities import LlmProvider, LlmProviderStatus, Role
 from app.domain.models import ChatModel, ModelTier
 from app.services.audit import AuditSink
 from app.services.secrets_service import build_secrets_service
@@ -108,6 +109,19 @@ def parse_provider_model_id(model_id: str) -> tuple[UUID, str] | None:
     return provider_id, raw_model_id
 
 
+def is_routable(provider: LlmProvider) -> bool:
+    """The single routability predicate (spec 0029, issue #585).
+
+    Only an ENABLED provider whose required validation checks passed
+    (``status == ready``) surfaces in the picker and routes completions.
+    Providers grandfathered by migration 0050 keep ``status == ready`` (with
+    ``validation_grandfathered`` set for the Admin UI) until their next
+    validation, so existing setups do not silently disappear on deploy.
+    **To reverse the strict rule, change this one predicate.**
+    """
+    return provider.enabled and provider.status is LlmProviderStatus.READY
+
+
 def _raw_model_ids(provider: LlmProvider) -> set[str]:
     """The set of raw model ids in a provider's discovered snapshot."""
     ids: set[str] = set()
@@ -157,7 +171,7 @@ async def list_provider_models(
     """
     out: list[ChatModel] = []
     for provider in await providers.list_for_tenant():
-        if not provider.enabled:
+        if not is_routable(provider):
             continue
         out.extend(provider_model_infos(provider))
     return out
@@ -179,7 +193,7 @@ async def resolve_provider_model(
         return None
     provider_id, raw_model_id = parsed
     provider = await providers.get(provider_id)
-    if provider is None or not provider.enabled:
+    if provider is None or not is_routable(provider):
         return None
     if raw_model_id not in _raw_model_ids(provider):
         return None
@@ -249,17 +263,21 @@ def build_model_route_resolver(
     (INV-1 — tenant-scoped repository), confirms it is enabled + lists the raw id,
     then decrypts its API key ONCE via the vault (a ``secret.accessed`` audit
     records the read, never the value) and returns the RAW model id + that
-    provider's api_key/base_url. A config id — or a provider id that no longer
-    resolves (deleted/disabled since the send-time 422 check) — is a plain
-    passthrough with default credentials. The decrypted key rides the returned
+    provider's api_key/base_url. A config id is a plain passthrough. A provider
+    that no longer resolves is refused before any gateway call; default
+    credentials must never substitute for an unavailable provider. The key rides the returned
     :class:`ModelRoute` for this answer only.
     """
 
     async def _resolver(session: AsyncSession, model: str) -> ModelRoute:
+        if not is_provider_model_id(model):
+            return ModelRoute(model=model)
         providers = LlmProviderRepository(session, tenant_id)
         resolved = await resolve_provider_model(model, providers)
         if resolved is None:
-            return ModelRoute(model=model)
+            raise ValidationError(
+                "The selected provider model is unavailable.", code="model_not_allowed"
+            )
         api_key: str | None = None
         if resolved.api_key_secret_ref is not None:
             audit = AuditSink(AuditEventRepository(session, tenant_id))
@@ -289,6 +307,7 @@ __all__ = [
     "build_model_route_resolver",
     "is_allowed_provider_model",
     "is_provider_model_id",
+    "is_routable",
     "list_provider_models",
     "make_provider_model_id",
     "parse_provider_model_id",

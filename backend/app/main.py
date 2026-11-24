@@ -37,9 +37,12 @@ from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
 from app.ingestion.contract import provision_embedding_contract
 from app.llm import aclose_embedding_clients
+from app.observability import HttpMetricsMiddleware, configure_telemetry, shutdown_telemetry
 from app.realtime.chat_ws import router as chat_ws_router
 from app.realtime.health_ws import router as health_ws_router
+from app.sandbox.accounting import aclose_sandbox_accounting_pools
 from app.search import aclose_search_store
+from app.services.stream_registry import StreamRegistry
 from app.tasks.rate_limit import aclose_async_rate_limit_pools
 
 log = get_logger(__name__)
@@ -107,6 +110,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: Settings = app.state.settings
     log.info("startup.begin", environment=settings.environment, version=settings.version)
+    # Trace/metric export (ADR-0027) — a no-op unless TELEMETRY_ENABLED. Here,
+    # not in create_app, so building an app in a test never starts an exporter.
+    configure_telemetry(settings, process="api")
     try:
         await get_object_store().ensure_bucket()
         log.info("startup.bucket_ready", bucket=settings.s3_bucket)
@@ -122,6 +128,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     await _drain_answer_tasks(app, grace_seconds=settings.chat_shutdown_grace_seconds)
+    await aclose_sandbox_accounting_pools()
     # Retire only this serving loop's embedding clients after producers drain.
     await aclose_embedding_clients()
     # Release the shared retrieval-store HTTP client (ADR-0010). Created lazily
@@ -139,6 +146,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # instance, so the lifespan is what closes it.
     await aclose_async_rate_limit_pools()
     await dispose_engine()
+    # Last: drained answers above may still end spans that must be flushed.
+    shutdown_telemetry()
     log.info("shutdown.complete")
 
 
@@ -150,7 +159,7 @@ async def _drain_answer_tasks(app: FastAPI, *, grace_seconds: float) -> None:
     terminal envelope so cancellation stays contract-clean. On timeout we log and
     return so shutdown proceeds to engine disposal rather than blocking forever.
     """
-    tasks = list(app.state.answer_tasks)
+    tasks = app.state.stream_registry.tasks()
     if not tasks:
         return
     for task in tasks:
@@ -226,9 +235,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # on app.state alongside settings; initialised here (not only in the lifespan)
     # so it exists even for transports that skip the lifespan (e.g. tests driving
     # the ASGI app directly). The lifespan teardown drains it.
-    app.state.answer_tasks = set()
+    # Stream-keyed producer registry (#574): the cancel endpoint's address book.
+    app.state.stream_registry = StreamRegistry()
 
     app.add_middleware(CorrelationMiddleware)
+    # Outermost, so the request-duration metric covers correlation and handlers.
+    app.add_middleware(HttpMetricsMiddleware)
     _register_exception_handlers(app)
 
     # Unversioned health probes (contracts/openapi.yaml).

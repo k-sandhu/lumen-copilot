@@ -405,6 +405,13 @@ def _to_chat_session(row: models.ChatSession) -> ChatSessionEntity:
         updated_at=row.updated_at,
         assistant_id=row.assistant_id,
         assistant_version_id=row.assistant_version_id,
+        # The durable bound marker (#581); also derive it from a live pin so a row
+        # written before the marker existed still reads as bound.
+        assistant_bound=bool(
+            row.assistant_bound
+            or row.assistant_id is not None
+            or row.assistant_version_id is not None
+        ),
     )
 
 
@@ -456,6 +463,7 @@ def _to_message(row: models.Message) -> Message:
             if row.source_document_ids is not None
             else None
         ),
+        finish_reason=getattr(row, "finish_reason", None),
     )
 
 
@@ -564,6 +572,11 @@ def _to_llm_provider(row: models.LlmProvider) -> LlmProvider:
         discovered_models=list(row.discovered_models or []),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        validation_checks=list(row.validation_checks or []),
+        last_error_code=row.last_error_code,
+        validated_at=row.validated_at,
+        validation_grandfathered=row.validation_grandfathered,
+        validation_result=row.validation_result,
     )
 
 
@@ -802,6 +815,8 @@ def _to_code_run(row: models.CodeRun) -> CodeRun:
         started_at=row.started_at,
         finished_at=row.finished_at,
         created_at=row.created_at,
+        effective_limits=dict(row.effective_limits) if row.effective_limits else None,
+        termination_reason=row.termination_reason,
     )
 
 
@@ -2976,6 +2991,18 @@ class ArtifactRepository(_TenantScopedRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_artifact(r) for r in rows]
 
+    async def exists_with_storage_key(self, storage_key: str) -> bool:
+        """Whether any row in this tenant already references ``storage_key`` (#576).
+
+        The tool writer reads this after its answer transaction ends, preserving
+        bytes if a commit succeeded even when its acknowledgement was lost.
+        """
+        stmt = select(models.Artifact.id).where(
+            models.Artifact.tenant_id == self._tenant_id,
+            models.Artifact.storage_key == storage_key,
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def delete(self, artifact_id: UUID) -> bool:
         """Delete an artifact **row** (tenant-scoped); returns ``False`` if absent.
 
@@ -3726,6 +3753,9 @@ class ChatSessionRepository(_TenantScopedRepository):
             title=title,
             assistant_id=assistant_id,
             assistant_version_id=assistant_version_id,
+            # Set once, never cleared (#581): survives ON DELETE SET NULL so a
+            # governed session can fail closed if its assistant is deleted.
+            assistant_bound=assistant_id is not None or assistant_version_id is not None,
         )
         self._session.add(row)
         await self._session.flush()
@@ -4074,6 +4104,7 @@ class MessageRepository(_TenantScopedRepository):
         model: str | None = None,
         question: AskUserQuestion | None = None,
         source_document_ids: Sequence[UUID] | None = None,
+        finish_reason: str | None = None,
     ) -> Message:
         """Persist a message under a **pre-minted** id (the streamed answer path).
 
@@ -4098,6 +4129,7 @@ class MessageRepository(_TenantScopedRepository):
                 if source_document_ids is not None
                 else None
             ),
+            finish_reason=finish_reason,
         )
         self._session.add(row)
         await self._session.flush()
@@ -5607,15 +5639,21 @@ class LlmProviderRepository(_TenantScopedRepository):
         await self._session.refresh(row)
         return _to_llm_provider(row)
 
-    async def get(self, provider_id: UUID) -> LlmProvider | None:
-        row = await self._get_row(provider_id)
+    async def get(self, provider_id: UUID, *, for_update: bool = False) -> LlmProvider | None:
+        row = await self._get_row(provider_id, for_update=for_update)
         return _to_llm_provider(row) if row is not None else None
 
-    async def _get_row(self, provider_id: UUID) -> models.LlmProvider | None:
+    async def _get_row(
+        self, provider_id: UUID, *, for_update: bool = False
+    ) -> models.LlmProvider | None:
         stmt = select(models.LlmProvider).where(
             models.LlmProvider.tenant_id == self._tenant_id,
             models.LlmProvider.id == provider_id,
         )
+        if for_update:
+            # Hold through network probe + audit + commit. Configuration edits
+            # use the same lock, so stale evidence cannot mark a new key Ready.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_for_tenant(self) -> list[LlmProvider]:
@@ -5679,13 +5717,20 @@ class LlmProviderRepository(_TenantScopedRepository):
         discovered_models: list[dict[str, object]],
         last_error: str | None,
         last_discovery_at: datetime | None,
+        validation_checks: list[dict[str, object]] | None = None,
+        last_error_code: str | None = None,
+        validated_at: datetime | None = None,
+        validation_result: dict[str, object] | None = None,
     ) -> LlmProvider | None:
-        """Persist a discovery outcome: status + discovery timestamp + model snapshot.
+        """Persist a validation outcome: status + checks + model snapshot.
 
-        On a successful discovery the caller passes ``status=ready`` with the fresh
-        ``last_discovery_at`` + discovered models; on a failure ``status=error`` with
-        a safe ``last_error`` (the previous model snapshot is left in place by passing
-        it back). Tenant-scoped; ``None`` for a foreign id.
+        Discovery passes ``status=reachable`` on success (never ``ready`` — spec
+        0029) and ``status=error`` with a safe ``last_error``/``last_error_code``
+        on failure (previous snapshot left in place by passing it back);
+        test-connection passes ``status=ready`` when the required checks pass.
+        Any validation run clears the migration grandfather flag (the strict
+        rule applies from the next validation onward). Tenant-scoped; ``None``
+        for a foreign id.
         """
         row = await self._get_row(provider_id)
         if row is None:
@@ -5694,6 +5739,13 @@ class LlmProviderRepository(_TenantScopedRepository):
         row.last_discovery_at = last_discovery_at
         row.last_error = last_error
         row.discovered_models = discovered_models
+        if validation_checks is not None:
+            row.validation_checks = validation_checks
+        row.last_error_code = last_error_code
+        if validated_at is not None:
+            row.validated_at = validated_at
+        row.validation_grandfathered = False
+        row.validation_result = validation_result
         await self._session.flush()
         await self._session.refresh(row)
         return _to_llm_provider(row)
@@ -6286,6 +6338,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
         self,
         *,
         tool_name: str,
+        invocation_id: UUID | None = None,
         args_hash: str,
         ok: bool,
         duration_ms: int,
@@ -6303,6 +6356,7 @@ class ToolInvocationRepository(_TenantScopedRepository):
         an unbounded string into the trace.
         """
         row = models.ToolInvocation(
+            id=invocation_id or uuid4(),
             tenant_id=self._tenant_id,
             session_id=session_id,
             message_id=message_id,
@@ -6625,11 +6679,15 @@ class AssistantRepository(_TenantScopedRepository):
         await self._session.flush()
         return _to_assistant(row)
 
-    async def get(self, assistant_id: UUID) -> Assistant | None:
+    async def get(self, assistant_id: UUID, *, lock: bool = False) -> Assistant | None:
         stmt = select(models.Assistant).where(
             models.Assistant.tenant_id == self._tenant_id,
             models.Assistant.id == assistant_id,
         )
+        if lock:
+            # Validate a partial patch against the latest head, with the lock
+            # retained until the caller's transaction commits or rolls back.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_assistant(row) if row is not None else None
 
@@ -6831,6 +6889,17 @@ class AssistantVersionRepository(_TenantScopedRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_assistant_version(row) if row is not None else None
 
+    async def get_many(self, version_ids: list[UUID]) -> dict[UUID, AssistantVersion]:
+        """Versions by id in one query (tenant-scoped); missing ids are absent."""
+        if not version_ids:
+            return {}
+        stmt = select(models.AssistantVersion).where(
+            models.AssistantVersion.tenant_id == self._tenant_id,
+            models.AssistantVersion.id.in_(version_ids),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {v.id: v for v in (_to_assistant_version(r) for r in rows)}
+
     async def get_by_number(self, assistant_id: UUID, version: int) -> AssistantVersion | None:
         """The specific numbered version of an assistant (for rollback), tenant-scoped."""
         stmt = select(models.AssistantVersion).where(
@@ -6963,34 +7032,146 @@ class RunRepository(_TenantScopedRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
-    async def mark_running(self, run_id: UUID, *, started_at: datetime) -> Run | None:
-        """Transition a run to ``running`` and stamp ``started_at``, tenant-scoped."""
-        row = await self._get_row(run_id)
+    async def mark_running(
+        self,
+        run_id: UUID,
+        *,
+        started_at: datetime,
+        expected_started_at: datetime | None = None,
+    ) -> Run | None:
+        """Atomically claim a ``queued`` run: ``running`` + ``started_at`` (#578).
+
+        One ``UPDATE … WHERE status = 'queued'`` — a duplicate Celery delivery
+        racing the first loses the compare-and-set and gets ``None`` instead of
+        re-running the loop (no duplicate chat rows, steps, audit, or
+        deliveries). Tenant-scoped (INV-1): a foreign tenant claims nothing.
+        Match the observed queued timestamp too (NULL for a fresh execution):
+        a read paused across another attempt's retry must lose, rather than
+        claim using stale chat/start-event identity.
+        """
+        stmt = (
+            update(models.Run)
+            .where(
+                models.Run.tenant_id == self._tenant_id,
+                models.Run.id == run_id,
+                models.Run.status == RunStatus.QUEUED.value,
+                models.Run.started_at == expected_started_at,
+            )
+            .values(status=RunStatus.RUNNING.value, started_at=started_at)
+            .returning(models.Run)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
-        row.status = RunStatus.RUNNING.value
-        row.started_at = started_at
         await self._session.flush()
         return _to_run(row)
 
-    async def mark_queued(self, run_id: UUID) -> Run | None:
+    async def fail_stale_running(
+        self,
+        run_id: UUID,
+        *,
+        older_than: datetime,
+        finished_at: datetime,
+        error: RunError,
+    ) -> Run | None:
+        """Atomically fail an abandoned running attempt or queued retry handoff.
+
+        The stale-run reaper's exactly-once CAS (#578): one ``UPDATE … WHERE
+        active-claim predicate AND COALESCE(started_at, created_at) < older_than``.
+        Queued retries retain ``started_at``; never-claimed/owner-reset queued
+        rows have no claim timestamp and are excluded.
+        A run that reached a terminal concurrently — or one a racing reaper
+        already failed — loses the CAS and returns ``None``, untouched.
+        Tenant-scoped (INV-1).
+        """
+        stmt = (
+            update(models.Run)
+            .where(
+                models.Run.tenant_id == self._tenant_id,
+                models.Run.id == run_id,
+                or_(
+                    models.Run.status == RunStatus.RUNNING.value,
+                    and_(
+                        models.Run.status == RunStatus.QUEUED.value,
+                        models.Run.started_at.is_not(None),
+                    ),
+                ),
+                func.coalesce(models.Run.started_at, models.Run.created_at) < older_than,
+            )
+            .values(
+                status=RunStatus.FAILED.value,
+                finished_at=finished_at,
+                error=error.to_dict(),
+            )
+            .returning(models.Run)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        return _to_run(row)
+
+    async def get_status(self, run_id: UUID) -> RunStatus | None:
+        """Read the current status without an ORM identity-map snapshot."""
+        value = (
+            await self._session.execute(
+                select(models.Run.status).where(
+                    models.Run.tenant_id == self._tenant_id, models.Run.id == run_id
+                )
+            )
+        ).scalar_one_or_none()
+        return RunStatus(value) if value is not None else None
+
+    async def attach_session(self, run_id: UUID, session_id: UUID) -> None:
+        """Keep the claimed run's chat session for a transient retry."""
+        await self._session.execute(
+            update(models.Run)
+            .where(
+                models.Run.tenant_id == self._tenant_id,
+                models.Run.id == run_id,
+                models.Run.status == RunStatus.RUNNING.value,
+            )
+            .values(session_id=session_id)
+        )
+
+    async def mark_queued(
+        self,
+        run_id: UUID,
+        *,
+        expected_status: RunStatus | None = None,
+        preserve_claim: bool = False,
+        expected_started_at: datetime | None = None,
+    ) -> Run | None:
         """Reset a run to ``queued`` for a re-drive (transient retry / human resume/reroute).
 
         Tenant-scoped. Clears the prior terminal so a re-delivered run task claims it
         again (``execute_run`` only runs a ``queued`` run). Clears ``finished_at`` +
-        ``error`` (this attempt is superseded); ``started_at`` is stamped fresh on the
-        next ``mark_running``. Used by the transient-retry fold and by the escalation
-        resume/reroute handoff (#239) so an escalated run is re-driven, not stuck.
+        ``error``. Transient retry sets ``preserve_claim`` to retain ``started_at``:
+        this identifies a previously claimed queued handoff for recovery/reaping
+        and distinguishes it from a new execution. Owner resume/reroute clears
+        the timestamp. The next ``mark_running`` stamps a fresh attempt lease.
         """
-        row = await self._get_row(run_id)
-        if row is None:
-            return None
-        row.status = RunStatus.QUEUED.value
-        row.started_at = None
-        row.finished_at = None
-        row.error = None
-        await self._session.flush()
-        return _to_run(row)
+        conditions = [models.Run.tenant_id == self._tenant_id, models.Run.id == run_id]
+        if expected_status is not None:
+            conditions.append(models.Run.status == expected_status.value)
+        if expected_started_at is not None:
+            conditions.append(models.Run.started_at == expected_started_at)
+        values: dict[str, object] = {
+            "status": RunStatus.QUEUED.value,
+            "finished_at": None,
+            "error": None,
+        }
+        if not preserve_claim:
+            values["started_at"] = None
+        stmt = (
+            update(models.Run)
+            .where(*conditions)
+            .values(**values)
+            .returning(models.Run)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_run(row) if row is not None else None
 
     async def reassign_owner(self, run_id: UUID, *, owner_id: UUID) -> Run | None:
         """Reassign a run to a different owner (the escalation *reroute* handoff, #239).
@@ -7018,6 +7199,8 @@ class RunRepository(_TenantScopedRepository):
         message_id: UUID | None = None,
         session_id: UUID | None = None,
         error: RunError | None = None,
+        expected_status: RunStatus | None = None,
+        expected_started_at: datetime | None = None,
     ) -> Run | None:
         """Write a run's terminal status + outputs (ADR-0015 §5), tenant-scoped.
 
@@ -7025,21 +7208,37 @@ class RunRepository(_TenantScopedRepository):
         ``escalated``, ``finished_at``, and any produced ``summary``/``message_id``/
         ``session_id``/``error``. A crash path calls this with ``failed`` + a typed
         error so a run never ends in silence (INV-8, never a stuck ``running``).
+        Execution supplies ``expected_status=RUNNING``: the atomic predicate
+        prevents a late worker or crash handler overwriting a winning terminal.
+        Retry handoff recovery also matches ``expected_started_at`` so an old
+        failed publication cannot fail a subsequent queued attempt.
+        Explicit owner controls retain their existing transition semantics.
         """
-        row = await self._get_row(run_id)
-        if row is None:
-            return None
-        row.status = status.value
-        row.finished_at = finished_at
+        conditions = [models.Run.tenant_id == self._tenant_id, models.Run.id == run_id]
+        if expected_status is not None:
+            conditions.append(models.Run.status == expected_status.value)
+        if expected_started_at is not None:
+            conditions.append(models.Run.started_at == expected_started_at)
+        values: dict[str, object] = {
+            "status": status.value,
+            "finished_at": finished_at,
+            "error": error.to_dict() if error is not None else None,
+        }
         if summary is not None:
-            row.summary = summary
+            values["summary"] = summary
         if message_id is not None:
-            row.message_id = message_id
+            values["message_id"] = message_id
         if session_id is not None:
-            row.session_id = session_id
-        row.error = error.to_dict() if error is not None else None
-        await self._session.flush()
-        return _to_run(row)
+            values["session_id"] = session_id
+        stmt = (
+            update(models.Run)
+            .where(*conditions)
+            .values(**values)
+            .returning(models.Run)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_run(row) if row is not None else None
 
     async def _get_row(self, run_id: UUID) -> models.Run | None:
         stmt = select(models.Run).where(
@@ -7315,6 +7514,43 @@ class RunDeliveryRepository(_TenantScopedRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_run_delivery(r) for r in rows]
+
+
+class RunReconcileRepository:
+    """Cross-tenant read of abandoned claims — the stale-run reaper ONLY.
+
+    **Not** tenant-scoped (it is the one run read that spans tenants), mirroring
+    :class:`RunDeliveryReconcileRepository`: the periodic reaper Beat must find
+    running attempts and queued retry handoffs abandoned by a dead worker so it
+    can fail each *as* its tenant (``tenant_session_scope`` +
+    the :meth:`RunRepository.fail_stale_running`
+    CAS, which re-checks staleness atomically). It runs under a **bypass**-scoped
+    session (``bind_bypass``) — a deliberate, system-only path, never a request
+    path (requests are always tenant-scoped, INV-1). Read-only.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_stale_running(self, *, older_than: datetime, limit: int) -> list[Run]:
+        """Stale running attempts or claimed queued handoffs, oldest first."""
+        stmt = (
+            select(models.Run)
+            .where(
+                or_(
+                    models.Run.status == RunStatus.RUNNING.value,
+                    and_(
+                        models.Run.status == RunStatus.QUEUED.value,
+                        models.Run.started_at.is_not(None),
+                    ),
+                ),
+                func.coalesce(models.Run.started_at, models.Run.created_at) < older_than,
+            )
+            .order_by(models.Run.created_at.asc(), models.Run.id.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_run(r) for r in rows]
 
 
 class RunDeliveryReconcileRepository:
@@ -7893,12 +8129,15 @@ class CodeRunRepository(_TenantScopedRepository):
         image_digest: str | None = None,
         sandbox_session_id: UUID | None = None,
         sandbox_generation: int | None = None,
+        effective_limits: dict[str, object] | None = None,
     ) -> CodeRun | None:
         """Atomically transition ``queued`` to ``running``; otherwise return current."""
         values: dict[str, object] = {
             "status": CodeRunStatus.RUNNING.value,
             "started_at": started_at,
         }
+        if effective_limits is not None:
+            values["effective_limits"] = effective_limits
         if image_digest is not None:
             values["image_digest"] = image_digest
         if sandbox_session_id is not None:
@@ -7935,6 +8174,8 @@ class CodeRunRepository(_TenantScopedRepository):
         image_digest: str | None = None,
         artifact_ids: list[UUID] | None = None,
         resolved_packages: tuple[dict[str, str], ...] | None = None,
+        effective_limits: dict[str, object] | None = None,
+        termination_reason: str | None = None,
     ) -> CodeRun | None:
         """Write a run's terminal status + captured result (ADR-0013 §4/§5), tenant-scoped.
 
@@ -7957,6 +8198,10 @@ class CodeRunRepository(_TenantScopedRepository):
             "resource_usage": resource_usage.to_dict() if resource_usage is not None else None,
             "artifact_ids": [str(a) for a in (artifact_ids or [])],
         }
+        if effective_limits is not None:
+            values["effective_limits"] = effective_limits
+        if termination_reason is not None:
+            values["termination_reason"] = termination_reason
         if image_digest is not None:
             values["image_digest"] = image_digest
         if resolved_packages is not None:
@@ -8445,6 +8690,7 @@ class SessionSummaryRepository(_TenantScopedRepository):
         covers_through_message_id: UUID,
         covered_created_at: datetime,
         mentioned_documents: dict[UUID, str] | None = None,
+        replace_invalid_version: int | None = None,
     ) -> tuple[bool, SessionSummary | None]:
         """Advance the rolling summary; returns ``(accepted, row)``.
 
@@ -8456,6 +8702,10 @@ class SessionSummaryRepository(_TenantScopedRepository):
         a DIFFERENT boundary id are allowed (second-resolution timestamps);
         the id inequality keeps an identical rewrite idempotent. The summary
         text and the mention map are size-capped here (the write chokepoint).
+
+        An invalid stored summary may rebuild from the first canonical batch.
+        That replacement requires the observed version, instead of advancing
+        an untrusted cursor. A racing valid summary wins. Evidence is untouched.
         """
         text_value = summary[:_SUMMARY_MAX_CHARS]
         mentioned_payload = {
@@ -8482,18 +8732,25 @@ class SessionSummaryRepository(_TenantScopedRepository):
                 "version": models.SessionSummary.version + 1,
             },
             where=(
-                models.SessionSummary.covers_through_created_at.is_(None)
-                | (models.SessionSummary.covers_through_created_at < covered_created_at)
-                | (
-                    (models.SessionSummary.covers_through_created_at == covered_created_at)
-                    # ORDERED tie-break (#446 round-2 blocker 3): within one
-                    # second, coverage may only advance toward the LARGER
-                    # boundary id — an arbitrary but STABLE total order, so a
-                    # stale A can never be re-accepted after B (the A->B->A
-                    # probe). A same-second boundary with a smaller id waits
-                    # for the next pass (a strictly-newer timestamp) — progress
-                    # converges, regression cannot happen.
-                    & (models.SessionSummary.covers_through_message_id < covers_through_message_id)
+                (models.SessionSummary.version == replace_invalid_version)
+                if replace_invalid_version is not None
+                else (
+                    models.SessionSummary.covers_through_created_at.is_(None)
+                    | (models.SessionSummary.covers_through_created_at < covered_created_at)
+                    | (
+                        (models.SessionSummary.covers_through_created_at == covered_created_at)
+                        # ORDERED tie-break (#446 round-2 blocker 3): within one
+                        # second, coverage may only advance toward the LARGER
+                        # boundary id — an arbitrary but STABLE total order, so a
+                        # stale A can never be re-accepted after B (the A->B->A
+                        # probe). A same-second boundary with a smaller id waits
+                        # for the next pass (a strictly-newer timestamp) — progress
+                        # converges, regression cannot happen.
+                        & (
+                            models.SessionSummary.covers_through_message_id
+                            < covers_through_message_id
+                        )
+                    )
                 )
             ),
         )

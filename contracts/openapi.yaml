@@ -846,6 +846,43 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
 
+  /chat/streams/{streamId}/cancel:
+    parameters:
+      - name: streamId
+        in: path
+        required: true
+        schema: { type: string, minLength: 1 }
+        description: The `stream_id` returned by `sendMessage` (202).
+    post:
+      operationId: cancelChatStream
+      summary: Cancel an in-flight chat answer stream (Stop).
+      description: >
+        Owner-checked, idempotent cancellation of the answer producer for
+        `streamId` (#574, spec 0028). The stream must belong to the caller
+        (same binding the WS consumer checks): an unknown id and a
+        foreign/cross-tenant id both return 404 (existence non-disclosure,
+        INV-1/INV-2). A 200 response waits for producer cleanup and the
+        terminal event. It cancels in-flight provider/tool awaits, persists only
+        the answer text already streamed
+        (marked `finish_reason=cancelled`), emits exactly one `cancelled`
+        WS terminal, and writes exactly one `answer.cancelled` audit event.
+        Repeated calls are safe: a second cancel, or a cancel after the
+        stream already completed, is a no-op returning
+        `status=already_completed`. A cancelled stream returns `status=cancelled`
+        on repeated calls. A cleanup timeout returns 503 without claiming Stop
+        succeeded; clients retain the partial and may retry.
+        A plain WebSocket disconnect never cancels; only this endpoint does.
+      tags: [chat]
+      responses:
+        "200":
+          description: Producer settled as cancelled, or the stream had already completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CancelStreamResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
   # --- Model picker ----------------------------------------------------------
   /models:
     get:
@@ -1379,10 +1416,10 @@ paths:
       summary: The per-tenant code-execution sandbox policy (admin only).
       description: >
         The caller's tenant's sandbox policy: whether code execution is `enabled` and
-        the enforced package allow/deny lists. ADR-0020 reusable sessions are always
-        offline and currently apply no automatic runtime/resource/quota ceilings. The
-        egress and cap fields remain compatibility-only values for older clients and
-        are not enforced by reusable sessions. Absence of a
+        the enforced package allow/deny lists and effective resource ceilings under
+        ADR-0029 (Proposed). Model code is always offline; egress fields remain
+        compatibility-only. Current usage includes active runtime reservations;
+        unavailable accounting fails closed. Absence of a
         stored policy is deny-by-default — code execution stays DISABLED for the tenant
         (matching the deploy-wide kill-switch). Restricted to the `admin` role; any
         other role receives **403** (INV-5). Tenant-scoped (INV-1).
@@ -3075,9 +3112,10 @@ paths:
       summary: The tenant's registered LLM providers + discovered models (admin only).
       description: >
         The caller's tenant's registered LLM providers, each with its discovered
-        models and discovery/health `status`. Restricted to the `admin` role; any
-        other role receives **403** (INV-5). Tenant-scoped (INV-1). The stored API key
-        is **never** returned — only a masked `secret_hint`.
+        models and evidence-based validation `status` (spec 0029). Restricted to the
+        `admin` role; any other role receives **403** (INV-5). Tenant-scoped (INV-1).
+        The stored API key is **never** returned or echoed — only `has_api_key`
+        (presence) is exposed.
       tags: [admin]
       responses:
         "200":
@@ -3097,9 +3135,12 @@ paths:
         otherwise, INV-5); tenant-scoped (INV-1); audited (INV-6). The `api_key` is
         write-only — stored envelope-encrypted via CC-C, never returned. An
         unsupported `provider_type`, or an invalid / non-https / SSRF-blocked
-        `base_url`, is **422** (INV-8). A reachable provider returns `status: ready`
-        with `discovered_models`; a bad key/url returns `status: error` + `last_error`
-        (never a 500).
+        `base_url`, is **422** (INV-8; the blocked-URL detail is generic and never
+        carries a resolved address). Discovery alone yields at most `status:
+        reachable` (catalog discovered, authentication unverified — a public model
+        list never implies key validity); `status: ready` requires the explicit
+        test-connection action. A failed discovery returns `status: error` + a safe
+        `last_error` / `last_error_code` (never a 500, never raw vendor text).
       tags: [admin]
       requestBody:
         required: true
@@ -3130,8 +3171,9 @@ paths:
         Update a registered LLM provider (rename, retarget `base_url`, toggle
         `enabled`, or rotate/clear the `api_key`). Changing `base_url` re-runs the
         https + SSRF validation (else **422**) and re-runs model discovery; rotating
-        the key likewise re-discovers. The key value is never returned — only the
-        updated masked `secret_hint`. `admin`-only (**403** otherwise, INV-5);
+        the key likewise re-discovers. Re-discovery re-validates from evidence (at
+        most `reachable` until test-connection passes). The key value is never
+        returned or echoed — only `has_api_key` (presence). `admin`-only (**403** otherwise, INV-5);
         tenant-scoped (INV-1) — a cross-tenant id is **404** (never 403). Audited
         (INV-6).
       tags: [admin]
@@ -3176,10 +3218,12 @@ paths:
       summary: Re-run model discovery for a provider (admin only).
       description: >
         Re-run model discovery for the provider via `GET {base_url}/models`, resolving
-        the API key in-process from the CC-C vault. On success `status: ready` with a
-        fresh `discovered_models`; on failure `status: error` + a safe `last_error`
-        (previous snapshot preserved). Both outcomes return **200** — the result is in
-        `status` / `last_error`, not the HTTP code. `admin`-only (**403** otherwise,
+        the API key in-process from the CC-C vault. On success `status: reachable`
+        with a fresh `discovered_models` (authentication stays unverified until
+        test-connection — a public model list never implies key validity); on failure
+        `status: error` + a safe `last_error` / `last_error_code` (previous snapshot
+        preserved). Both outcomes return **200** — the result is in `status` /
+        `last_error_code`, not the HTTP code. `admin`-only (**403** otherwise,
         INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**. Audited (INV-6).
       tags: [admin]
       responses:
@@ -3191,6 +3235,46 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/llm-providers/{providerId}/test-connection:
+    parameters:
+      - name: providerId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: The LLM provider id.
+    post:
+      operationId: testLlmProviderConnection
+      summary: Test a provider connection with one minimal bounded request (admin only).
+      description: >
+        Send ONE minimal chat request (`max_tokens: 1`) to the admin-selected
+        discovered `model`, resolving the API key in-process from the CC-C vault.
+        **Cost:** this is a real upstream request; the provider may bill for it
+        (bounded to a single output token). On success the provider's required
+        checks pass (configuration, reachability, catalog, authentication, chat
+        capability) and `status` becomes `ready` — the only path to `ready`. On
+        failure `status` becomes `error` with a stable safe `last_error_code`.
+        Both outcomes return **200** with a `ProviderValidationResult` (stage,
+        code, retryability, correlation id) — raw vendor/network text never
+        reaches the client. An unknown `model` is **422**. `admin`-only (**403**
+        otherwise, INV-5); tenant-scoped (INV-1) — a cross-tenant id is **404**.
+        Audited (INV-6).
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderTestConnectionRequest" }
+      responses:
+        "200":
+          description: The test completed; the updated provider + validation result are returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderTestConnectionResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
 components:
   parameters:
@@ -3891,6 +3975,58 @@ components:
         title: { type: string, maxLength: 200 }
         model: { type: string }
 
+    EffectiveKnowledgeScopeAdjustable:
+      type: object
+      additionalProperties: false
+      description: >
+        Per-field user adjustability of an `EffectiveKnowledgeScope` (#581).
+        All false in this change: a chat user can neither narrow nor widen the
+        pinned assistant version's scope per session or per turn, and the UI
+        must not present controls implying otherwise. Reversing this decision
+        means flipping these flags (and adding the narrowing request surface).
+      required: [modes, collection_ids, source_ids]
+      properties:
+        modes: { type: boolean, enum: [false] }
+        collection_ids: { type: boolean, enum: [false] }
+        source_ids: { type: boolean, enum: [false] }
+
+    EffectiveKnowledgeScope:
+      type: object
+      additionalProperties: false
+      description: >
+        The server-authoritative knowledge scope governing an
+        assistant-bound chat session (#581), resolved from the session's
+        PINNED assistant version — never from the assistant's mutable head
+        and never from client state. Returned on create/read/list session
+        responses so the scope survives reload and reopening from history.
+        Effective-modes rule: if the version's `knowledgeScope.modes` is
+        EMPTY (legacy), the effective modes are `company` + `uploaded`,
+        plus `web` when `web_search` is in the version's tool allowlist; if
+        non-empty it is authoritative. The `model` mode is never honoured
+        (answers are always grounded) and never appears in `modes`. The
+        scope can only narrow what the requesting user may already retrieve
+        (INV-2 still applies inside retrieval). Absent/null on `ChatSession`
+        for an ad-hoc (non-assistant) chat. A foreign session yields the
+        same 404 as a missing one, so no scope ever leaks cross-tenant or
+        cross-user (INV-1/INV-2).
+      required: [assistant_id, assistant_version_id, modes, collection_ids, source_ids, adjustable]
+      properties:
+        assistant_id: { type: string, format: uuid }
+        assistant_version_id: { type: string, format: uuid }
+        modes:
+          type: array
+          items: { $ref: "#/components/schemas/KnowledgeMode" }
+          description: Effective source classes (canonical order; never contains `model`).
+        collection_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Collection narrowing from the pinned version (empty ⇒ no collection narrowing).
+        source_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Connected-source narrowing from the pinned version.
+        adjustable: { $ref: "#/components/schemas/EffectiveKnowledgeScopeAdjustable" }
+
     ChatSession:
       type: object
       additionalProperties: false
@@ -3903,6 +4039,13 @@ components:
         message_count: { type: integer, minimum: 0 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        effective_scope:
+          oneOf:
+            - { $ref: "#/components/schemas/EffectiveKnowledgeScope" }
+            - { type: "null" }
+          description: >
+            The pinned assistant version's effective knowledge scope for an
+            assistant-bound session (#581); null for an ad-hoc chat.
 
     ChatSessionList:
       type: object
@@ -4061,6 +4204,12 @@ components:
             Governed tool calls behind an assistant message, oldest first
             (empty for user messages) (#377).
           items: { $ref: "#/components/schemas/MessageToolInvocation" }
+        finish_reason:
+          type: [string, "null"]
+          description: >
+            How an assistant turn ended (#574): `cancelled` for a partial
+            answer the user stopped (rendered with a stopped marker after
+            reload); absent/null for ordinary completed turns and legacy rows.
         question:
           $ref: "#/components/schemas/AskUserQuestion"
           description: >
@@ -4230,6 +4379,26 @@ components:
         stream_id:
           type: string
           description: Subscribe to this WebSocket stream id for the assistant answer.
+
+    CancelStreamResponse:
+      type: object
+      additionalProperties: false
+      required: [stream_id, status, terminal]
+      properties:
+        stream_id: { type: string }
+        terminal:
+          $ref: "./websocket-envelopes.schema.json"
+          description: >
+            The settled done, error or cancelled envelope from bounded replay.
+            Clients reconcile this acknowledgement if the socket dropped before
+            delivering the terminal. The WebSocket schema owns the exact shape.
+        status:
+          type: string
+          enum: [cancelled, already_completed]
+          description: >
+            `cancelled` - producer cleanup and the cancelled terminal completed;
+            `already_completed` - the stream had already settled, so the
+            cancel was a no-op.
 
     # --- Models -------------------------------------------------------------
     ModelTier:
@@ -4415,6 +4584,7 @@ components:
         - action.executed
         - action.requested
         - answer.generated
+        - answer.cancelled
         - artifact.created
         - artifact.deleted
         - artifact.downloaded
@@ -4456,6 +4626,7 @@ components:
         - llm_provider.created
         - llm_provider.deleted
         - llm_provider.discovered
+        - llm_provider.connection_tested
         - llm_provider.updated
         - mcp_server.deleted
         - mcp_server.registered
@@ -4942,15 +5113,15 @@ components:
             Whether an invocation still needs approval. Set `false` (with `enabled`
             true) to pre-approve a write-tier tool so the approval gate executes it.
 
-    # --- Sandbox governance policy (ADR-0020 enablement/packages + legacy fields) --
+    # --- Sandbox governance policy (ADR-0029 bounded sessions) --
     SandboxPolicy:
       type: object
       additionalProperties: false
       description: >
         The per-tenant code-execution sandbox policy. `enabled` is deny-by-default
         — a tenant with no stored policy has code execution DISABLED (and every value
-        is the config ceiling). ADR-0020 enforces enablement and package policy; egress
-        and cap fields remain compatibility-only and are not enforced for reusable sessions.
+        is the config ceiling). ADR-0029 (Proposed) enforces deployment ceilings narrowed by tenant policy.
+        Egress fields remain compatibility-only; model code is always offline.
       required:
         [
           enabled,
@@ -4967,6 +5138,8 @@ components:
           max_memory_mb_ceiling,
           daily_runtime_cap_s_ceiling,
           max_concurrency_ceiling,
+          cpus, pids_limit, output_bytes_cap, scratch_bytes, limits_enabled,
+          limit_sources, current_concurrency, daily_runtime_used_s, accounting_available, denial_reasons,
         ]
       properties:
         enabled:
@@ -5000,23 +5173,19 @@ components:
         max_runtime_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions have no automatic timeout.
+          description: Enforced per-execution deadline in seconds.
         max_memory_mb:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions have no memory cap.
+          description: Enforced session memory ceiling in MiB.
         daily_runtime_cap_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions have no daily runtime cap.
+          description: UTC-day runtime allowance; includes reservations for active runs.
         max_concurrency:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only value; reusable sessions do not enforce this quota.
+          description: Atomic tenant execution-lease cap.
         is_default:
           type: boolean
           description: >
@@ -5038,14 +5207,36 @@ components:
           type: integer
           minimum: 1
           description: The deploy-wide concurrency cap a per-tenant value cannot exceed.
+        cpus: { type: [number, "null"], exclusiveMinimum: 0 }
+        pids_limit: { type: [integer, "null"], minimum: 1 }
+        output_bytes_cap: { type: integer, minimum: 1 }
+        scratch_bytes: { type: [integer, "null"], minimum: 1 }
+        limits_enabled:
+          type: boolean
+          description: Whether container bounds are enabled; wall clock, output and quotas always apply.
+        limit_sources:
+          type: object
+          additionalProperties: { type: string, enum: [deployment_default, tenant_override] }
+          description: Source of each effective cap (policy field names).
+        current_concurrency: { type: [integer, "null"], minimum: 0 }
+        daily_runtime_used_s:
+          type: [integer, "null"]
+          minimum: 0
+          description: Accounted seconds including active reservations, reset at UTC midnight.
+        accounting_available:
+          type: boolean
+          description: False means usage is unknown and new executions fail closed.
+        denial_reasons:
+          type: array
+          items: { type: string }
+          description: Current admission constraints; authoritative admission is atomic.
 
     SandboxPolicyUpdate:
       type: object
       additionalProperties: false
       description: >
-        Set per-tenant enablement and package policy. All legacy fields remain required
-        for wire compatibility but ADR-0020 does not enforce egress or cap values. An
-        out-of-range compatibility value is still **422** (INV-8).
+        Set per-tenant enablement, packages and narrowing limits. Non-positive or
+        above-deployment-ceiling limits return **422** (INV-8). Egress remains offline.
       required:
         [
           enabled,
@@ -5083,23 +5274,19 @@ components:
         max_runtime_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only; no automatic timeout is enforced.
+          description: Enforced per-execution deadline in seconds.
         max_memory_mb:
           type: integer
-          minimum: 1
-          deprecated: true
-          description: Compatibility-only; no memory cap is enforced.
+          minimum: 6
+          description: Enforced session memory ceiling in MiB.
         daily_runtime_cap_s:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only; no daily runtime cap is enforced.
+          description: UTC-day runtime allowance; includes reservations for active runs.
         max_concurrency:
           type: integer
           minimum: 1
-          deprecated: true
-          description: Compatibility-only; no tenant concurrency quota is enforced.
+          description: Atomic tenant execution-lease cap.
 
     # --- Assistant autonomy cap (per-tenant ceiling, #218) ------------------
     AutonomyPolicy:
@@ -6276,6 +6463,23 @@ components:
         last_used_at: { type: [string, "null"], format: date-time }
         closed_at: { type: [string, "null"], format: date-time }
 
+    SandboxEffectiveLimits:
+      type: object
+      additionalProperties: false
+      required: [cpus, memory_bytes, pids_limit, wall_clock_seconds, scratch_bytes, output_bytes_cap, max_concurrency, daily_runtime_cap_s, sources]
+      properties:
+        cpus: { type: [number, "null"], exclusiveMinimum: 0 }
+        memory_bytes: { type: [integer, "null"], minimum: 1 }
+        pids_limit: { type: [integer, "null"], minimum: 1 }
+        wall_clock_seconds: { type: integer, minimum: 1 }
+        scratch_bytes: { type: [integer, "null"], minimum: 1 }
+        output_bytes_cap: { type: integer, minimum: 1 }
+        max_concurrency: { type: integer, minimum: 1 }
+        daily_runtime_cap_s: { type: integer, minimum: 1 }
+        sources:
+          type: object
+          additionalProperties: { type: string, enum: [deployment_default, tenant_override] }
+
     CodeRun:
       type: object
       additionalProperties: false
@@ -6329,6 +6533,14 @@ components:
             - { $ref: "#/components/schemas/ResourceUsage" }
             - { type: "null" }
           description: Measured resource consumption; null until the run finishes.
+        effective_limits:
+          oneOf:
+            - { $ref: "#/components/schemas/SandboxEffectiveLimits" }
+            - { type: "null" }
+          description: Immutable admitted caps and sources; null for historical or queued runs.
+        termination_reason:
+          type: [string, "null"]
+          description: completed, cancelled, a sandbox_limit_* code, or typed admission/runner failure.
         artifact_ids:
           type: array
           description: >
@@ -6898,10 +7110,92 @@ components:
     LlmProviderStatus:
       type: string
       description: >
-        Model-discovery state from the last probe. `pending` before the first
-        discovery, `ready` after a successful `GET /models` snapshot, `error` when
-        the last discovery failed (see `last_error`).
-      enum: [pending, ready, error]
+        Evidence-based validation state (spec 0029). `pending` before the first
+        probe, `reachable` when the model catalog was discovered but
+        authentication/capabilities are unverified, `ready` only when the
+        required checks passed via test-connection, `error` when the last probe
+        failed (see `last_error_code`). Only `ready` providers are routable;
+        pre-existing `ready` rows grandfathered by migration 0050 carry
+        `validation_grandfathered: true` until their next validation.
+      enum: [pending, reachable, ready, error]
+
+    ProviderValidationCheckName:
+      type: string
+      description: One independent provider validation check (spec 0029).
+      enum: [config_valid, reachable, catalog_discovered, auth_verified, capabilities_verified]
+
+    ProviderValidationCheckStatus:
+      type: string
+      enum: [passed, failed, unverified, not_applicable]
+
+    ProviderValidationCode:
+      type: [string, "null"]
+      enum: [blocked_address, dns_failed, timeout, connection_failed, unauthorized, forbidden, not_found, rate_limited, provider_error, unexpected_status, invalid_response, response_too_large, validation_failed, null]
+
+    ProviderValidationCheck:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name: { $ref: "#/components/schemas/ProviderValidationCheckName" }
+        status: { $ref: "#/components/schemas/ProviderValidationCheckStatus" }
+        code:
+          $ref: "#/components/schemas/ProviderValidationCode"
+
+    ProviderValidationResult:
+      type: object
+      additionalProperties: false
+      description: >
+        The outcome of one validation run (discovery or test-connection).
+        `code` is a stable safe code (e.g. `unauthorized`, `timeout`,
+        `dns_failed`, `blocked_address`, `rate_limited`, `provider_error`,
+        `invalid_response`); `correlation_id` joins the result to redacted
+        operator logs. No field ever carries a secret, exception text, a
+        resolved IP, a stack trace, or an external documentation link.
+      required: [status, checks, retryable, correlation_id]
+      properties:
+        status: { $ref: "#/components/schemas/LlmProviderStatus" }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderValidationCheck" }
+        stage:
+          type: [string, "null"]
+          enum: [config, discovery, connection_test, null]
+          description: The stage that failed, or null on success.
+        code:
+          $ref: "#/components/schemas/ProviderValidationCode"
+        retryable:
+          type: boolean
+          description: Whether retrying without a config change could succeed.
+        correlation_id:
+          type: string
+          description: The request correlation id for operator diagnostics.
+        tested_model:
+          type: [string, "null"]
+          description: The model used by test-connection, when one ran.
+        validated_at:
+          type: [string, "null"]
+          format: date-time
+          description: When this validation completed.
+
+    ProviderTestConnectionRequest:
+      type: object
+      additionalProperties: false
+      required: [model]
+      properties:
+        model:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: A discovered model id to send the one bounded test request to.
+
+    ProviderTestConnectionResponse:
+      type: object
+      additionalProperties: false
+      required: [provider, validation]
+      properties:
+        provider: { $ref: "#/components/schemas/LlmProvider" }
+        validation: { $ref: "#/components/schemas/ProviderValidationResult" }
 
     LlmProviderModel:
       type: object
@@ -6921,11 +7215,12 @@ components:
       additionalProperties: false
       description: >
         One registered per-tenant LLM provider, tenant- and owner-scoped (spec 0004
-        INV-1/INV-2). The response **never** includes the stored API-key value — only
-        a masked `secret_hint`. `discovered_models` is the last successful `GET
-        /models` snapshot. Foundation PR: this catalog is not yet wired into the chat
-        model picker or completion routing (a follow-up PR).
-      required: [id, name, provider_type, base_url, enabled, status, discovered_models, owner_id, created_at, updated_at]
+        INV-1/INV-2). The response **never** includes the stored API-key value or any
+        fragment of it — only `has_api_key` (presence). `discovered_models` is the
+        last successful `GET /models` snapshot. `last_error` is a fixed safe message
+        keyed by `last_error_code` — never raw vendor/network text. Only `ready`
+        providers surface in the chat model picker and route completions (spec 0029).
+      required: [id, name, provider_type, base_url, enabled, status, discovered_models, has_api_key, validation_checks, validation_grandfathered, owner_id, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, minLength: 1, maxLength: 200, description: Display name. }
@@ -6944,18 +7239,37 @@ components:
           description: When the last successful model discovery finished (null before the first success).
         last_error:
           type: [string, "null"]
-          description: Safe failure reason when status is error (never contains the API key).
+          description: Fixed safe failure message for `last_error_code` (never raw vendor text, a resolved IP, or the API key).
+        last_error_code:
+          type: [string, "null"]
+          description: Stable safe failure code from the last probe (e.g. `unauthorized`, `timeout`, `dns_failed`, `blocked_address`).
         discovered_models:
           type: array
           items: { $ref: "#/components/schemas/LlmProviderModel" }
           description: The models discovered on the last successful `GET /models` (empty until first discovery).
-        secret_hint:
-          type: [string, "null"]
+        has_api_key:
+          type: boolean
           description: >
-            A **masked** hint at the stored API key (e.g. `"****abcd"`), or null when
-            no key is stored. This is the ONLY key-derived value ever returned — the
-            actual key is write-only, envelope-encrypted in the CC-C vault, and never
-            serialized through any API.
+            Whether a write-only API key is stored (envelope-encrypted in the CC-C
+            vault). Presence only — no key-derived value is ever returned.
+        validation_checks:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderValidationCheck" }
+          description: The independent validation checks from the last validation run.
+        validation:
+          anyOf:
+            - $ref: "#/components/schemas/ProviderValidationResult"
+            - type: "null"
+          description: Last validation result, including safe diagnostics and original correlation id; null for migrated rows until revalidated.
+        validated_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the last validation run completed (staleness signal).
+        validation_grandfathered:
+          type: boolean
+          description: >
+            True for a pre-existing `ready` provider kept routable by migration 0050
+            until its next validation, after which the strict rule applies.
         owner_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -6976,8 +7290,8 @@ components:
         Register an LLM provider. `provider_type` is constrained to the supported
         values (`openai_compatible`); `base_url` must be https and pass the SSRF check
         (else 422). The optional `api_key` is **write-only** — stored envelope-
-        encrypted via CC-C and never returned; the response carries only a masked
-        `secret_hint`. The backend auto-discovers the provider's models on create.
+        encrypted via CC-C and never returned; the response carries only
+        `has_api_key` (presence). The backend auto-discovers the provider's models on create.
       required: [name, provider_type, base_url]
       properties:
         name: { type: string, minLength: 1, maxLength: 200, description: Display name. }

@@ -18,6 +18,7 @@
  */
 import { request } from './client';
 import type {
+  CancelStreamResponse,
   ChatSession,
   ChatSessionCreate,
   ChatSessionList,
@@ -120,6 +121,16 @@ export function sendMessage(
     method: 'POST',
     json: body,
   });
+}
+
+/**
+ * Cancel an in-flight answer stream (#574, spec 0028). Owner-checked and
+ * idempotent server-side: repeated calls and calls after completion are
+ * safe no-ops. The producer persists the partial already streamed (marked
+ * cancelled) and settles the WS stream with one `cancelled` terminal.
+ */
+export function cancelChatStream(streamId: string): Promise<CancelStreamResponse> {
+  return request<CancelStreamResponse>(`/chat/streams/${streamId}/cancel`, { method: 'POST' });
 }
 
 /** Token/context accounting for a session — the context meter (spec 0007 #432). */

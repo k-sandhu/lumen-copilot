@@ -19,14 +19,12 @@ returned ``stream_id``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     AuditSinkFactory,
@@ -42,18 +40,16 @@ from app.api.deps import (
 from app.core.config import Settings
 from app.core.errors import DependencyError, NotFoundError
 from app.core.logging import get_logger
-from app.db.repositories import AuditEventRepository, CitationView
+from app.db.repositories import CitationView
 from app.db.session import get_sessionmaker
 from app.domain.chat import AskUserQuestion
-from app.domain.entities import Message, MessageRole, SandboxSession, ToolInvocation
+from app.domain.entities import KnowledgeMode, Message, MessageRole, SandboxSession, ToolInvocation
 from app.domain.llm import ChatMessage, Role
-from app.llm.context import ContextConfig
 from app.realtime.backplane import Backplane
 from app.sandbox.runner import HttpSandboxRunner
 from app.sandbox.service import SandboxDisabledError, SandboxSessionService
-from app.sandbox.tool_runner import ChatSandboxToolRunner
-from app.services.audit import AuditSink
-from app.services.chat_runtime import ChatRuntime, SandboxContext
+from app.services.chat_composition import ChatCompositionOptions, build_chat_runtime
+from app.services.chat_runtime import ChatRuntime
 from app.services.chat_service import (
     ChatService,
     MessagePage,
@@ -62,11 +58,8 @@ from app.services.chat_service import (
     SessionPage,
     SessionView,
 )
-from app.services.mcp_servers_service import build_mcp_servers_service
-from app.services.models_service import ChatModelService
-from app.services.provider_models import ModelRouteResolver, build_model_route_resolver
-from app.services.tools.types import SandboxToolRunner, ToolDefinition
-from app.storage import ObjectStore
+from app.services.stream_cancellation import StreamCancellationService
+from app.services.stream_registry import StreamRegistry
 from app.tasks.summarize import enqueue_summarize
 
 log = get_logger(__name__)
@@ -122,6 +115,29 @@ class SandboxSessionResponse(BaseModel):
     closed_at: datetime | None = None
 
 
+class EffectiveKnowledgeScopeAdjustableResponse(BaseModel):
+    """``#/components/schemas/EffectiveKnowledgeScopeAdjustable`` (#581)."""
+
+    model_config = {"extra": "forbid"}
+
+    modes: Literal[False]
+    collection_ids: Literal[False]
+    source_ids: Literal[False]
+
+
+class EffectiveKnowledgeScopeResponse(BaseModel):
+    """``#/components/schemas/EffectiveKnowledgeScope`` (#581)."""
+
+    model_config = {"extra": "forbid"}
+
+    assistant_id: UUID
+    assistant_version_id: UUID
+    modes: list[KnowledgeMode]
+    collection_ids: list[UUID]
+    source_ids: list[UUID]
+    adjustable: EffectiveKnowledgeScopeAdjustableResponse
+
+
 class ChatSessionResponse(BaseModel):
     """``#/components/schemas/ChatSession``."""
 
@@ -134,6 +150,8 @@ class ChatSessionResponse(BaseModel):
     message_count: int
     created_at: datetime
     updated_at: datetime
+    # The pinned version's effective scope (#581); null for ad-hoc chat.
+    effective_scope: EffectiveKnowledgeScopeResponse | None = None
 
 
 class ChatSessionListResponse(BaseModel):
@@ -238,6 +256,7 @@ class MessageResponse(BaseModel):
     web_citations: list[WebCitationResponse] = Field(default_factory=list)
     tool_invocations: list[MessageToolInvocationResponse]
     question: AskUserQuestionResponse | None = None
+    finish_reason: str | None = None
     created_at: datetime
 
 
@@ -315,11 +334,22 @@ class SendMessageResponse(BaseModel):
     stream_id: str
 
 
+class CancelStreamResponse(BaseModel):
+    """``#/components/schemas/CancelStreamResponse`` (#574)."""
+
+    model_config = {"extra": "forbid"}
+
+    stream_id: str
+    status: Literal["cancelled", "already_completed"]
+    terminal: dict[str, Any]
+
+
 # --- Serialisation helpers --------------------------------------------------
 
 
 def _session_to_response(view: SessionView) -> ChatSessionResponse:
     s = view.session
+    scope = view.effective_scope
     return ChatSessionResponse(
         id=s.id,
         title=s.title,
@@ -328,6 +358,20 @@ def _session_to_response(view: SessionView) -> ChatSessionResponse:
         message_count=view.message_count,
         created_at=s.created_at,
         updated_at=s.updated_at,
+        effective_scope=(
+            EffectiveKnowledgeScopeResponse(
+                assistant_id=scope.assistant_id,
+                assistant_version_id=scope.assistant_version_id,
+                modes=list(scope.modes),
+                collection_ids=list(scope.collection_ids),
+                source_ids=list(scope.source_ids),
+                adjustable=EffectiveKnowledgeScopeAdjustableResponse(
+                    modes=False, collection_ids=False, source_ids=False
+                ),
+            )
+            if scope is not None
+            else None
+        ),
     )
 
 
@@ -405,6 +449,7 @@ def _message_to_response(view: MessageView) -> MessageResponse:
         ],
         tool_invocations=[_tool_invocation_to_response(t) for t in view.tool_invocations],
         question=_question_to_response(m.question),
+        finish_reason=m.finish_reason,
         created_at=m.created_at,
     )
 
@@ -535,7 +580,7 @@ def _sandbox_response(value: SandboxSession | None, *, enabled: bool) -> Sandbox
 # --- Session routes ---------------------------------------------------------
 
 
-@router.get("/sessions", response_model=ChatSessionListResponse, response_model_exclude_none=True)
+@router.get("/sessions", response_model=ChatSessionListResponse)
 async def list_sessions(
     request: Request,
     session: DbSession,
@@ -563,7 +608,6 @@ async def list_sessions(
     "/sessions",
     response_model=ChatSessionResponse,
     status_code=status.HTTP_201_CREATED,
-    response_model_exclude_none=True,
 )
 async def create_session(
     body: ChatSessionCreate,
@@ -593,7 +637,6 @@ async def create_session(
 @router.get(
     "/sessions/{session_id}",
     response_model=ChatSessionResponse,
-    response_model_exclude_none=True,
 )
 async def get_session(
     session_id: UUID,
@@ -684,7 +727,6 @@ async def get_session_usage(
 @router.patch(
     "/sessions/{session_id}",
     response_model=ChatSessionResponse,
-    response_model_exclude_none=True,
 )
 async def update_session(
     session_id: UUID,
@@ -933,6 +975,40 @@ async def send_message(
     )
 
 
+@router.post("/streams/{stream_id}/cancel", response_model=CancelStreamResponse)
+async def cancel_chat_stream(
+    stream_id: str,
+    request: Request,
+    principal: CurrentUser,
+    backplane: BackplaneDep,
+    settings: SettingsDep,
+    make_audit_sink: AuditSinkFactory,
+) -> CancelStreamResponse:
+    """Cancel an in-flight answer stream (#574, spec 0028).
+
+    Owner-checked via the same stream-owner binding the WS consumer uses:
+    unknown and foreign/cross-tenant ids are the same 404 (INV-1/INV-2).
+    Idempotent: a settled stream is the documented no-op. The local producer
+    (if this replica owns it) is cancelled through the stream registry; the
+    backplane signal interrupts an active await on another replica too;
+    acknowledgement waits for the producer terminal. The runtime emits exactly one
+    ``cancelled`` terminal and one ``answer.cancelled`` audit event.
+    """
+    terminal = await StreamCancellationService(
+        backplane=backplane,
+        registry=request.app.state.stream_registry,
+        timeout_seconds=settings.chat_cancel_timeout_seconds,
+        denials=authenticated_denial_context(
+            make_audit_sink, tenant_id=principal.tenant_id, principal=principal, request=request
+        ),
+    ).cancel(stream_id=stream_id, principal=principal)
+    return CancelStreamResponse(
+        stream_id=stream_id,
+        terminal=terminal,
+        status="cancelled" if terminal["type"] == "cancelled" else "already_completed",
+    )
+
+
 def _schedule_answer(
     *,
     backplane: Backplane,
@@ -968,73 +1044,19 @@ def _schedule_answer(
     """
     request_id = extract_request_id(request) or "unknown"
     source_ip = request.client.host if request.client else "unknown"
-    runtime = ChatRuntime(
+    # The ONE composition (#576): model route, MCP, sandbox, artifact
+    # writer, context + interactive deadlines all wired there.
+    # `runtime_factory=ChatRuntime` preserves the module-level test seam.
+    runtime = build_chat_runtime(
+        mode="interactive",
+        principal=principal,
+        backplane=backplane,
+        settings=settings,
         sessionmaker=get_sessionmaker(),
         gateway=get_llm_gateway(),
-        backplane=backplane,
-        principal=principal,
         request_id=request_id,
         source_ip=source_ip,
-        default_max_tool_turns=settings.chat_max_tool_turns,
-        tool_concurrency=settings.chat_tool_concurrency,
-        fallback_model_validator=lambda vsession, mid: ChatModelService(
-            settings, session=vsession, tenant_id=principal.tenant_id
-        ).is_allowed_model_async(mid),
-        context_config=ContextConfig(
-            fallback_max_input_tokens=settings.context_fallback_max_input_tokens,
-            output_headroom_tokens=settings.context_output_headroom_tokens,
-            compaction_digest_chars=settings.context_compaction_digest_chars,
-            compaction_chunk_size=settings.context_compaction_chunk_size,
-            # #491: proactively shrink superseded, cited tool results so old
-            # evidence stops re-riding every turn at full size on a frontier
-            # window (the interactive chat answer path — #486's IN scope).
-            proactive_compaction_enabled=settings.context_proactive_compaction_enabled,
-        ),
-        sandbox_factory=_build_sandbox_factory(
-            principal=principal,
-            backplane=backplane,
-            settings=settings,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        mcp_tools_factory=_build_mcp_tools_factory(
-            principal=principal,
-            settings=settings,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        model_route_resolver=_build_model_route_resolver(
-            principal=principal,
-            settings=settings,
-            request_id=request_id,
-            source_ip=source_ip,
-        ),
-        # Follow-up suggestions knobs (spec 0006 #429; dedicated model #490).
-        suggestions_enabled=settings.chat_suggestions_enabled,
-        suggestions_count=settings.chat_suggestions_count,
-        suggestions_timeout_seconds=settings.chat_suggestions_timeout_seconds,
-        # BE-5 (#489): the server's post-terminal grace, declared on the terminal
-        # so the WS consumer waits exactly the window the relay will keep open.
-        suggestions_grace_seconds=settings.chat_suggestions_grace_seconds,
-        suggestions_model=settings.chat_suggestions_model,
-        # Streamed-text coalescing knobs (issue #487).
-        text_coalesce_chars=settings.chat_text_coalesce_chars,
-        text_coalesce_seconds=settings.chat_text_coalesce_seconds,
-        # Interactive timeout budget (#489): a live chat turn is capped at the
-        # interactive deadline (a human is waiting) with a shortened retry ladder,
-        # so a hung provider surfaces a typed 503 within the budget instead of
-        # stacking the 60s batch timeout per retry (the ~182s cliff → <=30s, AC-4).
-        turn_timeout_seconds=settings.llm_interactive_timeout_seconds,
-        interactive_max_attempts=settings.llm_interactive_max_attempts,
-        # Terminal-publish budget (R2-8, #489 AC-4): the answer producer bounds
-        # publishing the terminal by the time left in ``turn deadline + this margin``
-        # so a stalled Redis pipeline can't push the real worst case past the 30s
-        # ceiling (config enforces ``interactive_deadline + margin <= 30s``).
-        terminal_publish_margin_seconds=settings.llm_terminal_publish_margin_seconds,
-        # Answer output ceiling (#488): bounds the streamed answer / forced
-        # synthesis so length — and the tail of the streaming wait — cannot run
-        # away; finish_reason="length" then rides the one length continuation.
-        answer_max_tokens=settings.chat_answer_max_tokens,
+        options=ChatCompositionOptions(runtime_factory=ChatRuntime),
     )
     history = _to_chat_messages(result.history)
 
@@ -1069,113 +1091,6 @@ def _schedule_answer(
             except Exception as exc:  # noqa: BLE001 — nicety, never the answer
                 log.warning("chat.summarize_enqueue_failed", error_type=type(exc).__name__)
 
-    tasks: set[asyncio.Task[None]] = request.app.state.answer_tasks
+    registry: StreamRegistry = request.app.state.stream_registry
     task = asyncio.create_task(_produce())
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
-
-
-def _build_sandbox_factory(
-    *,
-    principal: CurrentUser,
-    backplane: Backplane,
-    settings: Settings,
-    request_id: str,
-    source_ip: str,
-) -> Callable[[SandboxContext], SandboxToolRunner | None]:
-    """Build the live ``run_python`` seam factory (issue #231).
-
-    Returns a closure the runtime calls **only** when a run's allow-list offers
-    ``run_python``; it composes the live :class:`HttpSandboxRunner` (the worker's
-    only container-engine surface — an internal HTTP hop to the dedicated runner, no
-    Docker socket) and the object store into a :class:`ChatSandboxToolRunner` scoped
-    to the streaming principal (tenant + owner from the token, never model input).
-    The deny-by-default enable/package gate is inside the sandbox service the seam
-    composes, so this factory does not gate — it wires; a disabled tenant's run is
-    refused downstream and surfaces as a typed ``ok=False`` result.
-    """
-
-    def _factory(ctx: SandboxContext) -> SandboxToolRunner | None:
-        return ChatSandboxToolRunner(
-            sessionmaker=get_sessionmaker(),
-            tenant_id=principal.tenant_id,
-            owner_id=principal.user_id,
-            runner=HttpSandboxRunner(
-                settings.sandbox_runner_url, token=settings.sandbox_runner_token
-            ),
-            object_store=ObjectStore(settings),
-            settings=settings,
-            backplane=backplane,
-            stream_id=ctx.stream_id,
-            request_id=request_id,
-            source_ip=source_ip,
-            next_seq=ctx.next_seq,
-            session_id=ctx.session_id,
-            message_id=ctx.message_id,
-        )
-
-    return _factory
-
-
-def _build_mcp_tools_factory(
-    *,
-    principal: CurrentUser,
-    settings: Settings,
-    request_id: str,
-    source_ip: str,
-) -> Callable[[AsyncSession], Awaitable[dict[str, ToolDefinition]]]:
-    """Build the live MCP-tools resolver the runtime calls per answer (issue #227).
-
-    Returns a coroutine the runtime invokes **only** when a run's allow-list names
-    at least one ``mcp:*`` tool. It builds the per-tenant :class:`McpServersService`
-    over the runtime's own session (the request session is gone by then) — scoped to
-    the streaming principal (tenant + owner + roles from the token, never model
-    input) — and resolves its registered+enabled MCP tools into governed CC-A
-    :class:`ToolDefinition`s. The SSRF guard, per-tenant rate limit, and CC-C auth
-    resolution all live inside that service's client, so the resolved handlers invoke
-    upstream through the same governed egress the ``/mcp-servers`` surface uses.
-    """
-
-    async def _factory(session: AsyncSession) -> dict[str, ToolDefinition]:
-        audit = AuditSink(AuditEventRepository(session, principal.tenant_id))
-        service = build_mcp_servers_service(
-            session,
-            settings=settings,
-            tenant_id=principal.tenant_id,
-            owner_id=principal.user_id,
-            roles=principal.roles,
-            audit=audit,
-            denials=None,  # run-tool resolution is list-only, with no direct-id guard
-            request_id=request_id,
-            source_ip=source_ip,
-        )
-        return await service.resolve_run_tools()
-
-    return _factory
-
-
-def _build_model_route_resolver(
-    *,
-    principal: CurrentUser,
-    settings: Settings,
-    request_id: str,
-    source_ip: str,
-) -> ModelRouteResolver:
-    """Wire the live per-tenant model-route resolver the runtime calls (PR 2a).
-
-    A thin adapter over the ``services`` factory
-    (:func:`~app.services.provider_models.build_model_route_resolver`) scoped to the
-    streaming principal (tenant + owner + roles from the token, never model input).
-    The resolver decrypts a per-tenant provider's key **inside** ``services/`` (the
-    CC-C vault never enters ``api/`` — the architecture test forbids a router
-    importing the secrets service or naming ``get_secret_plaintext``); this router
-    only builds it and hands it to the runtime, which invokes it once per answer.
-    """
-    return build_model_route_resolver(
-        settings=settings,
-        tenant_id=principal.tenant_id,
-        owner_id=principal.user_id,
-        roles=principal.roles,
-        request_id=request_id,
-        source_ip=source_ip,
-    )
+    registry.register(result.stream_id, task=task, runtime=runtime)

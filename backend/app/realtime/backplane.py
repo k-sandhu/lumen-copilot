@@ -62,7 +62,7 @@ _DEFAULT_CLEANUP_GRACE: float = Settings.model_fields["chat_shutdown_grace_secon
 
 # Terminal envelope kinds: a subscriber stops after relaying one of these
 # (exactly-one-terminal lifecycle, contracts/websocket-envelopes.schema.json).
-_TERMINAL_TYPES = frozenset({"done", "error"})
+_TERMINAL_TYPES = frozenset({"done", "error", "cancelled"})
 
 # Post-terminal suggestions window (#489). A chat answer publishes its terminal
 # ``done`` BEFORE generating follow-up suggestions (they were on the critical
@@ -79,6 +79,11 @@ _DEFAULT_POST_TERMINAL_GRACE_SECONDS = 10.0
 _CHANNEL_PREFIX = "chat:stream:"
 # Key namespace for the stream→owner binding (separate from the pub/sub channel).
 _OWNER_PREFIX = "chat:stream-owner:"
+# Key namespace for the cross-replica cancel signal (#574): the cancel endpoint
+# SETs this key (same TTL as the owner binding) before publishing on that
+# channel. The producer monitor interrupts in-flight I/O on any replica;
+# the durable key closes subscribe/start races and supports boundary checks.
+_CANCEL_PREFIX = "chat:stream-cancel:"
 # How long the owner binding lives. Comfortably outstrips the gap between the 202
 # (when the binding is written) and the WS connect that follows it, while bounding
 # how long a (single-use) stream id stays authoritative. Matches the access-token
@@ -124,6 +129,10 @@ def _replay_key(stream_id: str) -> str:
     return f"{_REPLAY_PREFIX}{stream_id}"
 
 
+def _cancel_key(stream_id: str) -> str:
+    return f"{_CANCEL_PREFIX}{stream_id}"
+
+
 def _loads(raw: Any) -> dict[str, Any]:
     """Decode a Redis payload (``bytes`` or ``str``) into an envelope dict."""
     if isinstance(raw, bytes):
@@ -133,7 +142,7 @@ def _loads(raw: Any) -> dict[str, Any]:
 
 
 def is_terminal(envelope: dict[str, Any]) -> bool:
-    """True iff ``envelope`` is a terminal (``done``/``error``) envelope."""
+    """True iff ``envelope`` is a terminal (``done``/``error``/``cancelled``) envelope."""
     return envelope.get("type") in _TERMINAL_TYPES
 
 
@@ -202,6 +211,27 @@ class Backplane(Protocol):
         """
         ...
 
+    async def signal_cancel(self, stream_id: str) -> None:
+        """Record a user-cancellation request for ``stream_id`` (#574).
+
+        The cross-replica half of Stop: the producer (wherever it runs)
+        interrupts its active await via wait_cancel; boundary checks also read
+        the durable key. Idempotent.
+        """
+        ...
+
+    async def is_cancelled(self, stream_id: str) -> bool:
+        """True iff cancellation was signalled for ``stream_id`` (#574)."""
+        ...
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        """Wait for a durable cancel signal, including one sent before listening."""
+        ...
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        """Read the settled outcome from bounded replay on any replica."""
+        ...
+
 
 class RedisBackplane:
     """Redis-backed pub/sub fan-out (the production backplane).
@@ -235,8 +265,10 @@ class RedisBackplane:
         client_factory: RedisClientFactory | None = None,
         post_terminal_grace_seconds: float = _DEFAULT_POST_TERMINAL_GRACE_SECONDS,
         cleanup_grace_seconds: float = _DEFAULT_CLEANUP_GRACE,
+        stream_ttl_seconds: int = _OWNER_TTL_SECONDS,
     ) -> None:
         self._redis_url = redis_url
+        self._stream_ttl_seconds = max(_OWNER_TTL_SECONDS, stream_ttl_seconds)
         self._client_factory: RedisClientFactory = client_factory or self._connect
         # The pooled client and the loop it was built on (``None`` until first
         # use — construction stays I/O-free and loop-free, so the process-wide
@@ -313,7 +345,7 @@ class RedisBackplane:
         async with client.pipeline(transaction=False) as pipe:
             pipe.rpush(replay_key, payload)
             pipe.ltrim(replay_key, -_MAX_REPLAY, -1)
-            pipe.expire(replay_key, _REPLAY_TTL_SECONDS)
+            pipe.expire(replay_key, self._stream_ttl_seconds)
             pipe.publish(_channel(stream_id), payload)
             await pipe.execute()
 
@@ -324,7 +356,7 @@ class RedisBackplane:
         request, so a per-call connect/teardown sat directly on the send path.
         """
         payload = json.dumps({"owner_id": str(owner.owner_id), "tenant_id": str(owner.tenant_id)})
-        await self._client().set(_owner_key(stream_id), payload, ex=_OWNER_TTL_SECONDS)
+        await self._client().set(_owner_key(stream_id), payload, ex=self._stream_ttl_seconds)
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:
         """Read ``stream_id``'s owner binding, or ``None`` if absent/expired."""
@@ -335,6 +367,39 @@ class RedisBackplane:
             raw = raw.decode("utf-8")
         data = json.loads(raw)
         return StreamOwner(owner_id=UUID(data["owner_id"]), tenant_id=UUID(data["tenant_id"]))
+
+    async def signal_cancel(self, stream_id: str) -> None:
+        """Atomically persist and notify so caller death cannot split the signal."""
+        async with self._client().pipeline(transaction=True) as pipe:
+            pipe.set(_cancel_key(stream_id), "1", ex=self._stream_ttl_seconds)
+            pipe.publish(_cancel_key(stream_id), "1")
+            await pipe.execute()
+
+    async def is_cancelled(self, stream_id: str) -> bool:
+        """True iff the cancel key exists for ``stream_id``."""
+        return bool(await self._client().exists(_cancel_key(stream_id)))
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        client = self._client_factory()
+        pubsub = client.pubsub()
+        channel = _cancel_key(stream_id)
+        try:
+            await pubsub.subscribe(channel)
+            await self._await_subscribe_confirmed(pubsub)
+            if await self.is_cancelled(stream_id):
+                return
+            async for message in pubsub.listen():
+                if message.get("type") == "message":
+                    return
+        finally:
+            await self._close_subscriber(client, pubsub, channel, active_error=sys.exception())
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        for raw in reversed(await self._client().lrange(_replay_key(stream_id), 0, -1)):
+            envelope = _loads(raw)
+            if is_terminal(envelope):
+                return envelope
+        return None
 
     async def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:
         """Subscribe to ``stream_id`` and yield envelopes until a terminal one.
@@ -536,6 +601,8 @@ class InMemoryBackplane:
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._replay: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._owners: dict[str, StreamOwner] = {}
+        self._cancelled: set[str] = set()
+        self._cancel_events: dict[str, asyncio.Event] = {}
         # Mirrors the Redis path (#489): how long ``subscribe`` holds open after a
         # ``done(pendingSuggestions=true)`` for the one trailing suggestions event.
         self._post_terminal_grace_seconds = post_terminal_grace_seconds
@@ -553,6 +620,23 @@ class InMemoryBackplane:
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:
         return self._owners.get(stream_id)
+
+    async def signal_cancel(self, stream_id: str) -> None:
+        self._cancelled.add(stream_id)
+        self._cancel_events.setdefault(stream_id, asyncio.Event()).set()
+
+    async def is_cancelled(self, stream_id: str) -> bool:
+        return stream_id in self._cancelled
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        if stream_id not in self._cancelled:
+            await self._cancel_events.setdefault(stream_id, asyncio.Event()).wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        return next(
+            (env for env in reversed(self._replay.get(stream_id, ())) if is_terminal(env)),
+            None,
+        )
 
     async def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()

@@ -1,14 +1,14 @@
 """Provider-billed spend per usage scope (#832).
 
 Revision ID: 0054_billed_cost
-Revises: 0049_discovery_metadata
+Revises: 0053_message_finish_reason
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0054_billed_cost"
-down_revision = "0049_discovery_metadata"
+down_revision = "0053_message_finish_reason"
 branch_labels = None
 depends_on = None
 

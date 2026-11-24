@@ -39,6 +39,16 @@ const DEFAULT_POLICY: SandboxPolicy = {
   max_memory_mb_ceiling: 512,
   daily_runtime_cap_s_ceiling: 3600,
   max_concurrency_ceiling: 2,
+  cpus: 1,
+  pids_limit: 128,
+  output_bytes_cap: 33554432,
+  scratch_bytes: 268435456,
+  limits_enabled: true,
+  limit_sources: { max_runtime_s: 'deployment_default', max_memory_mb: 'tenant_override' },
+  current_concurrency: 1,
+  daily_runtime_used_s: 45,
+  accounting_available: true,
+  denial_reasons: [],
 };
 
 beforeEach(() => {
@@ -47,7 +57,7 @@ beforeEach(() => {
 });
 
 describe('SandboxGovernancePanel', () => {
-  it('renders enable/package policy and explains the intentionally unbounded posture', async () => {
+  it('renders effective caps, provenance and accounting usage', async () => {
     getSandboxPolicy.mockResolvedValue(DEFAULT_POLICY);
     renderWithQuery(<SandboxGovernancePanel />);
 
@@ -55,8 +65,11 @@ describe('SandboxGovernancePanel', () => {
       await screen.findByRole('switch', { name: /enable code execution/i }),
     ).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: /outbound network/i })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/max runtime/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/no automatic runtime.*memory.*process.*output/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/max runtime/i)).toHaveValue(30);
+    expect(screen.getByText(/output collection: 32 MiB/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/deployment default/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/active executions: 1 of 2/i)).toBeInTheDocument();
+    expect(screen.getByText(/daily runtime: 45 of 3600/i)).toBeInTheDocument();
     // Deny-by-default hint when no policy is stored.
     expect(screen.getByText(/disabled for this tenant by default/i)).toBeInTheDocument();
   });
@@ -111,7 +124,7 @@ describe('SandboxGovernancePanel', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /save policy/i }));
     const alert = await screen.findByRole('alert');
-    expect(within(alert).getByText(/package-policy value/i)).toBeInTheDocument();
+    expect(within(alert).getByText(/policy value/i)).toBeInTheDocument();
   });
 
   it('surfaces a read 403 as an actionable panel error (INV-5)', async () => {
@@ -120,4 +133,30 @@ describe('SandboxGovernancePanel', () => {
     const alert = await screen.findByRole('alert');
     expect(within(alert).getByText(/admin role/i)).toBeInTheDocument();
   });
+});
+
+it('shows accounting outages as a fail-closed denial with unknown usage', async () => {
+  getSandboxPolicy.mockResolvedValue({
+    ...DEFAULT_POLICY,
+    accounting_available: false,
+    current_concurrency: null,
+    daily_runtime_used_s: null,
+    denial_reasons: ['sandbox_accounting_unavailable'],
+  });
+  renderWithQuery(<SandboxGovernancePanel />);
+  expect(
+    await screen.findByText(/accounting unavailable.*executions are refused/i),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/active executions: unknown/i)).toBeInTheDocument();
+});
+
+it('saves tenant narrowing limits', async () => {
+  getSandboxPolicy.mockResolvedValue(DEFAULT_POLICY);
+  updateSandboxPolicy.mockResolvedValue(DEFAULT_POLICY);
+  renderWithQuery(<SandboxGovernancePanel />);
+  const runtime = await screen.findByLabelText(/max runtime/i);
+  await userEvent.clear(runtime);
+  await userEvent.type(runtime, '10');
+  await userEvent.click(screen.getByRole('button', { name: /save policy/i }));
+  expect(updateSandboxPolicy).toHaveBeenCalledWith(expect.objectContaining({ max_runtime_s: 10 }));
 });

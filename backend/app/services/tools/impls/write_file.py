@@ -46,6 +46,8 @@ from app.domain.tools import ERROR_BAD_ARGS, ERROR_TOOL_ERROR, RiskTier, ToolHan
 from app.services.artifacts_service import ArtifactLinks
 from app.services.tools.types import ToolContext, ToolDefinition
 
+#: The registered tool name (mirrors ``RUN_PYTHON_TOOL_NAME``).
+WRITE_FILE_TOOL_NAME = "write_file"
 #: The content-type an unspecified text write defaults to (utf-8 plain text).
 _DEFAULT_CONTENT_TYPE = "text/plain"
 #: How the ``content`` string is interpreted before it becomes bytes.
@@ -147,7 +149,9 @@ async def _write_file(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
             filename=filename,
             content_type=content_type,
             produced_by=ArtifactProducedBy.TOOL,
-            links=ArtifactLinks(session_id=ctx.session_id),
+            links=ArtifactLinks(
+                session_id=ctx.session_id, tool_invocation_id=ctx.tool_invocation_id
+            ),
         )
     except ValidationError as exc:
         reason = exc.detail or "the content-type or size is not allowed"
@@ -173,6 +177,7 @@ async def _write_file(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResu
             "filename": artifact.filename,
             "content_type": artifact.mime_type,
             "size_bytes": artifact.size_bytes,
+            "sha256": artifact.sha256,
             "download_ref": download_ref,
         },
     )
@@ -229,4 +234,4 @@ TOOLS: tuple[ToolDefinition, ...] = (
 )
 
 
-__all__ = ["TOOLS"]
+__all__ = ["TOOLS", "WRITE_FILE_TOOL_NAME"]

@@ -60,6 +60,8 @@ def test_root_is_contained_without_host_mounts_socket_or_network() -> None:
 
 
 def test_no_automatic_time_resource_or_pid_limits() -> None:
+    # A bare spec carries no bounds of its own; bounds come from settings
+    # via ``session_resource_bounds`` (asserted below), never from a caller.
     flags = build_container_flags(_session())
     assert flags.wall_clock_seconds is None
     assert flags.cpus is None
@@ -67,17 +69,23 @@ def test_no_automatic_time_resource_or_pid_limits() -> None:
     assert flags.pids_limit is None
 
 
-def test_the_shipped_default_sends_no_cpu_memory_or_pid_bound() -> None:
-    """ADR-0020's posture is the default, and it is stated here rather than implied.
+def test_the_shipped_default_bounds_cpu_memory_and_pids() -> None:
+    """#589 / ADR-0029 (Proposed): bounded by default, reversing ADR-0020.
 
-    Its Consequences section is explicit that there is no automatic protection against
-    infinite loops, fork bombs, disk growth or resource monopolisation, and that this
-    is a deliberate sponsor decision. So the *absence* is asserted: a change that
-    started bounding sessions silently would fail this test and have to argue for it.
+    ADR-0020's unbounded posture was a deliberate sponsor decision; #589
+    filed its cost as a critical defect, so the default now *sends* the
+    bounds. The unbounded posture remains available only as an explicit
+    opt-out (asserted in test_sandbox_limits.py).
     """
-    limits = _limits_for(sandbox_settings())
+    settings = sandbox_settings()
+    limits = _limits_for(settings)
 
-    assert limits == (None, None, None)
+    assert limits == (
+        settings.sandbox_cpus,
+        settings.sandbox_memory_bytes,
+        settings.sandbox_pids_limit,
+    )
+    assert all(value is not None and value > 0 for value in limits)
 
 
 def test_a_deploy_may_opt_into_bounding_the_session_container() -> None:
@@ -96,7 +104,8 @@ def test_a_deploy_may_opt_into_bounding_the_session_container() -> None:
     )
 
     assert _limits_for(settings) == (1.5, 256 * 1024 * 1024, 64)
-    # Still no wall clock: nothing enforces one, so nothing claims to.
+    # The wall clock rides on the spec when the service builds it (#589);
+    # a bare spec still claims nothing on its own.
     assert build_container_flags(_session()).wall_clock_seconds is None
 
 

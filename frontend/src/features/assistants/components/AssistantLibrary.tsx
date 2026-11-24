@@ -62,10 +62,11 @@ export function AssistantLibrary() {
     setStartError(null);
     startChat.mutate(assistant, {
       onSuccess: (session) => {
-        // Bind the chat workspace to the new session, then navigate to it. Seed
-        // the session with the assistant's knowledge modes (#221) so the composer
-        // shows the active modes — the running session wire doesn't carry them.
-        useChatStore.getState().openSession(session.id, assistant.knowledgeScope.modes ?? []);
+        // Bind the chat workspace to the new session, then navigate to it. The
+        // knowledge scope is NOT seeded from the assistant's (mutable) head
+        // (#581): the chat view hydrates it from the session response, which
+        // carries the PINNED version's effective scope.
+        useChatStore.getState().openSession(session.id);
         navigate('/');
       },
       onError: (error) =>

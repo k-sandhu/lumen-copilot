@@ -7,8 +7,8 @@ is needed) and asserts the whole governance contract as **negative** tests:
 * AC-2 (INV-style): an off-allow-list tool → ``tool_not_permitted``; the handler
   never runs and the run continues.
 * AC-3 / INV-7: a ``requires_approval`` tool blocks on the approval gate — an
-  unapproved call is **not executed** (``approval_denied``); a T0/T1 tool bypasses
-  the gate; an *approved* gated call does run.
+  unapproved call is **not executed** (``approval_denied``); T1 dispatch checks
+  tenant policy at either acting autonomy level; T0 bypasses the gate.
 * AC-4 / INV-6: **every** invocation (success, denial, failure) writes a
   ``tool_invocations`` row and emits ``tool.invoked`` + ``tool.result``.
 * AC-5: a handler that raises / times out → an ``ok=False`` result, not a crash.
@@ -513,14 +513,17 @@ async def test_t1_tool_denied_below_act_autonomy(
     assert invocations[0].ok is False and invocations[0].error == ERROR_AUTONOMY_DENIED
 
 
-async def test_t1_tool_runs_at_act_auto(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC-1 (#218): at ``act_auto`` a T1 write executes automatically (no gate)."""
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_t1_tool_checks_policy_at_act_auto(
+    world: _World, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """R1-001: act_auto still enforces the current tenant policy."""
     consulted: list[str] = []
 
     class _RecordingGate:
         async def request(self, request: ApprovalRequest) -> bool:
             consulted.append(request.tool_name)
-            return False
+            return enabled
 
     _patch_tool(monkeypatch, _t1_tool("write_note"))
     r, _, _ = _make_runner(
@@ -532,9 +535,12 @@ async def test_t1_tool_runs_at_act_auto(world: _World, monkeypatch: pytest.Monke
     result = await r.run(
         call=ToolCall(id="c1", name="write_note", arguments={}), context=_context(world)
     )
-    assert result.ok is True and result.content == "wrote it"
-    # act_auto executes automatically — the approval gate is NOT consulted for a T1 tool.
-    assert consulted == []
+    assert result.ok is enabled
+    if enabled:
+        assert result.content == "wrote it"
+    else:
+        assert result.error == ERROR_APPROVAL_DENIED
+    assert consulted == ["write_note"]
 
 
 async def test_t1_tool_routes_through_approval_at_act_with_approval(

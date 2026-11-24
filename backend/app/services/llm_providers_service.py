@@ -4,9 +4,8 @@ The orchestration layer for per-tenant LLM provider registration (ADR-0004:
 ``services/`` compose adapters; routers call exactly one service). A tenant ADMIN
 registers an OpenAI-compatible provider (name + base URL + API key); the backend
 auto-discovers its models by calling ``GET {base_url}/models`` and stores a
-snapshot + discovery/health status. **This is the model-catalog foundation only:
-nothing here surfaces a provider in the chat model picker or routes a chat/
-embedding completion through it — that is a separate follow-up PR.**
+snapshot plus independent validation evidence (spec 0029). The picker and routing
+enforce readiness through the single predicate in ``services/provider_models.py``.
 
 The closest precedent is the MCP-server registration service
 (:mod:`app.services.mcp_servers_service`) — per-tenant registration + a CC-C secret
@@ -48,14 +47,17 @@ URL raises a typed ``ValidationError`` (``base_url_blocked`` / ``base_url_scheme
 **422**. The full guard (resolve-all + IP-pin) runs again at discovery time.
 
 **Discovery is a recorded state, never a 500.** A bad key/url/unreachable host does
-not raise — discovery sets ``status=error`` + a safe (truncated) ``last_error`` and
-persists it, mirroring MCP's status handling. The credential is never returned — no
-method or wire shape here exposes the stored API-key value, only the masked
-``secret_hint``.
+not raise — discovery sets ``status=error`` + a fixed safe ``last_error`` /
+``last_error_code`` and persists it. Validation is evidence-based (spec 0029):
+discovery proves at most ``reachable``; only the explicit bounded test-connection
+proves authentication + chat capability and yields ``ready``. The credential is
+never returned or echoed — no method, wire shape, audit event, or log here exposes
+the stored API-key value or any fragment of it, only its presence.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -76,7 +78,10 @@ from app.domain.entities import (
     Role,
     SecretKind,
 )
-from app.llm.provider_catalog import discover_models
+from app.llm.provider_catalog import ProviderProbeError, discover_models
+from app.llm.provider_catalog import (
+    test_connection as probe_test_connection,
+)
 from app.net.egress import EgressBlockedError, resolve_safe_ip
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.services.secrets_service import SecretsService, build_secrets_service
@@ -97,13 +102,39 @@ _SECRET_NAME_PREFIX = "llm-provider-key"
 # additive).
 _SECRET_KIND = SecretKind.OTHER
 
-# Truncation bound for a persisted ``last_error`` so a verbose upstream body can
-# never bloat the row (mirrors MCP's safe, bounded failure reason).
-_MAX_ERROR_LEN = 500
-
 # A cap on how many discovered models we persist, so a pathological provider cannot
 # blow up the row / response. OpenAI-compatible catalogs are well under this.
 _MAX_MODELS = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderValidationOutcome:
+    """One validation run's result (contract ``ProviderValidationResult``).
+
+    Carries only safe values: the new status, the independent checks, the
+    failed stage + stable code, retryability, and the tested model. The router
+    adds the request correlation id. Never exception text (spec 0029).
+    """
+
+    status: LlmProviderStatus
+    checks: list[dict[str, object]]
+    stage: str | None
+    code: str | None
+    retryable: bool
+    tested_model: str | None
+    validated_at: datetime
+
+    def as_record(self, correlation_id: str) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "checks": self.checks,
+            "stage": self.stage,
+            "code": self.code,
+            "retryable": self.retryable,
+            "correlation_id": correlation_id,
+            "tested_model": self.tested_model,
+            "validated_at": self.validated_at.isoformat(),
+        }
 
 
 class LlmProviderService:
@@ -177,21 +208,35 @@ class LlmProviderService:
         re-runs the full guard (incl. IP-pin) at fetch time — this is the pre-write
         gate, not the only one.
         """
-        parts = urlsplit(base_url)
+        try:
+            parts = urlsplit(base_url)
+            port = parts.port
+        except ValueError:
+            raise ValidationError("The base URL is not allowed.", code="base_url_blocked") from None
         scheme = parts.scheme.lower()
         if scheme != _ALLOWED_SCHEME:
             raise ValidationError(
-                f"LLM provider base URL scheme {scheme or '(none)'!r} is not allowed; "
-                "only https is permitted (credentials in transit)",
+                "The base URL must use https.",
                 code="base_url_scheme",
             )
         host = parts.hostname
         if not host:
             raise ValidationError("LLM provider base URL has no host.", code="base_url_scheme")
+        if (
+            parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+            or port == 0
+        ):
+            raise ValidationError("The base URL is not allowed.", code="base_url_blocked")
         try:
             resolve_safe_ip(host)
-        except EgressBlockedError as exc:
-            raise ValidationError(str(exc), code="base_url_blocked") from exc
+        except EgressBlockedError:
+            # Generic detail only: the egress message carries the resolved
+            # address, which must never reach the client (spec 0029). The
+            # stable code still distinguishes the case.
+            raise ValidationError("The base URL is not allowed.", code="base_url_blocked") from None
 
     async def _require_admin(self, *, attempted_action: str, resource_id: str) -> None:
         if self._is_admin:
@@ -205,14 +250,16 @@ class LlmProviderService:
         )
         raise ForbiddenError("LLM provider management requires the admin role.")
 
-    async def _visible(self, provider_id: UUID, *, attempted_action: str) -> LlmProvider | None:
+    async def _visible(
+        self, provider_id: UUID, *, attempted_action: str, for_update: bool = False
+    ) -> LlmProvider | None:
         """Fetch a provider in the caller's tenant, or ``None`` (→ 404).
 
         ``None`` for a missing id or a foreign-tenant id (the repository sees no
         row) — INV-1 collapses both to 404 at the router. Admin-gating is the
         router's; every tenant admin may manage any provider in the tenant.
         """
-        provider = await self._providers.get(provider_id)
+        provider = await self._providers.get(provider_id, for_update=for_update)
         if provider is None:
             await self._denials.emit(
                 resource_type="llm_provider",
@@ -234,6 +281,7 @@ class LlmProviderService:
             name=f"{_SECRET_NAME_PREFIX}:{provider_id}",
             kind=_SECRET_KIND,
             plaintext=api_key,
+            include_hint=False,
         )
         return ref.id, ref.hint
 
@@ -261,7 +309,7 @@ class LlmProviderService:
         try:
             secret_id = UUID(api_key_secret_ref)
         except ValueError:
-            return None
+            raise ValidationError("Provider credential is unavailable.") from None
         return await self._secrets.get_secret_plaintext(secret_id, accessor=AuditActor.system())
 
     # --- discovery ----------------------------------------------------------
@@ -285,62 +333,199 @@ class LlmProviderService:
         )
 
     async def _run_discovery(self, provider: LlmProvider) -> LlmProvider:
-        """Discover + persist a provider's models; record ready/error, never raise.
+        """Discover + persist a provider's models; record reachable/error, never raise.
 
         Resolves the API key in-process from CC-C (never returned/logged), calls
         ``GET {base_url}/models`` through the SSRF guard, and on success persists
-        ``status=ready`` + the fresh ``last_discovery_at`` + the model snapshot; on
-        ANY failure (bad key/url, unreachable host, malformed response) persists
-        ``status=error`` + a safe truncated ``last_error`` and preserves the previous
-        model snapshot — a bad provider is a recorded state, not an exception (mirrors
-        MCP). Audits ``llm_provider.discovered`` (INV-6) either way.
+        ``status=reachable`` (spec 0029: catalog evidence only — authentication
+        stays unverified, so discovery alone never yields ``ready``); on ANY
+        failure persists ``status=error`` + the fixed safe message/code and
+        preserves the previous model snapshot. Audits
+        ``llm_provider.discovered`` (INV-6) either way.
         """
-        error: str | None = None
+        probe_error: ProviderProbeError | None = None
         models: list[dict[str, object]] = []
         try:
             api_key = await self._resolve_api_key(provider.api_key_secret_ref)
             models = await self._discover_models(base_url=provider.base_url, api_key=api_key)
-        except Exception as exc:  # noqa: BLE001 — a bad provider is a state, not a 500
-            error = _safe_error(exc)
+        except ProviderProbeError as exc:
+            probe_error = exc
+        except Exception:  # noqa: BLE001 — a bad provider is a state, not a 500
+            probe_error = ProviderProbeError(stage="discovery", code="validation_failed")
+        has_key = provider.api_key_secret_ref is not None
+        now = _utc_now()
+        checks = _discovery_checks(has_key=has_key, error=probe_error)
+        outcome = ProviderValidationOutcome(
+            status=LlmProviderStatus.REACHABLE if probe_error is None else LlmProviderStatus.ERROR,
+            checks=checks,
+            stage=None if probe_error is None else probe_error.stage,
+            code=None if probe_error is None else probe_error.code,
+            retryable=False if probe_error is None else probe_error.retryable,
+            tested_model=None,
+            validated_at=now,
+        )
+        if probe_error is not None:
             log.info(
                 "llm_provider.discovery_failed",
                 provider_id=str(provider.id),
-                error=error,
+                stage=probe_error.stage,
+                code=probe_error.code,
+                retryable=probe_error.retryable,
+                request_id=self._request_id,
             )
 
-        if error is None:
+        if probe_error is None:
             updated = await self._providers.set_discovery(
                 provider.id,
-                status=LlmProviderStatus.READY,
+                status=LlmProviderStatus.REACHABLE,
                 discovered_models=models,
                 last_error=None,
-                last_discovery_at=_utc_now(),
+                last_discovery_at=now,
+                validation_checks=checks,
+                last_error_code=None,
+                validated_at=now,
+                validation_result=outcome.as_record(self._request_id),
             )
         else:
             updated = await self._providers.set_discovery(
                 provider.id,
                 status=LlmProviderStatus.ERROR,
                 discovered_models=provider.discovered_models,
-                last_error=error,
+                last_error=probe_error.safe_message,
                 last_discovery_at=provider.last_discovery_at,
+                validation_checks=checks,
+                last_error_code=probe_error.code,
+                validated_at=now,
+                validation_result=outcome.as_record(self._request_id),
             )
         if updated is None:
             raise NotFoundError("LLM provider not found.")
 
+        metadata: dict[str, object] = {
+            "status": updated.status.value,
+            "model_count": len(updated.discovered_models),
+        }
+        if probe_error is not None:
+            metadata["error_code"] = probe_error.code
         await self._audit.emit(
             action=AuditAction.LLM_PROVIDER_DISCOVERED,
             actor=AuditActor.user(self._owner_id),
             resource_type="llm_provider",
             resource_id=str(provider.id),
-            outcome=AuditOutcome.ALLOWED if error is None else AuditOutcome.ERROR,
+            outcome=AuditOutcome.ALLOWED if probe_error is None else AuditOutcome.ERROR,
             request_id=self._request_id,
             source_ip=self._source_ip,
-            metadata={
-                "status": updated.status.value,
-                "model_count": len(updated.discovered_models),
-            },
+            metadata=metadata,
         )
         return updated
+
+    @audited_resource(
+        "llm_provider.test_connection", "llm_provider", "provider_id", missing_result=True
+    )
+    async def test_connection(
+        self, provider_id: UUID, *, model: str
+    ) -> tuple[LlmProvider, ProviderValidationOutcome] | None:
+        """Send ONE minimal bounded chat request; persist ready/error (spec 0029).
+
+        The only path to ``ready``: the admin-selected discovered ``model``
+        receives a single ``max_tokens=1`` request (the provider may bill for
+        it — the UI states this). Success proves authentication + chat
+        capability, so every required check passes. Failure records
+        ``status=error`` with the stable safe code. An unknown ``model`` is a
+        422 (``test_model_unknown``) sent before any network I/O. ``None``
+        when not visible (→ 404). Audits ``llm_provider.connection_tested``.
+        """
+        await self._require_admin(
+            attempted_action="llm_provider.test_connection", resource_id=str(provider_id)
+        )
+        provider = await self._visible(
+            provider_id, attempted_action="llm_provider.test_connection", for_update=True
+        )
+        if provider is None:
+            return None
+        known = {
+            str(m.get("id"))
+            for m in provider.discovered_models
+            if isinstance(m.get("id"), str) and m.get("id")
+        }
+        if not any(
+            c.get("name") == "catalog_discovered" and c.get("status") == "passed"
+            for c in provider.validation_checks
+        ):
+            known = set()
+        if model not in known:
+            raise ValidationError(
+                "Select a model from the provider's discovered catalog.",
+                code="test_model_unknown",
+            )
+
+        probe_error: ProviderProbeError | None = None
+        try:
+            api_key = await self._resolve_api_key(provider.api_key_secret_ref)
+            await probe_test_connection(
+                base_url=provider.base_url,
+                api_key=api_key,
+                model=model,
+                timeout_seconds=self._discovery_timeout_seconds,
+                user_agent=self._user_agent,
+                http_client=self._discovery_client,
+            )
+        except ProviderProbeError as exc:
+            probe_error = exc
+        except Exception:  # noqa: BLE001 — a bad provider is a state, not a 500
+            probe_error = ProviderProbeError(stage="connection_test", code="validation_failed")
+        has_key = provider.api_key_secret_ref is not None
+        now = _utc_now()
+        checks = _test_checks(has_key=has_key, error=probe_error)
+        status = LlmProviderStatus.READY if probe_error is None else LlmProviderStatus.ERROR
+        outcome = ProviderValidationOutcome(
+            status=status,
+            checks=checks,
+            stage=None if probe_error is None else probe_error.stage,
+            code=None if probe_error is None else probe_error.code,
+            retryable=False if probe_error is None else probe_error.retryable,
+            tested_model=model,
+            validated_at=now,
+        )
+        if probe_error is not None:
+            log.info(
+                "llm_provider.connection_test_failed",
+                provider_id=str(provider.id),
+                stage=probe_error.stage,
+                code=probe_error.code,
+                retryable=probe_error.retryable,
+                request_id=self._request_id,
+            )
+        updated = await self._providers.set_discovery(
+            provider.id,
+            status=status,
+            discovered_models=provider.discovered_models,
+            last_error=None if probe_error is None else probe_error.safe_message,
+            last_discovery_at=provider.last_discovery_at,
+            validation_checks=checks,
+            last_error_code=None if probe_error is None else probe_error.code,
+            validated_at=now,
+            validation_result=outcome.as_record(self._request_id),
+        )
+        if updated is None:
+            raise NotFoundError("LLM provider not found.")
+        metadata: dict[str, object] = {
+            "status": updated.status.value,
+            "tested_model": model,
+        }
+        if probe_error is not None:
+            metadata["error_code"] = probe_error.code
+        await self._audit.emit(
+            action=AuditAction.LLM_PROVIDER_CONNECTION_TESTED,
+            actor=AuditActor.user(self._owner_id),
+            resource_type="llm_provider",
+            resource_id=str(provider.id),
+            outcome=AuditOutcome.ALLOWED if probe_error is None else AuditOutcome.ERROR,
+            request_id=self._request_id,
+            source_ip=self._source_ip,
+            metadata=metadata,
+        )
+        return updated, outcome
 
     # --- use-cases ----------------------------------------------------------
 
@@ -374,8 +559,8 @@ class LlmProviderService:
         3. **Row** — create ``status=pending``.
         4. **Key** — if supplied, store it write-only via CC-C and attach the ref +
            masked hint to the row (never the value).
-        5. **Audit** ``llm_provider.created`` (INV-6) — metadata + hint, never the key.
-        6. **Discover** — probe ``GET /models`` and persist ready/error (never raises;
+        5. **Audit** ``llm_provider.created`` (INV-6) — key presence only.
+        6. **Discover** — probe ``GET /models`` and persist reachable/error (never raises;
            a bad key/url is a recorded state, audited as ``llm_provider.discovered``).
 
         Raises:
@@ -414,8 +599,8 @@ class LlmProviderService:
             metadata={
                 "name": provider.name,
                 "provider_type": provider.provider_type,
+                # Presence only — no key-derived fragment in audit (spec 0029).
                 "has_api_key": provider.api_key_secret_ref is not None,
-                "secret_hint": provider.secret_hint,
             },
         )
         return await self._run_discovery(provider)
@@ -437,7 +622,7 @@ class LlmProviderService:
         re-runs the https + SSRF validation (else 422). Rotating ``api_key`` stores
         the new value write-only via CC-C and replaces the ref + hint; ``clear_api_key``
         deletes the vault secret and nulls the ref + hint. The key value is never
-        returned — only the updated masked ``secret_hint``. Re-runs discovery when the
+        returned — only key presence is exposed. Re-runs discovery when the
         ``base_url`` or the ``api_key`` changed (a new target/credential needs a fresh
         model snapshot). Audits ``llm_provider.updated`` (INV-6). ``None`` when not
         visible (→ 404).
@@ -445,7 +630,9 @@ class LlmProviderService:
         await self._require_admin(
             attempted_action="llm_provider.update", resource_id=str(provider_id)
         )
-        provider = await self._visible(provider_id, attempted_action="llm_provider.update")
+        provider = await self._visible(
+            provider_id, attempted_action="llm_provider.update", for_update=True
+        )
         if provider is None:
             return None
 
@@ -485,8 +672,8 @@ class LlmProviderService:
             metadata={
                 "name": updated.name,
                 "provider_type": updated.provider_type,
+                # Presence only — no key-derived fragment in audit (spec 0029).
                 "has_api_key": updated.api_key_secret_ref is not None,
-                "secret_hint": updated.secret_hint,
             },
         )
 
@@ -501,15 +688,18 @@ class LlmProviderService:
         """Re-run model discovery for a provider on demand; persist the outcome, or 404.
 
         The explicit refresh: probe ``GET {base_url}/models`` again through the SSRF
-        guard, resolving the key in-process from CC-C. On success ``status=ready`` +
-        a fresh snapshot; on failure ``status=error`` + a safe ``last_error`` (previous
-        snapshot preserved) — never raises (a bad provider is a recorded state).
+        guard, resolving the key in-process from CC-C. On success ``status=reachable``
+        + a fresh snapshot (auth unverified until test-connection, spec 0029); on
+        failure ``status=error`` + a safe ``last_error`` (previous snapshot preserved)
+        — never raises (a bad provider is a recorded state).
         Audits ``llm_provider.discovered`` (INV-6). ``None`` when not visible (→ 404).
         """
         await self._require_admin(
             attempted_action="llm_provider.refresh", resource_id=str(provider_id)
         )
-        provider = await self._visible(provider_id, attempted_action="llm_provider.refresh")
+        provider = await self._visible(
+            provider_id, attempted_action="llm_provider.refresh", for_update=True
+        )
         if provider is None:
             return None
         return await self._run_discovery(provider)
@@ -525,7 +715,9 @@ class LlmProviderService:
         await self._require_admin(
             attempted_action="llm_provider.delete", resource_id=str(provider_id)
         )
-        provider = await self._visible(provider_id, attempted_action="llm_provider.delete")
+        provider = await self._visible(
+            provider_id, attempted_action="llm_provider.delete", for_update=True
+        )
         if provider is None:
             return False
 
@@ -557,18 +749,89 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _safe_error(exc: Exception) -> str:
-    """A short, safe failure reason for ``last_error`` (never the credential).
+# Probe codes that mean "no HTTP response was ever received" — the provider
+# was not shown reachable. Every other code implies a response arrived.
+_NO_RESPONSE_CODES = frozenset(
+    {"blocked_address", "dns_failed", "timeout", "connection_failed", "validation_failed"}
+)
 
-    Uses the exception type + message, truncated — the API key is never in an
-    egress/httpx/JSON error, and the resolver's own errors carry only the ref, so
-    this is safe to persist and surface. Bounded to :data:`_MAX_ERROR_LEN`.
-    """
-    detail = str(exc).strip() or exc.__class__.__name__
-    message = f"{exc.__class__.__name__}: {detail}"
-    if len(message) > _MAX_ERROR_LEN:
-        return message[: _MAX_ERROR_LEN - 1] + "…"
-    return message
+
+def _check(name: str, status: str, code: str | None = None) -> dict[str, object]:
+    return {"name": name, "status": status, "code": code}
+
+
+def _auth_unverified(has_key: bool) -> dict[str, object]:
+    return _check("auth_verified", "unverified" if has_key else "not_applicable")
+
+
+def _discovery_checks(
+    *, has_key: bool, error: ProviderProbeError | None
+) -> list[dict[str, object]]:
+    """Checks after a /models discovery run (catalog evidence only, spec 0029)."""
+    if error is None:
+        return [
+            _check("config_valid", "passed"),
+            _check("reachable", "passed"),
+            _check("catalog_discovered", "passed"),
+            _auth_unverified(has_key),
+            _check("capabilities_verified", "unverified"),
+        ]
+    if error.code in _NO_RESPONSE_CODES:
+        return [
+            _check("config_valid", "failed", error.code)
+            if error.code == "blocked_address"
+            else _check("config_valid", "passed"),
+            _check("reachable", "failed", error.code),
+            _check("catalog_discovered", "unverified"),
+            _auth_unverified(has_key),
+            _check("capabilities_verified", "unverified"),
+        ]
+    return [
+        _check("config_valid", "passed"),
+        _check("reachable", "passed"),
+        _check("catalog_discovered", "failed", error.code),
+        _check("auth_verified", "failed", error.code)
+        if error.code in {"unauthorized", "forbidden"}
+        else _auth_unverified(has_key),
+        _check("capabilities_verified", "unverified"),
+    ]
+
+
+def _test_checks(*, has_key: bool, error: ProviderProbeError | None) -> list[dict[str, object]]:
+    """Checks after a bounded test-connection run (the required set, spec 0029)."""
+    if error is None:
+        return [
+            _check("config_valid", "passed"),
+            _check("reachable", "passed"),
+            _check("catalog_discovered", "passed"),
+            _check("auth_verified", "passed" if has_key else "not_applicable"),
+            _check("capabilities_verified", "passed"),
+        ]
+    if error.code in {"unauthorized", "forbidden"}:
+        return [
+            _check("config_valid", "passed"),
+            _check("reachable", "passed"),
+            _check("catalog_discovered", "passed"),
+            _check("auth_verified", "failed", error.code),
+            _check("capabilities_verified", "unverified"),
+        ]
+    if error.code in _NO_RESPONSE_CODES:
+        return [
+            _check("config_valid", "failed", error.code)
+            if error.code == "blocked_address"
+            else _check("config_valid", "passed"),
+            _check("reachable", "failed", error.code),
+            _check("catalog_discovered", "passed"),
+            _auth_unverified(has_key),
+            _check("capabilities_verified", "unverified"),
+        ]
+    return [
+        _check("config_valid", "passed"),
+        _check("reachable", "passed"),
+        _check("catalog_discovered", "passed"),
+        _auth_unverified(has_key),
+        _check("capabilities_verified", "failed", error.code),
+    ]
 
 
 def build_llm_provider_service(
@@ -623,5 +886,6 @@ def build_llm_provider_service(
 
 __all__ = [
     "LlmProviderService",
+    "ProviderValidationOutcome",
     "build_llm_provider_service",
 ]

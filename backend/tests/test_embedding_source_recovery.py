@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from celery.exceptions import Retry
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
@@ -529,10 +530,13 @@ async def test_full_source_replay_preserves_exact_legacy_archive(
             await asyncio.to_thread(
                 command.downgrade, _migration_config(), "0044_direct_media_uploads"
             )
+        # The refused downgrade rolls back as one transaction: still at head, which
+        # is computed, not pinned (the literal went stale with every new migration).
+        head = ScriptDirectory.from_config(_migration_config()).get_current_head()
         async with db_session.tenant_session_scope(tenant_id) as session:
             assert (
                 await session.execute(text("SELECT version_num FROM alembic_version"))
-            ).scalar_one() == ("0045_embedding_contract")
+            ).scalar_one() == head
             retained = (
                 (await session.execute(select(models.LegacyEmbeddingArchive))).scalars().all()
             )

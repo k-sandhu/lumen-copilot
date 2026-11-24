@@ -108,7 +108,9 @@ def build_quarantine_key(tenant_id: str, document_id: str, filename: str) -> str
 _ARTIFACT_PREFIX = "artifacts"
 
 
-def build_artifact_key(tenant_id: str, data: bytes, filename: str) -> str:
+def build_artifact_key(
+    tenant_id: str, data: bytes, filename: str, *, object_id: str | None = None
+) -> str:
     """Assemble the artifact object key (issue #208, AC-5).
 
     Shape: ``artifacts/{tenant_id}/{sha256(data)}/{safe_filename}`` — the same
@@ -117,10 +119,17 @@ def build_artifact_key(tenant_id: str, data: bytes, filename: str) -> str:
     uploaded document. Reuses :func:`validate_tenant_id` (a forged/traversing
     tenant id is refused) and :func:`safe_filename` (no path traversal in the
     final segment).
+
+    ``object_id`` inserts a server-reserved segment after the tenant for a
+    transactional tool write. That write owns its object independently of any
+    concurrent, identical output, so rollback cleanup cannot remove shared bytes.
     """
+    # A unique identity lets transactional tool writes compensate independently,
+    # even when concurrent requests produce identical bytes and filenames.
+    scope = f"{validate_tenant_id(object_id)}/" if object_id is not None else ""
     return (
         f"{_ARTIFACT_PREFIX}/{validate_tenant_id(tenant_id)}/"
-        f"{sha256_hex(data)}/{safe_filename(filename)}"
+        f"{scope}{sha256_hex(data)}/{safe_filename(filename)}"
     )
 
 
