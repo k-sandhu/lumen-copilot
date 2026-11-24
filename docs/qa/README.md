@@ -25,6 +25,11 @@ Git history preserves later changes; CI rejects modification/deletion of existin
 ledger files and removal/reuse of definition IDs. Corrections are a new run with
 a new ID and an explanatory note, never an overwritten observation.
 
+Git text used by the history validator is decoded explicitly as strict UTF-8,
+matching the repository definitions on Windows and CI regardless of the default
+locale. Unchanged non-ASCII titles remain valid; title reuse, ledger rewrites,
+and malformed UTF-8 remain errors. No process-wide locale override is needed.
+
 Every record includes:
 
 - Full application commit and source state (clean, modified, or unknown); deployment

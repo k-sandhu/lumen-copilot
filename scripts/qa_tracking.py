@@ -157,10 +157,13 @@ def timestamp(value):
 
 
 def git(root, *args):
+    # Decode after capture so Windows reader threads cannot swallow decode errors.
     result = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        check=True,
     )
-    return result.stdout.strip()
+    return result.stdout.decode("utf-8").strip()
 
 
 def definition_tree_dirty(root):
@@ -476,10 +479,12 @@ def validate_history(root, base):
         prior = subprocess.run(
             ["git", "-C", str(root), "show", base + ":" + path],
             capture_output=True,
-            text=True,
+            check=False,
         )
         if prior.returncode == 0:
-            previous = {x["id"]: x for x in json.loads(prior.stdout)[key]}
+            previous = {
+                x["id"]: x for x in json.loads(prior.stdout.decode("utf-8"))[key]
+            }
             current = {x["id"]: x for x in load_json(root / path)[key]}
             validate_evolution(previous, current)
 
