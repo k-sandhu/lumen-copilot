@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -301,6 +302,93 @@ class TrackingContract(unittest.TestCase):
         self.assertIn("fake/model", report)
         self.assertIn("(dirty)", report)
         self.assertIn("context ", report)
+
+
+class GitTextEncoding(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.git("init", "--quiet")
+        self.paths = (
+            ("docs/qa/catalog.json", "entries"),
+            ("docs/qa/cases.json", "cases"),
+        )
+        for path, key in self.paths:
+            target = self.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(
+                    {key: [{"id": "QA-TEST-001", "title": "Review — café"}]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        ledger = self.root / "qa/runs/original.json"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text("{}", encoding="utf-8")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+
+    def git(self, *args):
+        return subprocess.check_output(
+            ["git", "-C", str(self.root), *args], encoding="utf-8"
+        ).strip()
+
+    def commit(self):
+        self.git("add", ".")
+        self.git(
+            "-c",
+            "user.name=QA",
+            "-c",
+            "user.email=qa@example.test",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: fixture",
+        )
+
+    def test_unchanged_non_ascii_history_under_cp1252_default(self):
+        with patch("subprocess._text_encoding", return_value="cp1252"):
+            qa.validate_history(self.root, self.base)
+            self.assertIn(
+                "Review — café",
+                qa.git(self.root, "show", self.base + ":docs/qa/cases.json"),
+            )
+
+    def test_non_ascii_title_mutations_still_rejected_under_cp1252(self):
+        for path, _ in self.paths:
+            with self.subTest(path=path):
+                target = self.root / path
+                original = target.read_text(encoding="utf-8")
+                target.write_text(original.replace("café", "résumé"), encoding="utf-8")
+                with (
+                    patch("subprocess._text_encoding", return_value="cp1252"),
+                    self.assertRaisesRegex(ValueError, "reused stable ID QA-TEST-001"),
+                ):
+                    qa.validate_history(self.root, self.base)
+                target.write_text(original, encoding="utf-8")
+
+    def test_committed_ledger_mutation_still_rejected_under_cp1252(self):
+        (self.root / "qa/runs/original.json").write_text('{"changed": true}')
+        self.commit()
+        with (
+            patch("subprocess._text_encoding", return_value="cp1252"),
+            self.assertRaisesRegex(ValueError, "modified/deleted"),
+        ):
+            qa.validate_history(self.root, self.base)
+
+    def test_malformed_git_utf8_is_rejected_without_replacement(self):
+        (self.root / "docs/qa/cases.json").write_bytes(
+            b'{"cases": [{"id": "QA-TEST-001", "title": "bad \xff"}]}'
+        )
+        self.commit()
+        base = self.git("rev-parse", "HEAD")
+        with patch("subprocess._text_encoding", return_value="cp1252"):
+            with self.assertRaises(UnicodeDecodeError):
+                qa.git(self.root, "show", base + ":docs/qa/cases.json")
+            with self.assertRaises(UnicodeDecodeError):
+                qa.validate_history(self.root, base)
 
 
 if __name__ == "__main__":
