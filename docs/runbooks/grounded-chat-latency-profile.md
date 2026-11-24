@@ -216,8 +216,8 @@ One separately authorized diagnostic called that same embedding gateway once
 with synthetic text, preserving its 60s provider timeout and adding a 65s outer
 bound. It timed out before an upstream exception reached the mapping seam;
 there is no numeric HTTP status or evidence to identify a credential or model
-availability problem. No additional inference probe or timing-gate retry was
-made. Completion of the existing embedding route is a prerequisite for a
+availability problem. The timing gate was not retried. Completion of the
+existing embedding route is a prerequisite for a
 meaningful current baseline; no measured local performance repair is yet
 justified by this attempt.
 
@@ -229,6 +229,23 @@ base matched HTTPS OpenRouter with no query. The catalog returned **HTTP 200 in
 ordinary catalog connectivity and advertised model presence work, but neither
 proves that embedding inference completes or that the account can use the route.
 No credential failure, model retirement or chat-route latency is inferred.
+
+A final separately authorized same-route synthetic gateway call instrumented
+only the gateway-owned HTTPX client's original send and whitelisted transport
+timings. Exactly one dispatch reached the expected OpenRouter host and returned
+**HTTP 410**. TCP/TLS, response headers and body EOF completed normally; send to
+return took **0.210s**, and request-body completion to response headers took
+**0.077s**. There was no transport exception or retry, and owned clients closed.
+No response body, credential, input or vector was inspected or retained by the
+instrumentation. This distinguishes the observed inference-route failure from
+host connectivity or an HTTP client waiting indefinitely for its response. The
+catalog listing does not prove that the inference route is usable. It does not
+establish a failure of the chat model or provide a chat-latency measurement.
+
+The remaining prerequisite is successful inference on the existing embedding
+configuration. Substituting an embedding model/provider would change the
+baseline and requires a separately documented explicit decision; it is not a
+performance repair or a way to make the unchanged gate green.
 
 The baseline emitted a LiteLLM `DeprecationWarning` at `utils.py:146`; no warning
 was suppressed. No resource, unraisable or event-loop warning diagnostic was
