@@ -165,5 +165,12 @@
     "terminal_exception_type": "LlmProviderError",
     "finished_utc": "2026-11-24T06:28:12Z",
     "interpretation": "One dispatch completed HTTP headers and EOF normally with status410. Catalog presence does not prove that the embedding inference route is usable. No response body was inspected or retained; no transport exception or manual retry occurred."
+  },
+  "endpoint_path_verification": {
+    "configured_embedding_slug": "openai/nvidia/nemotron-3-embed-1b:free",
+    "configured_base_path_matches_api_v1": true,
+    "pinned_sdk_post_path_matches_embeddings": true,
+    "effective_path_from_config_and_pinned_sdk": "/api/v1/embeddings",
+    "verification": "configuration and pinned SDK source; actual request path was not recorded by the timing-only trace; no new network call"
   }
 }

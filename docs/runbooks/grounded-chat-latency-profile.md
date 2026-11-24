@@ -241,6 +241,10 @@ instrumentation. This distinguishes the observed inference-route failure from
 host connectivity or an HTTP client waiting indefinitely for its response. The
 catalog listing does not prove that the inference route is usable. It does not
 establish a failure of the chat model or provide a chat-latency measurement.
+The existing configured base path is `/api/v1`; the pinned OpenAI embedding
+resource posts to `/embeddings`, yielding `/api/v1/embeddings`. This path check
+uses existing configuration and pinned SDK source without another network call;
+the timing-only trace did not retain the actual request path.
 
 The remaining prerequisite is successful inference on the existing embedding
 configuration. Substituting an embedding model/provider would change the
