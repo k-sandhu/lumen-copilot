@@ -1,0 +1,176 @@
+{
+  "issue": 802,
+  "attempt_date": "2026-11-24",
+  "source_head": "ccde79a4efaf4cadca146470238d390f75643401",
+  "base_main": "1a566cb3e6c3da37a6aa5b382c114c3c2d8eb5c4",
+  "harness_sha256": "64ecee9272be0db7713ad25aa487e8d72c35def2d4fff9d9df2ec0dc83b81d2a",
+  "instrumentation_sha256": "24281bb2041df02f70b0609e667143114066e83c4a60337045dc01e2d7219c36",
+  "provider_model": "openrouter/inclusionai/ling-3.0-flash",
+  "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+  "embedding_dimensions": 2048,
+  "runtime": {
+    "python": "3.12.5",
+    "litellm": "1.55.9",
+    "openai": "2.43.0",
+    "httpx": "0.27.2",
+    "pytest": "8.3.4",
+    "host": "Windows",
+    "stores": "task-owned Docker29.8.2 under WSL; PostgreSQL16.15/pgvector, Redis7.4.11, OpenSearch2.19.1",
+    "transport": "original in-process authenticated ASGI HTTP/WebSocket harness, real Redis; direct Windows-to-WSL OpenSearch endpoint",
+    "interactive_timeout_seconds": 25.0,
+    "provider_timeout_seconds": 60.0,
+    "prompt_cache_enabled": true,
+    "telemetry_enabled": false
+  },
+  "command": "pytest tests/eval/test_chat_latency_live.py -n 0 -o addopts= -q -s -p chat_latency_profile --latency-profile-output <private-output.json>",
+  "live_opt_in": true,
+  "assertions_enabled": true,
+  "requested_samples": 5,
+  "budget_seconds": 2.0,
+  "error_budget_seconds": 30.0,
+  "started_utc": "2026-11-24T06:18:50Z",
+  "finished_utc": "2026-11-24T06:19:44Z",
+  "pytest_duration_seconds": 25.88,
+  "result": "FAIL_BEFORE_SAMPLING",
+  "pytest_failed_tests": 2,
+  "completed_answer_samples": 0,
+  "median_seconds": null,
+  "samples": [],
+  "failure": {
+    "stage": "seed_corpus embedding, before answer runtime",
+    "mapped_exception_type": "LlmProviderError",
+    "vendor_exception_type": "APIError",
+    "numeric_http_status": null,
+    "provider_error_text_retained": false,
+    "claims": "No latency, model availability, credential validity or regression conclusion can be drawn."
+  },
+  "warnings": {
+    "observed": [
+      {
+        "class": "DeprecationWarning",
+        "location": "litellm/utils.py:146"
+      }
+    ],
+    "resource_or_unraisable_or_event_loop_diagnostics_detected": false,
+    "suppressed": false
+  },
+  "contention": "Another task briefly launched two offline pytest workers during process startup, then stopped immediately. No answer sample began. Remaining run had no other task-owned suite or provider probe.",
+  "diagnostic": {
+    "diagnostic": "one synthetic same-route embedding gateway call",
+    "started_utc": "2026-11-24T06:21:39Z",
+    "exceptions": [],
+    "model": "openai/nvidia/nemotron-3-embed-1b:free",
+    "dimensions": 2048,
+    "timeout_seconds": 60.0,
+    "outcome": "failure",
+    "terminal_type": "TimeoutError",
+    "finished_utc": "2026-11-24T06:22:46Z"
+  },
+  "cleanup": {
+    "seed_schemas_removed": 2,
+    "seed_indexes_removed": 2,
+    "matching_pipelines_removed": 2,
+    "verified": "task runtime helper confirmed empty schema query and HTTP404 for exact indexes/pipelines after deletion; gateway seed finally and diagnostic closed owned clients"
+  },
+  "offline_validation": {
+    "tests": [
+      "tests/eval/test_chat_latency_gating.py",
+      "tests/eval/test_eval_latency.py"
+    ],
+    "passed": 27,
+    "duration_seconds": 26.2
+  },
+  "interpretation": "The original target remains unmet and unmeasured on this resumed source. No provider/model/budget/permission/citation/audit change or performance repair is included. The original timing gate was not retried; each separately authorized diagnostic ran once. The existing embedding inference prerequisite returned HTTP410 despite being listed in the catalog.",
+  "catalog_check": {
+    "check": "one documented embeddings catalog GET; no model invocation",
+    "documentation": "https://openrouter.ai/docs/api/api-reference/embeddings/list-embeddings-models",
+    "configured_base_host_matches_openrouter": true,
+    "configured_base_uses_https": true,
+    "configured_base_contains_query": false,
+    "model_presence": true,
+    "http_status": 200,
+    "started_utc": "2026-11-24T06:24:14Z",
+    "catalog_is_array": true,
+    "elapsed_seconds": 0.547,
+    "finished_utc": "2026-11-24T06:24:15Z"
+  },
+  "transport_diagnostic": {
+    "diagnostic": "one same-route gateway embedding invocation; owned HTTPX send timing only",
+    "events": [
+      {
+        "event": "send",
+        "seconds": 47.378588,
+        "host_matches_openrouter": true
+      },
+      {
+        "event": "connection.connect_tcp.started",
+        "seconds": 47.401177
+      },
+      {
+        "event": "connection.connect_tcp.complete",
+        "seconds": 47.448233
+      },
+      {
+        "event": "connection.start_tls.started",
+        "seconds": 47.448294
+      },
+      {
+        "event": "connection.start_tls.complete",
+        "seconds": 47.509234
+      },
+      {
+        "event": "http11.send_request_body.complete",
+        "seconds": 47.510587
+      },
+      {
+        "event": "http11.receive_response_headers.started",
+        "seconds": 47.510603
+      },
+      {
+        "event": "http11.receive_response_headers.complete",
+        "seconds": 47.587445,
+        "status": 410
+      },
+      {
+        "event": "http11.receive_response_body.started",
+        "seconds": 47.588258
+      },
+      {
+        "event": "http11.receive_response_body.complete",
+        "seconds": 47.588584
+      },
+      {
+        "event": "http11.response_closed.complete",
+        "seconds": 47.588755
+      },
+      {
+        "event": "send_returned",
+        "seconds": 47.588935,
+        "status": 410
+      },
+      {
+        "event": "owned_clients_closed",
+        "seconds": 47.836173
+      }
+    ],
+    "dispatch_count": 1,
+    "outer_bound_seconds": 65.0,
+    "model": "openai/nvidia/nemotron-3-embed-1b:free",
+    "dimensions": 2048,
+    "provider_timeout_seconds": 60.0,
+    "started_utc": "2026-11-24T06:27:44Z",
+    "owned_client_instrumented": true,
+    "configured_sdk_max_retries": 2,
+    "outcome": "failure",
+    "terminal_exception_type": "LlmProviderError",
+    "finished_utc": "2026-11-24T06:28:12Z",
+    "interpretation": "One dispatch completed HTTP headers and EOF normally with status410. Catalog presence does not prove that the embedding inference route is usable. No response body was inspected or retained; no transport exception or manual retry occurred."
+  },
+  "endpoint_path_verification": {
+    "configured_embedding_slug": "openai/nvidia/nemotron-3-embed-1b:free",
+    "configured_base_path_matches_api_v1": true,
+    "pinned_sdk_post_path_matches_embeddings": true,
+    "effective_path_from_config_and_pinned_sdk": "/api/v1/embeddings",
+    "verification": "configuration and pinned SDK source; actual request path was not recorded by the timing-only trace; no new network call"
+  }
+}

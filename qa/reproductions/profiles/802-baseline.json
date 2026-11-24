@@ -1,0 +1,129 @@
+{
+  "issue": 802,
+  "source_head": "19dec232f944b8c4dacce1e60254cd5a1be56c77",
+  "instrumentation_sha256": "573360cdbd6640d8497ffa2cd1c9de7451225cc7fecc09f42df336200e2ec8d2",
+  "provider_model": "openrouter/inclusionai/ling-3.0-flash",
+  "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+  "embedding_dimensions": 2048,
+  "runtime": {
+    "python": "3.12.5",
+    "litellm": "1.55.9",
+    "openai": "2.43.0",
+    "httpx": "0.27.2",
+    "host": "Windows",
+    "stores": "isolated WSL PostgreSQL16/Redis7.4/OpenSearch2.19.1",
+    "transport": "in-process authenticated ASGI HTTP/WS, real Redis; QA loopback forwarding to OpenSearch"
+  },
+  "budget_seconds": 2.0,
+  "assertions_enabled": true,
+  "grounding": "all five passed original exactly-one retrieval/nonempty passages/citation assertions",
+  "median_seconds": 2.8022898000199348,
+  "result": "FAIL",
+  "samples": [
+    {
+      "sample": 1,
+      "process_state": "cold",
+      "ttft_seconds": 5.5890872000018135,
+      "model_turn_seconds": [
+        3.838805,
+        1.049754
+      ],
+      "step_prepare_seconds": [
+        0.052836
+      ],
+      "retrieval_seconds": [
+        0.674609
+      ],
+      "embedding_seconds": [
+        0.358039
+      ],
+      "tool_batch_seconds": [
+        0.695868
+      ]
+    },
+    {
+      "sample": 2,
+      "process_state": "warm",
+      "ttft_seconds": 2.8022898000199348,
+      "model_turn_seconds": [
+        1.441346,
+        1.320693
+      ],
+      "step_prepare_seconds": [
+        0.045903
+      ],
+      "retrieval_seconds": [
+        0.036745
+      ],
+      "embedding_seconds": [
+        0.001145
+      ],
+      "tool_batch_seconds": [
+        0.057296
+      ]
+    },
+    {
+      "sample": 3,
+      "process_state": "warm",
+      "ttft_seconds": 2.4054667000018526,
+      "model_turn_seconds": [
+        1.097141,
+        1.227732
+      ],
+      "step_prepare_seconds": [
+        0.037457
+      ],
+      "retrieval_seconds": [
+        0.077922
+      ],
+      "embedding_seconds": [
+        0.000749
+      ],
+      "tool_batch_seconds": [
+        0.094755
+      ]
+    },
+    {
+      "sample": 4,
+      "process_state": "warm",
+      "ttft_seconds": 2.5744848999893293,
+      "model_turn_seconds": [
+        1.209578,
+        1.281216
+      ],
+      "step_prepare_seconds": [
+        0.0663
+      ],
+      "retrieval_seconds": [
+        0.039555
+      ],
+      "embedding_seconds": [
+        0.001943
+      ],
+      "tool_batch_seconds": [
+        0.065073
+      ]
+    },
+    {
+      "sample": 5,
+      "process_state": "warm",
+      "ttft_seconds": 2.8524774000106845,
+      "model_turn_seconds": [
+        1.1794,
+        1.572194
+      ],
+      "step_prepare_seconds": [
+        0.043591
+      ],
+      "retrieval_seconds": [
+        0.076976
+      ],
+      "embedding_seconds": [
+        0.000846
+      ],
+      "tool_batch_seconds": [
+        0.102725
+      ]
+    }
+  ]
+}

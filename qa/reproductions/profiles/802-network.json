@@ -1,0 +1,208 @@
+{
+  "issue": 802,
+  "source_head": "19dec232f944b8c4dacce1e60254cd5a1be56c77",
+  "instrumentation_sha256": "ff6cdfd47e904a7f0bcf334b240f0310766323bb998422dced82bda2d6452a08",
+  "provider_model": "openrouter/inclusionai/ling-3.0-flash",
+  "embedding_model": "openai/nvidia/nemotron-3-embed-1b:free",
+  "embedding_dimensions": 2048,
+  "runtime": {
+    "python": "3.12.5",
+    "litellm": "1.55.9",
+    "openai": "2.43.0",
+    "httpx": "0.27.2",
+    "host": "Windows",
+    "stores": "isolated WSL PostgreSQL16/Redis7.4/OpenSearch2.19.1",
+    "transport": "in-process authenticated ASGI HTTP/WS, real Redis; QA loopback forwarding to OpenSearch"
+  },
+  "budget_seconds": 2.0,
+  "assertions_enabled": true,
+  "grounding": "all five passed original exactly-one retrieval/nonempty passages/citation assertions",
+  "median_seconds": 2.3816921999969054,
+  "result": "FAIL",
+  "samples": [
+    {
+      "sample": 1,
+      "process_state": "cold",
+      "ttft_seconds": 3.270874300011201,
+      "model_turn_seconds": [
+        1.489104,
+        1.137618
+      ],
+      "retrieval_seconds": [
+        0.610354
+      ],
+      "embedding_seconds": [
+        0.366799
+      ],
+      "model_turn_network": [
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 2,
+          "tcp_tls_seconds": [
+            0.070776
+          ],
+          "last_request_to_response_headers_seconds": 0.692762
+        },
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [],
+          "last_request_to_response_headers_seconds": 0.835776
+        }
+      ]
+    },
+    {
+      "sample": 2,
+      "process_state": "warm",
+      "ttft_seconds": 2.3816921999969054,
+      "model_turn_seconds": [
+        1.162172,
+        1.114638
+      ],
+      "retrieval_seconds": [
+        0.086703
+      ],
+      "embedding_seconds": [
+        0.001358
+      ],
+      "model_turn_network": [
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.062037
+          ],
+          "last_request_to_response_headers_seconds": 0.74176
+        },
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.064371
+          ],
+          "last_request_to_response_headers_seconds": 0.721163
+        }
+      ]
+    },
+    {
+      "sample": 3,
+      "process_state": "warm",
+      "ttft_seconds": 2.4338153999997303,
+      "model_turn_seconds": [
+        1.232906,
+        1.186109
+      ],
+      "retrieval_seconds": [
+        0.082704
+      ],
+      "embedding_seconds": [
+        0.001229
+      ],
+      "model_turn_network": [
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.067621
+          ],
+          "last_request_to_response_headers_seconds": 0.890875
+        },
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.065775
+          ],
+          "last_request_to_response_headers_seconds": 0.752212
+        }
+      ]
+    },
+    {
+      "sample": 4,
+      "process_state": "warm",
+      "ttft_seconds": 2.2050519000040367,
+      "model_turn_seconds": [
+        1.031392,
+        1.134679
+      ],
+      "retrieval_seconds": [
+        0.029163
+      ],
+      "embedding_seconds": [
+        0.000746
+      ],
+      "model_turn_network": [
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.071004
+          ],
+          "last_request_to_response_headers_seconds": 0.787721
+        },
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.070259
+          ],
+          "last_request_to_response_headers_seconds": 0.774305
+        }
+      ]
+    },
+    {
+      "sample": 5,
+      "process_state": "warm",
+      "ttft_seconds": 2.3475198000087403,
+      "model_turn_seconds": [
+        1.051133,
+        1.159673
+      ],
+      "retrieval_seconds": [
+        0.080536
+      ],
+      "embedding_seconds": [
+        0.000779
+      ],
+      "model_turn_network": [
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.075891
+          ],
+          "last_request_to_response_headers_seconds": 0.722188
+        },
+        {
+          "sdk_reused": [
+            true
+          ],
+          "http_attempts": 1,
+          "tcp_tls_seconds": [
+            0.06885
+          ],
+          "last_request_to_response_headers_seconds": 0.86377
+        }
+      ]
+    }
+  ],
+  "instrumentation": "External timing-only HTTP trace plus stage wrappers, fresh process; no wire/payload/header overrides"
+}
