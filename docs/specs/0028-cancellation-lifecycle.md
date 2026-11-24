@@ -288,3 +288,22 @@ long tool batches, token reservations, retry/failover checks, missing prices,
 normal wire compatibility, tenant-scoped disclosure reload, reversible DDL,
 and frontend live/reload rendering. The PR records red/green and per-bound
 revert checks; this text does not substitute for executed verification.
+
+
+### Integration qualification (2026-11-24, #833)
+
+The approved disclosure shape is the nullable `{kind, message}` object on
+`done.data.limit` and history `Message.limit`, reconstructed from stored
+`messages.limit_kind`; it replaces the issue's initial `stopReason`/`limitation`
+field-name sketch. Research-phase ceilings include retries and failovers, with
+one bounded tool-free synthesis outside those phase ceilings but inside global
+model-call, wall-clock and answer-output caps, as described above.
+
+The integrated migration is `0055_answer_limit` after `0054_billed_cost`.
+`test_answer_limit_live.py` qualifies the real migrated PostgreSQL database and
+a loopback HTTP server using a deterministic model fixture: historical NULL,
+persisted/live/reload disclosure equality, paired skipped calls and durable
+denied audit rows, cross-tenant 404 with denial audit, unauthenticated 401, and
+unknown stored-kind omission. It reverses only the disclosure migration while
+preserving older message/billing data, reapplies head, reverses the full chain
+and drops its UUID-named database. No provider inference is needed.

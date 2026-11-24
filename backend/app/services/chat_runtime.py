@@ -1333,7 +1333,9 @@ class ChatRuntime:
                         model_calls=self._model_calls,
                         prompt_tokens=usage.prompt_tokens,
                         completion_tokens=usage.completion_tokens,
-                        cost_usd=format(usage.cost_usd, "f") if usage.cost_usd is not None else None,
+                        cost_usd=format(usage.cost_usd, "f")
+                        if usage.cost_usd is not None
+                        else None,
                         unpriced_calls=usage.unpriced_calls,
                         limit_kind=self._limit_kind,
                         loop_input_tokens=self._loop_input_tokens,
