@@ -199,6 +199,7 @@ class _OneSearchThenAnswer:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)

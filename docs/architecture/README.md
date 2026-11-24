@@ -36,7 +36,7 @@ For a dated visual walkthrough of the decisions, supersessions, and implementati
 | [0024](0024-agent-tool-contract-v2.md) | Agent tool contract v2, claim-linked answers and tool-call boundary hardening (#831) | Proposed |
 | [0025](0025-canonical-document-and-parser-evaluation.md) | Canonical document, provenance and structured-parser evaluation | Proposed — design only |
 | [0026](0026-continuous-integration.md) | Offline backend and frontend CI gates, locked dependencies, caches, and bounded test workers | Accepted |
-| [0031](0031-provider-billed-cost.md) | Provider-billed cost and per-answer spend accounting | Proposed |
+| [0031](0031-provider-billed-cost.md) | Provider-billed cost and per-answer spend accounting, including answer ceilings (spec 0028) | Proposed |
 | [0027](0027-llm-observability-phoenix-and-metrics.md) | LLM observability and ops metrics — OpenTelemetry → Arize Phoenix (self-hosted, ELv2 exception) + Prometheus/Grafana | Accepted |
 | [0029](0029-bounded-sandbox-sessions.md) | Bounded sandbox sessions by default — deployment ceilings, tenant narrowing, atomic accounting (amends 0020) | Proposed |
 

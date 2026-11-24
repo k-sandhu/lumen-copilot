@@ -51,11 +51,20 @@ and `unpricedCalls` (nonnegative integer). The string avoids JSON float loss;
 older producers and consumers remain compatible. The existing usage UI remains
 unchanged. Repository reads remain tenant scoped; no new usage endpoint is added.
 
-[#833](https://github.com/k-sandhu/lumen-copilot/issues/833) will enforce
-per-answer ceilings using these measurements. A post-request check necessarily
-allows one-request overshoot; unpriced calls must be disclosed, never claimed
-to fit a measured spend bound. This change enforces no ceiling, tenant budget,
-or price catalog.
+[#833](https://github.com/k-sandhu/lumen-copilot/issues/833) adds the optional
+per-answer tool-loop ceiling in [spec 0028](../specs/0028-cancellation-lifecycle.md).
+It checks the accumulated billed subtotal across failover scopes **before each
+provider attempt**, including retries. A measured cost can overshoot by one
+request because it arrives after dispatch. One separately bounded tool-free
+synthesis remains outside this phase ceiling, so its billed cost is additional.
+A configured ceiling stops tool-loop dispatch after the first unpriced request:
+unknown spend cannot establish remaining headroom. The priced subtotal and
+unpriced-call count are both retained in content-free outcome telemetry; no
+estimate is substituted for missing measurements. The disclosure uses the same
+`cost` kind for measured exhaustion and unavailable pricing, with policy wording
+that does not claim a measured total for an unpriced run. The ceiling is off by
+default; production deployments should set a finite positive value. No tenant
+budget, soft warning tier, or price catalog is introduced.
 
 ## Reversal and validation
 

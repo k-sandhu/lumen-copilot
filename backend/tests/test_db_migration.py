@@ -180,7 +180,9 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0054_billed_cost"]
+    assert list(script.get_heads()) == ["0055_answer_limit"]
+    limit = script.get_revision("0055_answer_limit")
+    assert limit is not None and limit.down_revision == "0054_billed_cost"
     billed = script.get_revision("0054_billed_cost")
     assert billed is not None
     assert billed.down_revision == "0053_message_finish_reason"
@@ -1308,7 +1310,7 @@ async def test_live_upgrade_then_downgrade_round_trip() -> None:
         async with engine.connect() as conn:
             names = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
             assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0054_billed_cost"
+                "0055_answer_limit"
             )
             historical = (
                 await conn.execute(
