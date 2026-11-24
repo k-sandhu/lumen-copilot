@@ -59,6 +59,7 @@ from app.domain.summary import (
     stored_summary_text,
 )
 from app.llm import LLMGateway
+from app.llm.calls import begin_call
 from app.llm.reasoning_guard import sanitize_provider_text
 from app.services.audit import AuditSink
 from app.services.provider_models import (
@@ -292,13 +293,13 @@ async def _record_summary_spend(
     usable, so leaving them unrecorded hides exactly the spend an operator would need
     to notice (ADR-0016 §2.6 — no invisible spend).
     """
-    if not (completion.usage.total_tokens or completion.usage.prompt_tokens):
-        return
     await LlmUsageRepository(session, tenant_id).record(
         model=completion.model or route.model,
         prompt_tokens=completion.usage.prompt_tokens,
         completion_tokens=completion.usage.completion_tokens,
         total_tokens=completion.usage.total_tokens,
+        cost_usd=completion.usage.cost_usd,
+        unpriced_calls=int(completion.usage.cost_usd is None),
         session_id=session_id,
     )
 
@@ -502,16 +503,35 @@ async def _summarize(tenant_id: UUID, session_id: UUID) -> str:
             session_model=chat_row.model,
         )
         gateway = LLMGateway(settings)
-        completion = await gateway.chat(
-            [
-                ChatMessage(role=LlmRole.SYSTEM, content=_SUMMARIZER_PROMPT),
-                ChatMessage(role=LlmRole.USER, content=user_block),
-            ],
-            model=route.model,
-            api_key=route.api_key,
-            api_base=route.api_base,
-            max_tokens=600,
-        )
+        call_tracker = begin_call()
+        try:
+            completion = await gateway.chat(
+                [
+                    ChatMessage(role=LlmRole.SYSTEM, content=_SUMMARIZER_PROMPT),
+                    ChatMessage(role=LlmRole.USER, content=user_block),
+                ],
+                model=route.model,
+                api_key=route.api_key,
+                api_base=route.api_base,
+                max_tokens=600,
+            )
+        except BaseException:
+            if call_tracker.dispatched:
+                # The provider may have billed an incomplete request. Commit
+                # its spend and refusal audit before the task rolls back.
+                await _refuse_summary(
+                    session,
+                    tenant_id,
+                    session_id,
+                    Completion(content="", model=route.model),
+                    route,
+                    covered=len(to_cover),
+                    reason="provider_request_incomplete",
+                )
+                await session.commit()
+            raise
+        finally:
+            call_tracker.finish()
         summary_text = completion.content.strip()
         if completion.content_filtered:
             log.warning("summarize.invalid_summary", reason="provider_content_filtered")

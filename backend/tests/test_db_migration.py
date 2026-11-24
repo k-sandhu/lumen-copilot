@@ -180,7 +180,10 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0053_message_finish_reason"]
+    assert list(script.get_heads()) == ["0054_billed_cost"]
+    billed = script.get_revision("0054_billed_cost")
+    assert billed is not None
+    assert billed.down_revision == "0053_message_finish_reason"
     bound = script.get_revision("0050_assistant_bound")
     assert bound is not None
     assert bound.down_revision == "0049_discovery_metadata"
@@ -1265,6 +1268,7 @@ async def test_live_upgrade_then_downgrade_round_trip() -> None:
 
     from alembic import command
     from sqlalchemy import inspect, text
+    from sqlalchemy.exc import IntegrityError
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from app.core.config import get_settings
@@ -1285,10 +1289,55 @@ async def test_live_upgrade_then_downgrade_round_trip() -> None:
     get_settings.cache_clear()
     engine = create_async_engine(tmp_url)
     try:
+        await asyncio.to_thread(command.upgrade, _alembic_config(), "0053_message_finish_reason")
+        tenant_id, usage_id = uuid.uuid4(), uuid.uuid4()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("INSERT INTO tenants (id, name) VALUES (:id, 'billing-migration-proof')"),
+                {"id": tenant_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO llm_usage (id, tenant_id, model, prompt_tokens, "
+                    "completion_tokens, total_tokens, cached_prompt_tokens, cache_write_tokens) "
+                    "VALUES (:id, :tenant, 'migration-proof', 0, 0, 0, 0, 0)"
+                ),
+                {"id": usage_id, "tenant": tenant_id},
+            )
         await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
         async with engine.connect() as conn:
             names = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
+            assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0054_billed_cost"
+            )
+            historical = (
+                await conn.execute(
+                    text("SELECT cost_usd, unpriced_calls FROM llm_usage WHERE id = :id"),
+                    {"id": usage_id},
+                )
+            ).one()
+            assert historical == (None, 0)
         assert _ALL_TABLES <= names
+        for assignment in ("cost_usd = -1", "unpriced_calls = -1"):
+            with pytest.raises(IntegrityError):
+                async with engine.begin() as conn:
+                    await conn.execute(text(f"UPDATE llm_usage SET {assignment}"))
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE llm_usage SET cost_usd = 0.125, unpriced_calls = 2"))
+        async with engine.connect() as conn:
+            priced = (
+                await conn.execute(
+                    text("SELECT cost_usd::text, unpriced_calls FROM llm_usage WHERE id = :id"),
+                    {"id": usage_id},
+                )
+            ).one()
+            assert priced == ("0.125000000000000000000000000000", 2)
+        await asyncio.to_thread(command.downgrade, _alembic_config(), "0053_message_finish_reason")
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(lambda c: inspect(c).get_columns("llm_usage"))
+            assert not {"cost_usd", "unpriced_calls"} & {c["name"] for c in columns}
+            assert await conn.scalar(text("SELECT count(*) FROM llm_usage")) == 1
+        await asyncio.to_thread(command.upgrade, _alembic_config(), "head")
 
         await asyncio.to_thread(command.downgrade, _alembic_config(), "base")
         async with engine.connect() as conn:
@@ -2233,3 +2282,21 @@ def test_offline_direct_media_upload_migration_round_trips(
     assert "alter table citations drop column time_end_ms" in down
     assert "drop constraint fk_chunks_transcript_segment_document" in down
     assert "drop constraint fk_citations_chunk_transcript_segment" in down
+
+
+def test_offline_billed_cost_migration_round_trips(capsys: pytest.CaptureFixture[str]) -> None:
+    """#832 adds nullable measured spend and nonnegative unpriced calls reversibly."""
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0053_message_finish_reason:0054_billed_cost", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "cost_usd numeric(48, 30)" in up
+    assert "unpriced_calls integer default '0' not null" in up
+    assert "ck_llm_usage_cost_nonneg" in up and "cost_usd >= 0" in up
+    assert "ck_llm_usage_unpriced_nonneg" in up and "unpriced_calls >= 0" in up
+    command.downgrade(cfg, "0054_billed_cost:0053_message_finish_reason", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop constraint ck_llm_usage_cost_nonneg" in down
+    assert "drop constraint ck_llm_usage_unpriced_nonneg" in down
+    assert "drop column cost_usd" in down and "drop column unpriced_calls" in down

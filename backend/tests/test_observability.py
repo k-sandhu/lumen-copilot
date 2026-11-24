@@ -798,7 +798,12 @@ async def test_real_embedding_span_records_cache_hits(
     gateway = _embedding_gateway()
     first = await gateway.embed(["deduction"], cache_namespace="observability-test")
     second = await gateway.embed(["deduction"], cache_namespace="observability-test")
-    assert first == second and len(seen) == 1
+    assert len(first) == len(second) == len(seen) == 1
+    assert first[0].vector == second[0].vector
+    assert first[0].model == second[0].model
+    # A cache hit has no new provider dispatch and therefore no billed usage.
+    assert first[0].usage is not None
+    assert second[0].usage is None
     spans = telemetry.named("embedding")
     assert len(spans) == 2
     for index, span in enumerate(spans):
