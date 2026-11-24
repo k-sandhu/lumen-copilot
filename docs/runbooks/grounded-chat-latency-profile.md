@@ -191,3 +191,54 @@ output is diagnostic and does not replace any original harness assertion.
 Do not publish the harness's raw provider diagnostics or run concurrent suites
 while collecting timing evidence. The pure ASGI client and real Redis remain
 the measurement boundary; no browser-render or public-internet RTT claim is made.
+
+## Resumed current-main attempt (2026-11-24): blocked before sampling
+
+The first resumed run used source `ccde79a4efaf4cadca146470238d390f75643401`,
+the evidence-only branch rebased onto main
+`1a566cb3e6c3da37a6aa5b382c114c3c2d8eb5c4`. Production code and the original
+live harness were unchanged from that main. The
+[sanitized artifact](../../qa/reproductions/profiles/802-resumed-baseline-20261124.json)
+records source/instrumentation hashes, runtime configuration and the complete
+attempt outcome. Existing private provider settings and inherited credentials
+were preserved; only disposable datastore endpoints were overlaid.
+
+The entire original file ran with `RUN_LIVE=1`, `LATENCY_ASSERT=1`,
+`LATENCY_SAMPLES=5`, `-n 0 -o addopts=`, and unchanged 2s/30s budgets.
+Both tests failed during golden-corpus seed embedding, before any answer sample
+began, with the gateway's typed `LlmProviderError` mapping an `APIError`.
+Pytest reported **2 failed in 25.88s**. There are **zero completed samples and
+no TTFT median**; this is neither a timing failure nor a passing latency gate.
+The configured chat route remains Ling3.0Flash and embeddings remain
+Nemotron3Embed1B free / 2048 dimensions. No model or provider was substituted.
+
+One separately authorized diagnostic called that same embedding gateway once
+with synthetic text, preserving its 60s provider timeout and adding a 65s outer
+bound. It timed out before an upstream exception reached the mapping seam;
+there is no numeric HTTP status or evidence to identify a credential or model
+availability problem. No additional inference probe or timing-gate retry was
+made. Completion of the existing embedding route is a prerequisite for a
+meaningful current baseline; no measured local performance repair is yet
+justified by this attempt.
+
+A subsequent authorized non-inference check used OpenRouter's documented
+[`GET /api/v1/embeddings/models`](https://openrouter.ai/docs/api/api-reference/embeddings/list-embeddings-models)
+once from the same host, without automatic retries. The configured embedding
+base matched HTTPS OpenRouter with no query. The catalog returned **HTTP 200 in
+0.547s**, and contained the configured embedding model. This narrows the failure:
+ordinary catalog connectivity and advertised model presence work, but neither
+proves that embedding inference completes or that the account can use the route.
+No credential failure, model retirement or chat-route latency is inferred.
+
+The baseline emitted a LiteLLM `DeprecationWarning` at `utils.py:146`; no warning
+was suppressed. No resource, unraisable or event-loop warning diagnostic was
+detected. A different task briefly started two offline pytest workers during
+startup and stopped them immediately; no answer sample began during or after
+that overlap. All other task-owned local checks were held for the remaining run.
+The isolated runtime helper removed both failed seeds' schemas, indexes and
+matching pipelines and verified their absence. The gateway clients were closed.
+The offline latency/gating checks separately passed **27 tests in 26.20s**.
+
+The historical failing measurements above remain unchanged. Issue #802 and
+draft PR #806 stay open: the original two-second target still requires a
+complete, grounded, exact-final-source live run and a justified repair.
