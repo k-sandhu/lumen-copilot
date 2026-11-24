@@ -74,9 +74,7 @@ async def test_failed_sandbox_kill_stays_unconfirmed_until_same_execution_is_rea
     # Isolate the service timer seam: tools also use asyncio.timeout. Patching
     # the shared module would capture their finished timers before Stop starts.
     # Rescheduling the real service timeout tests 503 without a clock wait.
-    monkeypatch.setattr(
-        stream_cancellation, "asyncio", SimpleNamespace(timeout=controlled_timeout)
-    )
+    monkeypatch.setattr(stream_cancellation, "asyncio", SimpleNamespace(timeout=controlled_timeout))
 
     async def retry_barrier(_delay: float) -> None:
         retry_delays.append(_delay)
