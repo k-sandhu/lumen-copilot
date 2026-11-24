@@ -37,6 +37,9 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: A gateway decode refusal, distinct from a valid empty argument object.
+    #: Invalid source text is discarded; the runner emits its own safe sentence.
+    argument_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

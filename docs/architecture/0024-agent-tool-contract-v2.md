@@ -28,7 +28,57 @@ The concrete cursor, sort and complete-passage range choices above are proposed 
 
 Output limits are explicit. A truncated result states its returned and available range and how to continue; legacy reads explain their prefix-only limitation until range reads land. Passage count and context fitting bound cost; do not silently cut each passage. If complete required evidence cannot fit, the context engine returns its existing typed context refusal. Every description explains purpose, use, non-use, output, limits and handle lifetime. Flat schemas disallow additional properties, describe bounds/defaults, use integer/enums, and make every property required with nullable optional values. Compatibility adapters accept old omitted arguments; provider strict enforcement is a later route-specific experiment.
 
-Large MCP catalogs need bounded descriptions, schemas and results plus model-neutral deferred loading where appropriate. Concrete limits and the loading protocol remain an owner-reviewed extension tracked in #652; wire-name mapping alone does not implement them. Tenant/assistant allowlists, stable ordering and context fitting remain authoritative while that extension is pending. Deferred loading must preserve internal identities, approval and durable audit; provider-native tool search remains outside scope.
+Large MCP catalogs need bounded descriptions and schemas plus model-neutral deferred loading where appropriate. Catalog limits and the loading protocol remain an owner-reviewed extension tracked in #652; wire-name mapping alone does not implement them. Tenant/assistant allowlists, stable ordering and context fitting remain authoritative while that extension is pending. Deferred loading must preserve internal identities, approval and durable audit; provider-native tool search remains outside scope.
+
+### Tool-call boundary hardening (#831, owner-authorized 2026-10-30)
+
+The gateway accepts at most **20,000 characters** of argument text per call
+(`MAX_TOOL_ARGUMENT_CHARACTERS`), retaining no further fragments after overflow.
+Empty or whitespace-only text means `{}`. Otherwise arguments must decode as one
+JSON object: reject malformed JSON, non-object values, non-finite numbers (including
+exponent overflow), invalid UTF-8 text (including escaped lone surrogates), and NUL
+characters in keys or values, which PostgreSQL JSONB cannot store. Nesting is
+limited to 64 object/array levels (`MAX_TOOL_ARGUMENT_DEPTH`) so valid JSON cannot
+overflow downstream schema normalization or hashing. A rejected call
+carries an internal `argument_error` and empty arguments; it never silently becomes
+a valid no-argument request. After tool visibility checks, the runner refuses it
+before approval, call-scope entry or handler I/O using `bad_arguments`, one static
+corrective sentence, and the existing denied invocation/result audit path (INV-6,
+INV-8). Raw invalid text is neither carried out of the gateway nor echoed. Provider history replays
+`{}` for rejected calls so a subsequent request remains well-formed.
+
+Before dispatch, the gateway treats blank or non-string IDs as missing and assigns
+deterministic `call_<message-count>_<index>` replacements to missing or repeated
+call IDs, adding underscores to avoid both real IDs in
+the entire completion and IDs already present in history. The first occurrence
+of an otherwise unused real ID is preserved. Events, results, approvals, audit
+and provider history all consume these same normalized IDs. Invocation rows keep
+their existing ordinal and argument-hash correlation; they have no call-ID column.
+
+The MCP adapter bounds remote tool results, including application errors,
+before it crosses into services. `DEFAULT_MCP_RESULT_CHARACTERS` is **12,000**:
+flattened text plus the JSON serialization of retained structured content must fit
+this combined character budget. Text overflow ends with the explicit marker
+`[MCP result truncated; request a narrower result.]`, included in the limit.
+Structured content that exceeds the remaining budget or cannot be safely
+serialized is omitted; text ends with
+`[MCP structured result omitted; request a narrower result.]`, also included in the
+limit. Unicode truncation preserves complete characters and surrogate pairs;
+invalid remote text is replaced with the Unicode replacement character. Results
+exactly at the limit remain unmarked. Rendering and structured-size traversal
+stop once the budget is exceeded. This bounds data retained by the runtime,
+transcript, token counter and trace; it does not change transport-frame limits
+or prevent the SDK from initially decoding the remote response. Built-in tools
+retain their existing result bounds.
+
+Cancellation is control flow, never an ordinary tool failure. Whenever the runner
+maps a handler exception or normal return to a result, a pending cancellation on
+the current task must propagate as `CancelledError`, including when a handler
+swallows cancellation or converts it to another exception. An expired per-tool
+timeout discards a late return and produces the existing timeout failure. A
+non-positive timeout refuses before dispatch, including a handler that would
+return without awaiting. These guards do not change approval/audit ordering or
+the answer cancellation lifecycle.
 
 Errors distinguish malformed arguments from execution/protocol failure. Missing and forbidden documents/handles share the same safe response. Empty searches suggest broadening or discovery. Remote errors never expose credentials or vendor internals. Reuse only identical read-only calls within one answer; write/approval paths are never deduplicated as reads. Reuse still records each consumer and its provenance and respects cancellation and permission rechecks.
 
