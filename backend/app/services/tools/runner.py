@@ -11,12 +11,12 @@ governance contract, in this fixed order:
    gated by the assistant's EFFECTIVE autonomy (already ``min``'d to the tenant cap
    by the run assembler). At ``suggest``/``draft`` a T1 write is refused
    (``autonomy_denied``) — the assistant may only suggest/draft, not act; at
-   ``act_with_approval`` a T1 write is routed through the approval seam (step 4) like
-   a higher tier; at ``act_auto`` it executes automatically (still audited). T0
+   ``act_with_approval`` and ``act_auto`` a T1 write checks the current tenant
+   policy through the gate (step 4); no override needs no extra approval. T0
    read-only tools are never autonomy-gated. Ad-hoc chat (no assistant) defaults to
    ``act_auto`` and its default set is all-T0, so this step is inert there.
 4. **Approval seam** (issue #207 §3 / AC-3 / INV-7): a ``requires_approval`` tool
-   (T2+) — and a T1 tool at ``act_with_approval`` (step 3) — is routed to the
+   (T2+) — and every admitted T1 tool (step 3) — is routed to the
    :class:`~app.services.tools.types.ApprovalGate` and blocks until approved; a
    denial → ``approval_denied`` and the handler never runs. The gate may name the
    switch that refused (:class:`~app.services.tools.types.ApprovalDecision`,
@@ -52,7 +52,7 @@ from contextlib import AbstractAsyncContextManager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from itertools import count
-from uuid import UUID
+from uuid import UUID, uuid4, uuid5
 
 from app.core.logging import get_logger
 from app.db.repositories import ToolInvocationRepository
@@ -74,6 +74,7 @@ from app.domain.tools import (
     ToolHandlerResult,
     ToolResult,
 )
+from app.observability import observe_tool
 from app.services.audit import AuditSink
 from app.services.tools.registry import UnknownToolError, get_tool
 from app.services.tools.types import (
@@ -82,6 +83,7 @@ from app.services.tools.types import (
     ApprovalRecord,
     ApprovalRequest,
     DenyAllApprovalGate,
+    ToolCancellationPending,
     ToolContext,
     ToolDefinition,
 )
@@ -154,7 +156,7 @@ class ToolRunner:
     retrieval tools for ad-hoc chat), the tenant-scoped
     :class:`ToolInvocationRepository`, the :class:`AuditSink`, and the request
     correlation (``request_id``/``source_ip``) the audit events carry. The
-    approval ``gate`` defaults to :class:`DenyAllApprovalGate` (inert for T0/T1;
+    approval ``gate`` defaults to :class:`DenyAllApprovalGate` (inert for T0;
     fail-closed for any gated tool until a real approval flow is wired).
 
     ``extra_tools`` is the per-run set of **dynamic** :class:`ToolDefinition`s that
@@ -188,6 +190,7 @@ class ToolRunner:
         gate: ApprovalGate | None = None,
         extra_tools: Mapping[str, ToolDefinition] | None = None,
         autonomy: AutonomyLevel = AutonomyLevel.ACT_AUTO,
+        approval_required_tools: frozenset[str] = frozenset(),
     ) -> None:
         self._allowed = allowed
         self._invocations = invocations
@@ -199,6 +202,8 @@ class ToolRunner:
         self._gate: ApprovalGate = gate or DenyAllApprovalGate()
         self._extra_tools: Mapping[str, ToolDefinition] = extra_tools or {}
         self._autonomy = autonomy
+        self._approval_required_tools = approval_required_tools
+        self._invocation_namespace = uuid4()
         # Per-turn dispatch counter (#397, #412): a runner lives exactly one
         # answer turn, so this is the per-message ordinal the trace orders by.
         # Ordinals are claimed AT DISPATCH — the serial path claims at ``run``
@@ -300,6 +305,36 @@ class ToolRunner:
         ordinal: int | None = None,
         scope: CallScopeFactory | None = None,
     ) -> ToolResult:
+        """Invoke ``call`` through the governed path inside its TOOL span (ADR-0027).
+
+        Every outcome — denial, failure, success — closes the span with the
+        returned :class:`ToolResult`; see :meth:`_run_governed` for the path.
+        """
+        if ordinal is None:
+            ordinal = self.claim_ordinal()
+        definition = self._resolve(call.name)
+        with observe_tool(
+            name=call.name,
+            resolved_name=definition.name if definition is not None else None,
+            call_id=call.id,
+            arguments=call.arguments,
+            ordinal=ordinal,
+        ) as span:
+            result = await self._run_governed(
+                call=call, context=context, message_id=message_id, ordinal=ordinal, scope=scope
+            )
+            span.finished(result)
+            return result
+
+    async def _run_governed(
+        self,
+        *,
+        call: ToolCall,
+        context: ToolContext,
+        message_id: UUID | None,
+        ordinal: int,
+        scope: CallScopeFactory | None,
+    ) -> ToolResult:
         """Invoke ``call`` through the governed path; always return a :class:`ToolResult`.
 
         Never raises for a tool concern (an unknown/off-list/unapproved/failing
@@ -324,8 +359,11 @@ class ToolRunner:
         dispatcher's concurrency slot, which the factory may bound) while
         waiting its turn to persist.
         """
-        if ordinal is None:
-            ordinal = self.claim_ordinal()
+        # #576: the invocation id derives from the ordinal ``run`` claimed (#818
+        # moved claiming into the span wrapper), so retries replay one identity.
+        context = replace(
+            context, tool_invocation_id=uuid5(self._invocation_namespace, str(ordinal))
+        )
         args_hash = hash_args(call.arguments)
         started = time.monotonic()
 
@@ -417,7 +455,7 @@ class ToolRunner:
         #     (autonomy_denied), the handler never runs.
         #   * act_with_approval: fall through and route the T1 tool through the approval
         #     seam below (like a higher tier), so it executes only if approved.
-        #   * act_auto: fall through and execute automatically (still audited).
+        #   * act_auto: fall through to the current tenant-policy check below.
         # T0 read-only tools are never autonomy-gated. This is deny-by-default: a
         # side-effecting tool needs an explicit autonomy level to run.
         if _requires_autonomy_approval(definition):
@@ -447,11 +485,18 @@ class ToolRunner:
             requires_gate = False
 
         # (4) Approval seam (AC-3 / INV-7). ``requires_approval`` (⇒ T2+) tools always
-        # gate here; a T1 tool at ``act_with_approval`` also gates (``requires_gate``).
+        # gate here; every T1 dispatch also rechecks the current tenant policy.
+        # Offering tools and snapshotting approval flags before provider output
+        # cannot authorise a write after an admin revokes it (#576, R1-001).
         # A denial refuses the call BEFORE the handler runs — no consequential action
         # executes without approval.
         granted: ApprovalRecord | None = None
-        if definition.requires_approval or requires_gate:
+        if (
+            definition.requires_approval
+            or definition.risk_tier is RiskTier.T1
+            or requires_gate
+            or call.name in self._approval_required_tools
+        ):
             approval = _as_decision(
                 await self._gate.request(
                     ApprovalRequest(
@@ -644,6 +689,10 @@ class ToolRunner:
             _raise_if_cancelling()
             if timer.expired():
                 raise TimeoutError
+        except ToolCancellationPending:
+            # Unconfirmed remote cleanup is producer control flow. Converting it
+            # into a tool result would let the answer falsely acknowledge Stop.
+            raise
         except TimeoutError:
             _raise_if_cancelling()
             return ToolResult.failure(
@@ -842,6 +891,7 @@ class ToolRunner:
                     durable=invoked_event_id is not None,
                 )
                 await self._invocations.record(
+                    invocation_id=uuid5(self._invocation_namespace, str(ordinal)),
                     tool_name=call.name,
                     args_hash=args_hash,
                     ok=result.ok,

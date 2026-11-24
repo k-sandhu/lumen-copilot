@@ -151,6 +151,7 @@ describe('AssistantLibrary — states', () => {
 
 describe('AssistantLibrary — Start chat (AC-2)', () => {
   it('POSTs /chat/sessions with the assistant_id and navigates to chat', async () => {
+    const openSession = vi.spyOn(useChatStore.getState(), 'openSession');
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = String(input);
       if (init?.method === 'POST' && url.includes('/chat/sessions')) {
@@ -189,10 +190,9 @@ describe('AssistantLibrary — Start chat (AC-2)', () => {
     // …and the workspace navigated to `/` with the new session bound.
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/'));
     expect(useChatStore.getState().activeSessionId).toBe('sess-1');
-    expect(useChatStore.getState().sessionScope).toEqual({
-      sessionId: 'sess-1',
-      modes: ['company'],
-    });
+    expect(openSession).toHaveBeenCalledWith('sess-1');
+    // #581: no scope is seeded from the assistant's mutable head into client
+    // state — the chat view hydrates the pinned scope from the server.
   });
 
   it('surfaces a per-card error when create-session fails (404/403 → no crash, AC-5)', async () => {

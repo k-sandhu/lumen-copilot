@@ -30,6 +30,18 @@ from app.services.artifacts_service import ArtifactLinks
 from app.services.tools.handles import EvidenceHandles
 
 
+class ToolCancellationPending(Exception):
+    """The tool await stopped locally, but remote cleanup still needs confirmation.
+
+    This is control flow, never a model-facing tool result. The callback retains
+    the execution identity and opens a fresh transaction for each cleanup retry.
+    """
+
+    def __init__(self, cleanup: Callable[[], Awaitable[None]]) -> None:
+        super().__init__("Tool cancellation cleanup is unconfirmed.")
+        self.cleanup = cleanup
+
+
 @runtime_checkable
 class ArtifactWriter(Protocol):
     """The narrow artifact-write seam a T1 file-writing tool persists through (#220).
@@ -255,6 +267,11 @@ class ToolContext:
     principal: Principal
     retrieval: RetrievalService
     collection_ids: list[UUID] | None = None
+    #: Assistant knowledge-scope source narrowing (#581): when set, retrieval
+    #: only reaches documents whose ``source_id`` is in this list — an ADDITIONAL
+    #: filter over the caller's allow-set, resolved in SQL inside ``retrieval/``
+    #: (the search index carries no source field). ``None`` ⇒ no source narrowing.
+    source_ids: list[UUID] | None = None
     #: Pinned documents (spec 0007 #429): when set, passage search narrows to
     #: these ids — an ADDITIONAL filter over the caller's allow-set, applied
     #: inside ``retrieval/`` (INV-2 unchanged; an inaccessible id contributes
@@ -275,6 +292,8 @@ class ToolContext:
     #: own snippet cap (600) — inert unless a tighter budget lowers it.
     snippet_budget: int = 600
     artifacts: ArtifactWriter | None = None
+    # Allocated by the runner before dispatch, never supplied by model arguments.
+    tool_invocation_id: UUID | None = None
     session_id: UUID | None = None
     simulate_writes: bool = False
     sandbox: SandboxToolRunner | None = None
@@ -529,6 +548,7 @@ __all__ = [
     "SandboxRun",
     "SandboxToolRunner",
     "ToolContext",
+    "ToolCancellationPending",
     "ToolDefinition",
     "ToolHandler",
     "TranscriptReader",

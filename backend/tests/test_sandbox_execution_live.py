@@ -78,7 +78,7 @@ from app.sandbox.runner import (
     SandboxRunnerUnauthorized,
     SandboxRunnerUnavailable,
 )
-from app.sandbox.service import SandboxSessionService
+from app.sandbox.service import SandboxSessionService, session_resource_bounds
 from app.sandbox.spec import RunResult, RunSpec, SandboxSessionSpec
 
 # STRICT (R2-5): only the exact string "1" opts in. Everything else — including
@@ -192,12 +192,23 @@ async def sandbox() -> AsyncIterator[_LiveSandbox]:
     """Production authentication, fresh identity, and only confirmed-created cleanup."""
     settings = await _live_settings()
     runner = HttpSandboxRunner(settings.sandbox_runner_url, token=settings.sandbox_runner_token)
+    # The deployment posture production launches (ADR-0029 default-on bounds, as
+    # ``SandboxSessionService._build_spec`` builds it), not a bare session: a spec
+    # without the scratch bound never mounted /workspace and hid #838.
+    cpus, memory_bytes, pids_limit = session_resource_bounds(settings)
     spec = SandboxSessionSpec(
         sandbox_session_id=uuid.uuid4(),
         generation=1,
         image=settings.sandbox_image,
         runtime=settings.sandbox_runtime,
         output_bytes_cap=settings.sandbox_output_bytes_cap,
+        cpus=cpus,
+        memory_bytes=memory_bytes,
+        pids_limit=pids_limit,
+        wall_clock_seconds=settings.sandbox_wall_clock_seconds,
+        scratch_bytes=(
+            settings.sandbox_scratch_bytes if settings.sandbox_session_limits_enabled else None
+        ),
         env=SandboxSessionService._session_env(),
     )
     created = False
@@ -661,6 +672,11 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
     for entry in entries:
         point, root, fstype = entry.split("|")
         seen[point] = (root, fstype)
+    # The bounded workspace (#589, #838): the one writable path under the read-only
+    # rootfs is a FRESH sized tmpfs — mount root "/", fstype tmpfs. A host bind at
+    # /workspace would carry the host's filesystem type and source path instead.
+    if seen.get("/workspace") == ("/", "tmpfs"):
+        del seen["/workspace"]
     unexpected = sorted(set(seen) - _DAEMON_CONFIG_BINDS)
     assert not unexpected, (
         "the execution container has mount point(s) the launcher must not attach — "
@@ -699,6 +715,11 @@ async def test_the_container_really_has_no_socket_mounts_or_stray_secrets(
         | baked
         | {
             "LUMEN_OUTPUT_DIR",
+            # Set by the runner on every session container (#589): packages resolve
+            # from the workspace, and under the scratch bound so does temp space,
+            # because the rootfs is read-only.
+            "PYTHONPATH",
+            "TMPDIR",
         }
     )
     present = set(out["ENVKEYS"].split(","))

@@ -746,6 +746,8 @@ class ObjectStore:
         data: bytes,
         content_type: str,
         filename: str,
+        *,
+        object_id: str | None = None,
     ) -> StoredObject:
         """Validate, content-address, and store an artifact; return its descriptor.
 
@@ -755,6 +757,8 @@ class ObjectStore:
         typed ``ValidationError`` (→ 422). The key is
         ``artifacts/{tenant_id}/{sha256(data)}/{safe_filename}`` (AC-5), so
         identical agent output dedupes and every object is tenant-scoped.
+        A server-reserved ``object_id`` instead isolates a transactional write's
+        object for rollback compensation, while retaining the byte checksum.
         """
         validate_upload(
             size_bytes=len(data),
@@ -762,7 +766,7 @@ class ObjectStore:
             allowed_content_types=self._settings.artifact_allowed_content_types,
             max_bytes=self._settings.max_artifact_bytes,
         )
-        key = build_artifact_key(tenant_id, data, filename)
+        key = build_artifact_key(tenant_id, data, filename, object_id=object_id)
         async with self._client() as client:
             await client.put_object(
                 Bucket=self._bucket,

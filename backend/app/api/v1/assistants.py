@@ -24,6 +24,7 @@ transition.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -720,9 +721,44 @@ async def test_assistant(
             make_audit_sink, tenant_id=principal.tenant_id, principal=principal, request=request
         ),
     )
-    trace = await service.run_test(
-        assistant_id, input_text=body.input if body is not None else None
+    # Client-abort cancellation (#574): the test runs as a task while a
+    # watcher polls for request disconnect; an aborted fetch (the TestPanel
+    # Stop button) cancels the task, which cancels the shared runtime (and
+    # any in-flight tool await) instead of letting the preview run to
+    # completion server-side. The preview's rollback still applies.
+    cancellation = asyncio.Event()
+    task = asyncio.create_task(
+        service.run_test(
+            assistant_id,
+            input_text=body.input if body is not None else None,
+            cancellation=cancellation,
+        )
     )
+
+    async def _cancel_on_disconnect() -> None:
+        while not task.done():
+            if await request.is_disconnected():
+                cancellation.set()
+                return
+            await asyncio.sleep(0.1)
+
+    watcher = asyncio.create_task(_cancel_on_disconnect())
+    try:
+        trace = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Some ASGI servers cancel the handler on disconnect. Keep that from
+        # masquerading as runtime shutdown; signal user Stop and drain cleanup
+        # before releasing the request transaction that owns the preview audit.
+        cancellation.set()
+        await asyncio.shield(task)
+        await asyncio.shield(session.commit())
+        raise
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     # Commit the request session to persist ONLY the assistant.tested audit event (the
     # runtime's own transcript writes were rolled back inside the service).
     await session.commit()

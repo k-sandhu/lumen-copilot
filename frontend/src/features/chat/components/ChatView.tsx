@@ -12,20 +12,20 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '@/api';
-import type { ChatModelInfo, KnowledgeMode, Message, SendMessageRequest } from '@/api';
+import type { ChatModelInfo, Message, SendMessageRequest } from '@/api';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Icon } from '@/ui';
 import { usePreferences, useUpdatePreferences } from '@/features/preferences';
 import { useModels } from '@/features/models';
-import { useChatStore, type SessionScope, type ViewerTarget } from '../model/chatStore';
-import { initialModes, modeAvailability } from '../model/presentation';
+import { useChatStore, type ViewerTarget } from '../model/chatStore';
+import { availabilityFromEffectiveScope, modesFromEffectiveScope } from '../model/presentation';
 import { fromRestCitation, type UiCitation } from '../model/citation';
 import '../chat.css';
-import { useMessages, useSendMessage, useUpdateSession } from '../model/queries';
+import { useChatSession, useMessages, useSendMessage, useUpdateSession } from '../model/queries';
 import { useChatStream } from '../model/useChatStream';
 import { useQueryClient } from '@tanstack/react-query';
 import { chatKeys } from '../model/queries';
-import { ArtifactPanel } from '@/features/artifacts';
+import { ArtifactPanel, artifactKeys } from '@/features/artifacts';
 import { HistorySidebar } from './HistorySidebar';
 import { ChatThread, type LiveAnswer } from './ChatThread';
 import { Composer, type PinnedDocument } from './Composer';
@@ -55,7 +55,6 @@ export function ChatView() {
   const viewer = useChatStore((s) => s.viewer);
   const openViewer = useChatStore((s) => s.openViewer);
   const closeViewer = useChatStore((s) => s.closeViewer);
-  const sessionScope = useChatStore((s) => s.sessionScope);
   const panel = useChatStore((s) => s.panel);
   const openPanel = useChatStore((s) => s.openPanel);
   const closePanel = useChatStore((s) => s.closePanel);
@@ -74,6 +73,9 @@ export function ChatView() {
     void queryClient.invalidateQueries({ queryKey: chatKeys.messages(activeSessionId) });
     // A settled answer moved the token accounting (spec 0007 AC-1).
     void queryClient.invalidateQueries({ queryKey: chatKeys.usage(activeSessionId) });
+    // A committed write_file can add an artifact while this pane stays mounted.
+    // Refresh every origin filter for this session, including the context pane.
+    void queryClient.invalidateQueries({ queryKey: artifactKeys.sessionLists(activeSessionId) });
   }, [activeSessionId, queryClient]);
 
   // BE2-7: the follow-up suggestion is generated AFTER the terminal, so its
@@ -142,9 +144,6 @@ export function ChatView() {
             <ActiveSession
               key={activeSessionId}
               sessionId={activeSessionId}
-              scope={
-                sessionScope && sessionScope.sessionId === activeSessionId ? sessionScope : null
-              }
               models={models.data?.items}
               modelsLoading={models.isLoading}
               activeStreamId={activeStreamId}
@@ -303,8 +302,6 @@ export function ChatView() {
 
 interface ActiveSessionProps {
   sessionId: string;
-  /** The knowledge scope this session was launched with (#221), or null. */
-  scope: SessionScope | null;
   models: ChatModelInfo[] | undefined;
   modelsLoading: boolean;
   activeStreamId: string | null;
@@ -318,7 +315,6 @@ interface ActiveSessionProps {
 
 function ActiveSession({
   sessionId,
-  scope,
   models,
   modelsLoading,
   activeStreamId,
@@ -351,13 +347,25 @@ function ActiveSession({
   // model is persisted via PATCH when changed.
   const [model, setModel] = useState<string>('');
 
-  // The active knowledge modes for the next turn (#221). Seeded from the
-  // launching assistant's scope (or the ad-hoc default), then a per-chat
-  // override the user can toggle. WEB is available only when the scope allowed
-  // it — otherwise the composer renders it disabled with a reason (AC-3).
-  const scopeModes = scope?.modes;
-  const [modes, setModes] = useState<KnowledgeMode[]>(() => initialModes(scopeModes));
-  const availability = useMemo(() => modeAvailability(scopeModes), [scopeModes]);
+  // The knowledge modes on display are the session's server-authoritative
+  // effective scope (#581): hydrated from GET /chat/sessions/{id} (the pinned
+  // assistant version), never seeded from an assistant's mutable head or from
+  // launch-time client state — so WEB survives reload and reopening from
+  // history. It is not adjustable in chat (`adjustable: false`), so the
+  // composer renders it read-only; while the query loads (or fails) NO modes
+  // are claimed, rather than guessing an ad-hoc default.
+  const sessionQuery = useChatSession(sessionId);
+  const effectiveScope = sessionQuery.data ? (sessionQuery.data.effective_scope ?? null) : null;
+  const modes = useMemo(
+    () => (sessionQuery.isSuccess ? modesFromEffectiveScope(effectiveScope) : []),
+    [sessionQuery.isSuccess, effectiveScope],
+  );
+  const availability = useMemo(
+    () => availabilityFromEffectiveScope(effectiveScope),
+    [effectiveScope],
+  );
+  const refetchSession = sessionQuery.refetch;
+  const onRetryScope = useCallback(() => void refetchSession(), [refetchSession]);
   // Remember the last request so a stream error/disconnect can be retried (AC-5).
   const lastSendRef = useRef<SendMessageRequest | null>(null);
 
@@ -403,7 +411,14 @@ function ActiveSession({
   const stream = useChatStream({
     streamId: activeStreamId,
     onDone: () => onDoneReload(),
+    onCancelled: () => onDoneReload(),
   });
+
+  useEffect(() => {
+    // Delivery can fail after a write committed; refresh persisted artifacts on
+    // error as well as done without relying on tool_result's pre-commit event.
+    if (stream.phase === 'error') onDoneReload();
+  }, [stream.phase, onDoneReload]);
 
   useEffect(() => {
     // Promote suggestions only once the stream settled successfully (#434
@@ -412,7 +427,7 @@ function ActiveSession({
     // chips nor ghost. An error clears anything already promoted.
     if (stream.phase === 'done' && stream.suggestions) {
       setFollowUps(stream.suggestions.suggestions);
-    } else if (stream.phase === 'error') {
+    } else if (stream.phase === 'error' || stream.phase === 'cancelled') {
       setFollowUps([]);
     }
   }, [stream.phase, stream.suggestions]);
@@ -424,7 +439,11 @@ function ActiveSession({
   // Capture the done messageId once the stream settles successfully.
   useEffect(() => {
     if (stream.phase === 'done' && stream.done) setPendingDoneId(stream.done.messageId);
-  }, [stream.phase, stream.done]);
+    // A cancelled partial retires the same way (#574): once the reload
+    // carries the persisted stopped message, the live bubble stands down.
+    if (stream.phase === 'cancelled' && stream.cancelled)
+      setPendingDoneId(stream.cancelled.messageId);
+  }, [stream.phase, stream.done, stream.cancelled]);
 
   // BE2-7 — persisted-bubble retirement and SOCKET lifetime are separate. The
   // live bubble is retired the moment the authoritative server copy arrives (as
@@ -544,10 +563,13 @@ function ActiveSession({
   // not the whole `stream` result (a fresh object every render), so `onStop` keeps
   // a stable identity per delta and does not defeat Composer's memo (#495).
   const cancelStream = stream.cancel;
+  // Stop (#574/#279): cancel server-side and KEEP the live partial visible
+  // (marked cancelled) - deliberately no endStream() here, which used to
+  // erase the partial while the backend finished and persisted the full
+  // answer. The persisted stopped message retires the bubble on reload.
   const onStop = useCallback(() => {
     cancelStream();
-    endStream();
-  }, [cancelStream, endStream]);
+  }, [cancelStream]);
 
   // Opening a citation forwards only what the citation wire provides about the
   // source; the answer-time `meta` is NOT source provenance and is intentionally
@@ -600,7 +622,7 @@ function ActiveSession({
     [sessionId, updateSessionMutate],
   );
 
-  const streaming = live?.phase === 'streaming';
+  const streaming = live?.phase === 'streaming' || live?.phase === 'idle' || stream.stopping;
   const busy = send.isPending || streaming === true;
 
   // Bash-style composer recall (spec 0006 AC-5): the caller's own previous
@@ -661,6 +683,40 @@ function ActiveSession({
       </div>
 
       <div className="lc-composer-wrap">
+        {/* Knowledge-scope state (#581): loading/error are surfaced, never
+            silently replaced with a guessed ad-hoc default. */}
+        {sessionQuery.isPending && (
+          <p role="status" className="lc-composer mb-2 text-center text-xs text-foreground-muted">
+            Loading knowledge scope…
+          </p>
+        )}
+        {sessionQuery.isError && (
+          <div role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
+            Could not load this chat&apos;s knowledge scope.{' '}
+            <button type="button" onClick={onRetryScope} className="underline">
+              Retry
+            </button>
+          </div>
+        )}
+        {sessionQuery.isSuccess && effectiveScope && (
+          <p className="lc-composer mb-2 text-center text-xs text-foreground-muted">
+            Knowledge scope is set by this assistant&apos;s published version and can&apos;t be
+            changed in chat.
+          </p>
+        )}
+        {stream.cancelError && (
+          <p role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
+            {stream.cancelError}{' '}
+            <button type="button" onClick={onStop} className="underline">
+              Retry Stop
+            </button>
+          </p>
+        )}
+        {stream.stopping && (
+          <p role="status" className="text-center text-xs">
+            Stopping…
+          </p>
+        )}
         {send.isError && (
           <p role="alert" className="lc-composer mb-2 text-center text-xs text-danger">
             {send.error instanceof ApiError ? send.error.displayMessage : 'Could not send message.'}
@@ -672,6 +728,7 @@ function ActiveSession({
           onModelChange={onModelChange}
           busy={busy}
           streaming={streaming === true}
+          stopping={stream.stopping}
           onSend={onSend}
           onStop={onStop}
           disabled={modelsLoading && (models?.length ?? 0) === 0}
@@ -679,8 +736,8 @@ function ActiveSession({
           onSetDefaultModel={onSetDefaultModel}
           settingDefault={setDefaultPref.isPending}
           modes={modes}
-          onModesChange={setModes}
           modeAvailability={availability}
+          modesReadOnly
           ghostSuggestion={!busy ? (followUps[0] ?? null) : null}
           historyEntries={historyEntries}
           pinnedDocuments={pinnedDocs}

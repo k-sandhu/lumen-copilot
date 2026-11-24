@@ -75,10 +75,15 @@ signal derived from data the turn already has:
   and any excluded count — excluded candidates render muted (mission filter #4).
 - **FreshnessPill** on cited sources; a **model badge** on assistant answers
   (friendly label from `GET /models`, falling back to the model id).
-- **Knowledge-mode chips** on the composer surface the grounding scope; "Company
-  sources" (all permitted docs — the existing behavior) is the default. Modes the
-  contract has no backing for (web, model-only) are **not** offered — no invented
-  product behavior (AGENTS.md §8).
+- **Knowledge-mode chips** on the composer surface the grounding scope. For an
+  assistant-bound session they show the session's server-authoritative
+  `effective_scope` ([spec 0030](../../../../docs/specs/0030-session-effective-knowledge-scope.md),
+  #581 — the PINNED assistant version's modes, hydrated from
+  `GET /chat/sessions/{id}`, so they survive reload and reopening from history);
+  an ad-hoc chat (`effective_scope: null`) shows Company + Uploaded. The scope is
+  not adjustable in chat, so the chips are read-only: excluded modes render
+  disabled with a reason, and Model is shown as not used (answers are always
+  grounded) rather than as a working toggle.
 
 ## Answer footer + inspector metadata (#120, wireframe `chat.html`)
 

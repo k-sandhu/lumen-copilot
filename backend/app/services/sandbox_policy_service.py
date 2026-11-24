@@ -15,8 +15,8 @@ DISABLED (matching #230's default-off), and the reported caps are the config cei
 The stored caps are ceilings a per-tenant policy can only NARROW, never widen: a
 per-tenant ``max_runtime_s`` above the config cap is clamped down, and the cloud
 metadata IP is stripped from any egress allowlist (never reachable, G4). This
-clamping is applied on **both** the write (what is stored) and the read (what is
-reported), so a config ceiling that later tightens re-clamps a previously-stored
+clamping applies on reads; above-ceiling writes are rejected (422). A tighter
+config ceiling re-clamps a previously-stored
 policy without a migration.
 
 Role gating (admin-only, INV-5) is enforced one layer up by the ``/admin`` router's
@@ -30,14 +30,17 @@ reversible, tenant-scoped **T1** governance action, audited here
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.errors import ValidationError
-from app.db.repositories import AuditEventRepository, TenantSandboxPolicyRepository
+from app.db.repositories import (
+    AuditEventRepository,
+    TenantSandboxPolicyRepository,
+)
 from app.domain.audit import AuditAction, AuditActor
 from app.domain.code_execution import (
     SANDBOX_REASON_DEPLOY_DISABLED,
@@ -46,6 +49,7 @@ from app.domain.code_execution import (
     SANDBOX_REASON_TENANT_DISABLED,
 )
 from app.domain.entities import AuditOutcome, TenantSandboxPolicy
+from app.sandbox.accounting import AccountingUnavailable, RedisSandboxAccounting, SandboxAccounting
 from app.services.audit import AuditSink
 
 # The cloud-metadata IP an SSRF/escape attempt targets for credentials. It is **never**
@@ -82,6 +86,21 @@ class SandboxPolicyView:
     max_memory_mb_ceiling: int
     daily_runtime_cap_s_ceiling: int
     max_concurrency_ceiling: int
+    # Deployment-wide enforced bounds with no tenant field (#589): shown so
+    # the console never claims "unlimited" where a ceiling exists.
+    cpus: float | None = None
+    pids_limit: int | None = None
+    output_bytes_cap: int | None = None
+    scratch_bytes: int | None = None
+    limits_enabled: bool = True
+    #: Per-cap provenance: ``tenant_override`` | ``deployment_default``.
+    limit_sources: dict[str, str] = field(default_factory=dict)
+    #: Current usage (best-effort, from ``code_runs``): in-flight runs and
+    #: seconds of runtime consumed since UTC midnight.
+    current_concurrency: int | None = None
+    daily_runtime_used_s: int | None = None
+    accounting_available: bool = False
+    denial_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +167,14 @@ def _clamp_view(policy: TenantSandboxPolicy | None, settings: Settings) -> Sandb
     config re-clamps without a migration.
     """
     runtime_ceil, memory_ceil, daily_ceil, conc_ceil = _config_ceiling(settings)
+    bounded = settings.sandbox_session_limits_enabled
+    deployment = {
+        "cpus": settings.sandbox_cpus if bounded else None,
+        "pids_limit": settings.sandbox_pids_limit if bounded else None,
+        "output_bytes_cap": settings.sandbox_output_bytes_cap,
+        "scratch_bytes": settings.sandbox_scratch_bytes if bounded else None,
+        "limits_enabled": bounded,
+    }
     if policy is None:
         return SandboxPolicyView(
             enabled=False,
@@ -164,7 +191,25 @@ def _clamp_view(policy: TenantSandboxPolicy | None, settings: Settings) -> Sandb
             max_memory_mb_ceiling=memory_ceil,
             daily_runtime_cap_s_ceiling=daily_ceil,
             max_concurrency_ceiling=conc_ceil,
+            limit_sources={
+                name: "deployment_default"
+                for name in (
+                    "max_runtime_s",
+                    "max_memory_mb",
+                    "daily_runtime_cap_s",
+                    "max_concurrency",
+                    "cpus",
+                    "pids_limit",
+                    "output_bytes_cap",
+                    "scratch_bytes",
+                )
+            },
+            **deployment,  # type: ignore[arg-type]
         )
+
+    def _source(value: int, ceiling: int) -> str:
+        return "tenant_override" if value < ceiling else "deployment_default"
+
     return SandboxPolicyView(
         enabled=policy.enabled,
         allowed_packages=policy.allowed_packages,
@@ -182,6 +227,17 @@ def _clamp_view(policy: TenantSandboxPolicy | None, settings: Settings) -> Sandb
         max_memory_mb_ceiling=memory_ceil,
         daily_runtime_cap_s_ceiling=daily_ceil,
         max_concurrency_ceiling=conc_ceil,
+        limit_sources={
+            "max_runtime_s": _source(policy.max_runtime_s, runtime_ceil),
+            "max_memory_mb": _source(policy.max_memory_mb, memory_ceil),
+            "daily_runtime_cap_s": _source(policy.daily_runtime_cap_s, daily_ceil),
+            "max_concurrency": _source(policy.max_concurrency, conc_ceil),
+            "cpus": "deployment_default",
+            "pids_limit": "deployment_default",
+            "output_bytes_cap": "deployment_default",
+            "scratch_bytes": "deployment_default",
+        },
+        **deployment,  # type: ignore[arg-type]
     )
 
 
@@ -196,7 +252,15 @@ class SandboxPolicyService:
     write validates + clamps the caps, strips the metadata IP, upserts, and audits.
     """
 
-    def __init__(self, session: AsyncSession, *, tenant_id: UUID, settings: Settings) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        settings: Settings,
+        accounting: SandboxAccounting | None = None,
+    ) -> None:
+        self._accounting = accounting or RedisSandboxAccounting(settings.redis_url)
         self._session = session
         self._tenant_id = tenant_id
         self._settings = settings
@@ -206,9 +270,26 @@ class SandboxPolicyService:
         """The tenant's effective sandbox policy — clamped to the config ceiling.
 
         No stored row ⇒ deny-by-default (code exec off, caps = config ceiling,
-        ``is_default=True``). Tenant-scoped (INV-1).
+        ``is_default=True``). Tenant-scoped (INV-1). Current usage is read
+        from this tenant's ``code_runs`` only (#589).
         """
-        return _clamp_view(await self._policies.get(), self._settings)
+        view = _clamp_view(await self._policies.get(), self._settings)
+        try:
+            concurrency, daily = await self._accounting.usage(self._tenant_id)
+        except AccountingUnavailable:
+            return replace(view, denial_reasons=("sandbox_accounting_unavailable",))
+        reasons = []
+        if concurrency >= view.max_concurrency:
+            reasons.append("sandbox_concurrency_exceeded")
+        if daily + view.max_runtime_s > view.daily_runtime_cap_s:
+            reasons.append("sandbox_daily_runtime_exceeded")
+        return replace(
+            view,
+            current_concurrency=concurrency,
+            daily_runtime_used_s=daily,
+            accounting_available=True,
+            denial_reasons=tuple(reasons),
+        )
 
     async def set_policy(
         self,
@@ -229,7 +310,7 @@ class SandboxPolicyService:
         """Set the tenant's sandbox policy (issue #233) — a reversible T1 write.
 
         Validates the caps are positive (a non-positive value is **422**, INV-8 — no
-        unbounded cap can be stored), CLAMPS each cap DOWN to the deploy-wide config
+        unbounded cap can be stored), rejects caps above the deploy-wide config
         ceiling (a per-tenant value can only narrow), STRIPS the metadata IP from the
         egress allowlist (never reachable, G4), upserts the per-tenant singleton, and
         audits ``sandbox_policy.updated`` (INV-6). Returns the effective, clamped view
@@ -238,12 +319,30 @@ class SandboxPolicyService:
         # --- Validate: a non-positive cap would disable an isolation control (INV-8).
         self._require_positive("max_runtime_s", max_runtime_s)
         self._require_positive("max_memory_mb", max_memory_mb)
+        if max_memory_mb < 6:
+            raise ValidationError(
+                "max_memory_mb must be at least 6 MiB.", code="invalid_sandbox_policy"
+            )
         self._require_positive("daily_runtime_cap_s", daily_runtime_cap_s)
         self._require_positive("max_concurrency", max_concurrency)
 
         runtime_ceil, memory_ceil, daily_ceil, conc_ceil = _config_ceiling(self._settings)
-        # Clamp DOWN to the ceiling + strip the metadata IP BEFORE storing — the stored
-        # row can never widen past the config, so even a direct read of the row is safe.
+        # Above-ceiling is REJECTED, not silently clamped (#589): an admin who
+        # asks to widen past the deployment ceiling must be told no (422),
+        # not shown a stored value different from what they submitted.
+        for field_name, value, ceiling in (
+            ("max_runtime_s", max_runtime_s, runtime_ceil),
+            ("max_memory_mb", max_memory_mb, memory_ceil),
+            ("daily_runtime_cap_s", daily_runtime_cap_s, daily_ceil),
+            ("max_concurrency", max_concurrency, conc_ceil),
+        ):
+            if value > ceiling:
+                raise ValidationError(
+                    f"{field_name} exceeds the deployment ceiling of {ceiling}; "
+                    "a tenant policy may only narrow it.",
+                    code="invalid_sandbox_policy",
+                )
+        # Strip the metadata IP BEFORE storing — never reachable (G4).
         stored = await self._policies.upsert(
             enabled=enabled,
             allowed_packages=allowed_packages,
@@ -279,9 +378,10 @@ class SandboxPolicyService:
                 "max_memory_mb": stored.max_memory_mb,
                 "daily_runtime_cap_s": stored.daily_runtime_cap_s,
                 "max_concurrency": stored.max_concurrency,
+                "limit_sources": _clamp_view(stored, self._settings).limit_sources,
             },
         )
-        return _clamp_view(stored, self._settings)
+        return await self.get_policy()
 
     @staticmethod
     def _require_positive(field: str, value: int) -> None:

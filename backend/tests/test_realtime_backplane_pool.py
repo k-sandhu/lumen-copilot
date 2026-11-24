@@ -86,12 +86,19 @@ class _FakePipeline:
     def expire(self, key: str, ttl: int) -> None:
         self._ops.append(("expire", (key, ttl)))
 
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self._ops.append(("set", (key, value, ex)))
+
     def publish(self, channel: str, payload: str) -> None:
         self._ops.append(("publish", (channel, payload)))
 
     async def execute(self) -> list[Any]:
         for name, args in self._ops:
-            if name == "rpush":
+            if name == "set":
+                key, value, ttl = args
+                self._server.strings[key] = value
+                self._server.expires[key] = ttl
+            elif name == "rpush":
                 key, value = args
                 self._server.lists.setdefault(key, []).append(value)
             elif name == "ltrim":
@@ -167,6 +174,9 @@ class _FakeClient:
         self._server.strings[key] = value
         if ex is not None:
             self._server.expires[key] = ex
+
+    async def exists(self, key: str) -> bool:
+        return key in self._server.strings
 
     async def get(self, key: str) -> str | None:
         return self._server.strings.get(key)
@@ -444,7 +454,9 @@ async def test_lifespan_shutdown_releases_the_pooled_backplane_client(
 
     app = FastAPI()
     app.state.settings = get_settings()
-    app.state.answer_tasks = set()
+    from app.services.stream_registry import StreamRegistry
+
+    app.state.stream_registry = StreamRegistry()
     with patch("app.main.get_object_store") as get_store:
         get_store.return_value.ensure_bucket = AsyncMock(return_value=None)
         async with lifespan(app):
@@ -461,3 +473,77 @@ async def test_aclose_backplane_is_a_noop_for_a_non_redis_backplane(
 
     monkeypatch.setattr(deps, "get_backplane", InMemoryBackplane)
     await deps.aclose_backplane()  # must not raise
+
+
+async def test_redis_cancel_signal_survives_before_subscribe_and_closes_handles() -> None:
+    producer, server = _fake_backplane()
+    replica = RedisBackplane("redis://unused/0", client_factory=producer._client_factory)
+    await replica.signal_cancel("remote")
+    await asyncio.wait_for(producer.wait_cancel("remote"), timeout=30)
+    assert await producer.is_cancelled("remote")
+    subscribers = [client for client in server.clients if client.pubsubs]
+    assert all(client.closed and client.pubsubs[0].closed for client in subscribers)
+    assert not any(server.channels.values())
+    await producer.aclose()
+    await replica.aclose()
+
+
+async def test_redis_cancel_interrupts_live_subscription_on_other_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer, server = _fake_backplane()
+    replica = RedisBackplane("redis://unused/0", client_factory=producer._client_factory)
+    ready = asyncio.Event()
+    original = producer._await_subscribe_confirmed
+
+    async def confirmed(pubsub: object) -> None:
+        await original(pubsub)
+        ready.set()
+
+    monkeypatch.setattr(producer, "_await_subscribe_confirmed", confirmed)
+    waiting = asyncio.create_task(producer.wait_cancel("remote"))
+    await asyncio.wait_for(ready.wait(), timeout=30)
+    await replica.signal_cancel("remote")
+    await asyncio.wait_for(waiting, timeout=30)
+    assert not any(server.channels.values())
+    await producer.aclose()
+    await replica.aclose()
+
+
+async def test_settled_terminal_is_readable_on_other_replica() -> None:
+    producer, _server = _fake_backplane()
+    replica = RedisBackplane("redis://unused/0", client_factory=producer._client_factory)
+    terminal = envelopes.cancelled("s", 1, {"messageId": str(uuid.uuid4())})
+    await producer.publish("s", terminal)
+    assert await replica.get_terminal("s") == terminal
+    assert await replica.get_terminal("unknown") is None
+    await producer.aclose()
+    await replica.aclose()
+
+
+async def test_stream_binding_outlives_configured_answer_and_cancel_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import Settings
+
+    template, server = _fake_backplane()
+    settings = Settings(CHAT_ANSWER_WALL_CLOCK_SECONDS=3600, CHAT_CANCEL_TIMEOUT_SECONDS=30)
+
+    def build(url: str, **kwargs: Any) -> RedisBackplane:
+        return RedisBackplane(url, client_factory=template._client_factory, **kwargs)
+
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+    monkeypatch.setattr(deps, "RedisBackplane", build)
+    deps.get_backplane.cache_clear()
+    producer = deps.get_backplane()
+    try:
+        await producer.bind_owner(
+            "long", StreamOwner(owner_id=uuid.uuid4(), tenant_id=uuid.uuid4())
+        )
+        await producer.publish("long", envelopes.start("long", 0))
+        await producer.signal_cancel("long")
+        assert len(server.expires) == 3
+        assert all(ttl >= 3630 for ttl in server.expires.values())
+    finally:
+        deps.get_backplane.cache_clear()
+        await producer.aclose()

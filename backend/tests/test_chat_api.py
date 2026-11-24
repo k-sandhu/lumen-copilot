@@ -355,7 +355,7 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     # answer-task drain (#156) never runs; cancel any detached producer still in
     # flight here so it doesn't outlive this loop and leak (mirrors the lifespan
     # teardown). The runtime turns CancelledError into its terminal envelope.
-    tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+    tasks = app.state.stream_registry.tasks()
     for task in list(tasks):
         task.cancel()
     if tasks:
@@ -1070,7 +1070,7 @@ async def test_shutdown_cancellation_emits_single_retryable_terminal(
         # The producer is genuinely in-flight: `start` is published and the runtime
         # is parked inside the first completion turn.
         await asyncio.wait_for(gateway.entered.wait(), timeout=5)
-        tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+        tasks = app.state.stream_registry.tasks()
         assert len(tasks) == 1
         answer_task = next(iter(tasks))
 
@@ -1126,7 +1126,7 @@ async def test_hung_answer_does_not_block_send_or_shutdown(
 
             # The producer is tracked on app.state and is genuinely running.
             await asyncio.wait_for(blocking.started.wait(), timeout=5)
-            tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+            tasks = app.state.stream_registry.tasks()
             assert len(tasks) == 1
             answer_task = next(iter(tasks))
             assert not answer_task.done()
@@ -1134,11 +1134,11 @@ async def test_hung_answer_does_not_block_send_or_shutdown(
         # window rather than hanging; the set self-empties via the done callback.
         await asyncio.sleep(0)  # let the discard done-callback run
         assert answer_task.cancelled()
-        assert app.state.answer_tasks == set()
+        assert app.state.stream_registry.tasks() == []
 
 
 def test_send_tracks_and_self_empties_answer_task(app: FastAPI, seeded: _Seeded) -> None:
-    # POSITIVE (#156): a normal scripted answer is tracked on app.state.answer_tasks
+    # POSITIVE (#156): a normal scripted answer is tracked on app.state.stream_registry.tasks()
     # while in flight and the set self-empties (via add_done_callback) once it
     # completes. Uses the sync TestClient (its one loop runs startup/shutdown).
     with TestClient(app) as client:
@@ -1165,10 +1165,10 @@ def test_send_tracks_and_self_empties_answer_task(app: FastAPI, seeded: _Seeded)
                 if ws.receive_json()["type"] in ("done", "error"):
                     break
         for _ in range(50):
-            if not app.state.answer_tasks:
+            if not app.state.stream_registry.tasks():
                 break
             time.sleep(0.02)
-        assert app.state.answer_tasks == set()
+        assert app.state.stream_registry.tasks() == []
 
 
 # --- Provider chat routing (PR 2a) -----------------------------------------
@@ -1227,7 +1227,7 @@ async def _seed_enabled_provider(
 
 async def _drain_answer_task(app: FastAPI) -> None:
     """Await the in-flight answer producer(s) so the gateway has been called."""
-    tasks: set[asyncio.Task[None]] = app.state.answer_tasks
+    tasks = app.state.stream_registry.tasks()
     if tasks:
         await asyncio.gather(*list(tasks), return_exceptions=True)
 
@@ -1680,3 +1680,162 @@ async def test_sandbox_lifecycle_refusal_audit_survives_the_request(
     # The real correlation context, not the background-task sentinels: an
     # operator has to be able to tie the refusal to the request that caused it.
     assert denial.request_id != "sandbox-request"
+
+
+# --- #574: stream cancellation endpoint --------------------------------------
+
+
+async def test_cancel_stream_owner_checked_idempotent(
+    client: AsyncClient, seeded: _Seeded, backplane: InMemoryBackplane
+) -> None:
+    """Owner may cancel; foreign/unknown ids are the same 404; repeats are safe."""
+    alice = await _login(client, seeded.alice_email)
+    bob = await _login(client, seeded.bob_email)
+    stream_id = uuid.uuid4().hex
+    await backplane.bind_owner(
+        stream_id, StreamOwner(owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    )
+
+    # A same-tenant non-owner and a cross-tenant user both get 404, and the
+    # cancel signal is NOT recorded for them (no side effect on denial).
+    resp = await client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=_auth(bob))
+    assert resp.status_code == 404
+    carol = await _login(client, seeded.carol_email)
+    resp = await client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=_auth(carol))
+    assert resp.status_code == 404
+    assert await backplane.is_cancelled(stream_id) is False
+
+    # Unknown id: identical 404 (existence non-disclosure).
+    resp = await client.post(
+        f"/api/v1/chat/streams/{uuid.uuid4().hex}/cancel", headers=_auth(alice)
+    )
+    assert resp.status_code == 404
+
+    # No token -> 401 (INV-4).
+    resp = await client.post(f"/api/v1/chat/streams/{stream_id}/cancel")
+    assert resp.status_code == 401
+
+    signal_seen = asyncio.Event()
+    cleanup_allowed = asyncio.Event()
+
+    async def remote_producer() -> None:
+        await backplane.wait_cancel(stream_id)
+        signal_seen.set()
+        await cleanup_allowed.wait()
+        await backplane.publish(
+            stream_id,
+            {
+                "type": "cancelled",
+                "streamId": stream_id,
+                "seq": 1,
+                "data": {
+                    "messageId": str(uuid.uuid4()),
+                    "finishReason": "cancelled",
+                    "citationCount": 0,
+                },
+            },
+        )
+
+    producer = asyncio.create_task(remote_producer())
+    # The owner waits for acknowledgement from a producer on another replica.
+    cancelling = asyncio.create_task(
+        client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=_auth(alice))
+    )
+    await asyncio.wait_for(signal_seen.wait(), timeout=30)
+    assert not cancelling.done()
+    cleanup_allowed.set()
+    resp = await cancelling
+    await producer
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["stream_id"] == stream_id
+    assert resp.json()["status"] == "cancelled"
+    assert resp.json()["terminal"]["type"] == "cancelled"
+    assert await backplane.is_cancelled(stream_id) is True
+    resp = await client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=_auth(alice))
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+
+
+async def test_late_stop_of_completed_stream_is_noop(
+    client: AsyncClient, seeded: _Seeded, backplane: InMemoryBackplane
+) -> None:
+    token = await _login(client, seeded.alice_email)
+    stream_id = uuid.uuid4().hex
+    await backplane.bind_owner(
+        stream_id, StreamOwner(owner_id=seeded.alice_id, tenant_id=seeded.tenant_a)
+    )
+    await backplane.publish(
+        stream_id, {"type": "done", "streamId": stream_id, "seq": 1, "data": {}}
+    )
+    response = await client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=_auth(token))
+    assert response.status_code == 200
+    assert response.json()["status"] == "already_completed"
+    assert not await backplane.is_cancelled(stream_id)
+
+
+def test_websocket_stop_keeps_one_cancelled_partial_without_summary(
+    app: FastAPI,
+    seeded: _Seeded,
+    backplane: InMemoryBackplane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PartialGateway(_BlockingGateway):
+        async def stream_tools(
+            self, messages: object, **kwargs: object
+        ) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(text="Kept partial.")
+            self.entered.set()
+            await asyncio.Event().wait()
+            yield StreamEvent(text="Late output")  # pragma: no cover
+
+    gateway = PartialGateway()
+    enqueued: list[object] = []
+    monkeypatch.setattr(chat_module, "get_llm_gateway", lambda: gateway)
+    monkeypatch.setattr(chat_module, "enqueue_summarize", lambda *args: enqueued.append(args))
+    monkeypatch.setattr(app.state.settings, "chat_summary_enabled", True)
+    monkeypatch.setattr(app.state.settings, "chat_text_coalesce_chars", 1)
+    with TestClient(app) as client:
+        token = client.post(
+            "/api/v1/auth/login", json={"email": seeded.alice_email, "password": _PASSWORD}
+        ).json()["access_token"]
+        headers = _auth(token)
+        sid = client.post("/api/v1/chat/sessions", headers=headers, json={"title": "s"}).json()[
+            "id"
+        ]
+        sent = client.post(
+            f"/api/v1/chat/sessions/{sid}/messages", headers=headers, json={"content": "q"}
+        )
+        assert sent.status_code == 202
+        stream_id = sent.json()["stream_id"]
+        assert client.portal is not None
+        client.portal.call(asyncio.wait_for, gateway.entered.wait(), 30)
+        with client.websocket_connect(f"/ws/chat/{stream_id}?access_token={token}") as ws:
+            response = client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=headers)
+            assert response.status_code == 200
+            assert response.json()["status"] == "cancelled"
+            received: list[dict[str, object]] = []
+            while True:
+                envelope = ws.receive_json()
+                received.append(envelope)
+                if envelope["type"] in ("done", "error", "cancelled"):
+                    break
+            assert [
+                env["type"] for env in received if env["type"] in ("done", "error", "cancelled")
+            ] == ["cancelled"]
+        again = client.post(f"/api/v1/chat/streams/{stream_id}/cancel", headers=headers)
+        assert again.json() == response.json()
+        client.portal.call(_drain_answer_task, app)
+        assert enqueued == []
+        history = client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=headers).json()[
+            "items"
+        ]
+        partials = [message for message in history if message["role"] == "assistant"]
+        assert len(partials) == 1
+        assert partials[0]["content"] == "Kept partial."
+        assert partials[0]["finish_reason"] == "cancelled"
+        assert partials[0]["citations"] == []
+        assert [
+            env["type"]
+            for env in backplane._replay[stream_id]
+            if env["type"] in ("done", "error", "cancelled")
+        ] == ["cancelled"]

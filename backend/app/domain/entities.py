@@ -193,17 +193,19 @@ class McpServerStatus(str, enum.Enum):
 
 
 class LlmProviderStatus(str, enum.Enum):
-    """Discovery state of a registered per-tenant LLM provider (contract ``LlmProviderStatus``).
+    """Evidence-based validation state of a per-tenant LLM provider (spec 0029).
 
-    ``PENDING`` before the first model-discovery probe (a freshly registered
-    provider), ``READY`` after a successful ``GET {base_url}/models`` snapshot,
-    ``ERROR`` when the last discovery failed (see ``last_error``). Mirrors the
+    ``PENDING`` before the first probe, ``REACHABLE`` when the model catalog was
+    discovered but authentication/capabilities are unverified (a public
+    ``GET {base_url}/models`` never implies key validity), ``READY`` only when
+    the required checks passed via the explicit test-connection action,
+    ``ERROR`` when the last probe failed (see ``last_error_code``). Mirrors the
     ``llm_providers.status`` CHECK domain and the frozen ``LlmProviderStatus``
-    contract enum. This is the model-catalog discovery lifecycle only — routing
-    chat/embeddings through a provider is a follow-up PR.
+    contract enum. Only ``READY`` providers are routable (spec 0029).
     """
 
     PENDING = "pending"
+    REACHABLE = "reachable"
     READY = "ready"
     ERROR = "error"
 
@@ -976,6 +978,13 @@ class LlmProvider:
     discovered_models: list[dict[str, object]]
     created_at: datetime
     updated_at: datetime
+    # Evidence-based validation (spec 0029, migration 0050). ``secret_hint``
+    # above is vault-internal and is never projected to the wire or audit.
+    validation_checks: list[dict[str, object]] = field(default_factory=list)
+    last_error_code: str | None = None
+    validated_at: datetime | None = None
+    validation_grandfathered: bool = False
+    validation_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1092,7 +1101,11 @@ class ChatSession:
     (ADR-0011 §1): a session started from an assistant records both the assistant
     and the exact published version it ran, so the transcript is reproducible after
     the assistant is edited/rolled back. Both ``None`` ⇒ ad-hoc chat (the default,
-    unchanged path).
+    unchanged path) — **unless** ``assistant_bound`` is set: the FKs are
+    ``ON DELETE SET NULL``, so deleting an assistant would otherwise erase the
+    only evidence the session was ever governed by one. The non-FK bound marker
+    survives that deletion so the send path can fail closed (#581) instead of
+    silently continuing as unrestricted ad-hoc chat.
     """
 
     id: UUID
@@ -1104,6 +1117,7 @@ class ChatSession:
     updated_at: datetime
     assistant_id: UUID | None = None
     assistant_version_id: UUID | None = None
+    assistant_bound: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1172,6 +1186,8 @@ class Message:
     question: AskUserQuestion | None = None
     #: Immutable prompt dependencies, independent of deletable citations.
     source_document_ids: tuple[UUID, ...] | None = None
+    #: How the turn ended (#574): "cancelled" for a stopped partial, else None.
+    finish_reason: str | None = None
     #: Recall-only projection of stored name mentions, captured before text processing.
     mentioned_document_ids: tuple[UUID, ...] = ()
 
@@ -1661,6 +1677,13 @@ class CodeRun:
     #: model asked for. ``None`` means the run predates the column, which is a
     #: different fact from an empty tuple ("this run installed nothing").
     resolved_packages: tuple[dict[str, str], ...] | None = None
+    #: The enforced bounds this run was admitted under (#589) — deployment
+    #: ceilings narrowed by tenant policy, with per-field source. ``None``
+    #: predates the column (migration 0051).
+    effective_limits: dict[str, object] | None = None
+    #: Why the run ended (#589): ``completed``, a denial reason code, or a
+    #: ``sandbox_limit_*`` code when a bound terminated it.
+    termination_reason: str | None = None
 
     @property
     def is_terminal(self) -> bool:

@@ -46,10 +46,20 @@ export function TestPanel({ assistantId }: TestPanelProps) {
   const test = useTestAssistant(assistantId);
   const trace = test.data ?? null;
   const busy = test.isPending;
+  const [stopped, setStopped] = useState(false);
 
   const run = (sample: string, testCase: AssistantTestCase | null) => {
+    setStopped(false);
     setRanCase(testCase);
     test.mutate({ input: sample.trim() || undefined });
+  };
+
+  // #574 Stop: abort the in-flight test request; the server cancels the
+  // preview runtime on disconnect. Repeated clicks are safe (abort is
+  // idempotent and the button only shows while a run is pending).
+  const stop = () => {
+    setStopped(true);
+    test.cancel();
   };
 
   const saveCurrentAsCase = () => {
@@ -113,6 +123,16 @@ export function TestPanel({ assistantId }: TestPanelProps) {
             <Icon name="play" className="shrink-0" aria-hidden="true" />
             {busy ? 'Running…' : 'Run test'}
           </button>
+          {busy && (
+            <button
+              type="button"
+              onClick={stop}
+              disabled={stopped}
+              className="rounded-md border border-border px-3 py-1.5 text-sm focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+            >
+              Stop test
+            </button>
+          )}
           <button
             type="button"
             onClick={saveCurrentAsCase}
@@ -172,7 +192,11 @@ export function TestPanel({ assistantId }: TestPanelProps) {
 
       {/* --- Run status / result --- */}
       <div aria-live="polite">
-        {busy ? (
+        {stopped ? (
+          <p role="status" className="text-sm text-foreground-muted">
+            Test request stopped.
+          </p>
+        ) : busy ? (
           <div role="status" className="flex items-center gap-2 text-sm text-foreground-muted">
             <span className="lc-skeleton" style={{ width: 16, height: 16, borderRadius: 8 }} />
             Running a read-only test…

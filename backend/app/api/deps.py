@@ -11,6 +11,7 @@ client-supplied tenant (spec 0004 §2.3).
 
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import lru_cache
 from typing import Annotated
@@ -193,6 +194,11 @@ def get_backplane() -> Backplane:
         settings.redis_url,
         post_terminal_grace_seconds=settings.chat_suggestions_grace_seconds,
         cleanup_grace_seconds=settings.chat_shutdown_grace_seconds,
+        stream_ttl_seconds=math.ceil(
+            settings.chat_answer_wall_clock_seconds
+            + settings.chat_cancel_timeout_seconds
+            + settings.chat_shutdown_grace_seconds
+        ),
     )
 
 

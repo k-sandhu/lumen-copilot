@@ -30,6 +30,7 @@ export interface ArtifactFilters {
 /** Stable query keys for the slice. */
 export const artifactKeys = {
   all: ['artifacts'] as const,
+  sessionLists: (sessionId: string) => [...artifactKeys.all, 'list', sessionId] as const,
   list: (filters: ArtifactFilters) =>
     [...artifactKeys.all, 'list', filters.sessionId ?? null, filters.producedBy ?? null] as const,
 };

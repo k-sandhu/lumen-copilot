@@ -42,7 +42,7 @@ export interface WsClientOptions {
   tokenless?: boolean;
 }
 
-const ENVELOPE_TYPES = new Set(['start', 'delta', 'event', 'done', 'error']);
+const ENVELOPE_TYPES = new Set(['start', 'delta', 'event', 'done', 'error', 'cancelled']);
 
 /** Narrow unknown parsed JSON to a WsEnvelope, validating the discriminator. */
 export function parseEnvelope(raw: string): WsEnvelope {

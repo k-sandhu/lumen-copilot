@@ -66,12 +66,17 @@ from app.domain.entities import (
     MessageRole,
     ToolInvocation,
 )
+from app.domain.summary import stored_summary_text
 from app.llm.context import ContextConfig, input_budget_for_model
 from app.realtime.backplane import Backplane, StreamOwner
 from app.retrieval.permissions import AllowSet
 from app.services.assistant_runtime import AssistantRunConfig, assemble_run_config
 from app.services.audit import AuditSink, PermissionDeniedContext, audited_resource
 from app.services.citation_access import enforce_citation_permissions
+from app.services.knowledge_scope import (
+    EffectiveKnowledgeScope,
+    effective_scope_from_version,
+)
 from app.services.models_service import is_allowed_model
 from app.services.provider_models import (
     is_allowed_provider_model,
@@ -96,10 +101,15 @@ log = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class SessionView:
-    """A chat session projected for the wire (contract ``ChatSession``)."""
+    """A chat session projected for the wire (contract ``ChatSession``).
+
+    ``effective_scope`` is the PINNED assistant version's governing scope
+    (#581, contract ``EffectiveKnowledgeScope``); ``None`` for ad-hoc chat.
+    """
 
     session: ChatSession
     message_count: int
+    effective_scope: EffectiveKnowledgeScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,9 +355,28 @@ class ChatService:
         )
         return None
 
+    async def _resolve_scope(self, session: ChatSession) -> EffectiveKnowledgeScope | None:
+        """The pinned version's effective scope, or ``None`` for ad-hoc chat.
+
+        The version load is tenant-scoped (INV-1) and only runs for a session
+        already proven visible to the caller, so scope inherits the session's
+        own 404 rules. A pinned version that no longer resolves in this
+        tenant degrades to ``None`` rather than fabricating a scope.
+        """
+        if session.assistant_id is None or session.assistant_version_id is None:
+            return None
+        version = await self._versions.get(session.assistant_version_id)
+        if version is None or version.assistant_id != session.assistant_id:
+            return None
+        return effective_scope_from_version(assistant_id=session.assistant_id, version=version)
+
     async def _view(self, session: ChatSession) -> SessionView:
         count = await self._sessions.count_messages(session.id)
-        return SessionView(session=session, message_count=count)
+        return SessionView(
+            session=session,
+            message_count=count,
+            effective_scope=await self._resolve_scope(session),
+        )
 
     # --- session use-cases --------------------------------------------------
 
@@ -421,7 +450,11 @@ class ChatService:
             assistant_id=assistant.id,
             assistant_version_id=head.id,
         )
-        return SessionView(session=session, message_count=0)
+        return SessionView(
+            session=session,
+            message_count=0,
+            effective_scope=effective_scope_from_version(assistant_id=assistant.id, version=head),
+        )
 
     async def list_sessions(self, *, cursor: str | None, limit: int | None) -> SessionPage:
         """A keyset page of the caller's own sessions (newest-updated first)."""
@@ -438,7 +471,22 @@ class ChatService:
         # One grouped count for the whole page (no per-row COUNT — #396); the
         # single-session paths keep `_view`.
         counts = await self._sessions.count_for_sessions([s.id for s in page])
-        items = [SessionView(session=s, message_count=counts.get(s.id, 0)) for s in page]
+        # Pinned scopes for the whole page in one query (#581, no N+1).
+        versions = await self._versions.get_many(
+            [s.assistant_version_id for s in page if s.assistant_version_id is not None]
+        )
+        items = []
+        for s in page:
+            scope: EffectiveKnowledgeScope | None = None
+            if s.assistant_id is not None and s.assistant_version_id is not None:
+                version = versions.get(s.assistant_version_id)
+                if version is not None and version.assistant_id == s.assistant_id:
+                    scope = effective_scope_from_version(
+                        assistant_id=s.assistant_id, version=version
+                    )
+            items.append(
+                SessionView(session=s, message_count=counts.get(s.id, 0), effective_scope=scope)
+            )
         return SessionPage(items=items, next_cursor=next_cursor)
 
     @audited_resource("chat.session.read", "chat_session", "session_id", missing_result=True)
@@ -668,7 +716,7 @@ class ChatService:
         # (ADR-0011 §2): instructions → system prompt, tool_allowlist → allowed set,
         # knowledge_scope → the narrowing retrieval filter. Load the exact pinned
         # version so the run is reproducible even after the assistant is edited.
-        assistant_config = await self._load_assistant_config(session.assistant_version_id)
+        assistant_config = await self._load_assistant_config(session)
         # The asking user's per-account custom instructions (spec: user settings). Read
         # from THEIR preferences row (tenant-scoped, keyed off the resolved owner — never
         # request input); threaded to the runtime, which prepends it to the system prompt
@@ -688,9 +736,21 @@ class ChatService:
         mentioned: tuple[tuple[UUID, str], ...] = ()
         compaction_cursor: tuple[datetime, UUID] | None = None
         if summary_row is not None:
-            summary_text = summary_row.summary
             evidence = summary_row.evidence
             mentioned = summary_row.mentioned_documents
+            # #573 validate-on-read: a stored summary is untrusted data. A row
+            # that fails the strict schema / bounded leakage checks is treated
+            # as ABSENT — no summary text and no compaction cursor, so this
+            # turn falls back to the full verbatim history below. Only a
+            # sanitized reason code is logged, never the stored payload.
+            summary_text, invalid_reason = stored_summary_text(summary_row.summary)
+            if summary_row.summary and summary_text is None:
+                log.warning(
+                    "chat.summary_rejected_on_read",
+                    session_id=str(session_id),
+                    reason=invalid_reason,
+                )
+                mentioned = ()
         if (
             summary_row is not None
             and summary_text
@@ -745,23 +805,48 @@ class ChatService:
             return None
         return prefs.custom_instructions
 
-    async def _load_assistant_config(
-        self, assistant_version_id: UUID | None
-    ) -> AssistantRunConfig | None:
+    async def _load_assistant_config(self, session: ChatSession) -> AssistantRunConfig | None:
         """Assemble the run config for a session's pinned assistant version (or None).
 
         Tenant-scoped (the repository); a version pinned in this tenant is loaded
-        and assembled into the three run inputs. A missing/foreign version id
-        (e.g. the assistant was deleted, nulling the FK) degrades to ``None`` — the
-        turn runs as ad-hoc rather than failing, fail-open on availability but never
-        on permission (the per-user retrieval filter still runs).
+        and assembled into the run inputs, stamped with its assistant/version ids
+        for the answer audit (INV-6).
+
+        **Fail closed (#581).** A session that was started from an assistant —
+        evidence: a live pin, or the durable ``assistant_bound`` marker that
+        survives ``ON DELETE SET NULL`` — whose pinned config can no longer be
+        loaded (assistant/version deleted, or the pin nulled) raises a typed
+        **422** ``assistant_config_unavailable`` here, using the send endpoint's
+        existing validation-problem response, before the user message
+        is persisted and before any retrieval or model call. It NEVER silently
+        falls back to unrestricted ad-hoc chat: the published knowledge scope
+        is a governance boundary, not an availability hint. A genuinely ad-hoc
+        session (never bound) returns ``None`` exactly as before.
         """
-        if assistant_version_id is None:
+        bound = (
+            session.assistant_bound
+            or session.assistant_id is not None
+            or session.assistant_version_id is not None
+        )
+        if not bound:
             return None
-        version = await self._versions.get(assistant_version_id)
+        version = (
+            await self._versions.get(session.assistant_version_id)
+            if session.assistant_version_id is not None
+            else None
+        )
         if version is None:
-            return None
-        return assemble_run_config(version.config)
+            raise ValidationError(
+                "This conversation was started from an assistant whose published "
+                "configuration is no longer available, so it cannot continue. "
+                "Start a new conversation to chat without that assistant.",
+                code="assistant_config_unavailable",
+            )
+        return assemble_run_config(
+            version.config,
+            assistant_id=version.assistant_id,
+            assistant_version_id=version.id,
+        )
 
 
 __all__ = [

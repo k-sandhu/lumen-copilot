@@ -135,6 +135,27 @@ def test_metadata_covers_every_mvp_table() -> None:
     assert set(Base.metadata.tables) == _ALL_TABLES
 
 
+def test_provider_validation_migration_grandfathers_and_scrubs_with_rls(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from alembic import command
+
+    cfg = _alembic_config("postgresql+asyncpg://u:p@localhost/db")
+    command.upgrade(cfg, "0050_assistant_bound:0051_provider_validation", sql=True)
+    up = capsys.readouterr().out.lower()
+    assert "validation_grandfathered = true" in up
+    assert "where status = 'ready'" in up
+    assert "last_error = 'provider validation failed.'" in up
+    assert "validation_result jsonb" in up
+    assert up.index("no force row level security") < up.index("validation_grandfathered = true")
+    assert up.index("force row level security", up.index("validation_grandfathered = true"))
+
+    command.downgrade(cfg, "0051_provider_validation:0050_assistant_bound", sql=True)
+    down = capsys.readouterr().out.lower()
+    assert "drop column validation_result" in down
+    assert down.index("no force row level security") < down.index("status = 'pending'")
+
+
 def test_every_revision_id_fits_alembic_version_column() -> None:
     """Every revision id must fit ``alembic_version.version_num`` — varchar(32).
 
@@ -159,7 +180,19 @@ def test_migration_chain_is_linear_single_head() -> None:
     one-element list is the offline form of the ``alembic heads`` == 1 acceptance.
     """
     script = ScriptDirectory.from_config(_alembic_config())
-    assert list(script.get_heads()) == ["0049_discovery_metadata"]
+    assert list(script.get_heads()) == ["0053_message_finish_reason"]
+    bound = script.get_revision("0050_assistant_bound")
+    assert bound is not None
+    assert bound.down_revision == "0049_discovery_metadata"
+    provider_validation = script.get_revision("0051_provider_validation")
+    assert provider_validation is not None
+    assert provider_validation.down_revision == "0050_assistant_bound"
+    sandbox_limits = script.get_revision("0052_sandbox_limits")
+    assert sandbox_limits is not None
+    assert sandbox_limits.down_revision == "0051_provider_validation"
+    finish_reason = script.get_revision("0053_message_finish_reason")
+    assert finish_reason is not None
+    assert finish_reason.down_revision == "0052_sandbox_limits"
     locations = script.get_revision("0047_ingestion_locations")
     assert locations is not None
     assert locations.down_revision == "0046_message_source_provenance"

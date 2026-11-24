@@ -666,6 +666,14 @@ class ChatSession(TenantScopedMixin, TimestampMixin, Base):
         ForeignKey("assistant_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Non-FK bound marker (#581): SET NULL above erases the pin when an assistant
+    # is deleted, which would silently turn a governed session into unrestricted
+    # ad-hoc chat. This flag is set once at creation (assistant-started sessions
+    # only) and never cleared, so the send path can fail closed when the pinned
+    # config can no longer be loaded.
+    assistant_bound: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
@@ -800,6 +808,9 @@ class Message(TenantScopedMixin, TimestampMixin, Base):
     # the REST AskUserQuestion payload verbatim, so the UI can re-render the
     # options after reload. NULL for every other turn.
     question: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # How an assistant turn ended (#574): "cancelled" for a partial answer
+    # persisted at user Stop; NULL for ordinary/legacy turns.
+    finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Immutable answer-level provenance, independent of chunk/citation cascades.
     # NULL means unknown (legacy); [] means explicitly no source documents.
     # No document FK: deletion must retain the id so recall fails closed.
@@ -1329,7 +1340,7 @@ class LlmProvider(TenantScopedMixin, TimestampMixin, Base):
             name="ck_llm_providers_provider_type",
         ),
         CheckConstraint(
-            "status in ('pending', 'ready', 'error')",
+            "status in ('pending', 'reachable', 'ready', 'error')",
             name="ck_llm_providers_status",
         ),
     )
@@ -1366,6 +1377,16 @@ class LlmProvider(TenantScopedMixin, TimestampMixin, Base):
     discovered_models: Mapped[list[dict[str, object]]] = mapped_column(
         _JSON, nullable=False, default=list
     )
+    # Evidence-based validation (spec 0029, migration 0050): the independent
+    # checks from the last validation run, the stable safe failure code, the
+    # staleness timestamp, and the grandfather flag for pre-existing ready rows.
+    validation_checks: Mapped[list[dict[str, object]]] = mapped_column(
+        _JSON, nullable=False, default=list
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validation_grandfathered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    validation_result: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
 
 
 class TenantToolPolicy(TenantScopedMixin, TimestampMixin, Base):
@@ -2199,6 +2220,9 @@ class CodeRun(TenantScopedMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Measured peak mem / cpu time / max pids / output bytes (best-effort).
     resource_usage: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    # The enforced bounds the run was admitted under + why it ended (#589).
+    effective_limits: Mapped[dict[str, object] | None] = mapped_column(_JSON, nullable=True)
+    termination_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # The pinned base-image digest actually used (reproducibility, E3-7).
     image_digest: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Ids of artifacts the run emitted (collected via CC-B, tenant-scoped). Stored as

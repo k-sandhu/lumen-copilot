@@ -815,6 +815,10 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* A read-only in-use mode (#581) is disabled but must still read as active. */
+.lc-mode-chip[aria-pressed='true']:disabled {
+  opacity: 1;
+}
 .lc-mode-chip .lc-icon {
   width: calc(14px * var(--fs));
   height: calc(14px * var(--fs));

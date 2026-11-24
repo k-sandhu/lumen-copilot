@@ -82,6 +82,8 @@ class CodeRunResponse(BaseModel):
     trace_id: UUID | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    effective_limits: dict[str, object] | None = None
+    termination_reason: str | None = None
 
 
 def _usage_to_response(usage: ResourceUsage | None) -> ResourceUsageResponse | None:
@@ -115,6 +117,8 @@ def _to_response(run: CodeRun) -> CodeRunResponse:
         trace_id=run.trace_id,
         started_at=run.started_at,
         finished_at=run.finished_at,
+        effective_limits=run.effective_limits,
+        termination_reason=run.termination_reason,
     )
 
 

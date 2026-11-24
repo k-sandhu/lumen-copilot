@@ -160,6 +160,13 @@ export function rollbackAssistant(
 export function testAssistant(
   id: string,
   body: AssistantTestRequest = {},
+  signal?: AbortSignal,
 ): Promise<AssistantTestTrace> {
-  return request<AssistantTestTrace>(`/assistants/${id}/test`, { method: 'POST', json: body });
+  // #574: aborting the fetch disconnects the request, which the server
+  // watches for and cancels the preview runtime instead of finishing it.
+  return request<AssistantTestTrace>(`/assistants/${id}/test`, {
+    method: 'POST',
+    json: body,
+    signal,
+  });
 }

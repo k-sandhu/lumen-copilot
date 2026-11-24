@@ -48,7 +48,7 @@ def _unavailable_documents(values: list[str], ctx: ToolContext) -> str:
 
 
 async def _document_ids(value: object, ctx: ToolContext) -> list[UUID] | None:
-    """Resolve D handles or UUIDs to readable documents, then intersect pinned scope.
+    """Resolve identities under permissions and collection/source scope, then narrow documents.
 
     Every value must name a document the principal can read now. A filename, an S
     handle, another conversation's handle, an unknown UUID and a revoked document
@@ -60,16 +60,22 @@ async def _document_ids(value: object, ctx: ToolContext) -> list[UUID] | None:
         raise ValueError("Use at most 50 values in each scope filter.")
     resolved = {str(item): _document_identity(str(item), ctx) for item in value}
     wanted = list(dict.fromkeys(item for item in resolved.values() if item is not None))
+    scope = {}
+    if ctx.collection_ids is not None:
+        scope["collection_ids"] = ctx.collection_ids
+    if ctx.source_ids is not None:
+        scope["source_ids"] = ctx.source_ids
     permitted = (
-        await ctx.retrieval.permitted_document_names(principal=ctx.principal, document_ids=wanted)
+        await ctx.retrieval.permitted_document_names(
+            principal=ctx.principal, document_ids=wanted, **scope
+        )
         if wanted
         else {}
     )
     unavailable = [raw for raw, item in resolved.items() if item is None or item not in permitted]
     if unavailable:
         raise ValidationError(_unavailable_documents(unavailable, ctx))
-    scope = ctx.document_ids
-    return wanted if scope is None else [item for item in wanted if item in scope]
+    return wanted if ctx.document_ids is None else [d for d in wanted if d in ctx.document_ids]
 
 
 def _date(value: object) -> datetime | None:
@@ -82,7 +88,7 @@ def _date(value: object) -> datetime | None:
 
 
 async def _filters(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    return {
+    filters: dict[str, Any] = {
         "collection_ids": _ids(args.get("collection_ids"), ctx.collection_ids),
         "document_ids": await _document_ids(args.get("document_ids"), ctx),
         "source": args.get("source"),
@@ -92,6 +98,12 @@ async def _filters(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "modified_after": _date(args.get("modified_after")),
         "modified_before": _date(args.get("modified_before")),
     }
+    # Assistant source scope (#581): not a model-supplied filter — the run's
+    # published ``sourceIds`` narrow every corpus read. Passed only when set so
+    # an ad-hoc context calls retrieval exactly as before.
+    if ctx.source_ids is not None:
+        filters["source_ids"] = ctx.source_ids
+    return filters
 
 
 def _bad_args(detail: str | None = None) -> ToolHandlerResult:
@@ -218,6 +230,7 @@ async def _search(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
                 k=min(int(args.get("k") or ctx.default_k), 20, ctx.max_k),
                 collection_ids=filters["collection_ids"],
                 document_ids=filters["document_ids"],
+                **({"source_ids": filters["source_ids"]} if "source_ids" in filters else {}),
             )
     except ValidationError as exc:
         return _bad_args(exc.detail)
@@ -252,10 +265,12 @@ async def _read(args: dict[str, Any], ctx: ToolContext) -> ToolHandlerResult:
         handle = str(args.get("handle") or "").strip()
         start = int(args.get("start") or 0)
         end = int(args["end"]) if args.get("end") is not None else None
-        scopes = {
+        scopes: dict[str, Any] = {
             "collection_ids": _ids(args.get("collection_ids"), ctx.collection_ids),
             "document_ids": await _document_ids(args.get("document_ids"), ctx),
         }
+        if ctx.source_ids is not None:
+            scopes["source_ids"] = ctx.source_ids
         if re.fullmatch(r"S[1-9][0-9]*", handle):
             # An S handle opens the text around that passage; any range is ignored.
             entry = ctx.handles.resolve(handle) if ctx.handles else None

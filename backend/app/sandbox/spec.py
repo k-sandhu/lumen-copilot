@@ -9,7 +9,7 @@ container objects (ADR-0004 boundary rule).
 
 Legacy ADR-0013 policy value objects remain for source compatibility. ADR-0020's
 active enforcement is the fixed runner mapping: network mode ``none``, no host mounts,
-all capabilities dropped, contained UID 0, and no automatic execution limits.
+all capabilities dropped and contained UID 0. ADR-0029 (Proposed) adds default-on bounds.
 """
 
 from __future__ import annotations
@@ -81,6 +81,42 @@ class SandboxPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class EffectiveLimits:
+    """The resolved, enforced bounds for one execution (#589, ADR-0029).
+
+    Deployment ceilings from ``SANDBOX_*`` config, narrowed (never widened)
+    by the tenant policy where a tenant field exists. ``sources`` records,
+    per field, whether the value came from the tenant override or the
+    deployment default, so the admin surface can prove which. ``None``
+    values occur only under the explicit unbounded opt-out
+    (``SANDBOX_SESSION_LIMITS_ENABLED=false``).
+    """
+
+    cpus: float | None
+    memory_bytes: int | None
+    pids_limit: int | None
+    wall_clock_seconds: int | None
+    output_bytes_cap: int | None
+    scratch_bytes: int | None
+    max_concurrency: int
+    daily_runtime_cap_s: int
+    sources: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cpus": self.cpus,
+            "memory_bytes": self.memory_bytes,
+            "pids_limit": self.pids_limit,
+            "wall_clock_seconds": self.wall_clock_seconds,
+            "output_bytes_cap": self.output_bytes_cap,
+            "scratch_bytes": self.scratch_bytes,
+            "max_concurrency": self.max_concurrency,
+            "daily_runtime_cap_s": self.daily_runtime_cap_s,
+            "sources": dict(self.sources),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxSessionSpec:
     """The opaque reusable-container identity passed to the runner (ADR-0020).
 
@@ -90,12 +126,10 @@ class SandboxSessionSpec:
     collection let one chat turn OOM the process every tenant's code execution depends
     on. ``None`` leaves the runner's own ceiling in force.
 
-    ``cpus``/``memory_bytes``/``pids_limit`` bound the session CONTAINER, and they are
-    ``None`` by default because ADR-0020 ships unbounded on purpose (its Consequences
-    section: no automatic protection against infinite loops, fork bombs or disk growth,
-    explicit cancel being the recovery path). A deploy unwilling to accept that sets
-    ``SANDBOX_SESSION_LIMITS_ENABLED`` and these carry its ``SANDBOX_CPUS`` /
-    ``SANDBOX_MEMORY_BYTES`` / ``SANDBOX_PIDS_LIMIT`` down to the engine flags.
+    CPU/memory/PID/scratch bounds come from default-on deployment settings,
+    narrowed by tenant policy (ADR-0029, Proposed). Optional fields permit the
+    explicit emergency container-bound opt-out. Execution deadlines and quotas
+    still apply under that opt-out.
     """
 
     sandbox_session_id: UUID
@@ -106,6 +140,8 @@ class SandboxSessionSpec:
     cpus: float | None = None
     memory_bytes: int | None = None
     pids_limit: int | None = None
+    wall_clock_seconds: int | None = None
+    scratch_bytes: int | None = None
     env: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -122,6 +158,10 @@ class SandboxSessionSpec:
             raise ValueError("sandbox memory_bytes must be >= 1 when set")
         if self.pids_limit is not None and self.pids_limit < 1:
             raise ValueError("sandbox pids_limit must be >= 1 when set")
+        if self.wall_clock_seconds is not None and self.wall_clock_seconds < 1:
+            raise ValueError("sandbox wall_clock_seconds must be >= 1 when set")
+        if self.scratch_bytes is not None and self.scratch_bytes < 1:
+            raise ValueError("sandbox scratch_bytes must be >= 1 when set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,8 +199,10 @@ class RunSpec:
     #: and `pip install` takes the whole wheelhouse — so a denied distribution could
     #: arrive as a dependency of an allowed one. Only the runner sees the resolution.
     denied_packages: tuple[str, ...] = ()
-    # Kept optional for source compatibility with historical callers. ADR-0020
-    # never populates or enforces automatic run limits.
+    #: Per-execution wall clock (#589): the runner destroys the container at
+    #: this deadline. The HTTP transport also has a finite read timeout.
+    wall_clock_seconds: int | None = None
+    # Kept optional for source compatibility with historical callers.
     limits: RunLimits | None = None
     policy: SandboxPolicy = field(default_factory=SandboxPolicy)
     inputs: tuple[StagedInput, ...] = ()
@@ -206,3 +248,6 @@ class RunResult:
     #: names, so a run that pulled in thirty distributions audited as one.
     resolved_packages: tuple[dict[str, str], ...] = ()
     resource_usage: ResourceUsage | None = None
+    #: Why the run ended (#589): ``completed`` or a ``sandbox_limit_*`` /
+    #: ``killed`` code from the runner. Persisted on the code-run row.
+    termination_reason: str | None = None

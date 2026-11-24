@@ -61,6 +61,7 @@ backend/
 - One error model: domain raises typed errors; an exception handler maps them to the contract's error shape (RFC-9457-style problem+JSON). Never leak stack traces or vendor errors to the client.
 - All config via `core/config.py` (`pydantic-settings`); **no** `os.environ` reads elsewhere, **no** secrets in code or compose. Fail fast on missing required config at startup.
 - Structured logs (`structlog`) with request/tenant correlation IDs; OpenTelemetry traces; Prometheus metrics. This is **ops** observability — distinct from the product **audit log** (CC-8), which emits through one sink for retrieval/answer/action events.
+- Traces and metrics go through `app/observability/` only ([ADR-0027](../docs/architecture/0027-llm-observability-phoenix-and-metrics.md)): open spans with its helpers (`observe_turn`, `observe_tool`, `observe_retrieval`, `LlmCall`, …), never `opentelemetry` directly (a test enforces it). Put content (prompts, passages, tool I/O) only through `set_content` / `set_input` / `set_output`, so `TELEMETRY_CAPTURE_CONTENT=false` removes it. Never hand a helper a credential. Metric labels must stay bounded: route templates, model ids and tool names, never tenant, user or raw paths.
 
 ## Testing (test-first — root §9)
 - `domain/` unit-tested with zero mocks (it's pure). `services/` tested with faked adapters. `api/` integration-tested against the contract. Streaming paths tested for the full event lifecycle (start → delta → done/error) incl. cancellation.

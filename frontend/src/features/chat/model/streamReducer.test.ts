@@ -669,3 +669,28 @@ describe('answer_retract (speculative streaming, #488)', () => {
     expect(replayed.text).toBe('real');
   });
 });
+
+it('#574 freezes a cancelled partial with its citation and tool activity', () => {
+  let state = reduceStream(initialStreamState, start(0));
+  state = reduceStream(state, delta(1, 'Partial'));
+  state = reduceStream(state, citation(2, 'c1'));
+  state = reduceStream(state, {
+    type: 'event',
+    streamId: SID,
+    seq: 3,
+    name: 'tool_call',
+    data: { callId: 't1', tool: 'search_text', args: {} },
+  });
+  const stopped = reduceStream(state, {
+    type: 'cancelled',
+    streamId: SID,
+    seq: 4,
+    data: { messageId: 'm', finishReason: 'cancelled', citationCount: 0 },
+  });
+  expect(stopped.phase).toBe('cancelled');
+  expect(stopped.text).toBe('Partial');
+  expect(stopped.citations).toEqual(state.citations);
+  expect(stopped.tools).toEqual(state.tools);
+  expect(reduceStream(stopped, delta(5, 'late'))).toBe(stopped);
+  expect(terminateWithDisconnect(stopped)).toBe(stopped);
+});

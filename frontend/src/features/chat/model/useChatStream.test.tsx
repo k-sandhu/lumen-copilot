@@ -46,6 +46,20 @@ function harness() {
 
 const SID = 'stream-xyz';
 
+vi.mock('@/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api')>()),
+  cancelChatStream: vi.fn(() => new Promise(() => {})),
+}));
+
+function emitCancelled(socket: FakeSocket, seq = 2) {
+  socket.emit({
+    type: 'cancelled',
+    streamId: SID,
+    seq,
+    data: { messageId: 'm', finishReason: 'cancelled', citationCount: 0 },
+  });
+}
+
 describe('useChatStream', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -276,10 +290,13 @@ describe('useChatStream', () => {
     expect(h.get().closed).toBe(true);
   });
 
-  it('cancel() closes the socket', () => {
+  it('cancel() closes the socket after the server terminal', () => {
     const h = harness();
     const { result } = renderHook(() => useChatStream({ streamId: SID, makeClient: h.makeClient }));
-    act(() => result.current.cancel());
+    act(() => {
+      result.current.cancel();
+      emitCancelled(h.get());
+    });
     expect(h.get().closed).toBe(true);
   });
 
@@ -809,7 +826,7 @@ describe('useChatStream — post-terminal envelopes (FE-5)', () => {
     expect(result.current.phase).toBe('error');
   });
 
-  it('ignores a late delta after cancel() so nothing re-arms', () => {
+  it('ignores a late delta after acknowledged cancellation so nothing re-arms', () => {
     vi.useFakeTimers();
     const h = harness();
     const { result } = renderHook(() =>
@@ -822,8 +839,9 @@ describe('useChatStream — post-terminal envelopes (FE-5)', () => {
     });
     act(() => {
       result.current.cancel();
+      emitCancelled(h.get());
     });
-    // cancel() cleared the watchdog and the pending flush.
+    // Acknowledged cancellation cleared the watchdog and the pending flush.
     expect(vi.getTimerCount()).toBe(0);
 
     act(() => {
@@ -996,7 +1014,15 @@ describe('useChatStream — suggestions window lifetime (FE2-3)', () => {
       live().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
       live().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'partial' } });
     });
-    act(() => result.current.cancel());
+    act(() => {
+      result.current.cancel();
+      live().emit({
+        type: 'cancelled',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'cancelled', citationCount: 0 },
+      });
+    });
     expect(live().closed).toBe(true);
 
     const settled = renders;
@@ -1031,5 +1057,354 @@ describe('useChatStream — suggestions window lifetime (FE2-3)', () => {
     expect(result.current.phase).toBe('done');
     expect(result.current.problem).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('#574 server cancellation acknowledgement', () => {
+  it('keeps the partial and socket while Stop is pending, then settles once', async () => {
+    const h = harness();
+    let resolveCancel!: (value: unknown) => void;
+    const cancelRequest = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveCancel = resolve;
+        }),
+    );
+    const onCancelled = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({
+        streamId: SID,
+        makeClient: h.makeClient,
+        cancelRequest,
+        onCancelled,
+      }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: { messageId: 'm' } });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Partial' } });
+      result.current.cancel();
+      result.current.cancel();
+    });
+    expect(result.current.text).toBe('Partial');
+    expect(result.current.stopping).toBe(true);
+    expect(result.current.phase).toBe('streaming');
+    expect(h.get().closed).toBe(false);
+    expect(cancelRequest).toHaveBeenCalledTimes(1);
+    expect(onCancelled).not.toHaveBeenCalled();
+    act(() => {
+      h.get().emit({
+        type: 'cancelled',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'cancelled', citationCount: 0 },
+      });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 3, data: { text: 'late' } });
+      h.get().emit({ type: 'cancelled', streamId: SID, seq: 4, data: {} });
+    });
+    await act(async () => {
+      resolveCancel({ stream_id: SID, status: 'cancelled' });
+    });
+    expect(result.current.text).toBe('Partial');
+    expect(result.current.phase).toBe('cancelled');
+    expect(result.current.stopping).toBe(false);
+    expect(h.get().closed).toBe(true);
+    expect(onCancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not claim cancellation on a failed request and permits retry', async () => {
+    const h = harness();
+    const cancelRequest = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockImplementation(() => new Promise(() => {}));
+    const onCancelled = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({
+        streamId: SID,
+        makeClient: h.makeClient,
+        cancelRequest,
+        onCancelled,
+      }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Partial' } });
+      result.current.cancel();
+    });
+    await waitFor(() => expect(result.current.stopping).toBe(false));
+    expect(result.current.cancelError).toMatch(/could not confirm/i);
+    expect(result.current.phase).toBe('streaming');
+    expect(result.current.text).toBe('Partial');
+    expect(h.get().closed).toBe(false);
+    expect(onCancelled).not.toHaveBeenCalled();
+    act(() => result.current.cancel());
+    expect(cancelRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a late Stop after completion without a server request', () => {
+    const h = harness();
+    const cancelRequest = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({
+        streamId: SID,
+        makeClient: h.makeClient,
+        cancelRequest,
+      }),
+    );
+    act(() => {
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 0,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0 },
+      });
+      result.current.cancel();
+    });
+    expect(result.current.phase).toBe('done');
+    expect(cancelRequest).not.toHaveBeenCalled();
+  });
+
+  it('keeps a completion that wins the Stop race', async () => {
+    const h = harness();
+    const cancelRequest = vi
+      .fn()
+      .mockResolvedValue({ stream_id: SID, status: 'already_completed' });
+    const onDone = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({
+        streamId: SID,
+        makeClient: h.makeClient,
+        cancelRequest,
+        onDone,
+      }),
+    );
+    act(() => {
+      h.get().emit({ type: 'start', streamId: SID, seq: 0, data: {} });
+      result.current.cancel();
+      h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Complete' } });
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 2,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0 },
+      });
+    });
+    await act(async () => {});
+    expect(result.current.phase).toBe('done');
+    expect(result.current.text).toBe('Complete');
+    expect(result.current.stopping).toBe(false);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a previous Stop failure mutate the next stream', async () => {
+    const h = harness();
+    let rejectCancel!: (error: Error) => void;
+    const cancelRequest = vi.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCancel = reject;
+        }),
+    );
+    const { result, rerender } = renderHook(
+      ({ id }) =>
+        useChatStream({
+          streamId: id,
+          makeClient: h.makeClient,
+          cancelRequest,
+        }),
+      { initialProps: { id: SID } },
+    );
+    act(() => result.current.cancel());
+    rerender({ id: 'next-stream' });
+    await act(async () => {
+      rejectCancel(new Error('old failure'));
+    });
+    expect(result.current.stopping).toBe(false);
+    expect(result.current.cancelError).toBeNull();
+    expect(result.current.phase).toBe('idle');
+  });
+});
+
+describe('#574 confirmed HTTP terminal fallback', () => {
+  it.each(['cancelled', 'done', 'error'] as const)(
+    'reconciles confirmed %s after the socket loses its terminal',
+    async (type) => {
+      const h = harness();
+      let acknowledge!: (value: unknown) => void;
+      const cancelRequest = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+      const onDone = vi.fn();
+      const onCancelled = vi.fn();
+      const { result } = renderHook(() =>
+        useChatStream({
+          streamId: SID,
+          makeClient: h.makeClient,
+          cancelRequest,
+          onDone,
+          onCancelled,
+        }),
+      );
+      act(() => {
+        h.get().emit({ type: 'start', streamId: SID, seq: 0, data: { messageId: 'm' } });
+        h.get().emit({ type: 'delta', streamId: SID, seq: 1, data: { text: 'Partial' } });
+        result.current.cancel();
+        h.get().drop();
+      });
+      expect(result.current.phase).toBe('error');
+      const terminal =
+        type === 'error'
+          ? {
+              type,
+              streamId: SID,
+              seq: 2,
+              problem: { status: 503, title: 'Provider failed', code: 'provider_failed' },
+            }
+          : {
+              type,
+              streamId: SID,
+              seq: 2,
+              data: {
+                messageId: 'm',
+                finishReason: type === 'done' ? 'stop' : 'cancelled',
+                citationCount: 0,
+              },
+            };
+      await act(async () => {
+        acknowledge({
+          stream_id: SID,
+          status: type === 'cancelled' ? 'cancelled' : 'already_completed',
+          terminal,
+        });
+      });
+      expect(result.current.phase).toBe(type);
+      expect(result.current.text).toBe('Partial');
+      expect(result.current.stopping).toBe(false);
+      expect(result.current.problem?.code ?? null).toBe(
+        type === 'error' ? 'provider_failed' : null,
+      );
+      expect(onCancelled).toHaveBeenCalledTimes(type === 'cancelled' ? 1 : 0);
+      expect(onDone).toHaveBeenCalledTimes(type === 'done' ? 1 : 0);
+    },
+  );
+
+  it('settles an empty cancelled turn even when no start reached the socket', async () => {
+    const h = harness();
+    const terminal = {
+      type: 'cancelled',
+      streamId: SID,
+      seq: 1,
+      data: { messageId: 'empty-message', finishReason: 'cancelled', citationCount: 0 },
+    };
+    const cancelRequest = vi
+      .fn()
+      .mockResolvedValue({ stream_id: SID, status: 'cancelled', terminal });
+    const onCancelled = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({
+        streamId: SID,
+        makeClient: h.makeClient,
+        cancelRequest,
+        onCancelled,
+      }),
+    );
+    await act(async () => result.current.cancel());
+    expect(result.current.phase).toBe('cancelled');
+    expect(result.current.text).toBe('');
+    expect(result.current.cancelled?.messageId).toBe('empty-message');
+    expect(onCancelled).toHaveBeenCalledTimes(1);
+    expect(h.get().closed).toBe(true);
+  });
+
+  it('ignores a confirmed acknowledgement belonging to the previous stream', async () => {
+    const h = harness();
+    let acknowledge!: (value: unknown) => void;
+    const cancelRequest = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const onCancelled = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ id }) =>
+        useChatStream({
+          streamId: id,
+          makeClient: h.makeClient,
+          cancelRequest,
+          onCancelled,
+        }),
+      { initialProps: { id: SID } },
+    );
+    act(() => {
+      result.current.cancel();
+      h.get().drop();
+    });
+    rerender({ id: 'next-stream' });
+    await act(async () => {
+      acknowledge({
+        stream_id: SID,
+        status: 'cancelled',
+        terminal: {
+          type: 'cancelled',
+          streamId: SID,
+          seq: 1,
+          data: { messageId: 'old-message', finishReason: 'cancelled', citationCount: 0 },
+        },
+      });
+    });
+    expect(result.current.phase).toBe('idle');
+    expect(result.current.cancelled).toBeNull();
+    expect(onCancelled).not.toHaveBeenCalled();
+    expect(h.get().closed).toBe(false);
+  });
+
+  it('does not override a delivered server terminal or reload twice', async () => {
+    const h = harness();
+    let acknowledge!: (value: unknown) => void;
+    const cancelRequest = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const onDone = vi.fn();
+    const onCancelled = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream({
+        streamId: SID,
+        makeClient: h.makeClient,
+        cancelRequest,
+        onDone,
+        onCancelled,
+      }),
+    );
+    act(() => {
+      result.current.cancel();
+      h.get().emit({
+        type: 'done',
+        streamId: SID,
+        seq: 1,
+        data: { messageId: 'm', finishReason: 'stop', citationCount: 0 },
+      });
+    });
+    await act(async () => {
+      acknowledge({
+        stream_id: SID,
+        status: 'cancelled',
+        terminal: {
+          type: 'cancelled',
+          streamId: SID,
+          seq: 2,
+          data: { messageId: 'm', finishReason: 'cancelled', citationCount: 0 },
+        },
+      });
+    });
+    expect(result.current.phase).toBe('done');
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onCancelled).not.toHaveBeenCalled();
   });
 });

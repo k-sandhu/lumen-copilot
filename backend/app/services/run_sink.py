@@ -30,6 +30,7 @@ path (the transcript is the durable replay; Redis is the live leg via the tee).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +38,7 @@ from uuid import UUID
 
 from app.db.repositories import RunRepository, RunStepRepository
 from app.domain.entities import RunError, RunStatus, RunStepKind
+from app.domain.escalation import TOOL_FAILURE_REASON, is_denied_or_unavailable_tool_error
 from app.realtime.backplane import Backplane, StreamOwner, is_terminal
 
 # The WS envelope ``type`` / ``event name`` set → the durable ``RunStepKind``. A
@@ -108,6 +110,18 @@ class RunTranscriptSink:
     async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
         return None
 
+    async def signal_cancel(self, stream_id: str) -> None:  # pragma: no cover
+        return None
+
+    async def is_cancelled(self, stream_id: str) -> bool:  # pragma: no cover
+        return False
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        return None
+
     def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
         raise NotImplementedError("RunTranscriptSink is producer-only; watch via the chat WS.")
 
@@ -122,11 +136,20 @@ class RunTranscriptSink:
         """Fold the captured terminal envelope into a run outcome (status + summary/error).
 
         A ``done`` terminal ⇒ ``succeeded`` with a one-line ``summary`` distilled
-        from the streamed deltas + citation count. An ``error`` terminal ⇒ ``failed``
-        with a typed :class:`RunError` built from the problem envelope (a stable
-        ``code`` + human ``message`` — never a raw vendor string). No terminal seen
-        (should not happen: the runtime always emits exactly one) ⇒ ``failed`` with
-        a ``no_terminal`` reason, so a run never ends in an unknown state.
+        from the streamed deltas + citation count — **unless** any tool call was
+        denied or unavailable (#578): then the assistant could not do what it was
+        configured to do, so the run is ``failed`` with reason ``tool_failure``
+        even though the stream ended cleanly. Recoverable tool errors (bad args,
+        timeouts the model moved past) do not block success; the classification
+        is :func:`app.domain.escalation.is_denied_or_unavailable_tool_error`. An
+        ``error`` terminal ⇒ ``failed`` with a typed :class:`RunError` built from
+        the problem envelope (a stable ``code`` + human ``message`` — never a raw
+        vendor string), unless a denied/unavailable tool fixes the reason as
+        ``tool_failure``. This also prevents re-driving a denied capability
+        because a later dependency failure happened to be transient.
+        No terminal seen (should not happen: the runtime always emits exactly
+        one) ⇒ ``failed`` with a ``no_terminal`` reason, so a run never ends in
+        an unknown state.
         """
         terminal = next(
             (e for e in reversed(self._envelopes) if is_terminal(e)),
@@ -137,6 +160,21 @@ class RunTranscriptSink:
                 status=RunStatus.FAILED,
                 summary=None,
                 error=RunError(code="no_terminal", message="The run produced no terminal event."),
+            )
+        if self._has_denied_tool_result():
+            # A configured tool was denied or unavailable — an honest Failed
+            # rather than a false Succeeded (#578).
+            # The failed call itself stays visible in the persisted steps.
+            return _RunOutcome(
+                status=RunStatus.FAILED,
+                summary=None,
+                error=RunError(
+                    code=TOOL_FAILURE_REASON,
+                    message=(
+                        "A tool the assistant needed was denied or unavailable, "
+                        "so the run could not complete as configured."
+                    ),
+                ),
             )
         if terminal.get("type") == "error":
             problem = terminal.get("problem")
@@ -155,6 +193,19 @@ class RunTranscriptSink:
                 error=RunError(code=code, message=message),
             )
         return _RunOutcome(status=RunStatus.SUCCEEDED, summary=self._summarize(), error=None)
+
+    def _has_denied_tool_result(self) -> bool:
+        """Whether any ``tool_result`` envelope is a denied/unavailable failure (#578)."""
+        for env in self._envelopes:
+            if env.get("type") != "event" or env.get("name") != "tool_result":
+                continue
+            data = env.get("data")
+            if not isinstance(data, dict) or data.get("ok") is not False:
+                continue
+            error = data.get("error")
+            if is_denied_or_unavailable_tool_error(error if isinstance(error, str) else None):
+                return True
+        return False
 
     def message_id(self) -> UUID | None:
         """The assistant message id the run produced (from the ``start`` envelope).
@@ -258,6 +309,18 @@ class DebugTraceSink:
         """No-op: a test run is synchronous and un-watched (no live owner binding)."""
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
+        return None
+
+    async def signal_cancel(self, stream_id: str) -> None:  # pragma: no cover
+        return None
+
+    async def is_cancelled(self, stream_id: str) -> bool:  # pragma: no cover
+        return False
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
         return None
 
     def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
@@ -375,6 +438,19 @@ class TeeSink:
 
     async def get_owner(self, stream_id: str) -> StreamOwner | None:  # pragma: no cover
         return await self._sinks[0].get_owner(stream_id)
+
+    async def signal_cancel(self, stream_id: str) -> None:
+        for sink in self._sinks:
+            await sink.signal_cancel(stream_id)
+
+    async def is_cancelled(self, stream_id: str) -> bool:
+        return any([await sink.is_cancelled(stream_id) for sink in self._sinks])
+
+    async def wait_cancel(self, stream_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def get_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        return None
 
     def subscribe(self, stream_id: str) -> AsyncGenerator[dict[str, Any], None]:  # pragma: no cover
         return self._sinks[0].subscribe(stream_id)

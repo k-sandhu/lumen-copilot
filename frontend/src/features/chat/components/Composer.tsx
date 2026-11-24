@@ -48,6 +48,8 @@ export interface ComposerProps {
   busy: boolean;
   /** True while the answer is streaming (shows Stop instead of Send). */
   streaming: boolean;
+  /** Server cancellation is pending acknowledgement. */
+  stopping?: boolean;
   onSend: (content: string) => void;
   onStop: () => void;
   /** Disable everything (e.g. no session selected). */
@@ -60,9 +62,14 @@ export interface ComposerProps {
   settingDefault?: boolean;
   /** The active knowledge modes for the next turn (#221). */
   modes: readonly KnowledgeMode[];
-  onModesChange: (next: KnowledgeMode[]) => void;
+  onModesChange?: (next: KnowledgeMode[]) => void;
   /** Per-mode availability (web is governed / disabled-with-reason; #221). */
   modeAvailability?: Partial<Record<KnowledgeMode, ModeAvailability>>;
+  /**
+   * The modes are the server-authoritative effective scope (#581,
+   * `adjustable: false`): display-only, no toggle pretends to change them.
+   */
+  modesReadOnly?: boolean;
   /**
    * The best next question (spec 0006 #429, AC-4) — ghost-rendered in the EMPTY
    * composer; Tab (or clicking the hint) accepts it into the draft. Null/absent
@@ -89,6 +96,7 @@ function ComposerComponent({
   onModelChange,
   busy,
   streaming,
+  stopping = false,
   onSend,
   onStop,
   disabled = false,
@@ -98,6 +106,7 @@ function ComposerComponent({
   modes,
   onModesChange,
   modeAvailability,
+  modesReadOnly = false,
   ghostSuggestion = null,
   historyEntries = [],
   pinnedDocuments = [],
@@ -306,6 +315,7 @@ function ComposerComponent({
           onChange={onModesChange}
           availability={modeAvailability}
           disabled={disabled || streaming}
+          readOnly={modesReadOnly}
         />
         {/* Pinned-document pills (spec 0007 #432): sticky retrieval scope for
             subsequent sends; each × unpins. */}
@@ -463,11 +473,12 @@ function ComposerComponent({
             <button
               type="button"
               onClick={onStop}
-              aria-label="Stop generating"
+              disabled={stopping}
+              aria-label={stopping ? 'Stopping answer' : 'Stop generating'}
               className="lc-stop-btn"
             >
               <span className="lc-stop-glyph" aria-hidden="true" />
-              Stop
+              {stopping ? 'Stopping…' : 'Stop'}
             </button>
           ) : (
             <button

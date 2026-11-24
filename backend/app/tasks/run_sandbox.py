@@ -13,9 +13,10 @@ The worker calls the dedicated ``sandbox-runner`` service over its internal HTTP
 ``run_task`` (engine disposed after each run so no pooled connection outlives its
 loop, #140).
 
-Crash safety (ADR-0020 §4, INV-8): the execution core always writes a terminal
-``code_runs`` status — a defect that escapes it is caught here and the run is failed,
-never left ``running``. Ids are passed as strings (Celery serializes JSON, not UUIDs)
+Crash safety (ADR-0020 §4, INV-8): ordinary failures become terminal rows.
+Unconfirmed cancellation stays running while producer-owned cleanup retries;
+producer death leaves a pessimistic reservation and an expiring lease, never a
+fabricated killed status. Ids are passed as strings (Celery serializes JSON, not UUIDs)
 and parsed back to ``UUID``.
 """
 

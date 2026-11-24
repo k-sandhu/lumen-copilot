@@ -38,6 +38,7 @@ def _start_beat(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
                 "expired-upload-sweep",
                 "run-digest-sweep",
                 "connector-sync-poll",
+                "stale-run-reaper",
             }
             assert self.app.conf.redbeat_key_prefix == settings.redbeat_key_prefix
             assert self.app.conf.redbeat_lock_timeout == settings.redbeat_lock_timeout_seconds
@@ -54,6 +55,10 @@ def _start_beat(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
                 "connector-sync-poll": {
                     "task": "lumen.poll_connector_syncs",
                     "schedule": float(settings.connector_sync_interval_minutes) * 60,
+                },
+                "stale-run-reaper": {
+                    "task": "lumen.reap_stale_runs",
+                    "schedule": float(settings.run_reaper_interval_seconds),
                 },
             }
             fake = MagicMock(max_interval=1)

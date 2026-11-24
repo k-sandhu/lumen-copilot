@@ -20,6 +20,8 @@ import {
   sessionMeta,
   initialModes,
   modeAvailability,
+  modesFromEffectiveScope,
+  availabilityFromEffectiveScope,
   usedWebSearch,
   partitionCitations,
   DEFAULT_CHAT_MODES,
@@ -27,7 +29,12 @@ import {
 import { toolActivityFromInvocations } from './presentation';
 import type { UiCitation } from './citation';
 import type { ToolActivity } from './streamReducer';
-import type { ChatSession, KnowledgeMode, MessageToolInvocation } from '@/api';
+import type {
+  ChatSession,
+  EffectiveKnowledgeScope,
+  KnowledgeMode,
+  MessageToolInvocation,
+} from '@/api';
 
 const NOW = Date.parse('2026-06-19T12:00:00Z');
 
@@ -377,6 +384,47 @@ describe('modeAvailability', () => {
 
   it('fails web closed for an ad-hoc chat (no scope)', () => {
     expect(modeAvailability(undefined).web?.available).toBe(false);
+  });
+});
+
+describe('effective scope (#581)', () => {
+  const scope: EffectiveKnowledgeScope = {
+    assistant_id: 'a1',
+    assistant_version_id: 'v1',
+    modes: ['company', 'web'],
+    collection_ids: [],
+    source_ids: [],
+    adjustable: { modes: false, collection_ids: false, source_ids: false },
+  };
+
+  it('hydrates modes from the server scope, keeping web', () => {
+    expect(modesFromEffectiveScope(scope)).toEqual(['company', 'web']);
+  });
+
+  it('falls back to the corpus default only for a confirmed ad-hoc chat', () => {
+    expect(modesFromEffectiveScope(null)).toEqual([...DEFAULT_CHAT_MODES]);
+  });
+
+  it('never surfaces model as an active mode', () => {
+    expect(modesFromEffectiveScope({ ...scope, modes: ['company', 'model'] })).toEqual(['company']);
+    expect(initialModes(['company', 'model'])).toEqual(['company']);
+  });
+
+  it('marks excluded modes unavailable with a reason and model as not used', () => {
+    const avail = availabilityFromEffectiveScope(scope);
+    expect(avail.web?.available).toBe(true);
+    expect(avail.uploaded?.available).toBe(false);
+    expect(avail.uploaded?.reason).toMatch(/not included/i);
+    expect(availabilityFromEffectiveScope({ ...scope, modes: [] }).web?.reason).toMatch(
+      /not included/i,
+    );
+    expect(avail.model?.available).toBe(false);
+    expect(avail.model?.reason).toMatch(/not used|grounded/i);
+  });
+
+  it('model is unavailable even for an ad-hoc chat', () => {
+    expect(modeAvailability(undefined).model?.available).toBe(false);
+    expect(availabilityFromEffectiveScope(null).model?.available).toBe(false);
   });
 });
 

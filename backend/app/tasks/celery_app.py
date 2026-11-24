@@ -47,6 +47,7 @@ celery_app.conf.update(
         "app.tasks.connector_poll",
         "app.tasks.artifact_retention",
         "app.tasks.run_assistant",
+        "app.tasks.run_reaper",
         "app.tasks.scheduler",
         "app.tasks.run_digest",
         "app.tasks.run_sandbox",
@@ -75,7 +76,11 @@ celery_app.conf.update(
         "expired-upload-sweep": {
             "task": "lumen.sweep_expired_uploads",
             "schedule": float(_settings.upload_janitor_interval_seconds),
-        }
+        },
+        "stale-run-reaper": {
+            "task": "lumen.reap_stale_runs",
+            "schedule": float(_settings.run_reaper_interval_seconds),
+        },
     },
 )
 
@@ -104,6 +109,27 @@ def _reconcile_beat_schedules(sender: object, **kwargs: object) -> None:
         # never starts ticking after a failed required boot reconciliation.
         raise SystemExit(1) from exc
     log.info("schedule.boot_reconciled", schedules=count)
+
+
+@signals.worker_process_init.connect  # type: ignore[misc]  # Celery signals are untyped
+def _start_telemetry(**kwargs: object) -> None:
+    """Start trace/metric export in each pool child (ADR-0027 §5).
+
+    Per child, not in the parent: exporter threads do not survive ``fork``, and
+    each child needs its own ``service.instance.id`` so Prometheus keeps their
+    cumulative series apart. A no-op unless ``TELEMETRY_ENABLED``.
+    """
+    from app.observability import configure_telemetry
+
+    configure_telemetry(get_settings(), process="worker")
+
+
+@signals.worker_process_shutdown.connect  # type: ignore[misc]  # Celery signals are untyped
+def _stop_telemetry(**kwargs: object) -> None:
+    """Flush the child's last spans and metrics before it exits."""
+    from app.observability import shutdown_telemetry
+
+    shutdown_telemetry()
 
 
 @celery_app.task(name="lumen.ping")  # type: ignore[misc]  # celery's task decorator is untyped

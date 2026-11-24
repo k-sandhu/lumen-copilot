@@ -517,12 +517,35 @@ export interface Message {
   tool_invocations?: MessageToolInvocation[];
   /** The clarifying question this turn ended with, if any (spec 0006 #429). */
   question?: AskUserQuestion;
+  /** How the turn ended (#574): 'cancelled' for a stopped partial answer. */
+  finish_reason?: string | null;
   created_at: string;
 }
 
 export interface MessageList {
   items: Message[];
   next_cursor?: string | null;
+}
+
+/** Per-field adjustability of an EffectiveKnowledgeScope (#581) — all false. */
+export interface EffectiveKnowledgeScopeAdjustable {
+  modes: false;
+  collection_ids: false;
+  source_ids: false;
+}
+
+/**
+ * The server-authoritative scope of an assistant-bound session (#581),
+ * resolved from the PINNED assistant version. `modes` never contains
+ * `model` (answers are always grounded).
+ */
+export interface EffectiveKnowledgeScope {
+  assistant_id: string;
+  assistant_version_id: string;
+  modes: KnowledgeMode[];
+  collection_ids: string[];
+  source_ids: string[];
+  adjustable: EffectiveKnowledgeScopeAdjustable;
 }
 
 export interface ChatSession {
@@ -534,6 +557,8 @@ export interface ChatSession {
   message_count: number;
   created_at: string;
   updated_at: string;
+  /** Pinned assistant version's effective scope (#581); null for ad-hoc chat. */
+  effective_scope?: EffectiveKnowledgeScope | null;
 }
 
 export interface ChatSessionList {
@@ -626,6 +651,14 @@ export interface SendMessageResponse {
   message: Message;
   /** Subscribe to this WebSocket stream id for the assistant answer. */
   stream_id: string;
+}
+
+/** 200 from POST /chat/streams/{streamId}/cancel (#574). */
+export interface CancelStreamResponse {
+  stream_id: string;
+  status: 'cancelled' | 'already_completed';
+  /** Settled server outcome, also returned when its socket delivery was lost. */
+  terminal: TerminalEnvelope;
 }
 
 // --- Search (contracts/openapi.yaml §search, M2 #80) ---
@@ -750,6 +783,7 @@ export const AUDIT_EVENT_TYPES = [
   'action.executed',
   'action.requested',
   'answer.generated',
+  'answer.cancelled',
   'artifact.created',
   'artifact.deleted',
   'artifact.downloaded',
@@ -791,6 +825,7 @@ export const AUDIT_EVENT_TYPES = [
   'llm_provider.created',
   'llm_provider.deleted',
   'llm_provider.discovered',
+  'llm_provider.connection_tested',
   'llm_provider.updated',
   'mcp_server.deleted',
   'mcp_server.registered',
@@ -1124,6 +1159,16 @@ export interface SandboxPolicy {
   max_memory_mb_ceiling: number;
   daily_runtime_cap_s_ceiling: number;
   max_concurrency_ceiling: number;
+  cpus: number | null;
+  pids_limit: number | null;
+  output_bytes_cap: number;
+  scratch_bytes: number | null;
+  limits_enabled: boolean;
+  limit_sources: Record<string, 'deployment_default' | 'tenant_override'>;
+  current_concurrency: number | null;
+  daily_runtime_used_s: number | null;
+  accounting_available: boolean;
+  denial_reasons: string[];
 }
 
 /**
@@ -1944,6 +1989,8 @@ export interface CodeRun {
   started_at?: string | null;
   /** When the run reached a terminal status; null until then. */
   finished_at?: string | null;
+  effective_limits?: Record<string, unknown> | null;
+  termination_reason?: string | null;
 }
 
 export type SandboxSessionStatus = 'not_created' | 'active' | 'closed' | 'error';
@@ -1962,8 +2009,8 @@ export interface SandboxSession {
 }
 
 // --- WebSocket envelopes (contracts/websocket-envelopes.schema.json) ---
-// Lifecycle: start -> (delta | event)* -> done | error, exactly one terminal.
-export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error';
+// Lifecycle: start -> (delta | event)* -> done | error | cancelled, exactly one terminal.
+export type EnvelopeType = 'start' | 'delta' | 'event' | 'done' | 'error' | 'cancelled';
 
 interface BaseEnvelope {
   type: EnvelopeType;
@@ -2013,15 +2060,22 @@ export interface ErrorEnvelope extends BaseEnvelope {
   problem: WsProblem;
 }
 
+export interface CancelledEnvelope extends BaseEnvelope {
+  type: 'cancelled';
+  /** Terminal user-cancellation summary (#574; chat: ChatCancelledData). */
+  data: Record<string, unknown>;
+}
+
 export type WsEnvelope =
   | StartEnvelope
   | DeltaEnvelope
   | EventEnvelope
   | DoneEnvelope
-  | ErrorEnvelope;
+  | ErrorEnvelope
+  | CancelledEnvelope;
 
 /** A terminal envelope ends a stream (exactly one per streamId). */
-export type TerminalEnvelope = DoneEnvelope | ErrorEnvelope;
+export type TerminalEnvelope = DoneEnvelope | ErrorEnvelope | CancelledEnvelope;
 
 // --- Chat answer-stream payloads (websocket-envelopes.schema.json x-chatStream) ---
 // These slot into the generic envelope `data`/`event` shapes for a chat answer:
@@ -2176,6 +2230,19 @@ export interface ChatNarration {
 // text as event:narration immediately after, so it is surfaced through the
 // transient narration affordance rather than vanishing. No payload interface is
 // needed (the event carries none); the reducer keys off the name.
+
+/** `cancelled.data` — terminal summary for a user-cancelled chat answer (#574). */
+export interface ChatCancelledData {
+  messageId: string;
+  finishReason: 'cancelled';
+  model?: string;
+  citationCount: number;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}
 
 /** `done.data` — terminal success summary for a chat answer. */
 export interface ChatDoneData {
@@ -2522,23 +2589,75 @@ export interface RunDeliveryList {
 export type LlmProviderType = 'openai_compatible';
 
 /**
- * Model-discovery state from the last probe. `pending` before the first discovery,
- * `ready` after a successful `GET /models` snapshot, `error` when the last discovery
- * failed (see `last_error`).
+ * Evidence-based validation state (spec 0029). `pending` before the first probe,
+ * `reachable` when the catalog was discovered but auth/capabilities are unverified,
+ * `ready` only after test-connection passed, `error` when the last probe failed
+ * (see `last_error_code`).
  */
-export type LlmProviderStatus = 'pending' | 'ready' | 'error';
+export type LlmProviderStatus = 'pending' | 'reachable' | 'ready' | 'error';
+
+export type ProviderValidationCheckName =
+  | 'config_valid'
+  | 'reachable'
+  | 'catalog_discovered'
+  | 'auth_verified'
+  | 'capabilities_verified';
+
+export type ProviderValidationCheckStatus = 'passed' | 'failed' | 'unverified' | 'not_applicable';
+
+export type ProviderValidationCode =
+  | 'blocked_address'
+  | 'dns_failed'
+  | 'timeout'
+  | 'connection_failed'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'not_found'
+  | 'rate_limited'
+  | 'provider_error'
+  | 'unexpected_status'
+  | 'invalid_response'
+  | 'response_too_large'
+  | 'validation_failed'
+  | null;
+
+export interface ProviderValidationCheck {
+  name: ProviderValidationCheckName;
+  status: ProviderValidationCheckStatus;
+  code?: ProviderValidationCode;
+}
+
+export interface ProviderValidationResult {
+  status: LlmProviderStatus;
+  checks: ProviderValidationCheck[];
+  stage?: 'config' | 'discovery' | 'connection_test' | null;
+  code?: ProviderValidationCode;
+  retryable: boolean;
+  correlation_id: string;
+  tested_model?: string | null;
+  validated_at?: string | null;
+}
+
+export interface ProviderTestConnectionRequest {
+  model: string;
+}
+
+export interface ProviderTestConnectionResponse {
+  provider: LlmProvider;
+  validation: ProviderValidationResult;
+}
 
 export interface LlmProviderModel {
   id: string;
-  label: string | null;
+  label?: string | null;
 }
 
 /**
  * 200/201 item from the /admin/llm-providers surface — one registered per-tenant LLM
- * provider (foundation PR). The response NEVER includes the stored API key — only a
- * masked `secret_hint`. `discovered_models` is the last successful `GET /models`
- * snapshot. This catalog is not yet wired into the chat model picker or completion
- * routing (a follow-up PR).
+ * provider. The response NEVER includes the stored API key or any fragment of it —
+ * only `has_api_key` (presence, spec 0029). `discovered_models` is the last
+ * successful `GET /models` snapshot; `last_error` is a fixed safe message keyed by
+ * `last_error_code`. Only `ready` providers surface in the picker and route.
  */
 export interface LlmProvider {
   id: string;
@@ -2547,10 +2666,15 @@ export interface LlmProvider {
   base_url: string;
   enabled: boolean;
   status: LlmProviderStatus;
-  last_discovery_at: string | null;
-  last_error: string | null;
+  last_discovery_at?: string | null;
+  last_error?: string | null;
+  last_error_code?: string | null;
   discovered_models: LlmProviderModel[];
-  secret_hint: string | null;
+  has_api_key: boolean;
+  validation_checks: ProviderValidationCheck[];
+  validation?: ProviderValidationResult | null;
+  validated_at?: string | null;
+  validation_grandfathered: boolean;
   owner_id: string;
   created_at: string;
   updated_at: string;

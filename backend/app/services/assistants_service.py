@@ -25,7 +25,9 @@ request input.
 
 **Validation (INV-8, fail-closed).** A ``tool_allowlist`` entry not in the CC-A
 registry → **422**. A ``knowledge_scope`` collection/source id the caller neither
-owns nor is granted → **422**. Publishing without a distinct backup owner → **422**
+owns nor is granted → **422**. ``web_search`` allow-listed while non-empty
+``modes`` lack ``web`` → **422** ``web_search_requires_web_mode`` (#581; the
+runtime would drop the tool). Publishing without a distinct backup owner → **422**
 (the frozen F-AB-0 contract's chosen code for the illegal transition; ADR-0011 §4
 motivates the rule). An unknown/malformed rollback ``version`` → **422**.
 
@@ -201,7 +203,9 @@ class AssistantsService:
         """Whether the caller may edit/publish/delete ``assistant`` (owner or admin)."""
         return self._is_admin or assistant.owner_id == self._owner_id
 
-    async def _load_managed_or_404(self, assistant_id: UUID, *, attempted_action: str) -> Assistant:
+    async def _load_managed_or_404(
+        self, assistant_id: UUID, *, attempted_action: str, lock: bool = False
+    ) -> Assistant:
         """Load an assistant the caller may manage, or raise 404 (existence non-disclosure).
 
         Deny-by-default: the assistant must exist in this tenant **and** be owned
@@ -210,7 +214,7 @@ class AssistantsService:
         from a non-existent id (INV-1/INV-2), so the surface never reveals that a
         foreign/unowned assistant exists.
         """
-        assistant = await self._assistants.get(assistant_id)
+        assistant = await self._assistants.get(assistant_id, lock=lock)
         if assistant is None or not self._may_manage(assistant):
             await self._denials.emit(
                 resource_type="assistant",
@@ -309,6 +313,24 @@ class AssistantsService:
                 if raw_name:
                     names.add(namespaced_tool_name(slug, raw_name))
         return names
+
+    def _validate_web_mode(self, scope: KnowledgeScope, tool_allowlist: tuple[str, ...]) -> None:
+        """``web_search`` requires the ``web`` knowledge mode (422; #581).
+
+        The runtime drops ``web_search`` from the effective allow-list unless
+        the effective modes carry ``web`` (``assistant_runtime``), so saving a
+        config whose NON-empty modes lack ``web`` yet allow-lists ``web_search``
+        would publish a silently dead tool — reject it at configure time with a
+        clear code instead. Empty modes are the legacy shape: the effective
+        modes backfill ``web`` from the allow-list, so they stay valid.
+        """
+        if scope.modes and KnowledgeMode.WEB not in scope.modes and "web_search" in tool_allowlist:
+            raise ValidationError(
+                "The web_search tool requires the 'web' knowledge mode. Add 'web' "
+                "to the knowledge scope modes or remove web_search from the tool "
+                "allow-list.",
+                code="web_search_requires_web_mode",
+            )
 
     async def _validate_knowledge_scope(self, scope: KnowledgeScope) -> None:
         """Every scoped collection/source id must be owned-or-granted (422 else).
@@ -433,6 +455,7 @@ class AssistantsService:
             raise ValidationError("Assistant name must not be blank.", code="invalid_name")
         scope = knowledge_scope or KnowledgeScope.empty()
         await self._validate_tool_allowlist(tool_allowlist)
+        self._validate_web_mode(scope, tool_allowlist)
         await self._validate_knowledge_scope(scope)
         await self._validate_backup_owner(backup_owner_id)
 
@@ -504,7 +527,9 @@ class AssistantsService:
         scope are re-validated when supplied; the backup owner (if changed) must be
         a distinct user.
         """
-        await self._load_managed_or_404(assistant_id, attempted_action="assistant.update")
+        current = await self._load_managed_or_404(
+            assistant_id, attempted_action="assistant.update", lock=True
+        )
 
         fields: dict[str, object] = {}
         if name is not UNSET:
@@ -536,6 +561,19 @@ class AssistantsService:
                 backup = backup_owner_id
             await self._validate_backup_owner(backup)
             fields["backup_owner_id"] = backup
+
+        # The web-mode coupling applies to the RESULTING head (#581): patching
+        # only the modes (or only the allow-list) must not create the dead
+        # web_search-without-web combination create/publish reject.
+        resulting_scope = fields.get("knowledge_scope", current.knowledge_scope)
+        assert isinstance(resulting_scope, KnowledgeScope)
+        raw_allowlist = fields.get("tool_allowlist", current.tool_allowlist)
+        resulting_allowlist = (
+            tuple(str(t) for t in raw_allowlist)
+            if isinstance(raw_allowlist, list | tuple)
+            else tuple(current.tool_allowlist)
+        )
+        self._validate_web_mode(resulting_scope, resulting_allowlist)
 
         updated = await self._assistants.update(assistant_id, fields=fields)
         if updated is None:
@@ -597,6 +635,7 @@ class AssistantsService:
         # is never internally inconsistent (a tool removed from the registry since
         # the draft was saved would block publish, not ship a dangling reference).
         await self._validate_tool_allowlist(assistant.tool_allowlist)
+        self._validate_web_mode(assistant.knowledge_scope, assistant.tool_allowlist)
         await self._validate_knowledge_scope(assistant.knowledge_scope)
 
         version_number = await self._versions.next_version(assistant.id)

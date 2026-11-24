@@ -23,13 +23,10 @@ afterEach(() => {
 it('uses the same store instance as the existing public chat surface', () => {
   expect(useChatStore).toBe(fullStore);
   expect(useChatStore).toBe(existingStore);
-  useChatStore.getState().openSession('assistant-session', ['company', 'web']);
-  expect(fullStore.getState().sessionScope).toEqual({
-    sessionId: 'assistant-session',
-    modes: ['company', 'web'],
-  });
+  useChatStore.getState().openSession('assistant-session');
+  expect(fullStore.getState().activeSessionId).toBe('assistant-session');
   fullStore.getState().openSession('another-session');
-  expect(useChatStore.getState().sessionScope).toBeNull();
+  expect(useChatStore.getState().activeSessionId).toBe('another-session');
 });
 
 it('keeps ModelPicker labelled, controlled, and independent from global model state', async () => {

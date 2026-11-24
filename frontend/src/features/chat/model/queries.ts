@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createChatSession,
   deleteChatSession,
+  getChatSession,
   getSessionUsage,
   listChatSessions,
   listMessages,
@@ -37,6 +38,7 @@ import type {
 export const chatKeys = {
   all: ['chat'] as const,
   sessions: () => [...chatKeys.all, 'sessions'] as const,
+  session: (sessionId: string) => [...chatKeys.all, 'session', sessionId] as const,
   messages: (sessionId: string) => [...chatKeys.all, 'messages', sessionId] as const,
   usage: (sessionId: string) => [...chatKeys.all, 'usage', sessionId] as const,
   mentionSuggest: (q: string) => [...chatKeys.all, 'mention-suggest', q] as const,
@@ -81,6 +83,20 @@ export function useChatSessions() {
   });
 }
 
+/**
+ * One session, incl. its server-authoritative effective knowledge scope
+ * (#581). This — not launch-time client state — is what hydrates the
+ * composer's knowledge-mode display, so scope survives reload and reopening
+ * from history. A foreign id 404s like any other session read (INV-1/2).
+ */
+export function useChatSession(sessionId: string | null) {
+  return useQuery<ChatSession>({
+    queryKey: chatKeys.session(sessionId ?? '∅'),
+    queryFn: ({ signal }) => getChatSession(sessionId as string, signal),
+    enabled: sessionId !== null,
+  });
+}
+
 /** Message history for the open session (AC-2 reload-from-server). */
 export function useMessages(sessionId: string | null) {
   return useQuery<MessageList>({
@@ -95,7 +111,12 @@ export function useCreateSession() {
   const qc = useQueryClient();
   return useMutation<ChatSession, unknown, ChatSessionCreate>({
     mutationFn: (body) => createChatSession(body),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: chatKeys.sessions() }),
+    onSuccess: (session) => {
+      // Seed the single-session query (incl. effective scope, #581) so the
+      // newly opened chat shows its real scope without a loading flash.
+      qc.setQueryData(chatKeys.session(session.id), session);
+      void qc.invalidateQueries({ queryKey: chatKeys.sessions() });
+    },
   });
 }
 

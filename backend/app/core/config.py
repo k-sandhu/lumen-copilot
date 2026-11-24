@@ -278,6 +278,34 @@ class Settings(PasswordHashingSettings):
 
     # --- Observability (environment is inherited with the hashing policy) ---
     log_level: str = Field(default="info", alias="LOG_LEVEL")
+    # OpenTelemetry export (ADR-0027, #817): turn traces → Arize Phoenix, metrics →
+    # Prometheus's OTLP receiver, both OTLP/HTTP. OFF by default: no exporter, no
+    # socket, every helper a no-op. The defaults name the `observability` compose
+    # profile's services; a blank endpoint disables that signal alone.
+    telemetry_enabled: bool = Field(default=False, alias="TELEMETRY_ENABLED")
+    telemetry_traces_endpoint: str = Field(
+        default="http://phoenix:6006/v1/traces", alias="TELEMETRY_TRACES_ENDPOINT"
+    )
+    telemetry_metrics_endpoint: str = Field(
+        default="http://prometheus:9090/api/v1/otlp/v1/metrics",
+        alias="TELEMETRY_METRICS_ENDPOINT",
+    )
+    # Bearer key for an authenticated Phoenix (PHOENIX_ENABLE_AUTH). Required
+    # outside local development, because traces carry tenant content (below).
+    telemetry_traces_api_key: str = Field(default="", alias="TELEMETRY_TRACES_API_KEY")
+    # Prompts, completions, tool I/O and retrieved passages in spans (sponsor
+    # decision: on). False keeps ids, counts, names, status and timing only.
+    telemetry_capture_content: bool = Field(default=True, alias="TELEMETRY_CAPTURE_CONTENT")
+    # The Phoenix project the traces are filed under.
+    telemetry_project_name: str = Field(default="lumen-copilot", alias="TELEMETRY_PROJECT_NAME")
+    telemetry_metrics_export_interval_seconds: float = Field(
+        default=15.0, gt=0, alias="TELEMETRY_METRICS_EXPORT_INTERVAL_SECONDS"
+    )
+    # Longest string a span attribute keeps; longer values are truncated in the
+    # trace (never in the request).
+    telemetry_max_attribute_chars: int = Field(
+        default=65_536, ge=1_024, alias="TELEMETRY_MAX_ATTRIBUTE_CHARS"
+    )
 
     # --- Identity & auth (CC-3 / spec 0004 §2.3) ---
     # Symmetric signing secret for the access JWT. A dev default is provided so
@@ -797,6 +825,24 @@ class Settings(PasswordHashingSettings):
     # scripted tests keep their exact turn shapes. Threaded through ``stream_tools``.
     chat_answer_max_tokens: int = Field(default=1536, ge=0, alias="CHAT_ANSWER_MAX_TOKENS")
 
+    # Shared per-answer budgets (#574, spec 0028): applied identically to live
+    # chat, assistant Test, and headless runs via ``AnswerBudgets``. The wall
+    # clock cancels the entire answer, including an in-flight tool/provider;
+    # the external cap bounds web+MCP calls
+    # per answer (underneath it, the per-tenant rate limits still apply).
+    chat_answer_wall_clock_seconds: float = Field(
+        default=600.0, gt=0, le=3600, alias="CHAT_ANSWER_WALL_CLOCK_SECONDS"
+    )
+    chat_cancel_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=120, alias="CHAT_CANCEL_TIMEOUT_SECONDS"
+    )
+    chat_max_model_calls_per_answer: int = Field(
+        default=23, ge=1, le=200, alias="CHAT_MAX_MODEL_CALLS_PER_ANSWER"
+    )
+    chat_max_external_calls_per_answer: int = Field(
+        default=30, ge=1, le=200, alias="CHAT_MAX_EXTERNAL_CALLS_PER_ANSWER"
+    )
+
     # Follow-up suggestions after an answer (spec 0006, #429): one cheap extra
     # completion on the session's resolved route, emitted as event:suggestions.
     # A nicety, so it is config-gated and time-bounded; any failure is a silent
@@ -1285,6 +1331,18 @@ class Settings(PasswordHashingSettings):
     # retried — it escalates to a human immediately. Mirrors ``ingestion_*``.
     run_max_retries: int = Field(default=3, alias="RUN_MAX_RETRIES")
     run_retry_backoff_seconds: int = Field(default=5, alias="RUN_RETRY_BACKOFF_SECONDS")
+    # Stale-run reaper (#578): a worker that dies after claiming a run can leave
+    # it ``running`` forever (redelivery sees a non-queued run and no-ops), and
+    # a stuck run blocks later fires of its schedule via the overlap skip. The
+    # Beat reaper (``lumen.reap_stale_runs``) fails running claims/queued retries
+    # longer than ``run_stale_after_seconds``. Six hours leaves headroom above
+    # the shared 600s answer budget (#574, spec 0028), retries and persistence.
+    # Pending cleanup/persistence can outlive that deadline: this is an age
+    # policy, not a proven runtime maximum, and reaping does not kill tools.
+    # Raise it for longer configured budgets, cleanup or retry workloads
+    # (ADR-0015 §5).
+    run_stale_after_seconds: int = Field(default=21600, alias="RUN_STALE_AFTER_SECONDS")
+    run_reaper_interval_seconds: int = Field(default=900, alias="RUN_REAPER_INTERVAL_SECONDS")
 
     @field_validator(
         "redbeat_lock_timeout_seconds",
@@ -1293,6 +1351,8 @@ class Settings(PasswordHashingSettings):
         "run_rate_backoff_seconds",
         "run_max_in_flight_per_tenant",
         "run_digest_interval_seconds",
+        "run_stale_after_seconds",
+        "run_reaper_interval_seconds",
     )
     @classmethod
     def _scheduler_counts_positive(cls, value: int) -> int:
@@ -1306,7 +1366,8 @@ class Settings(PasswordHashingSettings):
         if value <= 0:
             raise ValueError(
                 "REDBEAT_LOCK_TIMEOUT_SECONDS / RUN_RATE_* / RUN_MAX_IN_FLIGHT_PER_TENANT "
-                "/ RUN_DIGEST_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
+                "/ RUN_DIGEST_INTERVAL_SECONDS / RUN_STALE_AFTER_SECONDS "
+                "/ RUN_REAPER_INTERVAL_SECONDS must be positive (ADR-0015 §5/§6/§7)"
             )
         return value
 
@@ -1454,30 +1515,22 @@ class Settings(PasswordHashingSettings):
     # (gVisor — the recommended production hardening; a config swap, no code change,
     # ADR-0013 §2). Anything else is rejected fail-fast.
     sandbox_runtime: str = Field(default="runc", alias="SANDBOX_RUNTIME")
-    # ADR-0013 resource caps. ADR-0020 reusable sessions ship UNBOUNDED — no cpu,
-    # memory or PID limit on the execution container — which is a deliberate sponsor
-    # decision (ADR-0020 Consequences) and the largest residual operational risk in
-    # that design: one ``run_python`` call can exhaust host RAM, saturate every core or
-    # fork-bomb, and explicit cancel/reset is the only recovery.
-    #
-    # These three values are what a deploy that does NOT want to accept that risk sends
-    # instead, and ``SANDBOX_SESSION_LIMITS_ENABLED`` is the switch. Off (the default)
-    # preserves ADR-0020's posture exactly; on, they are passed to the runner, which
-    # applies them as ``--memory`` / ``--pids-limit`` / ``--cpus`` on the session
-    # container. They bound a long-lived session rather than one run, so a bound that
-    # is comfortable for a single analysis turn can still stop a later one.
-    #
-    # ``sandbox_wall_clock_seconds`` stays compatibility-only: ADR-0020 removed the
-    # automatic timeout, nothing enforces a wall clock, and the runner's wire schema
-    # refuses the field rather than accept a promise no code keeps.
-    sandbox_cpus: float = Field(default=1.0, alias="SANDBOX_CPUS")
-    sandbox_memory_bytes: int = Field(default=512 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES")
+    # ADR-0029 (Proposed), #589: deployment ceilings, narrowed by tenant policy.
+    # The explicit emergency opt-out disables container bounds only; deadlines,
+    # output budgets and tenant accounting always apply.
+    sandbox_cpus: float = Field(default=1.0, ge=1e-9, allow_inf_nan=False, alias="SANDBOX_CPUS")
+    sandbox_memory_bytes: int = Field(
+        default=512 * 1024 * 1024, ge=6 * 1024 * 1024, alias="SANDBOX_MEMORY_BYTES"
+    )
     sandbox_pids_limit: int = Field(default=128, alias="SANDBOX_PIDS_LIMIT")
     sandbox_wall_clock_seconds: int = Field(default=30, alias="SANDBOX_WALL_CLOCK_SECONDS")
+    # #589 / ADR-0029 (Proposed): bounded by default. The explicit opt-out
+    # remains for a deploy that deliberately re-accepts ADR-0020's unbounded
+    # posture; it must be set to ``false`` on purpose, never inherited.
     sandbox_session_limits_enabled: bool = Field(
-        default=False, alias="SANDBOX_SESSION_LIMITS_ENABLED"
+        default=True, alias="SANDBOX_SESSION_LIMITS_ENABLED"
     )
-    # ENFORCED, unlike the compatibility values around it: how many bytes of ONE
+    # Output collection: how many bytes of ONE
     # execution's output directory the runner will read into its own memory before it
     # stops and reports partial collection. This protects the RUNNER, not the run —
     # the runner is the single Docker-socket holder, so an unbounded collection let one
@@ -1489,10 +1542,11 @@ class Settings(PasswordHashingSettings):
     # limit even after base64 expansion. The runner clamps anything larger to its own
     # ceiling; lowering this only narrows collection.
     sandbox_output_bytes_cap: int = Field(
-        default=32 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
+        default=32 * 1024 * 1024, le=64 * 1024 * 1024, alias="SANDBOX_OUTPUT_BYTES_CAP"
     )
     sandbox_scratch_bytes: int = Field(default=256 * 1024 * 1024, alias="SANDBOX_SCRATCH_BYTES")
-    # Compatibility-only tenant quota values; not enforced for ADR-0020 sessions.
+    # Per-tenant quota CEILINGS (#589): enforced by the Redis lease/daily
+    # accounting in ``app.sandbox.accounting``; a tenant policy may only narrow.
     sandbox_max_concurrent_per_tenant: int = Field(
         default=2, alias="SANDBOX_MAX_CONCURRENT_PER_TENANT"
     )
@@ -1509,11 +1563,12 @@ class Settings(PasswordHashingSettings):
         "sandbox_scratch_bytes",
         "sandbox_max_concurrent_per_tenant",
         "sandbox_daily_runtime_seconds_per_tenant",
+        mode="before",
     )
     @classmethod
-    def _sandbox_limits_positive(cls, value: float) -> float:
-        """Keep compatibility-only ADR-0013 policy values syntactically valid."""
-        if value <= 0:
+    def _sandbox_limits_positive(cls, value: object) -> object:
+        """Reject caps that would remove an isolation control."""
+        if isinstance(value, str | int | float) and float(value) <= 0:
             raise ValueError("SANDBOX_* resource caps and quotas must be positive (ADR-0013 §2/§6)")
         return value
 
@@ -1695,6 +1750,26 @@ class Settings(PasswordHashingSettings):
         if self.environment != "local" and self.jwt_secret == self._DEV_JWT_SECRET:
             raise ValueError(
                 "JWT_SECRET must be overridden outside the local environment (spec 0004 §2.3)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_authenticated_trace_export_in_prod(self) -> Settings:
+        """Refuse unauthenticated trace export outside ``local`` (ADR-0027 §4).
+
+        Traces carry tenant content when capture is on, so a deployed trace store
+        must be operator-only: Phoenix with authentication, reached with a key.
+        """
+        if (
+            self.environment != "local"
+            and self.telemetry_enabled
+            and self.telemetry_traces_endpoint
+            and self.telemetry_capture_content
+            and not self.telemetry_traces_api_key
+        ):
+            raise ValueError(
+                "TELEMETRY_TRACES_API_KEY is required to export traces with content "
+                "outside the local environment (ADR-0027 §4)"
             )
         return self
 

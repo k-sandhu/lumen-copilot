@@ -214,3 +214,28 @@ describe('TestPanel — saved cases (client-side regression)', () => {
     );
   });
 });
+
+
+it('#574 Stop aborts the preview request and allows another test', async () => {
+  let observedSignal: AbortSignal | null = null;
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+    if (String(input).includes('/assistants/a1/test')) {
+      observedSignal = init?.signal as AbortSignal;
+      return new Promise((_resolve, reject) => {
+        observedSignal!.addEventListener('abort', () =>
+          reject(new DOMException('Aborted', 'AbortError')),
+        );
+      });
+    }
+    return Promise.resolve(json({ items: [], next_cursor: null }));
+  });
+  const user = userEvent.setup();
+  renderWithQuery(<TestPanel assistantId="a1" />);
+  await user.click(screen.getByRole('button', { name: /run test/i }));
+  await user.click(screen.getByRole('button', { name: /stop test/i }));
+  expect(observedSignal).not.toBeNull();
+  expect((observedSignal as unknown as AbortSignal).aborted).toBe(true);
+  expect(await screen.findByText(/test request stopped/i)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole('button', { name: /run test/i })).toBeEnabled());
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});

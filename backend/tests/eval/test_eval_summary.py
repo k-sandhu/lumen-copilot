@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 
+from app.domain.summary import RollingSummary, serialize_summary
 from app.llm.context import ContextConfig, assemble_context
 from tests.eval.metrics import (
     ObservedAnswer,
@@ -41,9 +42,13 @@ def _assembled(evidence_lines: tuple[str, ...]) -> list[str]:
         config=ContextConfig(fallback_max_input_tokens=50_000),
         counter=len,
         max_input_resolver=lambda _m: None,
-        summary=(
-            "Earlier the user asked about 2024 tax rules; the assistant answered "
-            f"from {_DOC_NAME} and cited the standard-deduction figure."
+        summary=serialize_summary(
+            RollingSummary(
+                facts=(
+                    "Earlier the user asked about 2024 tax rules; the assistant answered "
+                    f"from {_DOC_NAME} and cited the standard-deduction figure.",
+                )
+            )
         ),
         evidence_lines=evidence_lines,
     )

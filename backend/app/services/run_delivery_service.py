@@ -143,33 +143,46 @@ async def deliver_run(
     schedule produced only a pending digest row. **A failure to produce is caught and
     written as a ``failed`` delivery row (AC-3), never a silent drop** — the run's own
     terminal is untouched.
+
+    A delivery is only ever produced for a **legitimate terminal** run (#578):
+    a run still ``queued``/``running`` produces nothing, so a delivery can
+    never announce an outcome the run has not actually reached.
     """
+    if not run.is_terminal:
+        log.warning(
+            "run_delivery.skipped_non_terminal", run_id=str(run.id), status=run.status.value
+        )
+        return None
     deliveries = RunDeliveryRepository(session, tenant_id)
     config = await _delivery_config(session, tenant_id, run)
 
     inbox_delivery: RunDelivery | None = None
     try:
-        # Digest-batched, low-urgency: a pending digest row the beat rolls up later.
-        if config.digest is not None:
-            if not await deliveries.exists_for_run(run.id, kind=RunDeliveryKind.DIGEST):
-                await deliveries.create(
+        # Roll back a failed flush before attempting a failed-delivery row.
+        async with session.begin_nested():
+            # Digest-batched, low-urgency: a pending digest row the beat rolls up later.
+            if config.digest is not None:
+                if not await deliveries.exists_for_run(run.id, kind=RunDeliveryKind.DIGEST):
+                    await deliveries.create(
+                        recipient_id=run.owner_id,
+                        run_id=run.id,
+                        schedule_id=run.schedule_id,
+                        kind=RunDeliveryKind.DIGEST,
+                        status=RunDeliveryStatus.PENDING,
+                        summary=run.summary,
+                    )
+            # Immediate inbox delivery (the default; also whenever inbox is opted in).
+            if config.inbox and not await deliveries.exists_for_run(
+                run.id, kind=RunDeliveryKind.INBOX
+            ):
+                inbox_delivery = await deliveries.create(
                     recipient_id=run.owner_id,
                     run_id=run.id,
                     schedule_id=run.schedule_id,
-                    kind=RunDeliveryKind.DIGEST,
-                    status=RunDeliveryStatus.PENDING,
+                    kind=RunDeliveryKind.INBOX,
+                    status=RunDeliveryStatus.DELIVERED,
                     summary=run.summary,
                 )
-        # Immediate inbox delivery (the default; also whenever inbox is opted in).
-        if config.inbox and not await deliveries.exists_for_run(run.id, kind=RunDeliveryKind.INBOX):
-            inbox_delivery = await deliveries.create(
-                recipient_id=run.owner_id,
-                run_id=run.id,
-                schedule_id=run.schedule_id,
-                kind=RunDeliveryKind.INBOX,
-                status=RunDeliveryStatus.DELIVERED,
-                summary=run.summary,
-            )
     except Exception as exc:  # noqa: BLE001 — a delivery is never a silent drop (AC-3)
         log.error("run_delivery.produce_failed", run_id=str(run.id), error_type=type(exc).__name__)
         failed = await deliveries.create(

@@ -100,6 +100,7 @@ class _ScriptedGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
@@ -131,6 +132,7 @@ class _BoomGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover — makes this an async generator
@@ -160,6 +162,7 @@ class _AppErrorGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         raise self._exc
         yield  # pragma: no cover — makes this an async generator

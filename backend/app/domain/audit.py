@@ -69,6 +69,9 @@ class AuditAction(str, enum.Enum):
     USER_IDENTITY_ATTESTED = "user.identity_attested"
     RETRIEVAL_QUERY = "retrieval.query"
     ANSWER_GENERATED = "answer.generated"
+    # #574: exactly one event per user-cancelled answer, written with the
+    # persisted partial (or alone when nothing had streamed).
+    ANSWER_CANCELLED = "answer.cancelled"
     # #416 (ADR-0016 §3.2): the rolling-summary write and the next-answer
     # evidence rehydration are audited reads/writes of conversational state.
     SESSION_SUMMARIZED = "session.summarized"
@@ -272,13 +275,13 @@ class AuditAction(str, enum.Enum):
     # 0004 §2.5 — reversible internal write, audited); every lifecycle mutation
     # (created/updated/deleted) and the on-demand model-discovery probe (discovered)
     # is audited (INV-6). The stored API key (CC-C #209) is never in the metadata —
-    # only its masked hint, mirroring the secrets vault's own events. Routing chat/
-    # embeddings through a provider is a follow-up PR; these cover registration +
-    # discovery only.
+    # only its presence (spec 0029: no key-derived fragment, not even a masked
+    # tail). The connection test (spec 0029) is the bounded authenticated probe.
     LLM_PROVIDER_CREATED = "llm_provider.created"
     LLM_PROVIDER_UPDATED = "llm_provider.updated"
     LLM_PROVIDER_DELETED = "llm_provider.deleted"
     LLM_PROVIDER_DISCOVERED = "llm_provider.discovered"
+    LLM_PROVIDER_CONNECTION_TESTED = "llm_provider.connection_tested"
     # Reserved for the write tiers (T2+) — see spec 0004 §2.5.
     ACTION_REQUESTED = "action.requested"
     ACTION_APPROVED = "action.approved"

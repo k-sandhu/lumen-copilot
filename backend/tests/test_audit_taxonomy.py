@@ -63,6 +63,7 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "user.identity_attested",
         "retrieval.query",
         "answer.generated",
+        "answer.cancelled",
         "permission.denied",
         # Explicit ACL grants (CC-1 / issue #18, spec 0004 §2.2) — additive.
         "permission.granted",
@@ -190,6 +191,7 @@ def test_taxonomy_is_exactly_spec_0004_set() -> None:
         "llm_provider.updated",
         "llm_provider.deleted",
         "llm_provider.discovered",
+        "llm_provider.connection_tested",
         # #416 (ADR-0016 §3.2): the rolling-summary write + the next-answer
         # evidence-rehydration permission check are audited state events.
         "session.summarized",

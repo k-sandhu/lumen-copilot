@@ -23,10 +23,15 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
+from celery.exceptions import Retry
 
 from app.core.config import get_settings
-from app.domain.entities import RunStatus
-from app.services.runs_service import TransientRunRetry, execute_run
+from app.domain.entities import RunError, RunStatus
+from app.services.runs_service import (
+    TransientRunRetry,
+    ensure_run_terminal_on_failure,
+    execute_run,
+)
 from app.tasks.celery_app import celery_app
 from app.tasks.runner import run_task
 
@@ -50,7 +55,10 @@ def run_assistant(self: object, run_id: str, tenant_id: str) -> dict[str, object
     The one exception is a **transient** dependency fault with retry budget left: the
     core leaves the run ``queued`` and raises :class:`TransientRunRetry`, which this
     wrapper turns into ``self.retry`` with the core-computed exponential backoff
-    (AC-3 — retry before escalating, never a silent drop). Returns the terminal status.
+    (AC-3 — retry before escalating, never a silent drop). A publication failure
+    terminalises only the matching queued claim; the reaper recovers an abandoned
+    handoff if the worker dies or this fresh failure transaction cannot commit.
+    Returns the terminal status.
     """
     log = structlog.get_logger(__name__)
     rid = UUID(run_id)
@@ -68,15 +76,64 @@ def run_assistant(self: object, run_id: str, tenant_id: str) -> dict[str, object
             error_code=retry.error.code,
             backoff_seconds=retry.backoff_seconds,
         )
-        raise self.retry(  # type: ignore[attr-defined]
-            exc=retry, countdown=retry.backoff_seconds
-        ) from retry
+        try:
+            raise self.retry(  # type: ignore[attr-defined]
+                exc=retry, countdown=retry.backoff_seconds
+            ) from retry
+        except Retry:
+            # Publication succeeded: let the worker record the retry normally.
+            raise
+        except Exception as exc:  # noqa: BLE001 — includes rejected retry publication
+            log.error(
+                "run_assistant.retry_publish_failed", run_id=run_id, error_type=type(exc).__name__
+            )
+            try:
+                run_task(
+                    ensure_run_terminal_on_failure(
+                        rid,
+                        tid,
+                        error=RunError(
+                            code="retry_publish_failed",
+                            message="The run retry could not be scheduled.",
+                        ),
+                        retry_started_at=retry.started_at,
+                    )
+                )
+            except Exception as ensure_exc:  # noqa: BLE001 — reaper retries the durable handoff
+                log.error(
+                    "run_assistant.terminal_ensure_failed",
+                    run_id=run_id,
+                    error_type=type(ensure_exc).__name__,
+                )
+            raise
     except Exception as exc:  # noqa: BLE001 — the message is acknowledged; the run row is terminal
-        # ``execute_run`` writes a terminal itself; if the wrapper still sees an
-        # exception (e.g. loop setup), log the type only and report failed rather
-        # than redelivering forever.
+        # ``execute_run`` writes a terminal itself; if the wrapper still sees
+        # an exception (loop setup, a post-claim Phase-1 failure, a dead
+        # session), the wrapper must not merely log it — a claimed run left
+        # ``running`` here is the #578 stuck-run repro. Ensure the terminal in
+        # a fresh loop/engine (``run_task`` disposed the failed attempt's);
+        # the ensure is idempotent, so a redelivery after it cannot duplicate
+        # audit or deliveries. A run never claimed stays ``queued`` (reported
+        # as such), and if the ensure itself fails (e.g. the DB is down) the
+        # stale-run reaper remains the backstop — report failed, do not
+        # redeliver forever.
         log.error("run_assistant.failed", run_id=run_id, error_type=type(exc).__name__)
-        return {"run_id": run_id, "status": RunStatus.FAILED.value}
+        try:
+            ensured = run_task(
+                ensure_run_terminal_on_failure(
+                    rid,
+                    tid,
+                    error=RunError(code="internal_error", message="The run failed unexpectedly."),
+                )
+            )
+        except Exception as ensure_exc:  # noqa: BLE001 — reaper is the backstop
+            log.error(
+                "run_assistant.terminal_ensure_failed",
+                run_id=run_id,
+                error_type=type(ensure_exc).__name__,
+            )
+            return {"run_id": run_id, "status": RunStatus.FAILED.value}
+        return {"run_id": run_id, "status": ensured.value}
     return {"run_id": run_id, "status": status.value}
 
 

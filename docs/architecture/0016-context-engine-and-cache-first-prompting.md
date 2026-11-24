@@ -149,6 +149,25 @@ Implementation: [#764](https://github.com/k-sandhu/lumen-copilot/issues/764).
 - Summarizer failure degrades to the verbatim window; never a failed answer.
 - The eval harness gains the compression-regression suite (golden multi-turn conversations; groundedness/citation thresholds hold under compaction).
 
+**Trust-boundary amendment (#573, 2026-10-29).** Rolling summaries are strict
+typed JSON data (`facts`, `decisions`, `open_questions`, `evidence_refs`), checked
+before storage and at both read boundaries. Legacy prose is invalid and uses
+full-history fallback. Invalid stored state rebuilds from canonical messages
+with a version compare-and-swap; rejected completions leave summary and cursor
+untouched. The previous summary and new turns are escaped, delimited data,
+never instructions. Re-entry uses a fenced user-role message. Provider inline
+reasoning and exact internal control sentinels are blocked before streaming or
+saving; recall applies the same guard to old assistant rows and keeps user text
+as authored data. A length-capped completion with withheld marker/sentinel text,
+open reasoning, or a suppressed remainder stops at its safe partial answer;
+only a completion without outstanding guard state may continue with a fresh
+guard. Impossible marker candidates are released as ordinary text. The final
+redacted summary JSON is revalidated before storage so expansion cannot replace
+valid state or advance coverage. Rejection signals contain codes/counts, never
+payloads.
+The [summary trust-boundary runbook](../runbooks/summary-trust-boundary.md)
+defines acceptance checks, operational signals, and failure behaviour.
+
 **Amendment ([#491](https://github.com/k-sandhu/lumen-copilot/issues/491), 2026-07-23) — the verbatim-tail / min-batch defaults are retuned to summarise EARLIER.** The rolling summary only begins folding turns once `keep_messages + min_batch` messages have accumulated. The original `8 + 4 = 12` meant the first compaction fired at ~turn 7 of a 2-message/turn session, by which point turn-5 input was already ~2.5× turn-1. Retuned to `4 + 2 = 6` (first compaction ~turn 3): the verbatim tail still carries the last **2 full turns** word-for-word (the immediate context the model most needs), and older turns roll into the ≤300-word summary + IDs-only evidence carry-forward. These are `Settings` defaults (`CHAT_SUMMARY_KEEP_MESSAGES` / `CHAT_SUMMARY_MIN_BATCH`), not values this ADR pins, so the retune is a default change, not a decision reversal — the §3.2 mechanism (summary + M-turn verbatim tail, evidence-ids-only carry-forward, forward-only coverage) is unchanged. The summariser runs on the dedicated FAST model (#490), so the earlier/smaller batches cost little; groundedness under the shorter tail stays gated by the compression-regression eval above.
 
 **3.3 Recall — compaction is now reversible ON DEMAND ([#569](https://github.com/k-sandhu/lumen-copilot/issues/569), epic #533 R1, 2026-08-06).** §3.2 makes the model's view of a conversation *lossy by design*, and the #491 retune above made it lossy **sooner** — first compaction at ~turn 3. The summary is a good default and a bad floor: "as we discussed earlier" resolves to a paraphrase at best, and to nothing at all once the detail falls out of the ≤300-word budget. The transcript itself was never lost — `messages` is append-only and the *user* reads it through `GET /chat/sessions/{id}/messages` — so this adds the missing **function** rather than a second store: the T0, read-only `read_conversation` tool, which the model calls when it chooses to.

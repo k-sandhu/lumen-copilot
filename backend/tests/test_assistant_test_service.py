@@ -97,6 +97,7 @@ class _SearchThenAnswerGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
@@ -127,6 +128,7 @@ class _WriteFileGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
@@ -165,6 +167,7 @@ class _RunPythonGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
@@ -635,6 +638,7 @@ class _TwoSearchGateway:
         tenant_id: object = None,
         user_id: object = None,
         session_id: object = None,
+        max_tokens: object = None,
     ) -> AsyncIterator[StreamEvent]:
         msgs = list(messages)  # type: ignore[arg-type]
         has_tool_result = any(getattr(m, "role", None).value == "tool" for m in msgs)
@@ -701,3 +705,54 @@ async def test_preview_with_two_reads_stays_on_the_one_rollback_session(
     async with ctx.sessionmaker() as session:
         assert await _count(session, models.ChatSession, ctx.tenant_a) == 0
         assert await _count(session, models.Message, ctx.tenant_a) == 0
+
+
+async def test_preview_stop_cancels_runtime_rolls_back_and_audits(
+    ctx: _Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    from typing import Any
+
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+    cancellation = asyncio.Event()
+
+    class ParkedGateway:
+        async def stream_tools(self, messages: object, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+            try:
+                yield StreamEvent(text="Partial preview.")
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    _patch_runtime(
+        monkeypatch,
+        gateway=ParkedGateway(),
+        retrieval=_Retrieval(_passage(ctx), allowed_users={ctx.alice.user_id}),
+    )
+    async with ctx.sessionmaker() as session:
+        service = await _service(ctx, session, principal=ctx.alice)
+        task = asyncio.create_task(
+            service.run_test(ctx.assistant_id, input_text="q", cancellation=cancellation)
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        cancellation.set()
+        trace = await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert closed.is_set()
+        assert trace.succeeded is False
+        await session.commit()
+    async with ctx.sessionmaker() as session:
+        assert await _count(session, models.ChatSession, ctx.tenant_a) == 0
+        assert await _count(session, models.Message, ctx.tenant_a) == 0
+        assert await _count(session, models.Citation, ctx.tenant_a) == 0
+        assert await _count(session, models.Artifact, ctx.tenant_a) == 0
+        events = list(
+            (
+                await session.scalars(
+                    select(models.AuditEvent).where(models.AuditEvent.action == "assistant.tested")
+                )
+            ).all()
+        )
+        assert len(events) == 1
+        assert events[0].event_metadata["outcome"] == "cancelled"
